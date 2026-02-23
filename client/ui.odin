@@ -4,6 +4,19 @@ import "core:strings"
 import "vendor:raylib"
 import "widgets"
 
+// Layout constants
+panelSpacing: f32 = 5
+serverPanelWidth: f32 = 75
+statusPanelHeight: f32 = 40
+panelRoundness: f32 = 0.3
+
+// Widget IDs for easy reference
+SERVER_PANEL_ID: u32 = 1
+STATUS_PANEL_ID: u32 = 2
+FRIENDS_BUTTON_ID: u32 = 10
+ADD_SERVER_BUTTON_ID: u32 = 11
+SERVER_BUTTON_BASE_ID: u32 = 100
+
 initUI :: proc() {
 
 	// Initialize widgets system
