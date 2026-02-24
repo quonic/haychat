@@ -37,6 +37,8 @@ initUI :: proc() {
 		title        = "",
 		position     = {panelSpacing, panelSpacing},
 		size         = {serverPanelWidth - panelSpacing * 2, serverPanelHeight},
+		anchor       = .Left,
+		sideMode     = .Stretch,
 		shape        = .RoundedRectangle,
 		roundness    = panelRoundness,
 		font         = widgets.WidgetDefaultFont,
@@ -95,14 +97,14 @@ initUI :: proc() {
 
 	// Create status panel widget
 	statusPanelWidth: f32 = 200
-	statusPanelX: f32 = panelSpacing
-	statusPanelY: f32 = f32(raylib.GetScreenHeight()) - statusPanelHeight - panelSpacing
 
 	statusPanel := widgets.Panel {
 		id           = STATUS_PANEL_ID,
 		title        = "",
-		position     = {statusPanelX, statusPanelY},
+		position     = {panelSpacing, panelSpacing},
 		size         = {statusPanelWidth - panelSpacing * 2, statusPanelHeight - panelSpacing * 2},
+		anchor       = .BottomLeft,
+		sideMode     = .Fixed,
 		shape        = .RoundedRectangle,
 		roundness    = panelRoundness,
 		font         = widgets.WidgetDefaultFont,

@@ -5,6 +5,86 @@ import "core:fmt"
 import "core:strings"
 import "vendor:raylib"
 
+panelContainerRect :: proc(panel: ^Panel) -> raylib.Rectangle {
+	if panel.parent != 0 {
+		parentPanel := findPanelByID(panel.parent)
+		if parentPanel != nil {
+			return raylib.Rectangle {
+				x = parentPanel.resolvedPosition.x,
+				y = parentPanel.resolvedPosition.y,
+				width = parentPanel.resolvedSize.x,
+				height = parentPanel.resolvedSize.y,
+			}
+		}
+	}
+
+	return raylib.Rectangle {
+		x = 0,
+		y = 0,
+		width = f32(raylib.GetScreenWidth()),
+		height = f32(raylib.GetScreenHeight()),
+	}
+}
+
+resolvePanelLayout :: proc(panel: ^Panel) {
+	container := panelContainerRect(panel)
+	resolvedPosition := panel.position
+	resolvedSize := panel.size
+
+	switch panel.anchor {
+	case .TopLeft:
+		resolvedPosition.x = container.x + panel.position.x
+		resolvedPosition.y = container.y + panel.position.y
+	case .Top:
+		resolvedPosition.x = container.x + (container.width - panel.size.x) / 2 + panel.position.x
+		resolvedPosition.y = container.y + panel.position.y
+		if panel.sideMode == .Stretch {
+			resolvedPosition.x = container.x + panel.position.x
+			resolvedSize.x = container.width - panel.position.x * 2
+		}
+	case .TopRight:
+		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
+		resolvedPosition.y = container.y + panel.position.y
+	case .Right:
+		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
+		resolvedPosition.y = container.y + (container.height - panel.size.y) / 2 + panel.position.y
+		if panel.sideMode == .Stretch {
+			resolvedPosition.y = container.y + panel.position.y
+			resolvedSize.y = container.height - panel.position.y * 2
+		}
+	case .BottomRight:
+		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
+		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
+	case .Bottom:
+		resolvedPosition.x = container.x + (container.width - panel.size.x) / 2 + panel.position.x
+		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
+		if panel.sideMode == .Stretch {
+			resolvedPosition.x = container.x + panel.position.x
+			resolvedSize.x = container.width - panel.position.x * 2
+		}
+	case .BottomLeft:
+		resolvedPosition.x = container.x + panel.position.x
+		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
+	case .Left:
+		resolvedPosition.x = container.x + panel.position.x
+		resolvedPosition.y = container.y + (container.height - panel.size.y) / 2 + panel.position.y
+		if panel.sideMode == .Stretch {
+			resolvedPosition.y = container.y + panel.position.y
+			resolvedSize.y = container.height - panel.position.y * 2
+		}
+	}
+
+	if resolvedSize.x < 0 {
+		resolvedSize.x = 0
+	}
+	if resolvedSize.y < 0 {
+		resolvedSize.y = 0
+	}
+
+	panel.resolvedPosition = resolvedPosition
+	panel.resolvedSize = resolvedSize
+}
+
 drawButton :: proc(button: ^Button) {
 	// Call the custom draw function if it exists
 	if button.draw != nil {
@@ -22,8 +102,8 @@ drawButton :: proc(button: ^Button) {
 		parentPanel := findPanelByID(button.parent)
 		if parentPanel != nil {
 			// Adjust button position based on the parent panel's position
-			buttonPosition.x += parentPanel.position.x
-			buttonPosition.y += parentPanel.position.y
+			buttonPosition.x += parentPanel.resolvedPosition.x
+			buttonPosition.y += parentPanel.resolvedPosition.y
 		}
 	}
 
@@ -86,8 +166,8 @@ drawLabel :: proc(label: ^Label) {
 		parentPanel := findPanelByID(label.parent)
 		if parentPanel != nil {
 			// Adjust label position based on the parent panel's position
-			labelPosition.x += parentPanel.position.x
-			labelPosition.y += parentPanel.position.y
+			labelPosition.x += parentPanel.resolvedPosition.x
+			labelPosition.y += parentPanel.resolvedPosition.y
 		}
 	}
 
@@ -140,15 +220,7 @@ drawPanel :: proc(panel: ^Panel) {
 		return
 	}
 
-	originalPanelPosition := panel.position
-	if panel.parent != 0 {
-		parentPanel := findPanelByID(panel.parent)
-		if parentPanel != nil {
-			panel.position.x += parentPanel.position.x
-			panel.position.y += parentPanel.position.y
-		}
-	}
-	defer panel.position = originalPanelPosition
+	resolvePanelLayout(panel)
 
 	// If no font is set, use the default font
 	if panel.font == {} {
@@ -158,25 +230,28 @@ drawPanel :: proc(panel: ^Panel) {
 		panel.scrollTopPadding = panelTitleScrollTopPadding(panel)
 	}
 
+	panelPosition := panel.resolvedPosition
+	panelSize := panel.resolvedSize
+
 	// Default drawing logic based on shape
 	switch panel.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(panel.position, panel.size, raylib.DARKGRAY)
+		raylib.DrawRectangleV(panelPosition, panelSize, raylib.DARKGRAY)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
-				x = panel.position.x,
-				y = panel.position.y,
-				width = panel.size.x,
-				height = panel.size.y,
+				x = panelPosition.x,
+				y = panelPosition.y,
+				width = panelSize.x,
+				height = panelSize.y,
 			},
 			panel.roundness,
 			0, // Segments for rounded corners (0 for auto)
 			raylib.GRAY,
 		)
 	case .Circle:
-		radius := f32(panel.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(panel.position, radius, raylib.LIGHTGRAY)
+		radius := f32(panelSize.x) / 2 // Assuming size.x is diameter
+		raylib.DrawCircleV(panelPosition, radius, raylib.LIGHTGRAY)
 	}
 
 	maxContentY := f32(0)
@@ -233,14 +308,14 @@ drawPanel :: proc(panel: ^Panel) {
 	}
 
 	visibleTopPadding := panel.scrollTopPadding
-	visibleHeight := panel.size.y - visibleTopPadding
+	visibleHeight := panelSize.y - visibleTopPadding
 	if visibleHeight < 0 {
 		visibleHeight = 0
 	}
 	contentHeight := maxContentY - minContentY
 	if contentHeight > visibleHeight {
 		minScrollOffset := minContentY - visibleTopPadding
-		maxScrollOffset := maxContentY - panel.size.y
+		maxScrollOffset := maxContentY - panelSize.y
 		if panel.scrollOffset < minScrollOffset {
 			panel.scrollOffset = minScrollOffset
 		} else if panel.scrollOffset > maxScrollOffset {
@@ -259,8 +334,8 @@ drawPanel :: proc(panel: ^Panel) {
 			panel.fontSpacing,
 		)
 		textPosition := raylib.Vector2 {
-			panel.position.x + (panel.size.x - textSize.x) / 2,
-			panel.position.y + panel.fontSize / 2, // Position at the top with some padding
+			panelPosition.x + (panelSize.x - textSize.x) / 2,
+			panelPosition.y + panel.fontSize / 2, // Position at the top with some padding
 		}
 		raylib.DrawTextEx(
 			panel.font,
@@ -273,15 +348,15 @@ drawPanel :: proc(panel: ^Panel) {
 	}
 
 	// Draw child widgets contained within the panel
-	scissorY := panel.position.y + visibleTopPadding
-	scissorHeight := panel.size.y - visibleTopPadding
+	scissorY := panelPosition.y + visibleTopPadding
+	scissorHeight := panelSize.y - visibleTopPadding
 	if scissorHeight < 0 {
 		scissorHeight = 0
 	}
 	raylib.BeginScissorMode(
-		i32(panel.position.x),
+		i32(panelPosition.x),
 		i32(scissorY),
-		i32(panel.size.x),
+		i32(panelSize.x),
 		i32(scissorHeight),
 	)
 	defer raylib.EndScissorMode()
@@ -361,8 +436,8 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 		parentPanel := findPanelByID(textEntryField.parent)
 		if parentPanel != nil {
 			// Adjust text entry field position based on the parent panel's position
-			textEntryFieldPosition.x += parentPanel.position.x
-			textEntryFieldPosition.y += parentPanel.position.y
+			textEntryFieldPosition.x += parentPanel.resolvedPosition.x
+			textEntryFieldPosition.y += parentPanel.resolvedPosition.y
 		}
 	}
 
@@ -419,8 +494,8 @@ drawTextArea :: proc(textArea: ^TextArea) {
 		parentPanel := findPanelByID(textArea.parent)
 		if parentPanel != nil {
 			// Adjust text area position based on the parent panel's position
-			textAreaPosition.x += parentPanel.position.x
-			textAreaPosition.y += parentPanel.position.y
+			textAreaPosition.x += parentPanel.resolvedPosition.x
+			textAreaPosition.y += parentPanel.resolvedPosition.y
 		}
 	}
 
@@ -480,8 +555,8 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 		parentPanel := findPanelByID(textArea.parent)
 		if parentPanel != nil {
 			// Adjust text area position based on the parent panel's position
-			textAreaPosition.x += parentPanel.position.x
-			textAreaPosition.y += parentPanel.position.y
+			textAreaPosition.x += parentPanel.resolvedPosition.x
+			textAreaPosition.y += parentPanel.resolvedPosition.y
 		}
 	}
 

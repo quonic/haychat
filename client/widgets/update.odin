@@ -32,6 +32,41 @@ updateWidget :: proc {
 
 // Update panel state, such as handling scrolling based on mouse wheel input when the mouse is over the panel, and updating the scroll offset accordingly. This function also ensures that the scroll offset does not exceed the bounds of the content.
 updatePanel :: proc(panel: ^Panel) {
+	resolvePanelLayout(panel)
+
+	if raylib.CheckCollisionPointRec(
+		raylib.GetMousePosition(),
+		raylib.Rectangle {
+			x = panel.resolvedPosition.x,
+			y = panel.resolvedPosition.y,
+			width = panel.resolvedSize.x,
+			height = panel.resolvedSize.y,
+		},
+	) {
+		if !panel.mouseEntered {
+			panel.mouseEntered = true
+			if panel.onHover != nil {
+				panel.onHover()
+			}
+		}
+	} else {
+		if panel.mouseEntered {
+			panel.mouseEntered = false
+			if panel.onLeave != nil {
+				panel.onLeave()
+			}
+		}
+	}
+
+	if panel.mouseEntered && raylib.IsMouseButtonPressed(raylib.MouseButton.LEFT) {
+		panel.mouseClicked = true
+		if panel.onClick != nil {
+			panel.onClick()
+		}
+	} else {
+		panel.mouseClicked = false
+	}
+
 	if panel.mouseEntered {
 		mouseWheelMove := raylib.GetMouseWheelMove()
 		if mouseWheelMove != 0 {
@@ -42,7 +77,7 @@ updatePanel :: proc(panel: ^Panel) {
 			}
 			// Ensure scroll offset does not exceed the bounds of the content
 			maxScrollOffset :=
-				getChidrenTotalHeight(panel) - (panel.size.y - panel.scrollTopPadding)
+				getChidrenTotalHeight(panel) - (panel.resolvedSize.y - panel.scrollTopPadding)
 			if panel.scrollOffset > maxScrollOffset {
 				panel.scrollOffset = maxScrollOffset
 			}

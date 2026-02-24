@@ -28,6 +28,22 @@ Shape :: enum {
 	// Add more shapes as needed
 }
 
+PanelAnchor :: enum {
+	TopLeft,
+	Top,
+	TopRight,
+	Right,
+	BottomRight,
+	Bottom,
+	BottomLeft,
+	Left,
+}
+
+PanelSideMode :: enum {
+	Fixed,
+	Stretch,
+}
+
 Button :: struct {
 	id:           u32,
 	parent:       u32, // ID of the parent panel (if any) to which this label belongs
@@ -128,6 +144,10 @@ Panel :: struct {
 	title:            string,
 	position:         raylib.Vector2,
 	size:             raylib.Vector2,
+	resolvedPosition: raylib.Vector2,
+	resolvedSize:     raylib.Vector2,
+	anchor:           PanelAnchor,
+	sideMode:         PanelSideMode,
 	scrollOffset:     f32, // Current scroll offset for the panel when the content exceeds the visible area
 	scrollTopPadding: f32, // Top padding reserved for titles or headers in scrollable area
 	shape:            Shape, // Only Rectangle or RoundedRectangle for panels
@@ -315,4 +335,81 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 		}
 	}
 	return totalHeight
+}
+
+main :: proc() {
+	raylib.SetConfigFlags({.WINDOW_RESIZABLE})
+	raylib.InitWindow(960, 640, "HayChat Widgets Panel Anchor Demo")
+	defer raylib.CloseWindow()
+	raylib.SetTargetFPS(60)
+
+	init()
+
+	demoPanel := Panel {
+		id           = 1,
+		title        = "TopLeft Anchor",
+		position     = {16, 16},
+		size         = {260, 160},
+		anchor       = .TopLeft,
+		sideMode     = .Fixed,
+		shape        = .RoundedRectangle,
+		roundness    = 0.2,
+		font         = WidgetDefaultFont,
+		fontSize     = 18,
+		fontSpacing  = 0,
+		childSpacing = 8,
+	}
+
+	demoLabel := Label {
+		id          = 2,
+		parent      = 1,
+		text        = "Resize the window to verify anchoring.",
+		position    = {12, 12},
+		size        = {demoPanel.size.x - 24, 30},
+		shape       = .Rectangle,
+		font        = WidgetDefaultFont,
+		fontSize    = 14,
+		fontSpacing = 0,
+		enabled     = false,
+	}
+
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .Top
+	demoLabel.text = "Top Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .TopRight
+	demoLabel.text = "TopRight Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .Right
+	demoLabel.text = "Right Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .BottomRight
+	demoLabel.text = "BottomRight Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .Bottom
+	demoLabel.text = "Bottom Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .BottomLeft
+	demoLabel.text = "BottomLeft Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	demoPanel.anchor = .Left
+	demoLabel.text = "Left Anchor"
+	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+
+	for !raylib.WindowShouldClose() {
+		update()
+
+		raylib.BeginDrawing()
+		raylib.ClearBackground(raylib.BLACK)
+		draw()
+		raylib.EndDrawing()
+	}
 }
