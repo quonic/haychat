@@ -168,10 +168,12 @@ panelTitleScrollTopPadding :: proc(panel: ^Panel) -> f32 {
 // Functions to find widgets by their unique ID. These functions return a pointer to the widget if found, or nil if not found.
 findPanelByID :: proc(id: u32) -> ^Panel {
 	for &widget in widgets {
-		if typeid_of(type_of(widget)) == Panel {
-			if widget.(Panel).id == id {
+		#partial switch w in widget {
+		case Panel:
+			if w.id == id {
 				return &widget.(Panel)
 			}
+		case:
 		}
 	}
 	return nil
@@ -179,10 +181,12 @@ findPanelByID :: proc(id: u32) -> ^Panel {
 
 findButtonByID :: proc(id: u32) -> ^Button {
 	for &widget in widgets {
-		if typeid_of(type_of(widget)) == Button {
-			if widget.(Button).id == id {
+		#partial switch w in widget {
+		case Button:
+			if w.id == id {
 				return &widget.(Button)
 			}
+		case:
 		}
 	}
 	return nil
@@ -190,10 +194,12 @@ findButtonByID :: proc(id: u32) -> ^Button {
 
 findLabelByID :: proc(id: u32) -> ^Label {
 	for &widget in widgets {
-		if typeid_of(type_of(widget)) == Label {
-			if widget.(Label).id == id {
+		#partial switch w in widget {
+		case Label:
+			if w.id == id {
 				return &widget.(Label)
 			}
+		case:
 		}
 	}
 	return nil
@@ -201,10 +207,12 @@ findLabelByID :: proc(id: u32) -> ^Label {
 
 findTextEntryFieldByID :: proc(id: u32) -> ^TextEntryField {
 	for &widget in widgets {
-		if typeid_of(type_of(widget)) == TextEntryField {
-			if widget.(TextEntryField).id == id {
+		#partial switch w in widget {
+		case TextEntryField:
+			if w.id == id {
 				return &widget.(TextEntryField)
 			}
+		case:
 		}
 	}
 	return nil
@@ -212,10 +220,12 @@ findTextEntryFieldByID :: proc(id: u32) -> ^TextEntryField {
 
 findTextAreaByID :: proc(id: u32) -> ^TextArea {
 	for &widget in widgets {
-		if typeid_of(type_of(widget)) == TextArea {
-			if widget.(TextArea).id == id {
+		#partial switch w in widget {
+		case TextArea:
+			if w.id == id {
 				return &widget.(TextArea)
 			}
+		case:
 		}
 	}
 	return nil
