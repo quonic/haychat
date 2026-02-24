@@ -69,35 +69,6 @@ initUI :: proc() {
 		},
 	}
 
-	// Add server buttons to server panel
-	for server, i in config.servers {
-		shortName := getShortServerName(server.name)
-		shortNameStr := strings.clone_from_cstring(shortName)
-		serverButton := widgets.Button {
-			id          = SERVER_BUTTON_BASE_ID + u32(i),
-			parent      = SERVER_PANEL_ID,
-			text        = shortNameStr,
-			position    = {
-				panelSpacing,
-				panelSpacing +
-				30 +
-				f32(i) * (serverPanel.size.x - panelSpacing * 2 + panelSpacing),
-			},
-			size        = {
-				serverPanel.size.x - panelSpacing * 2,
-				serverPanel.size.x - panelSpacing * 2,
-			},
-			shape       = .RoundedRectangle,
-			roundness   = panelRoundness,
-			font        = widgets.WidgetDefaultFont,
-			fontSize    = 14,
-			fontSpacing = 0,
-			enabled     = true,
-			// TODO: Add onClick callback for server buttons
-		}
-		widgets.addChild(SERVER_PANEL_ID, widgets.Widget(serverButton))
-	}
-
 	// Add button to add servers
 	addServerButton := widgets.Button {
 		id = ADD_SERVER_BUTTON_ID,
@@ -180,15 +151,44 @@ initUI :: proc() {
 		},
 	}
 
+	// Add panels to widget system
+	widgets.add(serverPanel)
+
+	widgets.add(statusPanel)
+
+	// Add server buttons to server panel
+	for server, i in config.servers {
+		shortName := getShortServerName(server.name)
+		serverButton := widgets.Button {
+			id          = SERVER_BUTTON_BASE_ID + u32(i),
+			parent      = SERVER_PANEL_ID,
+			text        = shortName,
+			position    = {
+				panelSpacing,
+				panelSpacing +
+				30 +
+				f32(i) * (serverPanel.size.x - panelSpacing * 2 + panelSpacing),
+			},
+			size        = {
+				serverPanel.size.x - panelSpacing * 2,
+				serverPanel.size.x - panelSpacing * 2,
+			},
+			shape       = .RoundedRectangle,
+			roundness   = panelRoundness,
+			font        = widgets.WidgetDefaultFont,
+			fontSize    = 14,
+			fontSpacing = 0,
+			enabled     = true,
+			// TODO: Add onClick callback for server buttons
+		}
+		widgets.addChild(SERVER_PANEL_ID, widgets.Widget(serverButton))
+	}
+
 	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(friendsButton))
 	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(addServerButton))
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(userLabel))
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(settingsButton))
 
-	// Add panels to widget system
-	widgets.add(serverPanel)
-
-	widgets.add(statusPanel)
 }
 
 updateUI :: proc() {

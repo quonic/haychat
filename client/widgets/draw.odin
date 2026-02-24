@@ -181,8 +181,20 @@ drawPanel :: proc(panel: ^Panel) {
 
 	maxContentY := f32(0)
 	minContentY := f32(0)
+
+	// TODO: Remove once children not drawing is fixed.
+	when ODIN_DEBUG {
+		if len(panel.children) == 0 {
+			fmt.printfln(
+				"[Debug] Number of children in panel %d: %d",
+				panel.id,
+				len(panel.children),
+			)
+		}
+	}
+
 	for &child in panel.children {
-		switch typeid_of(type_of(child)) {
+		switch c in child {
 		case Button:
 			button := child.(Button)
 			if button.position.y < minContentY {

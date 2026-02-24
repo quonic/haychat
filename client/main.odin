@@ -91,7 +91,7 @@ main :: proc() {
 
 
 // Utility function to generate short server names
-getShortServerName :: proc(serverName: string) -> cstring {
+getShortServerName :: proc(serverName: string) -> string {
 	// Generate a short name for the server by taking the first letter of each word in the server name
 	words := strings.split(serverName, " ")
 	shortName := ""
@@ -108,8 +108,8 @@ getShortServerName :: proc(serverName: string) -> cstring {
 	}
 	if len(words) < 2 {
 		shortName, _ = strings.substring(serverName, 0, 2)
-		return strings.clone_to_cstring(shortName)
+		return shortName
 	}
 
-	return strings.clone_to_cstring(shortName)
+	return shortName
 }
