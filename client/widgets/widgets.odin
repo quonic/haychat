@@ -56,6 +56,8 @@ Button :: struct {
 	text:         string,
 	position:     raylib.Vector2,
 	size:         raylib.Vector2,
+	color:        raylib.Color, // Background color of the button
+	textColor:    raylib.Color, // Color of the button text
 	shape:        Shape,
 	roundness:    f32, // Only used for RoundedRectangle shape
 	font:         raylib.Font, // Optional custom font for the button text
@@ -82,6 +84,8 @@ Label :: struct {
 	font:         raylib.Font, // Optional custom font for the button text
 	fontSize:     f32, // Font size for the button text
 	fontSpacing:  f32, // Additional spacing between characters in the button text
+	color:        raylib.Color, // Background color of the label
+	textColor:    raylib.Color, // Color of the label text
 	enabled:      bool, // Whether the label is enabled for interaction (e.g., hovering)
 	mouseEntered: bool,
 	mouseLeave:   bool,
@@ -104,6 +108,8 @@ TextEntryField :: struct {
 	font:                raylib.Font, // Optional custom font for the button text
 	fontSize:            f32, // Font size for the button text
 	fontSpacing:         f32, // Additional spacing between characters in the button text
+	color:               raylib.Color, // Background color of the text entry field
+	textColor:           raylib.Color, // Color of the text in the text entry field
 	enabled:             bool, // Whether the text entry field is enabled for input
 	padding:             f32, // Padding inside the text entry field for better readability
 	mouseEntered:        bool,
@@ -132,6 +138,8 @@ TextArea :: struct {
 	font:         raylib.Font, // Optional custom font for the button text
 	fontSize:     f32, // Font size for the button text
 	fontSpacing:  f32, // Additional spacing between characters in the button text
+	color:        raylib.Color, // Background color of the text area
+	textColor:    raylib.Color, // Color of the text in the text area
 	enabled:      bool, // Whether the text area is enabled for interaction (e.g., scrolling)
 	padding:      f32, // Padding inside the text area for better readability
 	scrollOffset: f32, // Current scroll offset for the text area when the content exceeds the visible area
@@ -162,6 +170,8 @@ Panel :: struct {
 	font:             raylib.Font, // Optional custom font for the button text
 	fontSize:         f32, // Font size for the button text
 	fontSpacing:      f32, // Additional spacing between characters in the button text
+	color:            raylib.Color, // Background color of the panel
+	textColor:        raylib.Color, // Color of the text in the panel
 	mouseEntered:     bool,
 	mouseLeave:       bool,
 	mouseClicked:     bool,

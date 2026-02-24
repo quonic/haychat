@@ -174,7 +174,7 @@ drawButton :: proc(button: ^Button) {
 	// Default drawing logic based on shape
 	switch button.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(buttonPosition, button.size, raylib.RED)
+		raylib.DrawRectangleV(buttonPosition, button.size, button.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -185,11 +185,11 @@ drawButton :: proc(button: ^Button) {
 			},
 			button.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.BLUE,
+			button.color,
 		)
 	case .Circle:
 		radius := f32(button.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(buttonPosition, radius, raylib.GREEN)
+		raylib.DrawCircleV(buttonPosition, radius, button.color)
 	}
 
 	// Draw the button text centered within the button
@@ -209,7 +209,7 @@ drawButton :: proc(button: ^Button) {
 		textPosition,
 		button.fontSize,
 		button.fontSpacing,
-		raylib.WHITE,
+		button.textColor,
 	)
 }
 
@@ -238,7 +238,7 @@ drawLabel :: proc(label: ^Label) {
 	// Default drawing logic based on shape
 	switch label.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(labelPosition, label.size, raylib.DARKGRAY)
+		raylib.DrawRectangleV(labelPosition, label.size, label.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -249,11 +249,11 @@ drawLabel :: proc(label: ^Label) {
 			},
 			label.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.GRAY,
+			label.color,
 		)
 	case .Circle:
 		radius := f32(label.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(labelPosition, radius, raylib.LIGHTGRAY)
+		raylib.DrawCircleV(labelPosition, radius, label.color)
 	}
 
 	// Draw the label text centered within the label
@@ -273,7 +273,7 @@ drawLabel :: proc(label: ^Label) {
 		textPosition,
 		label.fontSize,
 		label.fontSpacing,
-		raylib.WHITE,
+		label.textColor,
 	)
 }
 
@@ -300,7 +300,7 @@ drawPanel :: proc(panel: ^Panel) {
 	// Default drawing logic based on shape
 	switch panel.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(panelPosition, panelSize, raylib.DARKGRAY)
+		raylib.DrawRectangleV(panelPosition, panelSize, panel.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -311,11 +311,11 @@ drawPanel :: proc(panel: ^Panel) {
 			},
 			panel.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.GRAY,
+			panel.color,
 		)
 	case .Circle:
 		radius := f32(panelSize.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(panelPosition, radius, raylib.LIGHTGRAY)
+		raylib.DrawCircleV(panelPosition, radius, panel.color)
 	}
 
 	minContentY, maxContentY := panelChildrenContentBoundsY(panel)
@@ -356,7 +356,7 @@ drawPanel :: proc(panel: ^Panel) {
 			textPosition,
 			panel.fontSize,
 			panel.fontSpacing,
-			raylib.WHITE,
+			panel.textColor,
 		)
 	}
 
@@ -484,7 +484,7 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 	// Default drawing logic based on shape
 	switch textEntryField.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(textEntryFieldPosition, textEntryField.size, raylib.DARKGRAY)
+		raylib.DrawRectangleV(textEntryFieldPosition, textEntryField.size, textEntryField.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -495,11 +495,11 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 			},
 			textEntryField.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.GRAY,
+			textEntryField.color,
 		)
 	case .Circle:
 		radius := f32(textEntryField.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textEntryFieldPosition, radius, raylib.LIGHTGRAY)
+		raylib.DrawCircleV(textEntryFieldPosition, radius, textEntryField.color)
 	}
 
 	// Draw the current text in the entry field with padding
@@ -513,7 +513,7 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 		textPosition,
 		textEntryField.fontSize,
 		textEntryField.fontSpacing,
-		raylib.WHITE,
+		textEntryField.textColor,
 	)
 }
 
@@ -542,7 +542,7 @@ drawTextArea :: proc(textArea: ^TextArea) {
 	// Default drawing logic based on shape
 	switch textArea.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(textAreaPosition, textArea.size, raylib.DARKGRAY)
+		raylib.DrawRectangleV(textAreaPosition, textArea.size, textArea.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -553,11 +553,11 @@ drawTextArea :: proc(textArea: ^TextArea) {
 			},
 			textArea.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.GRAY,
+			textArea.color,
 		)
 	case .Circle:
 		radius := f32(textArea.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textAreaPosition, radius, raylib.LIGHTGRAY)
+		raylib.DrawCircleV(textAreaPosition, radius, textArea.color)
 	}
 
 	// Draw each line of text within the text area with proper spacing
@@ -573,7 +573,7 @@ drawTextArea :: proc(textArea: ^TextArea) {
 			linePosition,
 			textArea.fontSize,
 			textArea.fontSpacing,
-			raylib.WHITE,
+			textArea.textColor,
 		)
 	}
 }
@@ -603,7 +603,7 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 	// Default drawing logic based on shape
 	switch textArea.shape {
 	case .Rectangle:
-		raylib.DrawRectangleV(textAreaPosition, textArea.size, raylib.DARKGRAY)
+		raylib.DrawRectangleV(textAreaPosition, textArea.size, textArea.color)
 	case .RoundedRectangle:
 		raylib.DrawRectangleRounded(
 			raylib.Rectangle {
@@ -614,11 +614,11 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 			},
 			textArea.roundness,
 			0, // Segments for rounded corners (0 for auto)
-			raylib.GRAY,
+			textArea.color,
 		)
 	case .Circle:
 		radius := f32(textArea.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textAreaPosition, radius, raylib.LIGHTGRAY)
+		raylib.DrawCircleV(textAreaPosition, radius, textArea.color)
 	}
 
 	// Draw each line of text within the text area with proper spacing and scrolling offset
@@ -641,7 +641,7 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 			linePosition,
 			textArea.fontSize,
 			textArea.fontSpacing,
-			raylib.WHITE,
+			textArea.textColor,
 		)
 	}
 }
