@@ -1,6 +1,4 @@
-# HayChat Project
-
-HayChat is an open-source project that is designed to be a replacement for Discord, with a focus on privacy, security, performance, and self-hosting. The project is built using a monolithic architecture, which allows for greater control over the codebase and easier maintenance. The project is written in Odin, a programming language that is a general-purpose programming language with distinct typing built for high performance, modern systems and data-oriented programming.
+# Agents.md
 
 ## Odin Programming Language
 
@@ -30,10 +28,6 @@ HayChat is an open-source project that is designed to be a replacement for Disco
 - Build: `odin build .`
 - Run: `odin run .`
 - Documentation Generation: `odin doc .`
-
-### Development Environment
-
-TODO: Add instructions for setting up a development environment, including any necessary tools and dependencies.
 
 ## Code Style
 
@@ -66,50 +60,6 @@ TODO: Add instructions for setting up a development environment, including any n
 - Use environment variables for sensitive data
 - Validate all user inputs on both client and server
 - Follow principle of least privilege for database access and other resources
-
-### Cryptography
-
-HayChat uses a dual-key system for separate authentication and encryption:
-
-- **Encryption**: `core:crypto/ecdh` (X25519) for key exchange, `core:crypto/hkdf` (HKDF-SHA256) for key derivation, and `core:crypto/aes` (AES-256-GCM) for authenticated symmetric encryption
-- **Authentication**: `core:crypto/ed25519` for digital signatures (signing/verifying messages)
-
-Each user has two key pairs:
-
-1. **Authentication key pair** (ed25519): Used to sign messages and prove identity
-2. **Encryption key pair** (ECDH X25519): Used for key exchange to establish encrypted communication channels
-
-**Key Exchange Flow**:
-
-1. Parties exchange their ECDH public keys
-2. Each party performs ECDH with their private key and the other's public key to derive a shared secret
-3. The shared secret is passed through HKDF-SHA256 to derive a 32-byte AES-256 key
-4. Messages are encrypted with AES-256-GCM using the derived key
-
-**Authentication Flow**:
-
-1. Server sends a random nonce challenge
-2. Client signs the nonce with their ed25519 private key
-3. Server verifies the signature using the client's ed25519 public key
-4. No passwords are needed - possession of the private key proves identity
-
-**Best Practices**:
-
-- Always use `deriveEncryptionKey()` instead of raw ECDH to ensure proper key derivation
-- Use `defer clearKey()` and `defer mem.zero_slice()` to clean up sensitive key material
-- Never reuse IVs - `encrypt()` generates a fresh random IV for each message
-- Include session ID and message type in AAD to prevent replay attacks
-- Separate authentication from encryption to prevent key misuse
-
-- The server will be responsible for managing user accounts, handling authentication, and storing data in the database. The client will be responsible for rendering the user interface and communicating with the server to send and receive data.
-
-## Git Workflow
-
-- ALWAYS run `odin check .` before committing code to ensure that there are no syntax errors or type errors in the codebase.
-- ALWAYS run `odin test .` before committing code to ensure that all tests are passing and that new code does not introduce any regressions.
-- NEVER use `git push --force` on the main branch
-- Use `git push --force-with-lease` for feature branches if needed
-- Always verify current branch before force operations
 
 ## Configuration
 
