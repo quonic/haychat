@@ -263,23 +263,23 @@ draw :: proc() {
 	for &widget in widgets {
 		switch typeid_of(type_of(widget)) {
 		case Button:
-			if widget.(Button).parent == 0 { 	// Only draw buttons that are not children of panels (panels will handle drawing their children)
+			if widget.(Button).parent == 0 {
 				drawButton(&widget.(Button))
 			}
 		case Label:
-			if widget.(Label).parent == 0 { 	// Only draw labels that are not children of panels (panels will handle drawing their children)
+			if widget.(Label).parent == 0 {
 				drawLabel(&widget.(Label))
 			}
 		case Panel:
-			if widget.(Panel).parent == 0 { 	// Only draw panels that are not children of other panels (parent panels will handle drawing their children)
+			if widget.(Panel).parent == 0 {
 				drawPanel(&widget.(Panel))
 			}
 		case TextEntryField:
-			if widget.(TextEntryField).parent == 0 { 	// Only draw text entry fields that are not children of panels (panels will handle drawing their children)
+			if widget.(TextEntryField).parent == 0 {
 				drawTextEntryField(&widget.(TextEntryField))
 			}
 		case TextArea:
-			if widget.(TextArea).parent == 0 { 	// Only draw text areas that are not children of panels (panels will handle drawing their children)
+			if widget.(TextArea).parent == 0 {
 				drawTextArea(&widget.(TextArea))
 			}
 		}
