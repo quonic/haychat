@@ -85,6 +85,70 @@ resolvePanelLayout :: proc(panel: ^Panel) {
 	panel.resolvedSize = resolvedSize
 }
 
+PanelChildLayoutMetrics :: struct {
+	position: raylib.Vector2,
+	size:     raylib.Vector2,
+}
+
+panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vector2) {
+	switch c in child {
+	case Button:
+		return c.position, c.size
+	case Label:
+		return c.position, c.size
+	case Panel:
+		return c.position, c.size
+	case TextEntryField:
+		return c.position, c.size
+	case TextArea:
+		return c.position, c.size
+	case:
+	}
+
+	return {}, {}
+}
+
+resolvePanelChildLayout :: proc(
+	panel: ^Panel,
+	child: Widget,
+	flowOffset: ^f32,
+) -> PanelChildLayoutMetrics {
+	position, size := panelChildPositionAndSize(child)
+
+	switch panel.childrenLayout {
+	case .None:
+	case .Vertical:
+		position = {0, flowOffset^}
+		size.x = panel.resolvedSize.x
+		flowOffset^ += size.y + panel.childSpacing
+	case .Horizontal:
+		position = {flowOffset^, 0}
+		size.y = panel.resolvedSize.y
+		flowOffset^ += size.x + panel.childSpacing
+	}
+
+	return PanelChildLayoutMetrics{position = position, size = size}
+}
+
+panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
+	minContentY := f32(0)
+	maxContentY := f32(0)
+	flowOffset := f32(0)
+
+	for &child in panel.children {
+		layoutMetrics := resolvePanelChildLayout(panel, child, &flowOffset)
+		if layoutMetrics.position.y < minContentY {
+			minContentY = layoutMetrics.position.y
+		}
+		bottom := layoutMetrics.position.y + layoutMetrics.size.y
+		if bottom > maxContentY {
+			maxContentY = bottom
+		}
+	}
+
+	return minContentY, maxContentY
+}
+
 drawButton :: proc(button: ^Button) {
 	// Call the custom draw function if it exists
 	if button.draw != nil {
@@ -254,58 +318,7 @@ drawPanel :: proc(panel: ^Panel) {
 		raylib.DrawCircleV(panelPosition, radius, raylib.LIGHTGRAY)
 	}
 
-	maxContentY := f32(0)
-	minContentY := f32(0)
-
-	for &child in panel.children {
-		switch c in child {
-		case Button:
-			button := child.(Button)
-			if button.position.y < minContentY {
-				minContentY = button.position.y
-			}
-			bottom := button.position.y + button.size.y
-			if bottom > maxContentY {
-				maxContentY = bottom
-			}
-		case Label:
-			label := child.(Label)
-			if label.position.y < minContentY {
-				minContentY = label.position.y
-			}
-			bottom := label.position.y + label.size.y
-			if bottom > maxContentY {
-				maxContentY = bottom
-			}
-		case Panel:
-			childPanel := child.(Panel)
-			if childPanel.position.y < minContentY {
-				minContentY = childPanel.position.y
-			}
-			bottom := childPanel.position.y + childPanel.size.y
-			if bottom > maxContentY {
-				maxContentY = bottom
-			}
-		case TextEntryField:
-			entryField := child.(TextEntryField)
-			if entryField.position.y < minContentY {
-				minContentY = entryField.position.y
-			}
-			bottom := entryField.position.y + entryField.size.y
-			if bottom > maxContentY {
-				maxContentY = bottom
-			}
-		case TextArea:
-			textArea := child.(TextArea)
-			if textArea.position.y < minContentY {
-				minContentY = textArea.position.y
-			}
-			bottom := textArea.position.y + textArea.size.y
-			if bottom > maxContentY {
-				maxContentY = bottom
-			}
-		}
-	}
+	minContentY, maxContentY := panelChildrenContentBoundsY(panel)
 
 	visibleTopPadding := panel.scrollTopPadding
 	visibleHeight := panelSize.y - visibleTopPadding
@@ -361,46 +374,74 @@ drawPanel :: proc(panel: ^Panel) {
 	)
 	defer raylib.EndScissorMode()
 	applyScroll := panel.scrollOffset != 0
+	layoutFlowOffset := f32(0)
 	for &child in panel.children {
+		layoutMetrics := resolvePanelChildLayout(panel, child, &layoutFlowOffset)
 		switch c in child {
 		case Button:
 			button := &child.(Button)
+			originalPosition := button.position
+			originalSize := button.size
+			if panel.childrenLayout != .None {
+				button.position = layoutMetrics.position
+				button.size = layoutMetrics.size
+			}
 			if applyScroll {
 				button.position.y -= panel.scrollOffset
 			}
 			drawButton(button)
-			if applyScroll {
-				button.position.y += panel.scrollOffset
-			}
+			button.position = originalPosition
+			button.size = originalSize
 		case Label:
 			label := &child.(Label)
+			originalPosition := label.position
+			originalSize := label.size
+			if panel.childrenLayout != .None {
+				label.position = layoutMetrics.position
+				label.size = layoutMetrics.size
+			}
 			if applyScroll {
 				label.position.y -= panel.scrollOffset
 			}
 			drawLabel(label)
-			if applyScroll {
-				label.position.y += panel.scrollOffset
-			}
+			label.position = originalPosition
+			label.size = originalSize
 		case Panel:
 			childPanel := &child.(Panel)
+			originalPosition := childPanel.position
+			originalSize := childPanel.size
+			if panel.childrenLayout != .None {
+				childPanel.position = layoutMetrics.position
+				childPanel.size = layoutMetrics.size
+			}
 			if applyScroll {
 				childPanel.position.y -= panel.scrollOffset
 			}
 			drawPanel(childPanel)
-			if applyScroll {
-				childPanel.position.y += panel.scrollOffset
-			}
+			childPanel.position = originalPosition
+			childPanel.size = originalSize
 		case TextEntryField:
 			entryField := &child.(TextEntryField)
+			originalPosition := entryField.position
+			originalSize := entryField.size
+			if panel.childrenLayout != .None {
+				entryField.position = layoutMetrics.position
+				entryField.size = layoutMetrics.size
+			}
 			if applyScroll {
 				entryField.position.y -= panel.scrollOffset
 			}
 			drawTextEntryField(entryField)
-			if applyScroll {
-				entryField.position.y += panel.scrollOffset
-			}
+			entryField.position = originalPosition
+			entryField.size = originalSize
 		case TextArea:
 			textArea := &child.(TextArea)
+			originalPosition := textArea.position
+			originalSize := textArea.size
+			if panel.childrenLayout != .None {
+				textArea.position = layoutMetrics.position
+				textArea.size = layoutMetrics.size
+			}
 			if applyScroll {
 				textArea.position.y -= panel.scrollOffset
 			}
@@ -411,9 +452,8 @@ drawPanel :: proc(panel: ^Panel) {
 			} else {
 				drawTextArea(textArea)
 			}
-			if applyScroll {
-				textArea.position.y += panel.scrollOffset
-			}
+			textArea.position = originalPosition
+			textArea.size = originalSize
 		// Add more widget types as needed
 		}
 	}

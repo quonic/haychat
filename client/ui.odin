@@ -33,18 +33,19 @@ initUI :: proc() {
 	serverPanelHeight :=
 		f32(raylib.GetScreenHeight()) - panelSpacing * 2 - statusPanelHeight - panelSpacing
 	serverPanel := widgets.Panel {
-		id           = SERVER_PANEL_ID,
-		title        = "",
-		position     = {panelSpacing, panelSpacing},
-		size         = {serverPanelWidth - panelSpacing * 2, serverPanelHeight},
-		anchor       = .Left,
-		sideMode     = .Stretch,
-		shape        = .RoundedRectangle,
-		roundness    = panelRoundness,
-		font         = widgets.WidgetDefaultFont,
-		fontSize     = 20,
-		fontSpacing  = 0,
-		childSpacing = panelSpacing,
+		id             = SERVER_PANEL_ID,
+		title          = "",
+		position       = {panelSpacing, panelSpacing},
+		size           = {serverPanelWidth - panelSpacing * 2, serverPanelHeight},
+		anchor         = .Left,
+		sideMode       = .Stretch,
+		childrenLayout = .Vertical,
+		shape          = .RoundedRectangle,
+		roundness      = panelRoundness,
+		font           = widgets.WidgetDefaultFont,
+		fontSize       = 20,
+		fontSpacing    = 0,
+		childSpacing   = panelSpacing,
 	}
 
 	// Create Friends button for server panel
@@ -99,18 +100,22 @@ initUI :: proc() {
 	statusPanelWidth: f32 = 200
 
 	statusPanel := widgets.Panel {
-		id           = STATUS_PANEL_ID,
-		title        = "",
-		position     = {panelSpacing, panelSpacing},
-		size         = {statusPanelWidth - panelSpacing * 2, statusPanelHeight - panelSpacing * 2},
-		anchor       = .BottomLeft,
-		sideMode     = .Fixed,
-		shape        = .RoundedRectangle,
-		roundness    = panelRoundness,
-		font         = widgets.WidgetDefaultFont,
-		fontSize     = 14,
-		fontSpacing  = 0,
-		childSpacing = panelSpacing,
+		id             = STATUS_PANEL_ID,
+		title          = "",
+		position       = {panelSpacing, panelSpacing},
+		size           = {
+			statusPanelWidth - panelSpacing * 2,
+			statusPanelHeight - panelSpacing * 2,
+		},
+		anchor         = .BottomLeft,
+		sideMode       = .Fixed,
+		childrenLayout = .Horizontal,
+		shape          = .RoundedRectangle,
+		roundness      = panelRoundness,
+		font           = widgets.WidgetDefaultFont,
+		fontSize       = 14,
+		fontSpacing    = 0,
+		childSpacing   = panelSpacing,
 	}
 
 	// Create user display label for status panel
@@ -158,6 +163,8 @@ initUI :: proc() {
 
 	widgets.add(statusPanel)
 
+	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(friendsButton))
+
 	// Add server buttons to server panel
 	for server, i in config.servers {
 		shortName := getShortServerName(server.name)
@@ -186,7 +193,6 @@ initUI :: proc() {
 		widgets.addChild(SERVER_PANEL_ID, widgets.Widget(serverButton))
 	}
 
-	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(friendsButton))
 	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(addServerButton))
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(userLabel))
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(settingsButton))

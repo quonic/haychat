@@ -44,6 +44,12 @@ PanelSideMode :: enum {
 	Stretch,
 }
 
+PanelChildrenLayout :: enum {
+	None,
+	Vertical,
+	Horizontal,
+}
+
 Button :: struct {
 	id:           u32,
 	parent:       u32, // ID of the parent panel (if any) to which this label belongs
@@ -148,6 +154,7 @@ Panel :: struct {
 	resolvedSize:     raylib.Vector2,
 	anchor:           PanelAnchor,
 	sideMode:         PanelSideMode,
+	childrenLayout:   PanelChildrenLayout,
 	scrollOffset:     f32, // Current scroll offset for the panel when the content exceeds the visible area
 	scrollTopPadding: f32, // Top padding reserved for titles or headers in scrollable area
 	shape:            Shape, // Only Rectangle or RoundedRectangle for panels
@@ -319,22 +326,84 @@ draw :: proc() {
 }
 
 getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
-	totalHeight := f32(0)
-	for &child in panel.children {
-		switch typeid_of(type_of(child)) {
-		case Button:
-			totalHeight += child.(Button).size.y + panel.childSpacing
-		case Label:
-			totalHeight += child.(Label).size.y + panel.childSpacing
-		case Panel:
-			totalHeight += child.(Panel).size.y + panel.childSpacing
-		case TextEntryField:
-			totalHeight += child.(TextEntryField).size.y + panel.childSpacing
-		case TextArea:
-			totalHeight += child.(TextArea).size.y + panel.childSpacing
-		}
+	if len(panel.children) == 0 {
+		return 0
 	}
-	return totalHeight
+
+	switch panel.childrenLayout {
+	case .Vertical:
+		totalHeight := f32(0)
+		for child, index in panel.children {
+			switch typeid_of(type_of(child)) {
+			case Button:
+				totalHeight += child.(Button).size.y
+			case Label:
+				totalHeight += child.(Label).size.y
+			case Panel:
+				totalHeight += child.(Panel).size.y
+			case TextEntryField:
+				totalHeight += child.(TextEntryField).size.y
+			case TextArea:
+				totalHeight += child.(TextArea).size.y
+			}
+			if index < len(panel.children) - 1 {
+				totalHeight += panel.childSpacing
+			}
+		}
+		return totalHeight
+	case .Horizontal:
+		return panel.resolvedSize.y
+	case .None:
+		minContentY := f32(0)
+		maxContentY := f32(0)
+		for &child in panel.children {
+			switch typeid_of(type_of(child)) {
+			case Button:
+				if child.(Button).position.y < minContentY {
+					minContentY = child.(Button).position.y
+				}
+				bottom := child.(Button).position.y + child.(Button).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case Label:
+				if child.(Label).position.y < minContentY {
+					minContentY = child.(Label).position.y
+				}
+				bottom := child.(Label).position.y + child.(Label).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case Panel:
+				if child.(Panel).position.y < minContentY {
+					minContentY = child.(Panel).position.y
+				}
+				bottom := child.(Panel).position.y + child.(Panel).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case TextEntryField:
+				if child.(TextEntryField).position.y < minContentY {
+					minContentY = child.(TextEntryField).position.y
+				}
+				bottom := child.(TextEntryField).position.y + child.(TextEntryField).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case TextArea:
+				if child.(TextArea).position.y < minContentY {
+					minContentY = child.(TextArea).position.y
+				}
+				bottom := child.(TextArea).position.y + child.(TextArea).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			}
+		}
+		return maxContentY - minContentY
+	}
+
+	return 0
 }
 
 main :: proc() {
