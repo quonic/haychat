@@ -17,6 +17,13 @@ FRIENDS_BUTTON_ID: u32 = 10
 ADD_SERVER_BUTTON_ID: u32 = 11
 SERVER_BUTTON_BASE_ID: u32 = 100
 
+// Visible UI state
+showFriendsList: bool
+showAddServer: bool
+showSettings: bool
+
+
+// Initialize the UI by creating panels and buttons based on the configuration
 initUI :: proc() {
 
 	// Initialize widgets system
@@ -40,18 +47,26 @@ initUI :: proc() {
 
 	// Create Friends button for server panel
 	friendsButton := widgets.Button {
-		id          = FRIENDS_BUTTON_ID,
-		parent      = SERVER_PANEL_ID,
-		text        = "Friends",
-		position    = {panelSpacing, panelSpacing},
-		size        = {serverPanel.size.x - panelSpacing * 2, 30},
-		shape       = .RoundedRectangle,
-		roundness   = panelRoundness,
-		font        = widgets.WidgetDefaultFont,
-		fontSize    = 16,
+		id = FRIENDS_BUTTON_ID,
+		parent = SERVER_PANEL_ID,
+		text = "Friends",
+		position = {panelSpacing, panelSpacing},
+		size = {serverPanel.size.x - panelSpacing * 2, 30},
+		shape = .RoundedRectangle,
+		roundness = panelRoundness,
+		font = widgets.WidgetDefaultFont,
+		fontSize = 16,
 		fontSpacing = 0,
-		enabled     = true,
-		// TODO: Add onClick callback for Friends button
+		enabled = true,
+		onClick = proc() {
+			showFriendsList = !showFriendsList
+			if showAddServer {
+				showAddServer = false
+			}
+			if showSettings {
+				showSettings = false
+			}
+		},
 	}
 
 	// Add server buttons to server panel
@@ -85,18 +100,26 @@ initUI :: proc() {
 
 	// Add button to add servers
 	addServerButton := widgets.Button {
-		id          = ADD_SERVER_BUTTON_ID,
-		parent      = SERVER_PANEL_ID,
-		text        = "+",
-		position    = {panelSpacing, serverPanel.size.y - 30 - panelSpacing},
-		size        = {serverPanel.size.x - panelSpacing * 2, 30},
-		shape       = .RoundedRectangle,
-		roundness   = panelRoundness,
-		font        = widgets.WidgetDefaultFont,
-		fontSize    = 16,
+		id = ADD_SERVER_BUTTON_ID,
+		parent = SERVER_PANEL_ID,
+		text = "+",
+		position = {panelSpacing, serverPanel.size.y - 30 - panelSpacing},
+		size = {serverPanel.size.x - panelSpacing * 2, 30},
+		shape = .RoundedRectangle,
+		roundness = panelRoundness,
+		font = widgets.WidgetDefaultFont,
+		fontSize = 16,
 		fontSpacing = 0,
-		enabled     = true,
-		// TODO: Add onClick callback for Add Server button
+		enabled = true,
+		onClick = proc() {
+			showAddServer = !showAddServer
+			if showFriendsList {
+				showFriendsList = false
+			}
+			if showSettings {
+				showSettings = false
+			}
+		},
 	}
 
 	// Create status panel widget
@@ -136,17 +159,25 @@ initUI :: proc() {
 
 	// Create settings button for status panel
 	settingsButton := widgets.Button {
-		id          = 21,
-		parent      = STATUS_PANEL_ID,
-		text        = "...",
-		position    = {statusPanel.size.x - 30 - panelSpacing, panelSpacing},
-		size        = {30, 30},
-		shape       = .Circle,
-		font        = widgets.WidgetDefaultFont,
-		fontSize    = 12,
+		id = 21,
+		parent = STATUS_PANEL_ID,
+		text = "...",
+		position = {statusPanel.size.x - 30 - panelSpacing, panelSpacing},
+		size = {30, 30},
+		shape = .Circle,
+		font = widgets.WidgetDefaultFont,
+		fontSize = 12,
 		fontSpacing = 0,
-		enabled     = true,
-		// TODO: Add onClick callback for Settings button
+		enabled = true,
+		onClick = proc() {
+			showSettings = !showSettings
+			if showFriendsList {
+				showFriendsList = false
+			}
+			if showAddServer {
+				showAddServer = false
+			}
+		},
 	}
 
 	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(friendsButton))
