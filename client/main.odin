@@ -77,8 +77,10 @@ main :: proc() {
 		raylib.EndDrawing()
 
 		when TAKE_SCREENSHOT {
-			raylib.TakeScreenshot("haychat_screenshot.png")
-			break
+			if raylib.GetTime() > 1 { 	// Wait a few frames to ensure the window is fully rendered before taking the screenshot
+				raylib.TakeScreenshot("haychat_screenshot.png")
+				break
+			}
 		}
 	}
 
