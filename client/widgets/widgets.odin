@@ -261,27 +261,28 @@ addChild :: proc(parentPanelID: u32, childWidget: Widget) {
 draw :: proc() {
 	raylib.BeginScissorMode(0, 0, raylib.GetScreenWidth(), raylib.GetScreenHeight())
 	for &widget in widgets {
-		switch typeid_of(type_of(widget)) {
+		switch w in widget {
 		case Button:
-			if widget.(Button).parent == 0 {
+			if w.parent == 0 {
 				drawButton(&widget.(Button))
 			}
 		case Label:
-			if widget.(Label).parent == 0 {
+			if w.parent == 0 {
 				drawLabel(&widget.(Label))
 			}
 		case Panel:
-			if widget.(Panel).parent == 0 {
+			if w.parent == 0 {
 				drawPanel(&widget.(Panel))
 			}
 		case TextEntryField:
-			if widget.(TextEntryField).parent == 0 {
+			if w.parent == 0 {
 				drawTextEntryField(&widget.(TextEntryField))
 			}
 		case TextArea:
-			if widget.(TextArea).parent == 0 {
+			if w.parent == 0 {
 				drawTextArea(&widget.(TextArea))
 			}
+		case:
 		}
 	}
 	raylib.EndScissorMode()
