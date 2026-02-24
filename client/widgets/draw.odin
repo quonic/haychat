@@ -298,7 +298,7 @@ drawPanel :: proc(panel: ^Panel) {
 	defer raylib.EndScissorMode()
 	applyScroll := panel.scrollOffset != 0
 	for &child in panel.children {
-		switch typeid_of(type_of(child)) {
+		switch c in child {
 		case Button:
 			button := &child.(Button)
 			if applyScroll {
