@@ -12,6 +12,7 @@
 
 - When assigning values to a struct, Odin expects either names or no names, but not a mix of both. For example, `return return Message{id = getNextMessageID(), type = type, timestamp = time.now(), pid = pid}` is valid, while `return Message{getNextMessageID(), type, timestamp = time.now(), pid}` is not valid and will result in a compilation error. Value assignments are always in the form of `field = value` when using named fields, and all fields must be assigned in the same way (either all named or all unnamed) to avoid syntax errors.
 - Odin variable declarations follow the syntax `name: type = value`, where the type can be inferred from the value if it is not explicitly specified. For example, `x := 5` will infer that `x` is of type `int`, while `y: f32 = 3.14` explicitly declares that `y` is of type `f32`. If the type cannot be inferred from the value, it must be explicitly declared to avoid compilation errors.
+- For getting the length of an array, use `len(array)`. This includes strings, slices, and other array-like structures.
 
 ## Project Structure
 
