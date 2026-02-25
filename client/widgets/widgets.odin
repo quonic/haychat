@@ -12,6 +12,7 @@ init :: proc() {
 // The base Widget struct and a dynamic array to hold all widgets in the client application.
 Widget :: union {
 	Button,
+	Image,
 	Label,
 	Panel,
 	TextEntryField,
@@ -71,6 +72,23 @@ Button :: struct {
 	onHover:      proc(),
 	onLeave:      proc(),
 	draw:         proc(), // Custom draw function for the button
+}
+
+Image :: struct {
+	id:           u32,
+	parent:       u32, // ID of the parent panel (if any) to which this image belongs
+	texture:      raylib.Texture,
+	sourceRect:   raylib.Rectangle, // Source rectangle in texture space; zero rect draws full texture
+	position:     raylib.Vector2,
+	size:         raylib.Vector2,
+	enabled:      bool, // Whether the image is enabled for interaction (e.g., hovering)
+	mouseEntered: bool,
+	mouseLeave:   bool,
+	mouseClicked: bool,
+	onClick:      proc(),
+	onHover:      proc(),
+	onLeave:      proc(),
+	draw:         proc(), // Custom draw function for the image
 }
 
 Label :: struct {
@@ -229,6 +247,19 @@ findButtonByID :: proc(id: u32) -> ^Button {
 	return nil
 }
 
+findImageByID :: proc(id: u32) -> ^Image {
+	for &widget in widgets {
+		#partial switch w in widget {
+		case Image:
+			if w.id == id {
+				return &widget.(Image)
+			}
+		case:
+		}
+	}
+	return nil
+}
+
 findLabelByID :: proc(id: u32) -> ^Label {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -271,6 +302,7 @@ findTextAreaByID :: proc(id: u32) -> ^TextArea {
 // Proc Union to add a widget to the global widgets array by reference
 add :: proc {
 	addButton,
+	addImage,
 	addLabel,
 	addPanel,
 	addTextEntryField,
@@ -279,6 +311,10 @@ add :: proc {
 
 addButton :: proc(button: Button) {
 	append(&widgets, Widget(button))
+}
+
+addImage :: proc(image: Image) {
+	append(&widgets, Widget(image))
 }
 
 addLabel :: proc(label: Label) {
@@ -312,6 +348,10 @@ draw :: proc() {
 		case Button:
 			if w.parent == 0 {
 				drawButton(&widget.(Button))
+			}
+		case Image:
+			if w.parent == 0 {
+				drawImage(&widget.(Image))
 			}
 		case Label:
 			if w.parent == 0 {
@@ -347,6 +387,8 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 			switch typeid_of(type_of(child)) {
 			case Button:
 				totalHeight += child.(Button).size.y
+			case Image:
+				totalHeight += child.(Image).size.y
 			case Label:
 				totalHeight += child.(Label).size.y
 			case Panel:
@@ -373,6 +415,14 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 					minContentY = child.(Button).position.y
 				}
 				bottom := child.(Button).position.y + child.(Button).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case Image:
+				if child.(Image).position.y < minContentY {
+					minContentY = child.(Image).position.y
+				}
+				bottom := child.(Image).position.y + child.(Image).size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}

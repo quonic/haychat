@@ -94,6 +94,8 @@ panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vect
 	switch c in child {
 	case Button:
 		return c.position, c.size
+	case Image:
+		return c.position, c.size
 	case Label:
 		return c.position, c.size
 	case Panel:
@@ -147,6 +149,48 @@ panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
 	}
 
 	return minContentY, maxContentY
+}
+
+drawImage :: proc(image: ^Image) {
+	if image.draw != nil {
+		image.draw()
+		return
+	}
+
+	imagePosition := image.position
+	if image.parent != 0 {
+		parentPanel := findPanelByID(image.parent)
+		if parentPanel != nil {
+			imagePosition.x += parentPanel.resolvedPosition.x
+			imagePosition.y += parentPanel.resolvedPosition.y
+		}
+	}
+
+	sourceRect := image.sourceRect
+	if sourceRect.width == 0 || sourceRect.height == 0 {
+		sourceRect = raylib.Rectangle {
+			x      = 0,
+			y      = 0,
+			width  = f32(image.texture.width),
+			height = f32(image.texture.height),
+		}
+	}
+
+	destinationRect := raylib.Rectangle {
+		x      = imagePosition.x,
+		y      = imagePosition.y,
+		width  = image.size.x,
+		height = image.size.y,
+	}
+
+	raylib.DrawTexturePro(
+		image.texture,
+		sourceRect,
+		destinationRect,
+		raylib.Vector2{},
+		0,
+		raylib.WHITE,
+	)
 }
 
 drawButton :: proc(button: ^Button) {
@@ -392,6 +436,20 @@ drawPanel :: proc(panel: ^Panel) {
 			drawButton(button)
 			button.position = originalPosition
 			button.size = originalSize
+		case Image:
+			image := &child.(Image)
+			originalPosition := image.position
+			originalSize := image.size
+			if panel.childrenLayout != .None {
+				image.position = layoutMetrics.position
+				image.size = layoutMetrics.size
+			}
+			if applyScroll {
+				image.position.y -= panel.scrollOffset
+			}
+			drawImage(image)
+			image.position = originalPosition
+			image.size = originalSize
 		case Label:
 			label := &child.(Label)
 			originalPosition := label.position

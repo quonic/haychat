@@ -10,6 +10,8 @@ update :: proc() {
 		switch typeid_of(type_of(widget)) {
 		case Button:
 			updateWidget(&widget.(Button))
+		case Image:
+			updateWidget(&widget.(Image))
 		case Label:
 			updateWidget(&widget.(Label))
 		case Panel:
@@ -25,6 +27,7 @@ update :: proc() {
 updateWidget :: proc {
 	updatePanel,
 	updateButton,
+	updateImage,
 	updateLabel,
 	updateTextEntryField,
 	updateTextArea,
@@ -117,6 +120,42 @@ updateButton :: proc(button: ^Button) {
 			}
 		} else {
 			button.mouseClicked = false
+		}
+	}
+}
+
+updateImage :: proc(image: ^Image) {
+	if image.enabled {
+		if raylib.CheckCollisionPointRec(
+			raylib.GetMousePosition(),
+			raylib.Rectangle {
+				x = image.position.x,
+				y = image.position.y,
+				width = image.size.x,
+				height = image.size.y,
+			},
+		) {
+			if !image.mouseEntered {
+				image.mouseEntered = true
+				if image.onHover != nil {
+					image.onHover()
+				}
+			}
+		} else {
+			if image.mouseEntered {
+				image.mouseEntered = false
+				if image.onLeave != nil {
+					image.onLeave()
+				}
+			}
+		}
+		if image.mouseEntered && raylib.IsMouseButtonPressed(raylib.MouseButton.LEFT) {
+			image.mouseClicked = true
+			if image.onClick != nil {
+				image.onClick()
+			}
+		} else {
+			image.mouseClicked = false
 		}
 	}
 }
