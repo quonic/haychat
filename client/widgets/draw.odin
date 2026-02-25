@@ -424,8 +424,6 @@ drawPanel :: proc(panel: ^Panel) {
 		switch c in child {
 		case Button:
 			button := &child.(Button)
-			originalPosition := button.position
-			originalSize := button.size
 			if panel.childrenLayout != .None {
 				button.position = layoutMetrics.position
 				button.size = layoutMetrics.size
@@ -434,12 +432,8 @@ drawPanel :: proc(panel: ^Panel) {
 				button.position.y -= panel.scrollOffset
 			}
 			drawButton(button)
-			button.position = originalPosition
-			button.size = originalSize
 		case Image:
 			image := &child.(Image)
-			originalPosition := image.position
-			originalSize := image.size
 			if panel.childrenLayout != .None {
 				image.position = layoutMetrics.position
 				image.size = layoutMetrics.size
@@ -448,12 +442,8 @@ drawPanel :: proc(panel: ^Panel) {
 				image.position.y -= panel.scrollOffset
 			}
 			drawImage(image)
-			image.position = originalPosition
-			image.size = originalSize
 		case Label:
 			label := &child.(Label)
-			originalPosition := label.position
-			originalSize := label.size
 			if panel.childrenLayout != .None {
 				label.position = layoutMetrics.position
 				label.size = layoutMetrics.size
@@ -462,12 +452,8 @@ drawPanel :: proc(panel: ^Panel) {
 				label.position.y -= panel.scrollOffset
 			}
 			drawLabel(label)
-			label.position = originalPosition
-			label.size = originalSize
 		case Panel:
 			childPanel := &child.(Panel)
-			originalPosition := childPanel.position
-			originalSize := childPanel.size
 			if panel.childrenLayout != .None {
 				childPanel.position = layoutMetrics.position
 				childPanel.size = layoutMetrics.size
@@ -476,12 +462,8 @@ drawPanel :: proc(panel: ^Panel) {
 				childPanel.position.y -= panel.scrollOffset
 			}
 			drawPanel(childPanel)
-			childPanel.position = originalPosition
-			childPanel.size = originalSize
 		case TextEntryField:
 			entryField := &child.(TextEntryField)
-			originalPosition := entryField.position
-			originalSize := entryField.size
 			if panel.childrenLayout != .None {
 				entryField.position = layoutMetrics.position
 				entryField.size = layoutMetrics.size
@@ -490,12 +472,8 @@ drawPanel :: proc(panel: ^Panel) {
 				entryField.position.y -= panel.scrollOffset
 			}
 			drawTextEntryField(entryField)
-			entryField.position = originalPosition
-			entryField.size = originalSize
 		case TextArea:
 			textArea := &child.(TextArea)
-			originalPosition := textArea.position
-			originalSize := textArea.size
 			if panel.childrenLayout != .None {
 				textArea.position = layoutMetrics.position
 				textArea.size = layoutMetrics.size
@@ -510,8 +488,6 @@ drawPanel :: proc(panel: ^Panel) {
 			} else {
 				drawTextArea(textArea)
 			}
-			textArea.position = originalPosition
-			textArea.size = originalSize
 		// Add more widget types as needed
 		}
 	}
