@@ -90,6 +90,83 @@ PanelChildLayoutMetrics :: struct {
 	size:     raylib.Vector2,
 }
 
+panelChildIsFlexSpacer :: proc(child: Widget) -> bool {
+	#partial switch c in child {
+	case FlexSpacer:
+		return true
+	}
+
+	return false
+}
+
+panelChildBaseFlowAxisSize :: proc(panel: ^Panel, child: Widget) -> f32 {
+	_, size := panelChildPositionAndSize(child)
+
+	switch panel.childrenLayout {
+	case .Vertical:
+		return size.y
+	case .Horizontal:
+		return size.x
+	case .None:
+	}
+
+	return 0
+}
+
+panelFlowFlexChildSize :: proc(panel: ^Panel) -> f32 {
+	if panel.childrenLayout == .None {
+		return 0
+	}
+
+	if len(panel.children) == 0 {
+		return 0
+	}
+
+	flexChildrenCount := 0
+	fixedAxisTotal := f32(0)
+	for child in panel.children {
+		if panelChildIsFlexSpacer(child) {
+			flexChildrenCount += 1
+			continue
+		}
+		fixedAxisTotal += panelChildBaseFlowAxisSize(panel, child)
+	}
+
+	if flexChildrenCount == 0 {
+		return 0
+	}
+
+	childSpacingCount := len(panel.children) - 1
+	totalSpacing := f32(0)
+	if childSpacingCount > 0 {
+		totalSpacing = panel.childSpacing * f32(childSpacingCount)
+	}
+
+	availableFlowAxis := f32(0)
+	switch panel.childrenLayout {
+	case .Vertical:
+		availableFlowAxis = panel.resolvedSize.y
+	case .Horizontal:
+		availableFlowAxis = panel.resolvedSize.x
+	case .None:
+	}
+
+	remaining := availableFlowAxis - fixedAxisTotal - totalSpacing
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	return remaining / f32(flexChildrenCount)
+}
+
+panelChildFlowAxisSize :: proc(panel: ^Panel, child: Widget) -> f32 {
+	if panelChildIsFlexSpacer(child) {
+		return panelFlowFlexChildSize(panel)
+	}
+
+	return panelChildBaseFlowAxisSize(panel, child)
+}
+
 panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vector2) {
 	switch c in child {
 	case Button:
@@ -97,6 +174,10 @@ panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vect
 	case Image:
 		return c.position, c.size
 	case Label:
+		return c.position, c.size
+	case Spacer:
+		return c.position, c.size
+	case FlexSpacer:
 		return c.position, c.size
 	case Panel:
 		return c.position, c.size
@@ -114,6 +195,7 @@ resolvePanelChildLayout :: proc(
 	panel: ^Panel,
 	child: Widget,
 	flowOffset: ^f32,
+	flexChildSize: f32,
 ) -> PanelChildLayoutMetrics {
 	position, size := panelChildPositionAndSize(child)
 
@@ -122,10 +204,16 @@ resolvePanelChildLayout :: proc(
 	case .Vertical:
 		position = {0, flowOffset^}
 		size.x = panel.resolvedSize.x
+		if panelChildIsFlexSpacer(child) {
+			size.y = flexChildSize
+		}
 		flowOffset^ += size.y + panel.childSpacing
 	case .Horizontal:
 		position = {flowOffset^, 0}
 		size.y = panel.resolvedSize.y
+		if panelChildIsFlexSpacer(child) {
+			size.x = flexChildSize
+		}
 		flowOffset^ += size.x + panel.childSpacing
 	}
 
@@ -136,9 +224,10 @@ panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
 	minContentY := f32(0)
 	maxContentY := f32(0)
 	flowOffset := f32(0)
+	flexChildSize := panelFlowFlexChildSize(panel)
 
 	for &child in panel.children {
-		layoutMetrics := resolvePanelChildLayout(panel, child, &flowOffset)
+		layoutMetrics := resolvePanelChildLayout(panel, child, &flowOffset, flexChildSize)
 		if layoutMetrics.position.y < minContentY {
 			minContentY = layoutMetrics.position.y
 		}
@@ -427,8 +516,9 @@ drawPanel :: proc(panel: ^Panel) {
 	defer raylib.EndScissorMode()
 	applyScroll := panel.scrollOffset != 0
 	layoutFlowOffset := f32(0)
+	flexChildSize := panelFlowFlexChildSize(panel)
 	for &child in panel.children {
-		layoutMetrics := resolvePanelChildLayout(panel, child, &layoutFlowOffset)
+		layoutMetrics := resolvePanelChildLayout(panel, child, &layoutFlowOffset, flexChildSize)
 		switch c in child {
 		case Button:
 			button := &child.(Button)
@@ -460,6 +550,24 @@ drawPanel :: proc(panel: ^Panel) {
 				label.position.y -= panel.scrollOffset
 			}
 			drawLabel(label)
+		case Spacer:
+			spacer := &child.(Spacer)
+			if panel.childrenLayout != .None {
+				spacer.position = layoutMetrics.position
+				spacer.size = layoutMetrics.size
+			}
+			if applyScroll {
+				spacer.position.y -= panel.scrollOffset
+			}
+		case FlexSpacer:
+			flexSpacer := &child.(FlexSpacer)
+			if panel.childrenLayout != .None {
+				flexSpacer.position = layoutMetrics.position
+				flexSpacer.size = layoutMetrics.size
+			}
+			if applyScroll {
+				flexSpacer.position.y -= panel.scrollOffset
+			}
 		case Panel:
 			childPanel := &child.(Panel)
 			if panel.childrenLayout != .None {

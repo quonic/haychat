@@ -14,6 +14,8 @@ Widget :: union {
 	Button,
 	Image,
 	Label,
+	Spacer,
+	FlexSpacer,
 	Panel,
 	TextEntryField,
 	TextArea,
@@ -112,6 +114,20 @@ Label :: struct {
 	onHover:      proc(),
 	onLeave:      proc(),
 	draw:         proc(), // Custom draw function for the label
+}
+
+Spacer :: struct {
+	id:       u32,
+	parent:   u32,
+	position: raylib.Vector2,
+	size:     raylib.Vector2,
+}
+
+FlexSpacer :: struct {
+	id:       u32,
+	parent:   u32,
+	position: raylib.Vector2,
+	size:     raylib.Vector2,
 }
 
 // TextEntryField is used for text input
@@ -304,6 +320,8 @@ add :: proc {
 	addButton,
 	addImage,
 	addLabel,
+	addSpacer,
+	addFlexSpacer,
 	addPanel,
 	addTextEntryField,
 	addTextArea,
@@ -319,6 +337,14 @@ addImage :: proc(image: Image) {
 
 addLabel :: proc(label: Label) {
 	append(&widgets, Widget(label))
+}
+
+addSpacer :: proc(spacer: Spacer) {
+	append(&widgets, Widget(spacer))
+}
+
+addFlexSpacer :: proc(flexSpacer: FlexSpacer) {
+	append(&widgets, Widget(flexSpacer))
 }
 
 addPanel :: proc(panel: Panel) {
@@ -357,6 +383,8 @@ draw :: proc() {
 			if w.parent == 0 {
 				drawLabel(&widget.(Label))
 			}
+		case Spacer:
+		case FlexSpacer:
 		case Panel:
 			if w.parent == 0 {
 				drawPanel(&widget.(Panel))
@@ -391,6 +419,10 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 				totalHeight += child.(Image).size.y
 			case Label:
 				totalHeight += child.(Label).size.y
+			case Spacer:
+				totalHeight += child.(Spacer).size.y
+			case FlexSpacer:
+				totalHeight += panelChildFlowAxisSize(panel, child)
 			case Panel:
 				totalHeight += child.(Panel).size.y
 			case TextEntryField:
@@ -431,6 +463,22 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 					minContentY = child.(Label).position.y
 				}
 				bottom := child.(Label).position.y + child.(Label).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case Spacer:
+				if child.(Spacer).position.y < minContentY {
+					minContentY = child.(Spacer).position.y
+				}
+				bottom := child.(Spacer).position.y + child.(Spacer).size.y
+				if bottom > maxContentY {
+					maxContentY = bottom
+				}
+			case FlexSpacer:
+				if child.(FlexSpacer).position.y < minContentY {
+					minContentY = child.(FlexSpacer).position.y
+				}
+				bottom := child.(FlexSpacer).position.y + child.(FlexSpacer).size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}

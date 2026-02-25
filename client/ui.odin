@@ -123,9 +123,9 @@ initUI :: proc() {
 		id          = 20,
 		parent      = STATUS_PANEL_ID,
 		text        = config.display_name,
-		size        = {100, 0},
+		size        = {120, 0},
 		shape       = .Rectangle,
-		color       = raylib.DARKGRAY,
+		color       = raylib.GRAY,
 		textColor   = raylib.WHITE,
 		font        = widgets.WidgetDefaultFont,
 		fontSize    = fontSize,
@@ -157,6 +157,12 @@ initUI :: proc() {
 		},
 	}
 
+	statusSpacer := widgets.FlexSpacer {
+		id     = 22,
+		parent = STATUS_PANEL_ID,
+		size   = {0, 0},
+	}
+
 	// Add panels to widget system
 	widgets.add(serverPanel)
 
@@ -186,7 +192,9 @@ initUI :: proc() {
 	}
 
 	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(addServerButton))
+
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(userLabel))
+	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(statusSpacer))
 	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(settingsButton))
 
 }

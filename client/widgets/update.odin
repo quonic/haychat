@@ -14,6 +14,10 @@ update :: proc() {
 			updateWidget(&widget.(Image))
 		case Label:
 			updateWidget(&widget.(Label))
+		case Spacer:
+			updateWidget(&widget.(Spacer))
+		case FlexSpacer:
+			updateWidget(&widget.(FlexSpacer))
 		case Panel:
 			updateWidget(&widget.(Panel))
 		case TextEntryField:
@@ -29,8 +33,18 @@ updateWidget :: proc {
 	updateButton,
 	updateImage,
 	updateLabel,
+	updateSpacer,
+	updateFlexSpacer,
 	updateTextEntryField,
 	updateTextArea,
+}
+
+updateSpacer :: proc(spacer: ^Spacer) {
+	_ = spacer
+}
+
+updateFlexSpacer :: proc(flexSpacer: ^FlexSpacer) {
+	_ = flexSpacer
 }
 
 // Update panel state, such as handling scrolling based on mouse wheel input when the mouse is over the panel, and updating the scroll offset accordingly. This function also ensures that the scroll offset does not exceed the bounds of the content.
