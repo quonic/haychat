@@ -5,6 +5,8 @@ import "vendor:raylib"
 
 WidgetDefaultFont: raylib.Font
 
+// Initialize the widgets system, setting up any necessary resources or state.
+// At the moment only initializes the default font.
 init :: proc() {
 	WidgetDefaultFont = raylib.GetFontDefault()
 }
@@ -22,8 +24,12 @@ Widget :: union {
 	// Add more widget types as needed
 }
 
+// Global array to hold all widgets in the application.
 widgets: [dynamic]Widget
 
+// Enums and structs for widget properties and types
+
+// Shape types for widgets
 Shape :: enum {
 	Rectangle,
 	RoundedRectangle,
@@ -31,6 +37,7 @@ Shape :: enum {
 	// Add more shapes as needed
 }
 
+// Anchor points for panels to determine how they should be positioned relative to the window or parent panel when resizing occurs.
 PanelAnchor :: enum {
 	TopLeft,
 	Top,
@@ -42,11 +49,15 @@ PanelAnchor :: enum {
 	Left,
 }
 
+// Side mode for panels to determine how they should stretch or maintain fixed size along the sides of the window or parent panel.
+// - Fixed: The panel maintains its size and position relative to the anchor point, regardless of window resizing.
+// - Stretch: The panel stretches along the sides of the window or parent panel, maintaining its position relative to the anchor point but adjusting its size to fill the available space.
 PanelSideMode :: enum {
 	Fixed,
 	Stretch,
 }
 
+// Layout mode for how child widgets are arranged within a panel.
 PanelChildrenLayout :: enum {
 	None,
 	Vertical,
@@ -116,6 +127,8 @@ Label :: struct {
 	draw:         proc(), // Custom draw function for the label
 }
 
+// Spacer is an invisible widget used to create space between other widgets in a panel layout.
+// You define its size to control how much space it takes up.
 Spacer :: struct {
 	id:       u32,
 	parent:   u32,
@@ -123,6 +136,7 @@ Spacer :: struct {
 	size:     raylib.Vector2,
 }
 
+// FlexSpacer is a special type of spacer that expands to fill available space in a panel layout, allowing for flexible spacing between widgets.
 FlexSpacer :: struct {
 	id:       u32,
 	parent:   u32,
@@ -186,6 +200,7 @@ TextArea :: struct {
 	draw:         proc(), // Custom draw function for the text area
 }
 
+// Panel is a container widget that can hold other widgets, allowing for grouping and layout management.
 Panel :: struct {
 	id:               u32,
 	parent:           u32, // ID of the parent panel (if any) to which this label belongs
@@ -236,7 +251,50 @@ panelTitleScrollTopPadding :: proc(panel: ^Panel) -> f32 {
 	return textSize.y + panel.fontSize / 2
 }
 
-// Functions to find widgets by their unique ID. These functions return a pointer to the widget if found, or nil if not found.
+// Find a widget by its unique ID.
+// This function iterates through the global widgets array and returns a pointer to the widget if found, or nil if not found.
+findWidgetByID :: proc(id: u32) -> ^Widget {
+	for &widget in widgets {
+		switch w in widget {
+		case Button:
+			if w.id == id {
+				return &widget
+			}
+		case Image:
+			if w.id == id {
+				return &widget
+			}
+		case Label:
+			if w.id == id {
+				return &widget
+			}
+		case Spacer:
+			if w.id == id {
+				return &widget
+			}
+		case FlexSpacer:
+			if w.id == id {
+				return &widget
+			}
+		case Panel:
+			if w.id == id {
+				return &widget
+			}
+		case TextEntryField:
+			if w.id == id {
+				return &widget
+			}
+		case TextArea:
+			if w.id == id {
+				return &widget
+			}
+		case:
+		}
+	}
+	return nil
+}
+
+// Find a panel by its unique ID.
 findPanelByID :: proc(id: u32) -> ^Panel {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -250,6 +308,7 @@ findPanelByID :: proc(id: u32) -> ^Panel {
 	return nil
 }
 
+// Find a button by its unique ID.
 findButtonByID :: proc(id: u32) -> ^Button {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -263,6 +322,7 @@ findButtonByID :: proc(id: u32) -> ^Button {
 	return nil
 }
 
+// Find an image by its unique ID.
 findImageByID :: proc(id: u32) -> ^Image {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -276,6 +336,7 @@ findImageByID :: proc(id: u32) -> ^Image {
 	return nil
 }
 
+// Find a label by its unique ID.
 findLabelByID :: proc(id: u32) -> ^Label {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -289,6 +350,7 @@ findLabelByID :: proc(id: u32) -> ^Label {
 	return nil
 }
 
+// Find a text entry field by its unique ID.
 findTextEntryFieldByID :: proc(id: u32) -> ^TextEntryField {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -302,6 +364,7 @@ findTextEntryFieldByID :: proc(id: u32) -> ^TextEntryField {
 	return nil
 }
 
+// Find a text area by its unique ID.
 findTextAreaByID :: proc(id: u32) -> ^TextArea {
 	for &widget in widgets {
 		#partial switch w in widget {
@@ -359,6 +422,7 @@ addTextArea :: proc(textArea: TextArea) {
 	append(&widgets, Widget(textArea))
 }
 
+// Adds a child widget to a parent panel by finding the panel by its ID and appending the child widget to the panel's children array.
 addChild :: proc(parentPanelID: u32, childWidget: Widget) {
 	parentPanel := findPanelByID(parentPanelID)
 	if parentPanel != nil {
@@ -403,6 +467,8 @@ draw :: proc() {
 	raylib.EndScissorMode()
 }
 
+// Gets the total height of all child widgets within a panel, including spacing between them, based on the panel's children layout mode.
+// This is used for calculating scrollable content height and determining when to show scrollbars.
 getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 	if len(panel.children) == 0 {
 		return 0
@@ -514,6 +580,9 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 	return 0
 }
 
+// Example main function demonstrating the use of the widgets system and panel anchoring.
+// This creates a demo panel that changes its anchor point and layout based on window resizing,
+// allowing you to verify that the anchoring works correctly.
 main :: proc() {
 	raylib.SetConfigFlags({.WINDOW_RESIZABLE})
 	raylib.InitWindow(960, 640, "HayChat Widgets Panel Anchor Demo")
@@ -535,6 +604,13 @@ main :: proc() {
 		fontSize     = 18,
 		fontSpacing  = 0,
 		childSpacing = 8,
+	}
+
+	demoSpacer := FlexSpacer {
+		id       = 2,
+		parent   = 1,
+		position = {0, 0},
+		size     = {0, 0},
 	}
 
 	demoLabel := Label {
@@ -579,6 +655,8 @@ main :: proc() {
 	demoPanel.anchor = .Left
 	demoLabel.text = "Left Anchor"
 	add(demoPanel)
+	addChild(1, Widget(demoLabel))
+	addChild(1, Widget(demoSpacer))
 	addChild(1, Widget(demoLabel))
 
 	for !raylib.WindowShouldClose() {
