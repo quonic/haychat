@@ -1,5 +1,7 @@
 # HayChat
 
+![HayChat Logo](assets/icon.png)
+
 HayChat is a secure, real-time chat application built with the Odin programming language. It features end-to-end encryption, a responsive user interface, and a modular architecture for easy extensibility.
 
 > [!IMPORTANT]
