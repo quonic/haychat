@@ -138,7 +138,6 @@ initUI :: proc() {
 		id = 21,
 		parent = STATUS_PANEL_ID,
 		text = "...",
-		position = {0, 0},
 		size = {30, 30},
 		shape = .Circle,
 		color = raylib.GREEN,

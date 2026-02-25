@@ -151,6 +151,14 @@ panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
 	return minContentY, maxContentY
 }
 
+circleCenterAndRadius :: proc(position, size: raylib.Vector2) -> (raylib.Vector2, f32) {
+	diameter := min(size.x, size.y)
+	radius := diameter / 2
+	center := raylib.Vector2{position.x + size.x / 2, position.y + size.y / 2}
+
+	return center, radius
+}
+
 drawImage :: proc(image: ^Image) {
 	if image.draw != nil {
 		image.draw()
@@ -232,8 +240,8 @@ drawButton :: proc(button: ^Button) {
 			button.color,
 		)
 	case .Circle:
-		radius := f32(button.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(buttonPosition, radius, button.color)
+		center, radius := circleCenterAndRadius(buttonPosition, button.size)
+		raylib.DrawCircleV(center, radius, button.color)
 	}
 
 	// Draw the button text centered within the button
@@ -296,8 +304,8 @@ drawLabel :: proc(label: ^Label) {
 			label.color,
 		)
 	case .Circle:
-		radius := f32(label.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(labelPosition, radius, label.color)
+		center, radius := circleCenterAndRadius(labelPosition, label.size)
+		raylib.DrawCircleV(center, radius, label.color)
 	}
 
 	// Draw the label text centered within the label
@@ -358,8 +366,8 @@ drawPanel :: proc(panel: ^Panel) {
 			panel.color,
 		)
 	case .Circle:
-		radius := f32(panelSize.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(panelPosition, radius, panel.color)
+		center, radius := circleCenterAndRadius(panelPosition, panelSize)
+		raylib.DrawCircleV(center, radius, panel.color)
 	}
 
 	minContentY, maxContentY := panelChildrenContentBoundsY(panel)
@@ -532,8 +540,8 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 			textEntryField.color,
 		)
 	case .Circle:
-		radius := f32(textEntryField.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textEntryFieldPosition, radius, textEntryField.color)
+		center, radius := circleCenterAndRadius(textEntryFieldPosition, textEntryField.size)
+		raylib.DrawCircleV(center, radius, textEntryField.color)
 	}
 
 	// Draw the current text in the entry field with padding
@@ -590,8 +598,8 @@ drawTextArea :: proc(textArea: ^TextArea) {
 			textArea.color,
 		)
 	case .Circle:
-		radius := f32(textArea.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textAreaPosition, radius, textArea.color)
+		center, radius := circleCenterAndRadius(textAreaPosition, textArea.size)
+		raylib.DrawCircleV(center, radius, textArea.color)
 	}
 
 	// Draw each line of text within the text area with proper spacing
@@ -651,8 +659,8 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 			textArea.color,
 		)
 	case .Circle:
-		radius := f32(textArea.size.x) / 2 // Assuming size.x is diameter
-		raylib.DrawCircleV(textAreaPosition, radius, textArea.color)
+		center, radius := circleCenterAndRadius(textAreaPosition, textArea.size)
+		raylib.DrawCircleV(center, radius, textArea.color)
 	}
 
 	// Draw each line of text within the text area with proper spacing and scrolling offset
