@@ -6,9 +6,12 @@ import "widgets"
 
 // Layout constants
 panelSpacing: f32 = 5
-serverPanelWidth: f32 = 75
+serverPanelWidth: f32 = 75 - panelSpacing * 2
 statusPanelHeight: f32 = 40
 panelRoundness: f32 = 0.3
+fontSize: f32 = 20
+fontSpacing: f32 = 2
+
 
 // Widget IDs for easy reference
 SERVER_PANEL_ID: u32 = 1
@@ -36,7 +39,7 @@ initUI :: proc() {
 		id             = SERVER_PANEL_ID,
 		title          = "",
 		position       = {panelSpacing, panelSpacing},
-		size           = {serverPanelWidth - panelSpacing * 2, serverPanelHeight},
+		size           = {serverPanelWidth, serverPanelHeight},
 		anchor         = .Left,
 		sideMode       = .Stretch,
 		childrenLayout = .Vertical,
@@ -45,25 +48,18 @@ initUI :: proc() {
 		color          = raylib.DARKGRAY,
 		textColor      = raylib.WHITE,
 		font           = widgets.WidgetDefaultFont,
-		fontSize       = 20,
-		fontSpacing    = 0,
-		childSpacing   = panelSpacing,
+		fontSize       = fontSize,
+		fontSpacing    = fontSpacing,
+		childSpacing   = 2,
 	}
 
 	// Create Friends button for server panel
-	friendsButton := widgets.Button {
+	friendsButton := widgets.Image {
 		id = FRIENDS_BUTTON_ID,
 		parent = SERVER_PANEL_ID,
-		text = "Friends",
+		texture = raylib.LoadTexture("../assets/icon.png"),
 		position = {panelSpacing, panelSpacing},
-		size = {serverPanel.size.x - panelSpacing * 2, 30},
-		shape = .RoundedRectangle,
-		roundness = panelRoundness,
-		color = raylib.BLUE,
-		textColor = raylib.WHITE,
-		font = widgets.WidgetDefaultFont,
-		fontSize = 16,
-		fontSpacing = 0,
+		size = {0, 60},
 		enabled = true,
 		onClick = proc() {
 			showFriendsList = !showFriendsList
@@ -87,8 +83,8 @@ initUI :: proc() {
 		color = raylib.GREEN,
 		textColor = raylib.WHITE,
 		font = widgets.WidgetDefaultFont,
-		fontSize = 16,
-		fontSpacing = 0,
+		fontSize = fontSize,
+		fontSpacing = fontSpacing,
 		enabled = true,
 		onClick = proc() {
 			showAddServer = !showAddServer
@@ -117,9 +113,9 @@ initUI :: proc() {
 		color          = raylib.DARKGRAY,
 		textColor      = raylib.WHITE,
 		font           = widgets.WidgetDefaultFont,
-		fontSize       = 14,
-		fontSpacing    = 0,
-		childSpacing   = panelSpacing,
+		fontSize       = fontSize,
+		fontSpacing    = fontSpacing,
+		childSpacing   = 5,
 	}
 
 	// Create user display label for status panel
@@ -132,8 +128,8 @@ initUI :: proc() {
 		color       = raylib.DARKGRAY,
 		textColor   = raylib.WHITE,
 		font        = widgets.WidgetDefaultFont,
-		fontSize    = 14,
-		fontSpacing = 0,
+		fontSize    = fontSize,
+		fontSpacing = fontSpacing,
 		enabled     = true,
 	}
 
@@ -148,8 +144,8 @@ initUI :: proc() {
 		color = raylib.GREEN,
 		textColor = raylib.WHITE,
 		font = widgets.WidgetDefaultFont,
-		fontSize = 12,
-		fontSpacing = 0,
+		fontSize = fontSize,
+		fontSpacing = fontSpacing,
 		enabled = true,
 		onClick = proc() {
 			showSettings = !showSettings
@@ -182,8 +178,8 @@ initUI :: proc() {
 			color       = raylib.GRAY,
 			textColor   = raylib.WHITE,
 			font        = widgets.WidgetDefaultFont,
-			fontSize    = 14,
-			fontSpacing = 0,
+			fontSize    = fontSize,
+			fontSpacing = fontSpacing,
 			enabled     = true,
 			// TODO: Add onClick callback for server buttons
 		}
