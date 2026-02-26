@@ -64,6 +64,7 @@ PanelChildrenLayout :: enum {
 	Horizontal,
 }
 
+// Button
 Button :: struct {
 	id:           u32,
 	parent:       u32, // ID of the parent panel (if any) to which this label belongs
@@ -87,6 +88,7 @@ Button :: struct {
 	draw:         proc(), // Custom draw function for the button
 }
 
+// Image is used for displaying images and has the same functionality as a button.
 Image :: struct {
 	id:           u32,
 	parent:       u32, // ID of the parent panel (if any) to which this image belongs
@@ -104,6 +106,7 @@ Image :: struct {
 	draw:         proc(), // Custom draw function for the image
 }
 
+// Label is used for displaying text
 Label :: struct {
 	id:           u32,
 	parent:       u32, // ID of the parent panel (if any) to which this label belongs
