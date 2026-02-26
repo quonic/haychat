@@ -7,7 +7,7 @@ import "vendor:raylib"
 
 panelContainerRect :: proc(panel: ^Panel) -> raylib.Rectangle {
 	if panel.parent != 0 {
-		parentPanel := findPanelByID(panel.parent)
+		parentPanel := findWidgetByID(panel.parent, Panel)
 		if parentPanel != nil {
 			return raylib.Rectangle {
 				x = parentPanel.resolvedPosition.x,
@@ -256,7 +256,7 @@ drawImage :: proc(image: ^Image) {
 
 	imagePosition := image.position
 	if image.parent != 0 {
-		parentPanel := findPanelByID(image.parent)
+		parentPanel := findWidgetByID(image.parent, Panel)
 		if parentPanel != nil {
 			imagePosition.x += parentPanel.resolvedPosition.x
 			imagePosition.y += parentPanel.resolvedPosition.y
@@ -304,7 +304,7 @@ drawButton :: proc(button: ^Button) {
 
 	buttonPosition := button.position
 	if button.parent != 0 {
-		parentPanel := findPanelByID(button.parent)
+		parentPanel := findWidgetByID(button.parent, Panel)
 		if parentPanel != nil {
 			// Adjust button position based on the parent panel's position
 			buttonPosition.x += parentPanel.resolvedPosition.x
@@ -368,7 +368,7 @@ drawLabel :: proc(label: ^Label) {
 
 	labelPosition := label.position
 	if label.parent != 0 {
-		parentPanel := findPanelByID(label.parent)
+		parentPanel := findWidgetByID(label.parent, Panel)
 		if parentPanel != nil {
 			// Adjust label position based on the parent panel's position
 			labelPosition.x += parentPanel.resolvedPosition.x
@@ -623,7 +623,7 @@ drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
 
 	textEntryFieldPosition := textEntryField.position
 	if textEntryField.parent != 0 {
-		parentPanel := findPanelByID(textEntryField.parent)
+		parentPanel := findWidgetByID(textEntryField.parent, Panel)
 		if parentPanel != nil {
 			// Adjust text entry field position based on the parent panel's position
 			textEntryFieldPosition.x += parentPanel.resolvedPosition.x
@@ -681,7 +681,7 @@ drawTextArea :: proc(textArea: ^TextArea) {
 
 	textAreaPosition := textArea.position
 	if textArea.parent != 0 {
-		parentPanel := findPanelByID(textArea.parent)
+		parentPanel := findWidgetByID(textArea.parent, Panel)
 		if parentPanel != nil {
 			// Adjust text area position based on the parent panel's position
 			textAreaPosition.x += parentPanel.resolvedPosition.x
@@ -742,7 +742,7 @@ drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
 
 	textAreaPosition := textArea.position
 	if textArea.parent != 0 {
-		parentPanel := findPanelByID(textArea.parent)
+		parentPanel := findWidgetByID(textArea.parent, Panel)
 		if parentPanel != nil {
 			// Adjust text area position based on the parent panel's position
 			textAreaPosition.x += parentPanel.resolvedPosition.x

@@ -256,126 +256,10 @@ panelTitleScrollTopPadding :: proc(panel: ^Panel) -> f32 {
 
 // Find a widget by its unique ID.
 // This function iterates through the global widgets array and returns a pointer to the widget if found, or nil if not found.
-findWidgetByID :: proc(id: u32) -> ^Widget {
+findWidgetByID :: proc(id: u32, $T: typeid) -> ^T {
 	for &widget in widgets {
-		switch w in widget {
-		case Button:
-			if w.id == id {
-				return &widget
-			}
-		case Image:
-			if w.id == id {
-				return &widget
-			}
-		case Label:
-			if w.id == id {
-				return &widget
-			}
-		case Spacer:
-			if w.id == id {
-				return &widget
-			}
-		case FlexSpacer:
-			if w.id == id {
-				return &widget
-			}
-		case Panel:
-			if w.id == id {
-				return &widget
-			}
-		case TextEntryField:
-			if w.id == id {
-				return &widget
-			}
-		case TextArea:
-			if w.id == id {
-				return &widget
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find a panel by its unique ID.
-findPanelByID :: proc(id: u32) -> ^Panel {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case Panel:
-			if w.id == id {
-				return &widget.(Panel)
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find a button by its unique ID.
-findButtonByID :: proc(id: u32) -> ^Button {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case Button:
-			if w.id == id {
-				return &widget.(Button)
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find an image by its unique ID.
-findImageByID :: proc(id: u32) -> ^Image {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case Image:
-			if w.id == id {
-				return &widget.(Image)
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find a label by its unique ID.
-findLabelByID :: proc(id: u32) -> ^Label {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case Label:
-			if w.id == id {
-				return &widget.(Label)
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find a text entry field by its unique ID.
-findTextEntryFieldByID :: proc(id: u32) -> ^TextEntryField {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case TextEntryField:
-			if w.id == id {
-				return &widget.(TextEntryField)
-			}
-		case:
-		}
-	}
-	return nil
-}
-
-// Find a text area by its unique ID.
-findTextAreaByID :: proc(id: u32) -> ^TextArea {
-	for &widget in widgets {
-		#partial switch w in widget {
-		case TextArea:
-			if w.id == id {
-				return &widget.(TextArea)
-			}
-		case:
+		if widget.(T).id == id {
+			return &widget.(T)
 		}
 	}
 	return nil
@@ -427,7 +311,7 @@ addTextArea :: proc(textArea: TextArea) {
 
 // Adds a child widget to a parent panel by finding the panel by its ID and appending the child widget to the panel's children array.
 addChild :: proc(parentPanelID: u32, childWidget: Widget) {
-	parentPanel := findPanelByID(parentPanelID)
+	parentPanel := findWidgetByID(parentPanelID, Panel)
 	if parentPanel != nil {
 		append(&parentPanel.children, childWidget)
 	}
