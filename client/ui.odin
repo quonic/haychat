@@ -1,5 +1,6 @@
 package client
 
+import "core:fmt"
 import "core:strings"
 import "vendor:raylib"
 import "widgets"
@@ -168,7 +169,7 @@ initUI :: proc() {
 
 	widgets.add(statusPanel)
 
-	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(friendsButton))
+	widgets.addChild(SERVER_PANEL_ID, &friendsButton)
 
 	// Add server buttons to server panel
 	for server, i in config.servers {
@@ -188,14 +189,14 @@ initUI :: proc() {
 			enabled     = true,
 			// TODO: Add onClick callback for server buttons
 		}
-		widgets.addChild(SERVER_PANEL_ID, widgets.Widget(serverButton))
+		widgets.addChild(SERVER_PANEL_ID, &serverButton)
 	}
 
-	widgets.addChild(SERVER_PANEL_ID, widgets.Widget(addServerButton))
+	widgets.addChild(SERVER_PANEL_ID, &addServerButton)
 
-	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(userLabel))
-	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(statusSpacer))
-	widgets.addChild(STATUS_PANEL_ID, widgets.Widget(settingsButton))
+	widgets.addChild(STATUS_PANEL_ID, &userLabel)
+	widgets.addChild(STATUS_PANEL_ID, &statusSpacer)
+	widgets.addChild(STATUS_PANEL_ID, &settingsButton)
 
 }
 

@@ -90,8 +90,8 @@ PanelChildLayoutMetrics :: struct {
 	size:     raylib.Vector2,
 }
 
-panelChildIsFlexSpacer :: proc(child: Widget) -> bool {
-	#partial switch c in child {
+panelChildIsFlexSpacer :: proc(child: ^Widget) -> bool {
+	#partial switch c in child^ {
 	case FlexSpacer:
 		return true
 	}
@@ -99,7 +99,7 @@ panelChildIsFlexSpacer :: proc(child: Widget) -> bool {
 	return false
 }
 
-panelChildBaseFlowAxisSize :: proc(panel: ^Panel, child: Widget) -> f32 {
+panelChildBaseFlowAxisSize :: proc(panel: ^Panel, child: ^Widget) -> f32 {
 	_, size := panelChildPositionAndSize(child)
 
 	switch panel.childrenLayout {
@@ -159,7 +159,7 @@ panelFlowFlexChildSize :: proc(panel: ^Panel) -> f32 {
 	return remaining / f32(flexChildrenCount)
 }
 
-panelChildFlowAxisSize :: proc(panel: ^Panel, child: Widget) -> f32 {
+panelChildFlowAxisSize :: proc(panel: ^Panel, child: ^Widget) -> f32 {
 	if panelChildIsFlexSpacer(child) {
 		return panelFlowFlexChildSize(panel)
 	}
@@ -167,8 +167,8 @@ panelChildFlowAxisSize :: proc(panel: ^Panel, child: Widget) -> f32 {
 	return panelChildBaseFlowAxisSize(panel, child)
 }
 
-panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vector2) {
-	switch c in child {
+panelChildPositionAndSize :: proc(child: ^Widget) -> (raylib.Vector2, raylib.Vector2) {
+	switch c in child^ {
 	case Button:
 		return c.position, c.size
 	case Image:
@@ -193,7 +193,7 @@ panelChildPositionAndSize :: proc(child: Widget) -> (raylib.Vector2, raylib.Vect
 
 resolvePanelChildLayout :: proc(
 	panel: ^Panel,
-	child: Widget,
+	child: ^Widget,
 	flowOffset: ^f32,
 	flexChildSize: f32,
 ) -> PanelChildLayoutMetrics {
@@ -226,7 +226,7 @@ panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
 	flowOffset := f32(0)
 	flexChildSize := panelFlowFlexChildSize(panel)
 
-	for &child in panel.children {
+	for child in panel.children {
 		layoutMetrics := resolvePanelChildLayout(panel, child, &flowOffset, flexChildSize)
 		if layoutMetrics.position.y < minContentY {
 			minContentY = layoutMetrics.position.y
@@ -517,11 +517,11 @@ drawPanel :: proc(panel: ^Panel) {
 	applyScroll := panel.scrollOffset != 0
 	layoutFlowOffset := f32(0)
 	flexChildSize := panelFlowFlexChildSize(panel)
-	for &child in panel.children {
+	for child in panel.children {
 		layoutMetrics := resolvePanelChildLayout(panel, child, &layoutFlowOffset, flexChildSize)
-		switch c in child {
+		switch c in child^ {
 		case Button:
-			button := &child.(Button)
+			button := &child^.(Button)
 			if panel.childrenLayout != .None {
 				button.position = layoutMetrics.position
 				button.size = layoutMetrics.size
@@ -531,7 +531,7 @@ drawPanel :: proc(panel: ^Panel) {
 			}
 			drawButton(button)
 		case Image:
-			image := &child.(Image)
+			image := &child^.(Image)
 			if panel.childrenLayout != .None {
 				image.position = layoutMetrics.position
 				image.size = layoutMetrics.size
@@ -541,7 +541,7 @@ drawPanel :: proc(panel: ^Panel) {
 			}
 			drawImage(image)
 		case Label:
-			label := &child.(Label)
+			label := &child^.(Label)
 			if panel.childrenLayout != .None {
 				label.position = layoutMetrics.position
 				label.size = layoutMetrics.size
@@ -551,7 +551,7 @@ drawPanel :: proc(panel: ^Panel) {
 			}
 			drawLabel(label)
 		case Spacer:
-			spacer := &child.(Spacer)
+			spacer := &child^.(Spacer)
 			if panel.childrenLayout != .None {
 				spacer.position = layoutMetrics.position
 				spacer.size = layoutMetrics.size
@@ -560,7 +560,7 @@ drawPanel :: proc(panel: ^Panel) {
 				spacer.position.y -= panel.scrollOffset
 			}
 		case FlexSpacer:
-			flexSpacer := &child.(FlexSpacer)
+			flexSpacer := &child^.(FlexSpacer)
 			if panel.childrenLayout != .None {
 				flexSpacer.position = layoutMetrics.position
 				flexSpacer.size = layoutMetrics.size
@@ -569,7 +569,7 @@ drawPanel :: proc(panel: ^Panel) {
 				flexSpacer.position.y -= panel.scrollOffset
 			}
 		case Panel:
-			childPanel := &child.(Panel)
+			childPanel := &child^.(Panel)
 			if panel.childrenLayout != .None {
 				childPanel.position = layoutMetrics.position
 				childPanel.size = layoutMetrics.size
@@ -579,7 +579,7 @@ drawPanel :: proc(panel: ^Panel) {
 			}
 			drawPanel(childPanel)
 		case TextEntryField:
-			entryField := &child.(TextEntryField)
+			entryField := &child^.(TextEntryField)
 			if panel.childrenLayout != .None {
 				entryField.position = layoutMetrics.position
 				entryField.size = layoutMetrics.size
@@ -589,7 +589,7 @@ drawPanel :: proc(panel: ^Panel) {
 			}
 			drawTextEntryField(entryField)
 		case TextArea:
-			textArea := &child.(TextArea)
+			textArea := &child^.(TextArea)
 			if panel.childrenLayout != .None {
 				textArea.position = layoutMetrics.position
 				textArea.size = layoutMetrics.size

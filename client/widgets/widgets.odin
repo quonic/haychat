@@ -26,6 +26,7 @@ Widget :: union {
 
 // Global array to hold all widgets in the application.
 widgets: [dynamic]Widget
+childWidgets: [dynamic]Widget
 
 // Enums and structs for widget properties and types
 
@@ -230,7 +231,7 @@ Panel :: struct {
 	onClick:          proc(),
 	onHover:          proc(),
 	onLeave:          proc(),
-	children:         [dynamic]Widget, // Panels can contain other widgets
+	children:         [dynamic]^Widget, // Panels can contain other widgets
 	childSpacing:     f32, // Spacing between child widgets within the panel
 	draw:             proc(), // Custom draw function for the panel
 }
@@ -310,11 +311,15 @@ addTextArea :: proc(textArea: TextArea) {
 }
 
 // Adds a child widget to a parent panel by finding the panel by its ID and appending the child widget to the panel's children array.
-addChild :: proc(parentPanelID: u32, childWidget: Widget) {
+addChild :: proc(parentPanelID: u32, childWidget: ^$T) {
 	parentPanel := findWidgetByID(parentPanelID, Panel)
-	if parentPanel != nil {
-		append(&parentPanel.children, childWidget)
+	if parentPanel == nil || childWidget == nil {
+		return
 	}
+
+	childAsWidget: Widget = childWidget^
+	append(&childWidgets, childAsWidget)
+	append(&parentPanel.children, &childWidgets[len(childWidgets) - 1])
 }
 
 // Main draw function that iterates through all widgets and calls their respective draw functions
@@ -365,23 +370,24 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 	case .Vertical:
 		totalHeight := f32(0)
 		for child, index in panel.children {
-			switch typeid_of(type_of(child)) {
+			switch c in child^ {
 			case Button:
-				totalHeight += child.(Button).size.y
+				totalHeight += c.size.y
 			case Image:
-				totalHeight += child.(Image).size.y
+				totalHeight += c.size.y
 			case Label:
-				totalHeight += child.(Label).size.y
+				totalHeight += c.size.y
 			case Spacer:
-				totalHeight += child.(Spacer).size.y
+				totalHeight += c.size.y
 			case FlexSpacer:
 				totalHeight += panelChildFlowAxisSize(panel, child)
 			case Panel:
-				totalHeight += child.(Panel).size.y
+				totalHeight += c.size.y
 			case TextEntryField:
-				totalHeight += child.(TextEntryField).size.y
+				totalHeight += c.size.y
 			case TextArea:
-				totalHeight += child.(TextArea).size.y
+				totalHeight += c.size.y
+			case:
 			}
 			if index < len(panel.children) - 1 {
 				totalHeight += panel.childSpacing
@@ -393,72 +399,73 @@ getChidrenTotalHeight :: proc(panel: ^Panel) -> f32 {
 	case .None:
 		minContentY := f32(0)
 		maxContentY := f32(0)
-		for &child in panel.children {
-			switch typeid_of(type_of(child)) {
+		for child in panel.children {
+			switch c in child^ {
 			case Button:
-				if child.(Button).position.y < minContentY {
-					minContentY = child.(Button).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(Button).position.y + child.(Button).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case Image:
-				if child.(Image).position.y < minContentY {
-					minContentY = child.(Image).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(Image).position.y + child.(Image).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case Label:
-				if child.(Label).position.y < minContentY {
-					minContentY = child.(Label).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(Label).position.y + child.(Label).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case Spacer:
-				if child.(Spacer).position.y < minContentY {
-					minContentY = child.(Spacer).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(Spacer).position.y + child.(Spacer).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case FlexSpacer:
-				if child.(FlexSpacer).position.y < minContentY {
-					minContentY = child.(FlexSpacer).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(FlexSpacer).position.y + child.(FlexSpacer).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case Panel:
-				if child.(Panel).position.y < minContentY {
-					minContentY = child.(Panel).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(Panel).position.y + child.(Panel).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case TextEntryField:
-				if child.(TextEntryField).position.y < minContentY {
-					minContentY = child.(TextEntryField).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(TextEntryField).position.y + child.(TextEntryField).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
 			case TextArea:
-				if child.(TextArea).position.y < minContentY {
-					minContentY = child.(TextArea).position.y
+				if c.position.y < minContentY {
+					minContentY = c.position.y
 				}
-				bottom := child.(TextArea).position.y + child.(TextArea).size.y
+				bottom := c.position.y + c.size.y
 				if bottom > maxContentY {
 					maxContentY = bottom
 				}
+			case:
 			}
 		}
 		return maxContentY - minContentY
@@ -514,37 +521,37 @@ main :: proc() {
 	}
 
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .Top
 	demoLabel.text = "Top Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .TopRight
 	demoLabel.text = "TopRight Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .Right
 	demoLabel.text = "Right Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .BottomRight
 	demoLabel.text = "BottomRight Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .Bottom
 	demoLabel.text = "Bottom Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .BottomLeft
 	demoLabel.text = "BottomLeft Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
 	demoPanel.anchor = .Left
 	demoLabel.text = "Left Anchor"
 	add(demoPanel)
-	addChild(1, Widget(demoLabel))
-	addChild(1, Widget(demoSpacer))
-	addChild(1, Widget(demoLabel))
+	addChild(1, &demoLabel)
+	addChild(1, &demoSpacer)
+	addChild(1, &demoLabel)
 
 	for !raylib.WindowShouldClose() {
 		update()
