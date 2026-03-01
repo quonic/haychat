@@ -126,18 +126,14 @@ close :: proc() {
 }
 
 addWidget :: proc(widget: Widget) -> (handle: Handle, err: runtime.Allocator_Error) {
-	w := widget
-	if w.fontPath != "" {
-		font := raylib.LoadFont(strings.clone_to_cstring(w.fontPath))
+	if widget.fontPath != "" {
+		font := raylib.LoadFont(strings.clone_to_cstring(widget.fontPath))
 		if font.texture.id == 0 {
-			fmt.eprintfln("[WIDGETS] Failed to load font from path: %s", w.fontPath)
+			fmt.eprintfln("[WIDGETS] Failed to load font from path: %s", widget.fontPath)
 			return {}, runtime.Allocator_Error.Invalid_Argument
 		}
 	}
-	if w.fontSpacing <= 0 {
-		w.fontSpacing = 2
-	}
-	handle, err = hm.add(&WidgetMap, w)
+	handle, err = hm.add(&WidgetMap, widget)
 	if err != nil {
 		fmt.eprintfln("[WIDGETS] Failed to create widget: %v", err)
 		return
