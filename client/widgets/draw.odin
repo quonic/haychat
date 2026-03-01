@@ -1,11 +1,15 @@
 package widgets
 
 import hm "core:container/handle_map"
+import "core:fmt"
 import "vendor:raylib"
 
 draw :: proc() {
 	topLevelWidgets := getTopLevelWidgets()
 	for widget in topLevelWidgets {
+		if widget == nil {
+			continue
+		}
 		drawWidget(widget)
 		if len(widget.children) > 0 {
 			drawChildWidgets(widget.handle)
@@ -14,9 +18,10 @@ draw :: proc() {
 }
 
 drawWidget :: proc(widget: ^Widget) {
-	if !widget.visible {
+	if widget == nil || !widget.visible {
 		return
 	}
+	fmt.printfln("[DRAW] Drawing widget: %s (Handle: %d)", widget.text, widget.handle)
 	if widget.text != "" {
 		drawText(widget)
 	}

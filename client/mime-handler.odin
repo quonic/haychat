@@ -150,8 +150,8 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 			fmt.println("Failed to match regex")
 			return
 		}
-		host := capture.groups[0]
-		port := capture.groups[1]
+		host = capture.groups[0]
+		port = capture.groups[1]
 		join := capture.groups[2] == "join"
 		fmt.println("Parsed URL - Host:", host, "Port:", port, "Join:", join)
 		// Save the host and port to a temporary file
@@ -179,19 +179,21 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 			}
 			currentPid := os.get_pid()
 			for pid in pid_list {
-				process_info, err := os.process_info_by_pid(
-					pid,
-					{.Command_Line},
-					context.allocator,
-				)
-				if err != nil {
-					continue
-				}
-				if pid != currentPid && process_info.command_line == "haychat" {
-					fmt.println(
-						"Another instance of haychat is already running. Exiting to allow it to handle the URL.",
+				{
+					process_info, err := os.process_info_by_pid(
+						pid,
+						{.Command_Line},
+						context.allocator,
 					)
-					os.exit(0)
+					if err != nil {
+						continue
+					}
+					if pid != currentPid && process_info.command_line == "haychat" {
+						fmt.println(
+							"Another instance of haychat is already running. Exiting to allow it to handle the URL.",
+						)
+						os.exit(0)
+					}
 				}
 			}
 		} else {

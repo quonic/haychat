@@ -5,6 +5,8 @@ import "core:strings"
 import "core:unicode/utf8"
 import "vendor:raylib"
 
+// https://github.com/ethanavatar/post_processing_shaders_scratch/blob/30a2a1b8f65d2734341f13deeafef3892cf25c83/text_entry_widget.odin
+
 update :: proc() {
 	// Mouse Position
 	mousePosition := raylib.GetMousePosition()
@@ -150,7 +152,7 @@ cstringSplitAt :: proc(
 	if n <= 0 {return "", cstr}
 
 	len := len(cstr)
-	str := strings.string_from_ptr(transmute([^]u8)cstr, len)
+	str := strings.string_from_ptr(cast([^]u8)cstr, len)
 	return strings.clone_to_cstring(
 		str[0:n],
 		allocator,

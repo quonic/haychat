@@ -89,6 +89,7 @@ main :: proc() {
 	// saveConfig()
 
 	raylib.CloseWindow()
+	widgets.close()
 }
 
 

@@ -75,6 +75,8 @@ WidgetType :: enum {
 	Button,
 	Image,
 	Text,
+	FlexSpacer,
+	Spacer,
 }
 
 Layout :: enum {
@@ -117,13 +119,10 @@ init :: proc(fontPath: string = "") {
 		WidgetDefaultFont = raylib.GetFontDefault()
 	}
 	hm.dynamic_init(&WidgetMap, context.allocator)
-	hm.dynamic_init(&EventMap, context.allocator)
-	registerGlobalEventHandlers()
 }
 
 close :: proc() {
 	hm.dynamic_destroy(&WidgetMap)
-	hm.dynamic_destroy(&EventMap)
 }
 
 addWidget :: proc(widget: Widget) -> (handle: Handle, err: runtime.Allocator_Error) {
@@ -160,9 +159,15 @@ getTopLevelWidgets :: proc() -> (widgets: [dynamic]^Widget) {
 	widgets = make([dynamic]^Widget, hm.dynamic_len(WidgetMap))
 	it := hm.iterator_make(&WidgetMap)
 	for widget, handle in hm.iterate(&it) {
+		if widget == nil {
+			continue
+		}
 		if widget.parent == {} {
 			append(&widgets, widget)
 		}
+	}
+	if len(widgets) == 0 {
+		fmt.eprintfln("[WIDGETS] No top-level widgets found")
 	}
 	return
 }
