@@ -54,6 +54,7 @@ initUI :: proc() {
 		fontSize = fontSize,
 		fontSpacing = fontSpacing,
 		childSpacing = 2,
+		visible = true,
 	}
 	serverPanelHandle, _ := widgets.addWidget(serverPanel)
 
@@ -77,6 +78,8 @@ initUI :: proc() {
 				showSettings = false
 			}
 		},
+		parent = serverPanelHandle,
+		visible = true,
 	}
 
 	// Create status panel widget
@@ -100,6 +103,7 @@ initUI :: proc() {
 		fontSize = fontSize,
 		fontSpacing = fontSpacing,
 		childSpacing = 5,
+		visible = true,
 	}
 
 	statusPanelHandle, _ := widgets.addWidget(statusPanel)
@@ -126,6 +130,7 @@ initUI :: proc() {
 			}
 		},
 		parent = serverPanelHandle,
+		visible = true,
 	}
 	widgets.addWidget(addServerButton)
 
@@ -141,6 +146,7 @@ initUI :: proc() {
 		fontSpacing = fontSpacing,
 		enabled = true,
 		parent = statusPanelHandle,
+		visible = true,
 	}
 	widgets.addWidget(userLabel)
 
@@ -164,12 +170,14 @@ initUI :: proc() {
 			}
 		},
 		parent = statusPanelHandle,
+		visible = true,
 	}
 	widgets.addWidget(settingsButton)
 
 	statusSpacer := widgets.Widget {
-		type   = .FlexSpacer,
-		parent = statusPanelHandle,
+		type    = .FlexSpacer,
+		parent  = statusPanelHandle,
+		visible = true,
 	}
 	widgets.addWidget(statusSpacer)
 
@@ -191,6 +199,7 @@ initUI :: proc() {
 			fontSpacing = fontSpacing,
 			enabled = true,
 			parent = serverPanelHandle,
+			visible = true,
 			text = strings.clone_to_cstring(shortName),
 			// TODO: Add onClick callback for server buttons
 		}

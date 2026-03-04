@@ -21,7 +21,7 @@ drawWidget :: proc(widget: ^Widget) {
 	if widget == nil || !widget.visible {
 		return
 	}
-	fmt.printfln("[DRAW] Drawing widget: %s (Handle: %d)", widget.text, widget.handle)
+	anchorWidget(widget)
 	if widget.text != "" {
 		drawText(widget)
 	}
@@ -32,6 +32,93 @@ drawWidget :: proc(widget: ^Widget) {
 		drawRoundedRectangle(widget)
 	case Shape.Circle:
 		drawCircle(widget)
+	}
+}
+
+anchorWidget :: proc(widget: ^Widget) {
+	if widget == nil {
+		return
+	}
+	windowWidth := f32(raylib.GetScreenWidth())
+	windowHeight := f32(raylib.GetScreenHeight())
+	if parentWidget, ok := hm.get(&WidgetMap, widget.parent); !ok || parentWidget == nil {
+		switch widget.anchor {
+		case .TopLeft:
+			widget.rectangle.x = 0
+			widget.rectangle.y = 0
+		case .TopCenter:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = 0
+		case .TopRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width
+			widget.rectangle.y = 0
+		case .BottomLeft:
+			widget.rectangle.x = 0
+			widget.rectangle.y = windowHeight - widget.rectangle.height
+		case .BottomCenter:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = windowHeight - widget.rectangle.height
+		case .BottomRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width
+			widget.rectangle.y = windowHeight - widget.rectangle.height
+		case .CenterLeft:
+			widget.rectangle.x = 0
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
+		case .Center:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
+		case .CenterRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
+		}
+	} else {
+		switch widget.anchor {
+		case .TopLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .TopCenter:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .TopRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .BottomLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .BottomCenter:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .BottomRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .CenterLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
+		case .Center:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
+		case .CenterRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
+		}
 	}
 }
 
