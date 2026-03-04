@@ -22,9 +22,6 @@ drawWidget :: proc(widget: ^Widget) {
 		return
 	}
 	anchorWidget(widget)
-	if widget.text != "" {
-		drawText(widget)
-	}
 	switch widget.shape {
 	case Shape.Rectangle:
 		drawRectangle(widget)
@@ -32,6 +29,9 @@ drawWidget :: proc(widget: ^Widget) {
 		drawRoundedRectangle(widget)
 	case Shape.Circle:
 		drawCircle(widget)
+	}
+	if widget.text != "" {
+		drawText(widget)
 	}
 }
 
@@ -123,12 +123,14 @@ anchorWidget :: proc(widget: ^Widget) {
 }
 
 drawChildWidgets :: proc(parentHandle: Handle) {
-	it := hm.iterator_make(&WidgetMap)
-	for widget, handle in hm.iterate(&it) {
-		if widget.parent == parentHandle {
-			drawWidget(widget)
-			if len(widget.children) > 0 {
-				drawChildWidgets(widget.handle)
+	if parent, ok := hm.get(&WidgetMap, parentHandle); ok {
+		it := hm.iterator_make(&WidgetMap)
+		for widget, handle in hm.iterate(&it) {
+			if widget.parent == parent.handle {
+				drawWidget(widget)
+				if len(widget.children) > 0 {
+					drawChildWidgets(widget.handle)
+				}
 			}
 		}
 	}
