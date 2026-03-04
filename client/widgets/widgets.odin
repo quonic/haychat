@@ -15,6 +15,7 @@ Widget :: struct {
 	type:                    WidgetType,
 	rectangle:               raylib.Rectangle,
 	anchor:                  Anchor,
+	padding:                 f32,
 	sideMode:                SideMode,
 	fontPath:                string,
 	fontSize:                f32,

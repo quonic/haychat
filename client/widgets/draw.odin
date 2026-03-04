@@ -44,31 +44,31 @@ anchorWidget :: proc(widget: ^Widget) {
 	if parentWidget, ok := hm.get(&WidgetMap, widget.parent); !ok || parentWidget == nil {
 		switch widget.anchor {
 		case .TopLeft:
-			widget.rectangle.x = 0
-			widget.rectangle.y = 0
+			widget.rectangle.x = widget.padding
+			widget.rectangle.y = widget.padding
 		case .TopCenter:
 			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
-			widget.rectangle.y = 0
+			widget.rectangle.y = widget.padding
 		case .TopRight:
-			widget.rectangle.x = windowWidth - widget.rectangle.width
-			widget.rectangle.y = 0
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
+			widget.rectangle.y = widget.padding
 		case .BottomLeft:
-			widget.rectangle.x = 0
-			widget.rectangle.y = windowHeight - widget.rectangle.height
+			widget.rectangle.x = widget.padding
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
 		case .BottomCenter:
 			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
-			widget.rectangle.y = windowHeight - widget.rectangle.height
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
 		case .BottomRight:
-			widget.rectangle.x = windowWidth - widget.rectangle.width
-			widget.rectangle.y = windowHeight - widget.rectangle.height
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
 		case .CenterLeft:
-			widget.rectangle.x = 0
+			widget.rectangle.x = widget.padding
 			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
 		case .Center:
 			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
 			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
 		case .CenterRight:
-			widget.rectangle.x = windowWidth - widget.rectangle.width
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
 			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
 		}
 	} else {
