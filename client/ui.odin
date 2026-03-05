@@ -36,33 +36,41 @@ initUI :: proc() {
 	// Create server panel widget
 	serverPanelHeight :=
 		f32(raylib.GetScreenHeight()) - panelSpacing * 2 - statusPanelHeight - panelSpacing
-	serverPanel := widgets.Panel {
-		id             = SERVER_PANEL_ID,
-		title          = "",
-		position       = {panelSpacing, panelSpacing},
-		size           = {serverPanelWidth, serverPanelHeight},
-		anchor         = .Left,
-		sideMode       = .Stretch,
+	serverPanel := widgets.Widget {
+		type = .Panel,
+		rectangle = raylib.Rectangle {
+			x = panelSpacing,
+			y = panelSpacing,
+			width = serverPanelWidth,
+			height = serverPanelHeight,
+		},
+		anchor = .TopLeft,
+		padding = 5,
+		sideMode = .Stretch,
 		childrenLayout = .Vertical,
-		shape          = .RoundedRectangle,
-		roundness      = panelRoundness,
-		color          = raylib.DARKGRAY,
-		textColor      = raylib.WHITE,
-		font           = widgets.WidgetDefaultFont,
-		fontSize       = fontSize,
-		fontSpacing    = fontSpacing,
-		childSpacing   = 2,
+		shape = .RoundedRectangle,
+		roundness = panelRoundness,
+		backgroundColor = raylib.DARKGRAY,
+		textColor = raylib.WHITE,
+		fontSize = fontSize,
+		fontSpacing = fontSpacing,
+		childSpacing = 2,
+		visible = true,
 	}
+	serverPanelHandle, _ := widgets.addWidget(serverPanel)
 
 	// Create Friends button for server panel
-	friendsButton := widgets.Image {
-		id = FRIENDS_BUTTON_ID,
-		parent = SERVER_PANEL_ID,
-		texture = raylib.LoadTexture("../assets/icon.png"),
-		position = {panelSpacing, panelSpacing},
-		size = {0, 60},
+	friendsButton := widgets.Widget {
+		type = .Button,
+		imagePath = "../assets/friends_icon.png",
+		rectangle = raylib.Rectangle {
+			x = 0,
+			y = 0,
+			width = serverPanelWidth - panelSpacing * 2,
+			height = 50,
+		},
 		enabled = true,
-		onClick = proc() {
+		onClick = proc(widget: widgets.Handle, event: widgets.Event) {
 			showFriendsList = !showFriendsList
 			if showAddServer {
 				showAddServer = false
@@ -71,23 +79,50 @@ initUI :: proc() {
 				showSettings = false
 			}
 		},
+		parent = serverPanelHandle,
+		visible = true,
 	}
 
-	// Add button to add servers
-	addServerButton := widgets.Button {
-		id = ADD_SERVER_BUTTON_ID,
-		parent = SERVER_PANEL_ID,
-		text = "+",
-		size = {30, 30},
+	// Create status panel widget
+	statusPanelWidth: f32 = 200
+
+	statusPanel := widgets.Widget {
+		type = .Panel,
+		rectangle = raylib.Rectangle {
+			x = panelSpacing,
+			y = panelSpacing,
+			width = statusPanelWidth,
+			height = statusPanelHeight,
+		},
+		anchor = .BottomLeft,
+		padding = 5,
+		sideMode = .Fixed,
+		childrenLayout = .Horizontal,
 		shape = .RoundedRectangle,
 		roundness = panelRoundness,
-		color = raylib.GREEN,
+		backgroundColor = raylib.DARKGRAY,
 		textColor = raylib.WHITE,
-		font = widgets.WidgetDefaultFont,
+		fontSize = fontSize,
+		fontSpacing = fontSpacing,
+		childSpacing = 5,
+		visible = true,
+	}
+
+	statusPanelHandle, _ := widgets.addWidget(statusPanel)
+
+	// Add button to add servers
+	addServerButton := widgets.Widget {
+		type = .Button,
+		text = "+",
+		rectangle = raylib.Rectangle{x = 0, y = 0, width = 30, height = 30},
+		shape = .RoundedRectangle,
+		roundness = panelRoundness,
+		backgroundColor = raylib.GREEN,
+		textColor = raylib.WHITE,
 		fontSize = fontSize,
 		fontSpacing = fontSpacing,
 		enabled = true,
-		onClick = proc() {
+		onClick = proc(widget: widgets.Handle, event: widgets.Event) {
 			showAddServer = !showAddServer
 			if showFriendsList {
 				showFriendsList = false
@@ -96,58 +131,38 @@ initUI :: proc() {
 				showSettings = false
 			}
 		},
+		parent = serverPanelHandle,
+		visible = true,
 	}
-
-	// Create status panel widget
-	statusPanelWidth: f32 = 200
-
-	statusPanel := widgets.Panel {
-		id             = STATUS_PANEL_ID,
-		title          = "",
-		position       = {panelSpacing, panelSpacing},
-		size           = {statusPanelWidth, statusPanelHeight},
-		anchor         = .BottomLeft,
-		sideMode       = .Fixed,
-		childrenLayout = .Horizontal,
-		shape          = .RoundedRectangle,
-		roundness      = panelRoundness,
-		color          = raylib.DARKGRAY,
-		textColor      = raylib.WHITE,
-		font           = widgets.WidgetDefaultFont,
-		fontSize       = fontSize,
-		fontSpacing    = fontSpacing,
-		childSpacing   = 5,
-	}
+	addServerButtonHandle, _ := widgets.addWidget(addServerButton)
 
 	// Create user display label for status panel
-	userLabel := widgets.Label {
-		id          = 20,
-		parent      = STATUS_PANEL_ID,
-		text        = config.display_name,
-		size        = {120, 0},
-		shape       = .Rectangle,
-		color       = raylib.GRAY,
-		textColor   = raylib.WHITE,
-		font        = widgets.WidgetDefaultFont,
-		fontSize    = fontSize,
-		fontSpacing = fontSpacing,
-		enabled     = true,
-	}
-
-	// Create settings button for status panel
-	settingsButton := widgets.Button {
-		id = 21,
-		parent = STATUS_PANEL_ID,
-		text = "...",
-		size = {30, 30},
-		shape = .Circle,
-		color = raylib.GREEN,
+	userLabel := widgets.Widget {
+		type = .Text,
+		rectangle = raylib.Rectangle{x = 0, y = 0, width = 120, height = 0},
+		shape = .Rectangle,
+		text = strings.clone_to_cstring(config.display_name),
+		backgroundColor = raylib.GRAY,
 		textColor = raylib.WHITE,
-		font = widgets.WidgetDefaultFont,
 		fontSize = fontSize,
 		fontSpacing = fontSpacing,
 		enabled = true,
-		onClick = proc() {
+		parent = statusPanelHandle,
+		visible = true,
+	}
+	userLabelHandle, _ := widgets.addWidget(userLabel)
+
+	// Create settings button for status panel
+	settingsButton := widgets.Widget {
+		type = .Button,
+		rectangle = raylib.Rectangle{x = 0, y = 0, width = 30, height = 30},
+		shape = .Circle,
+		backgroundColor = raylib.GREEN,
+		textColor = raylib.WHITE,
+		fontSize = fontSize,
+		fontSpacing = fontSpacing,
+		enabled = true,
+		onClick = proc(widget: widgets.Handle, event: widgets.Event) {
 			showSettings = !showSettings
 			if showFriendsList {
 				showFriendsList = false
@@ -156,47 +171,42 @@ initUI :: proc() {
 				showAddServer = false
 			}
 		},
+		parent = statusPanelHandle,
+		visible = true,
 	}
+	settingsButtonHandle, _ := widgets.addWidget(settingsButton)
 
-	statusSpacer := widgets.FlexSpacer {
-		id     = 22,
-		parent = STATUS_PANEL_ID,
-		size   = {0, 0},
+	statusSpacer := widgets.Widget {
+		type    = .FlexSpacer,
+		parent  = statusPanelHandle,
+		visible = true,
 	}
+	statusSpacerHandle, _ := widgets.addWidget(statusSpacer)
 
-	// Add panels to widget system
-	widgets.add(serverPanel)
+	friendsButton.parent = serverPanelHandle
 
-	widgets.add(statusPanel)
-
-	widgets.addChild(SERVER_PANEL_ID, &friendsButton)
+	friendsButtonHandle, _ := widgets.addWidget(friendsButton)
 
 	// Add server buttons to server panel
-	for server, i in config.servers {
+	for &server, i in config.servers {
 		shortName := getShortServerName(server.name)
-		serverButton := widgets.Button {
-			id          = SERVER_BUTTON_BASE_ID + u32(i),
-			parent      = SERVER_PANEL_ID,
-			text        = shortName,
-			size        = {50, 60},
-			shape       = .RoundedRectangle,
-			roundness   = panelRoundness,
-			color       = raylib.GRAY,
-			textColor   = raylib.WHITE,
-			font        = widgets.WidgetDefaultFont,
-			fontSize    = fontSize,
+		serverButton := widgets.Widget {
+			type = .Button,
+			rectangle = raylib.Rectangle{x = 0, y = 0, width = 50, height = 60},
+			shape = .RoundedRectangle,
+			roundness = panelRoundness,
+			backgroundColor = raylib.GRAY,
+			textColor = raylib.WHITE,
+			fontSize = fontSize,
 			fontSpacing = fontSpacing,
-			enabled     = true,
+			enabled = true,
+			parent = serverPanelHandle,
+			visible = true,
+			text = strings.clone_to_cstring(shortName),
 			// TODO: Add onClick callback for server buttons
 		}
-		widgets.addChild(SERVER_PANEL_ID, &serverButton)
+		server.handle, _ = widgets.addWidget(serverButton)
 	}
-
-	widgets.addChild(SERVER_PANEL_ID, &addServerButton)
-
-	widgets.addChild(STATUS_PANEL_ID, &userLabel)
-	widgets.addChild(STATUS_PANEL_ID, &statusSpacer)
-	widgets.addChild(STATUS_PANEL_ID, &settingsButton)
 
 }
 

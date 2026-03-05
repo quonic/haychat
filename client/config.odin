@@ -4,6 +4,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "widgets"
 
 lastMonitor: i32 = -1 // Global variable to store the last monitor index used by the client, initialized to -1 (no monitor)
 
@@ -20,10 +21,11 @@ Config :: struct {
 }
 
 Server :: struct {
-	id:   int,
-	name: string,
-	host: string,
-	port: i32,
+	id:     int,
+	name:   string,
+	host:   string,
+	port:   i32,
+	handle: widgets.Handle, // Handle to the server button widget in the UI, used for event handling and updating the button state
 }
 
 Friend :: struct {

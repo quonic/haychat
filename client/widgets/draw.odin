@@ -1,797 +1,278 @@
 package widgets
 
-
+import hm "core:container/handle_map"
 import "core:fmt"
-import "core:strings"
 import "vendor:raylib"
 
-panelContainerRect :: proc(panel: ^Panel) -> raylib.Rectangle {
-	if panel.parent != 0 {
-		parentPanel := findWidgetByID(panel.parent, Panel)
-		if parentPanel != nil {
-			return raylib.Rectangle {
-				x = parentPanel.resolvedPosition.x,
-				y = parentPanel.resolvedPosition.y,
-				width = parentPanel.resolvedSize.x,
-				height = parentPanel.resolvedSize.y,
-			}
-		}
-	}
-
-	return raylib.Rectangle {
-		x = 0,
-		y = 0,
-		width = f32(raylib.GetScreenWidth()),
-		height = f32(raylib.GetScreenHeight()),
-	}
-}
-
-resolvePanelLayout :: proc(panel: ^Panel) {
-	container := panelContainerRect(panel)
-	resolvedPosition := panel.position
-	resolvedSize := panel.size
-
-	switch panel.anchor {
-	case .TopLeft:
-		resolvedPosition.x = container.x + panel.position.x
-		resolvedPosition.y = container.y + panel.position.y
-	case .Top:
-		resolvedPosition.x = container.x + (container.width - panel.size.x) / 2 + panel.position.x
-		resolvedPosition.y = container.y + panel.position.y
-		if panel.sideMode == .Stretch {
-			resolvedPosition.x = container.x + panel.position.x
-			resolvedSize.x = container.width - panel.position.x * 2
-		}
-	case .TopRight:
-		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
-		resolvedPosition.y = container.y + panel.position.y
-	case .Right:
-		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
-		resolvedPosition.y = container.y + (container.height - panel.size.y) / 2 + panel.position.y
-		if panel.sideMode == .Stretch {
-			resolvedPosition.y = container.y + panel.position.y
-			resolvedSize.y = container.height - panel.position.y * 2
-		}
-	case .BottomRight:
-		resolvedPosition.x = container.x + container.width - panel.size.x - panel.position.x
-		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
-	case .Bottom:
-		resolvedPosition.x = container.x + (container.width - panel.size.x) / 2 + panel.position.x
-		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
-		if panel.sideMode == .Stretch {
-			resolvedPosition.x = container.x + panel.position.x
-			resolvedSize.x = container.width - panel.position.x * 2
-		}
-	case .BottomLeft:
-		resolvedPosition.x = container.x + panel.position.x
-		resolvedPosition.y = container.y + container.height - panel.size.y - panel.position.y
-	case .Left:
-		resolvedPosition.x = container.x + panel.position.x
-		resolvedPosition.y = container.y + (container.height - panel.size.y) / 2 + panel.position.y
-		if panel.sideMode == .Stretch {
-			resolvedPosition.y = container.y + panel.position.y
-			resolvedSize.y = container.height - panel.position.y * 2
-		}
-	}
-
-	if resolvedSize.x < 0 {
-		resolvedSize.x = 0
-	}
-	if resolvedSize.y < 0 {
-		resolvedSize.y = 0
-	}
-
-	panel.resolvedPosition = resolvedPosition
-	panel.resolvedSize = resolvedSize
-}
-
-PanelChildLayoutMetrics :: struct {
-	position: raylib.Vector2,
-	size:     raylib.Vector2,
-}
-
-panelChildIsFlexSpacer :: proc(child: ^Widget) -> bool {
-	#partial switch c in child^ {
-	case FlexSpacer:
-		return true
-	}
-
-	return false
-}
-
-panelChildBaseFlowAxisSize :: proc(panel: ^Panel, child: ^Widget) -> f32 {
-	_, size := panelChildPositionAndSize(child)
-
-	switch panel.childrenLayout {
-	case .Vertical:
-		return size.y
-	case .Horizontal:
-		return size.x
-	case .None:
-	}
-
-	return 0
-}
-
-panelFlowFlexChildSize :: proc(panel: ^Panel) -> f32 {
-	if panel.childrenLayout == .None {
-		return 0
-	}
-
-	if len(panel.children) == 0 {
-		return 0
-	}
-
-	flexChildrenCount := 0
-	fixedAxisTotal := f32(0)
-	for child in panel.children {
-		if panelChildIsFlexSpacer(child) {
-			flexChildrenCount += 1
+draw :: proc() {
+	topLevelWidgets := getTopLevelWidgets()
+	for widget in topLevelWidgets {
+		if widget == nil {
 			continue
 		}
-		fixedAxisTotal += panelChildBaseFlowAxisSize(panel, child)
-	}
-
-	if flexChildrenCount == 0 {
-		return 0
-	}
-
-	childSpacingCount := len(panel.children) - 1
-	totalSpacing := f32(0)
-	if childSpacingCount > 0 {
-		totalSpacing = panel.childSpacing * f32(childSpacingCount)
-	}
-
-	availableFlowAxis := f32(0)
-	switch panel.childrenLayout {
-	case .Vertical:
-		availableFlowAxis = panel.resolvedSize.y
-	case .Horizontal:
-		availableFlowAxis = panel.resolvedSize.x
-	case .None:
-	}
-
-	remaining := availableFlowAxis - fixedAxisTotal - totalSpacing
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	return remaining / f32(flexChildrenCount)
-}
-
-panelChildFlowAxisSize :: proc(panel: ^Panel, child: ^Widget) -> f32 {
-	if panelChildIsFlexSpacer(child) {
-		return panelFlowFlexChildSize(panel)
-	}
-
-	return panelChildBaseFlowAxisSize(panel, child)
-}
-
-panelChildPositionAndSize :: proc(child: ^Widget) -> (raylib.Vector2, raylib.Vector2) {
-	switch c in child^ {
-	case Button:
-		return c.position, c.size
-	case Image:
-		return c.position, c.size
-	case Label:
-		return c.position, c.size
-	case Spacer:
-		return c.position, c.size
-	case FlexSpacer:
-		return c.position, c.size
-	case Panel:
-		return c.position, c.size
-	case TextEntryField:
-		return c.position, c.size
-	case TextArea:
-		return c.position, c.size
-	case:
-	}
-
-	return {}, {}
-}
-
-resolvePanelChildLayout :: proc(
-	panel: ^Panel,
-	child: ^Widget,
-	flowOffset: ^f32,
-	flexChildSize: f32,
-) -> PanelChildLayoutMetrics {
-	position, size := panelChildPositionAndSize(child)
-
-	switch panel.childrenLayout {
-	case .None:
-	case .Vertical:
-		position = {0, flowOffset^}
-		size.x = panel.resolvedSize.x
-		if panelChildIsFlexSpacer(child) {
-			size.y = flexChildSize
-		}
-		flowOffset^ += size.y + panel.childSpacing
-	case .Horizontal:
-		position = {flowOffset^, 0}
-		size.y = panel.resolvedSize.y
-		if panelChildIsFlexSpacer(child) {
-			size.x = flexChildSize
-		}
-		flowOffset^ += size.x + panel.childSpacing
-	}
-
-	return PanelChildLayoutMetrics{position = position, size = size}
-}
-
-panelChildrenContentBoundsY :: proc(panel: ^Panel) -> (f32, f32) {
-	minContentY := f32(0)
-	maxContentY := f32(0)
-	flowOffset := f32(0)
-	flexChildSize := panelFlowFlexChildSize(panel)
-
-	for child in panel.children {
-		layoutMetrics := resolvePanelChildLayout(panel, child, &flowOffset, flexChildSize)
-		if layoutMetrics.position.y < minContentY {
-			minContentY = layoutMetrics.position.y
-		}
-		bottom := layoutMetrics.position.y + layoutMetrics.size.y
-		if bottom > maxContentY {
-			maxContentY = bottom
+		drawWidget(widget)
+		if len(widget.children) > 0 {
+			drawChildWidgets(widget.handle)
 		}
 	}
-
-	return minContentY, maxContentY
 }
 
-circleCenterAndRadius :: proc(position, size: raylib.Vector2) -> (raylib.Vector2, f32) {
-	diameter := min(size.x, size.y)
-	radius := diameter / 2
-	center := raylib.Vector2{position.x + size.x / 2, position.y + size.y / 2}
-
-	return center, radius
-}
-
-drawImage :: proc(image: ^Image) {
-	if image.draw != nil {
-		image.draw()
+drawWidget :: proc(widget: ^Widget) {
+	if widget == nil || !widget.visible {
 		return
 	}
-
-	imagePosition := image.position
-	if image.parent != 0 {
-		parentPanel := findWidgetByID(image.parent, Panel)
-		if parentPanel != nil {
-			imagePosition.x += parentPanel.resolvedPosition.x
-			imagePosition.y += parentPanel.resolvedPosition.y
-		}
+	anchorWidget(widget)
+	switch widget.shape {
+	case Shape.Rectangle:
+		drawRectangle(widget)
+	case Shape.RoundedRectangle:
+		drawRoundedRectangle(widget)
+	case Shape.Circle:
+		drawCircle(widget)
 	}
-
-	sourceRect := image.sourceRect
-	if sourceRect.width == 0 || sourceRect.height == 0 {
-		sourceRect = raylib.Rectangle {
-			x      = 0,
-			y      = 0,
-			width  = f32(image.texture.width),
-			height = f32(image.texture.height),
-		}
+	if widget.text != "" {
+		drawText(widget)
 	}
-
-	destinationRect := raylib.Rectangle {
-		x      = imagePosition.x,
-		y      = imagePosition.y,
-		width  = image.size.x,
-		height = image.size.y,
-	}
-
-	raylib.DrawTexturePro(
-		image.texture,
-		sourceRect,
-		destinationRect,
-		raylib.Vector2{},
-		0,
-		raylib.WHITE,
-	)
 }
 
-drawButton :: proc(button: ^Button) {
-	// Call the custom draw function if it exists
-	if button.draw != nil {
-		button.draw()
+anchorWidget :: proc(widget: ^Widget) {
+	if widget == nil {
 		return
 	}
-
-	// If no font is set, use the default font
-	if button.font == {} {
-		button.font = WidgetDefaultFont
-	}
-
-	buttonPosition := button.position
-	if button.parent != 0 {
-		parentPanel := findWidgetByID(button.parent, Panel)
-		if parentPanel != nil {
-			// Adjust button position based on the parent panel's position
-			buttonPosition.x += parentPanel.resolvedPosition.x
-			buttonPosition.y += parentPanel.resolvedPosition.y
-		}
-	}
-
-	// Default drawing logic based on shape
-	switch button.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(buttonPosition, button.size, button.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = buttonPosition.x,
-				y = buttonPosition.y,
-				width = button.size.x,
-				height = button.size.y,
-			},
-			button.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			button.color,
-		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(buttonPosition, button.size)
-		raylib.DrawCircleV(center, radius, button.color)
-	}
-
-	// Draw the button text centered within the button
-	textSize := raylib.MeasureTextEx(
-		button.font,
-		fmt.caprint(button.text),
-		button.fontSize,
-		button.fontSpacing,
-	)
-	textPosition := raylib.Vector2 {
-		buttonPosition.x + (button.size.x - textSize.x) / 2,
-		buttonPosition.y + (button.size.y - textSize.y) / 2, // Center vertically based on font size
-	}
-	raylib.DrawTextEx(
-		button.font,
-		fmt.caprint(button.text),
-		textPosition,
-		button.fontSize,
-		button.fontSpacing,
-		button.textColor,
-	)
-}
-
-drawLabel :: proc(label: ^Label) {
-	// Call the custom draw function if it exists
-	if label.draw != nil {
-		label.draw()
-		return
-	}
-
-	// If no font is set, use the default font
-	if label.font == {} {
-		label.font = WidgetDefaultFont
-	}
-
-	labelPosition := label.position
-	if label.parent != 0 {
-		parentPanel := findWidgetByID(label.parent, Panel)
-		if parentPanel != nil {
-			// Adjust label position based on the parent panel's position
-			labelPosition.x += parentPanel.resolvedPosition.x
-			labelPosition.y += parentPanel.resolvedPosition.y
-		}
-	}
-
-	// Default drawing logic based on shape
-	switch label.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(labelPosition, label.size, label.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = labelPosition.x,
-				y = labelPosition.y,
-				width = label.size.x,
-				height = label.size.y,
-			},
-			label.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			label.color,
-		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(labelPosition, label.size)
-		raylib.DrawCircleV(center, radius, label.color)
-	}
-
-	// Draw the label text centered within the label
-	textSize := raylib.MeasureTextEx(
-		label.font,
-		fmt.caprint(label.text),
-		label.fontSize,
-		label.fontSpacing,
-	)
-	textPosition := raylib.Vector2 {
-		labelPosition.x + (label.size.x - textSize.x) / 2,
-		labelPosition.y + (label.size.y - textSize.y) / 2, // Center vertically based on font size
-	}
-	raylib.DrawTextEx(
-		label.font,
-		fmt.caprint(label.text),
-		textPosition,
-		label.fontSize,
-		label.fontSpacing,
-		label.textColor,
-	)
-}
-
-drawPanel :: proc(panel: ^Panel) {
-	// Call the custom draw function if it exists
-	if panel.draw != nil {
-		panel.draw()
-		return
-	}
-
-	resolvePanelLayout(panel)
-
-	// If no font is set, use the default font
-	if panel.font == {} {
-		panel.font = WidgetDefaultFont
-	}
-	if panel.scrollTopPadding <= 0 && panel.title != "" {
-		panel.scrollTopPadding = panelTitleScrollTopPadding(panel)
-	}
-
-	panelPosition := panel.resolvedPosition
-	panelSize := panel.resolvedSize
-
-	// Default drawing logic based on shape
-	switch panel.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(panelPosition, panelSize, panel.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = panelPosition.x,
-				y = panelPosition.y,
-				width = panelSize.x,
-				height = panelSize.y,
-			},
-			panel.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			panel.color,
-		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(panelPosition, panelSize)
-		raylib.DrawCircleV(center, radius, panel.color)
-	}
-
-	minContentY, maxContentY := panelChildrenContentBoundsY(panel)
-
-	visibleTopPadding := panel.scrollTopPadding
-	visibleHeight := panelSize.y - visibleTopPadding
-	if visibleHeight < 0 {
-		visibleHeight = 0
-	}
-	contentHeight := maxContentY - minContentY
-	if contentHeight > visibleHeight {
-		minScrollOffset := minContentY - visibleTopPadding
-		maxScrollOffset := maxContentY - panelSize.y
-		if panel.scrollOffset < minScrollOffset {
-			panel.scrollOffset = minScrollOffset
-		} else if panel.scrollOffset > maxScrollOffset {
-			panel.scrollOffset = maxScrollOffset
+	windowWidth := f32(raylib.GetScreenWidth())
+	windowHeight := f32(raylib.GetScreenHeight())
+	if parentWidget, ok := hm.get(&WidgetMap, widget.parent); !ok || parentWidget == nil {
+		switch widget.anchor {
+		case .TopLeft:
+			widget.rectangle.x = widget.padding
+			widget.rectangle.y = widget.padding
+		case .TopCenter:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = widget.padding
+		case .TopRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
+			widget.rectangle.y = widget.padding
+		case .BottomLeft:
+			widget.rectangle.x = widget.padding
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
+		case .BottomCenter:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
+		case .BottomRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
+			widget.rectangle.y = windowHeight - widget.rectangle.height - widget.padding
+		case .CenterLeft:
+			widget.rectangle.x = widget.padding
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
+		case .Center:
+			widget.rectangle.x = (windowWidth - widget.rectangle.width) / 2
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
+		case .CenterRight:
+			widget.rectangle.x = windowWidth - widget.rectangle.width - widget.padding
+			widget.rectangle.y = (windowHeight - widget.rectangle.height) / 2
 		}
 	} else {
-		panel.scrollOffset = 0
-	}
-
-	// Draw the panel title centered at the top of the panel
-	if panel.title != "" {
-		textSize := raylib.MeasureTextEx(
-			panel.font,
-			fmt.caprint(panel.title),
-			panel.fontSize,
-			panel.fontSpacing,
-		)
-		textPosition := raylib.Vector2 {
-			panelPosition.x + (panelSize.x - textSize.x) / 2,
-			panelPosition.y + panel.fontSize / 2, // Position at the top with some padding
-		}
-		raylib.DrawTextEx(
-			panel.font,
-			fmt.caprint(panel.title),
-			textPosition,
-			panel.fontSize,
-			panel.fontSpacing,
-			panel.textColor,
-		)
-	}
-
-	// Draw child widgets contained within the panel
-	scissorY := panelPosition.y + visibleTopPadding
-	scissorHeight := panelSize.y - visibleTopPadding
-	if scissorHeight < 0 {
-		scissorHeight = 0
-	}
-	raylib.BeginScissorMode(
-		i32(panelPosition.x),
-		i32(scissorY),
-		i32(panelSize.x),
-		i32(scissorHeight),
-	)
-	defer raylib.EndScissorMode()
-	applyScroll := panel.scrollOffset != 0
-	layoutFlowOffset := f32(0)
-	flexChildSize := panelFlowFlexChildSize(panel)
-	for child in panel.children {
-		layoutMetrics := resolvePanelChildLayout(panel, child, &layoutFlowOffset, flexChildSize)
-		switch c in child^ {
-		case Button:
-			button := &child^.(Button)
-			if panel.childrenLayout != .None {
-				button.position = layoutMetrics.position
-				button.size = layoutMetrics.size
-			}
-			if applyScroll {
-				button.position.y -= panel.scrollOffset
-			}
-			drawButton(button)
-		case Image:
-			image := &child^.(Image)
-			if panel.childrenLayout != .None {
-				image.position = layoutMetrics.position
-				image.size = layoutMetrics.size
-			}
-			if applyScroll {
-				image.position.y -= panel.scrollOffset
-			}
-			drawImage(image)
-		case Label:
-			label := &child^.(Label)
-			if panel.childrenLayout != .None {
-				label.position = layoutMetrics.position
-				label.size = layoutMetrics.size
-			}
-			if applyScroll {
-				label.position.y -= panel.scrollOffset
-			}
-			drawLabel(label)
-		case Spacer:
-			spacer := &child^.(Spacer)
-			if panel.childrenLayout != .None {
-				spacer.position = layoutMetrics.position
-				spacer.size = layoutMetrics.size
-			}
-			if applyScroll {
-				spacer.position.y -= panel.scrollOffset
-			}
-		case FlexSpacer:
-			flexSpacer := &child^.(FlexSpacer)
-			if panel.childrenLayout != .None {
-				flexSpacer.position = layoutMetrics.position
-				flexSpacer.size = layoutMetrics.size
-			}
-			if applyScroll {
-				flexSpacer.position.y -= panel.scrollOffset
-			}
-		case Panel:
-			childPanel := &child^.(Panel)
-			if panel.childrenLayout != .None {
-				childPanel.position = layoutMetrics.position
-				childPanel.size = layoutMetrics.size
-			}
-			if applyScroll {
-				childPanel.position.y -= panel.scrollOffset
-			}
-			drawPanel(childPanel)
-		case TextEntryField:
-			entryField := &child^.(TextEntryField)
-			if panel.childrenLayout != .None {
-				entryField.position = layoutMetrics.position
-				entryField.size = layoutMetrics.size
-			}
-			if applyScroll {
-				entryField.position.y -= panel.scrollOffset
-			}
-			drawTextEntryField(entryField)
-		case TextArea:
-			textArea := &child^.(TextArea)
-			if panel.childrenLayout != .None {
-				textArea.position = layoutMetrics.position
-				textArea.size = layoutMetrics.size
-			}
-			if applyScroll {
-				textArea.position.y -= panel.scrollOffset
-			}
-			if f32(len(textArea.text)) *
-				   raylib.MeasureTextEx(textArea.font, "sample", textArea.fontSize, textArea.fontSpacing).y >
-			   textArea.size.y {
-				drawTextAreaWithScrolling(textArea, textArea.scrollOffset) // Pass the current scroll offset for the text area
-			} else {
-				drawTextArea(textArea)
-			}
-		// Add more widget types as needed
+		switch widget.anchor {
+		case .TopLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .TopCenter:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .TopRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y = parentWidget.rectangle.y
+		case .BottomLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .BottomCenter:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .BottomRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y =
+				parentWidget.rectangle.y + parentWidget.rectangle.height - widget.rectangle.height
+		case .CenterLeft:
+			widget.rectangle.x = parentWidget.rectangle.x
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
+		case .Center:
+			widget.rectangle.x =
+				parentWidget.rectangle.x +
+				(parentWidget.rectangle.width - widget.rectangle.width) / 2
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
+		case .CenterRight:
+			widget.rectangle.x =
+				parentWidget.rectangle.x + parentWidget.rectangle.width - widget.rectangle.width
+			widget.rectangle.y =
+				parentWidget.rectangle.y +
+				(parentWidget.rectangle.height - widget.rectangle.height) / 2
 		}
 	}
 }
 
-drawTextEntryField :: proc(textEntryField: ^TextEntryField) {
-	// Call the custom draw function if it exists
-	if textEntryField.draw != nil {
-		textEntryField.draw()
-		return
-	}
-
-	// If no font is set, use the default font
-	if textEntryField.font == {} {
-		textEntryField.font = WidgetDefaultFont
-	}
-
-	textEntryFieldPosition := textEntryField.position
-	if textEntryField.parent != 0 {
-		parentPanel := findWidgetByID(textEntryField.parent, Panel)
-		if parentPanel != nil {
-			// Adjust text entry field position based on the parent panel's position
-			textEntryFieldPosition.x += parentPanel.resolvedPosition.x
-			textEntryFieldPosition.y += parentPanel.resolvedPosition.y
+drawChildWidgets :: proc(parentHandle: Handle) {
+	if parent, ok := hm.get(&WidgetMap, parentHandle); ok {
+		switch parent.childrenLayout {
+		case .Horizontal:
+			layoutHorizontal(parent)
+		case .Vertical:
+			layoutVertical(parent)
+		case .Overlay:
+			layoutOverlay(parent)
 		}
 	}
+}
 
-	// Default drawing logic based on shape
-	switch textEntryField.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(textEntryFieldPosition, textEntryField.size, textEntryField.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = textEntryFieldPosition.x,
-				y = textEntryFieldPosition.y,
-				width = textEntryField.size.x,
-				height = textEntryField.size.y,
-			},
-			textEntryField.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			textEntryField.color,
-		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(textEntryFieldPosition, textEntryField.size)
-		raylib.DrawCircleV(center, radius, textEntryField.color)
+layoutHorizontal :: proc(parent: ^Widget) {
+	currentX := parent.rectangle.x + parent.padding
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = currentX
+			child.rectangle.y = parent.rectangle.y + parent.padding
+			child.rectangle.height = parent.rectangle.height - parent.padding * 2
+			if child.rectangle.width == 0 {
+				child.rectangle.width = child.fontSize * f32(len(child.text)) + child.padding * 2
+			}
+			currentX += child.rectangle.width + parent.childSpacing
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
+			}
+		}
 	}
+}
 
-	// Draw the current text in the entry field with padding
+layoutVertical :: proc(parent: ^Widget) {
+	currentY := parent.rectangle.y + parent.padding
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = parent.rectangle.x + parent.padding
+			child.rectangle.y = currentY
+			child.rectangle.width = parent.rectangle.width - parent.padding * 2
+			if child.rectangle.height == 0 {
+				child.rectangle.height = child.fontSize + child.padding * 2
+			}
+			currentY += child.rectangle.height + parent.childSpacing
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
+			}
+		}
+	}
+}
+
+layoutOverlay :: proc(parent: ^Widget) {
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = parent.rectangle.x + parent.padding
+			child.rectangle.y = parent.rectangle.y + parent.padding
+			if child.rectangle.width == 0 {
+				child.rectangle.width = child.fontSize * f32(len(child.text)) + child.padding * 2
+			}
+			if child.rectangle.height == 0 {
+				child.rectangle.height = child.fontSize + child.padding * 2
+			}
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
+			}
+		}
+	}
+}
+
+drawRectangle :: proc(widget: ^Widget) {
+	raylib.DrawRectanglePro(
+		widget.rectangle,
+		raylib.Vector2{0, 0},
+		widget.rotation,
+		widget.backgroundColor,
+	)
+
+}
+
+drawRoundedRectangle :: proc(widget: ^Widget) {
+	raylib.DrawRectangleRounded(widget.rectangle, 0.2, 0, widget.backgroundColor)
+}
+
+drawCircle :: proc(widget: ^Widget) {
+	center := raylib.Vector2 {
+		widget.rectangle.x + widget.rectangle.width / 2,
+		widget.rectangle.y + widget.rectangle.height / 2,
+	}
+	radius := widget.rectangle.width / 2
+	raylib.DrawCircleV(center, radius, widget.backgroundColor)
+}
+
+drawText :: proc(widget: ^Widget) {
+	textSize := raylib.MeasureTextEx(
+		WidgetDefaultFont,
+		widget.text,
+		widget.fontSize,
+		widget.fontSpacing,
+	)
 	textPosition := raylib.Vector2 {
-		textEntryFieldPosition.x + textEntryField.padding, // Add some padding from the left edge
-		textEntryFieldPosition.y + (textEntryField.size.y - textEntryField.fontSize) / 2, // Center vertically based on font size
+		widget.rectangle.x + (widget.rectangle.width - textSize.x) / 2,
+		widget.rectangle.y + (widget.rectangle.height - textSize.y) / 2,
 	}
 	raylib.DrawTextEx(
-		textEntryField.font,
-		fmt.caprint(textEntryField.text),
+		WidgetDefaultFont,
+		widget.text,
 		textPosition,
-		textEntryField.fontSize,
-		textEntryField.fontSpacing,
-		textEntryField.textColor,
+		widget.fontSize,
+		widget.fontSpacing,
+		widget.textColor,
 	)
-}
 
-drawTextArea :: proc(textArea: ^TextArea) {
-	// Call the custom draw function if it exists
-	if textArea.draw != nil {
-		textArea.draw()
-		return
-	}
+	if widget.type == .Text && widget.isInput && widget.focused {
 
-	// If no font is set, use the default font
-	if textArea.font == {} {
-		textArea.font = WidgetDefaultFont
-	}
+		half_font_size: i32 = i32(widget.fontSize) / 2
+		x_offset: i32 = cast(i32)widget.rectangle.x + half_font_size
+		y_offset: i32 = cast(i32)widget.rectangle.y + half_font_size
 
-	textAreaPosition := textArea.position
-	if textArea.parent != 0 {
-		parentPanel := findWidgetByID(textArea.parent, Panel)
-		if parentPanel != nil {
-			// Adjust text area position based on the parent panel's position
-			textAreaPosition.x += parentPanel.resolvedPosition.x
-			textAreaPosition.y += parentPanel.resolvedPosition.y
-		}
-	}
-
-	// Default drawing logic based on shape
-	switch textArea.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(textAreaPosition, textArea.size, textArea.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = textAreaPosition.x,
-				y = textAreaPosition.y,
-				width = textArea.size.x,
-				height = textArea.size.y,
-			},
-			textArea.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			textArea.color,
+		cursor_x := x_offset + raylib.MeasureText(widget.text, i32(widget.fontSize))
+		_, after_cursor := cstringSplitAt(
+			widget.text,
+			cast(int)widget.cursorPosition,
+			context.temp_allocator,
 		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(textAreaPosition, textArea.size)
-		raylib.DrawCircleV(center, radius, textArea.color)
-	}
+		cursor_x -= raylib.MeasureText(after_cursor, i32(widget.fontSize))
+		cursor_y := y_offset
 
-	// Draw each line of text within the text area with proper spacing
-	lineHeight := textArea.fontSize + textArea.fontSpacing
-	for line, i in textArea.text {
-		linePosition := raylib.Vector2 {
-			textAreaPosition.x + textArea.padding, // Add some padding from the left edge
-			textAreaPosition.y + textArea.padding + f32(i) * lineHeight, // Position each line with spacing
+		if widget.cursorBlinkTimer < 0.5 {
+			raylib.DrawRectangle(cursor_x, cursor_y, 2, i32(widget.fontSize), raylib.BLACK)
 		}
-		raylib.DrawTextEx(
-			textArea.font,
-			fmt.caprint(line),
-			linePosition,
-			textArea.fontSize,
-			textArea.fontSpacing,
-			textArea.textColor,
-		)
-	}
-}
-
-drawTextAreaWithScrolling :: proc(textArea: ^TextArea, scrollOffset: f32) {
-	// Call the custom draw function if it exists
-	if textArea.draw != nil {
-		textArea.draw()
-		return
-	}
-
-	// If no font is set, use the default font
-	if textArea.font == {} {
-		textArea.font = WidgetDefaultFont
-	}
-
-	textAreaPosition := textArea.position
-	if textArea.parent != 0 {
-		parentPanel := findWidgetByID(textArea.parent, Panel)
-		if parentPanel != nil {
-			// Adjust text area position based on the parent panel's position
-			textAreaPosition.x += parentPanel.resolvedPosition.x
-			textAreaPosition.y += parentPanel.resolvedPosition.y
-		}
-	}
-
-	// Default drawing logic based on shape
-	switch textArea.shape {
-	case .Rectangle:
-		raylib.DrawRectangleV(textAreaPosition, textArea.size, textArea.color)
-	case .RoundedRectangle:
-		raylib.DrawRectangleRounded(
-			raylib.Rectangle {
-				x = textAreaPosition.x,
-				y = textAreaPosition.y,
-				width = textArea.size.x,
-				height = textArea.size.y,
-			},
-			textArea.roundness,
-			0, // Segments for rounded corners (0 for auto)
-			textArea.color,
-		)
-	case .Circle:
-		center, radius := circleCenterAndRadius(textAreaPosition, textArea.size)
-		raylib.DrawCircleV(center, radius, textArea.color)
-	}
-
-	// Draw each line of text within the text area with proper spacing and scrolling offset
-	lineHeight := textArea.fontSize + textArea.fontSpacing
-	raylib.BeginScissorMode(
-		i32(textAreaPosition.x),
-		i32(textAreaPosition.y),
-		i32(textArea.size.x),
-		i32(textArea.size.y),
-	)
-	defer raylib.EndScissorMode()
-	for line, i in textArea.text {
-		linePosition := raylib.Vector2 {
-			textAreaPosition.x + textArea.padding, // Add some padding from the left edge
-			textAreaPosition.y + textArea.padding + f32(i) * lineHeight - scrollOffset, // Position each line with spacing and apply scroll offset
-		}
-		raylib.DrawTextEx(
-			textArea.font,
-			fmt.caprint(line),
-			linePosition,
-			textArea.fontSize,
-			textArea.fontSpacing,
-			textArea.textColor,
-		)
 	}
 }
