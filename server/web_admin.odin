@@ -16,7 +16,12 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	pmWebAdmin = pm // Set global pointer so handlers can access process manager
 	context.logger = log.create_console_logger(.Info)
 
-	IPC_Client_init(&pm.config.webAdminSocket)
+	webAdminFd, ipcInitErr := IPC_Client_init(&pm.config.webAdminSocket)
+	if ipcInitErr != nil {
+		fmt.eprintln("[WebAdmin] Failed to initialize coordinator endpoint:", ipcInitErr)
+		return
+	}
+	pm.config.webAdminFd = webAdminFd
 	defer IPC_Client_deinit(&pm.config.webAdminSocket)
 
 	s: http.Server

@@ -1,64 +1,41 @@
 package server
 
-import sa "core:container/small_array"
-import "core:encoding/cbor"
-import "core:log"
-import "core:net"
-import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:sys/linux"
-import "core:sys/posix"
 import "vendor:ENet"
 
-SERVER_SOCKET :: "\x00haychat"
-MAX_CLIENTS :: 64
-BUF_SIZE :: 1024
-
-IPC_Server_Context :: struct {
-	server_fd:            linux.Fd,
-	server_addr:          linux.Sock_Addr_Un,
-	messages:             [dynamic]IPC_Message,
-	_clients:             sa.Small_Array(MAX_CLIENTS, linux.Poll_Fd),
-	_removed_clients:     sa.Small_Array(MAX_CLIENTS, linux.Fd),
-	_volume_subscribers:  sa.Small_Array(MAX_CLIENTS, linux.Fd),
-	_program_subscribers: sa.Small_Array(MAX_CLIENTS, linux.Fd),
-	_buf:                 [BUF_SIZE]u8,
-}
-
-IPC_Message :: struct {
-	msg_bytes: []u8,
-	sender:    linux.Fd,
-}
+SERVER_SOCKET :: "haychat"
 
 Message :: union {
 	Wake,
 	// Network process messages
-	NetworkPeerConnected, // Sent by network process when a new peer connects
-	NetworkPeerDisconnected, // Sent by network process when a peer disconnects
-	NetworkDataReceived, // Sent by network process when data is received from a peer
-	NetworkSendData, // Sent by main process to network process to send data to a peer
-	NetworkBroadcast, // Sent by main process to network process to broadcast data to all peers
-	NetworkDisconnectPeer, // Sent by main process to network process to disconnect a peer
+	NetworkPeerConnected,
+	NetworkPeerDisconnected,
+	NetworkDataReceived,
+	NetworkSendData,
+	NetworkBroadcast,
+	NetworkDisconnectPeer,
 	// Web admin messages
-	AdminQueryStatus, // Sent by web admin process to query server status
-	AdminQueryStatusResponse, // Sent by main process in response to AdminQueryStatus
-	AdminGetPeers, // Sent by web admin process to request list of connected peers
-	AdminGetPeersResponse, // Sent by main process in response to AdminGetPeers
-	AdminGetLogs, // Sent by web admin process to request recent logs
-	AdminGetLogsResponse, // Sent by main process in response to AdminGetLogs
+	AdminQueryStatus,
+	AdminQueryStatusResponse,
+	AdminGetPeers,
+	AdminGetPeersResponse,
+	AdminGetLogs,
+	AdminGetLogsResponse,
 	// Database messages
-	DatabaseQuery, // Sent by main process to database process to execute a query
-	DatabaseQueryResult, // Sent by database process in response to DatabaseQuery
-	DatabaseError, // Sent by database process if a query fails
+	DatabaseQuery,
+	DatabaseQueryResult,
+	DatabaseError,
 	// System messages
-	ProcessShutdown, // Graceful shutdown of the process, can be used for all processes
-	ProcessRestart, // Graceful restart of the process, can be used for all processes
-	ProcessError, // Generic error message with string payload
+	ProcessShutdown,
+	ProcessRestart,
+	ProcessError,
 }
 
 NetworkPeerConnected :: struct {
 	peerId:  u32,
-	address: ENet.Address, // Remote peer address (IP4 or IP6)
+	address: ENet.Address,
 }
 
 NetworkPeerDisconnected :: struct {
@@ -95,41 +72,38 @@ NetworkDisconnectPeer :: struct {
 	peerId: u32,
 }
 
-AdminQueryStatus :: struct {
-	// Empty - requests full server status
-}
+AdminQueryStatus :: struct {}
 
 AdminQueryStatusResponse :: struct {
-	uptime:         i64, // Seconds since startup
+	uptime:         i64,
 	connectedPeers: int,
 }
 
-AdminGetPeers :: struct {
-	// Empty - requests list of connected peers
-}
+AdminGetPeers :: struct {}
 
 AdminGetPeersResponse :: struct {
 	peers: []NetworkPeerInfo,
 }
 
-AdminGetLogs :: struct {
-	// Empty - requests recent server logs
-}
+AdminGetLogs :: struct {}
 
 AdminGetLogsResponse :: struct {
-	logs: []string, // Recent server logs
+	logs: []string,
 }
 
 DatabaseQuery :: struct {
-	query: string, // SQL query string
+	request_id: u64,
+	query:      string,
 }
 
 DatabaseQueryResult :: struct {
-	result: string, // Query result
+	request_id: u64,
+	result:     string,
 }
 
 DatabaseError :: struct {
-	error: string, // Error message
+	request_id: u64,
+	error:      string,
 }
 
 ProcessShutdown :: struct {}
@@ -137,172 +111,222 @@ ProcessShutdown :: struct {}
 ProcessRestart :: struct {}
 
 ProcessError :: struct {
-	error: string, // Error message
+	error: string,
 }
 
 Wake :: struct {}
 
-
-IPC_Server_init :: proc(ctx: ^IPC_Server_Context, socket_name: string) -> linux.Errno {
-	posix.signal(.SIGPIPE, IPC_Server__handle_sigpipe)
-
-	sock_err: linux.Errno
-	ctx.server_fd, sock_err = linux.socket(.UNIX, .STREAM, {.NONBLOCK}, .HOPOPT)
-	if sock_err != nil do log.panicf("could not create socket with error %v", sock_err)
-
-	ctx.server_addr.sun_family = .UNIX
-	copy(ctx.server_addr.sun_path[:], socket_name)
-
-	linux.unlink(strings.clone_to_cstring(socket_name))
-	linux.bind(ctx.server_fd, &ctx.server_addr) or_return
-	listen_err := linux.listen(ctx.server_fd, 1024)
-	sa.append(&ctx._clients, linux.Poll_Fd{fd = ctx.server_fd, events = {.IN}})
-	return listen_err
+IPC_Endpoint_Kind :: enum {
+	Unknown,
+	Main,
+	Network,
+	WebAdmin,
+	Database,
 }
 
-IPC_Client_init :: proc(ctx: ^IPC_Server_Context) -> (linux.Fd, linux.Errno) {
-	client_fd, sock_err := linux.socket(.UNIX, .STREAM, {.NONBLOCK}, .HOPOPT)
-	if sock_err != nil do return 0, sock_err
-
-	connect_err := linux.connect(client_fd, &ctx.server_addr)
-	if connect_err != nil do return 0, connect_err
-
-	return client_fd, nil
+IPC_Server_Context :: struct {
+	socket_name:   string,
+	endpoint_kind: IPC_Endpoint_Kind,
 }
 
-IPC_Server_poll :: proc(ctx: ^IPC_Server_Context) {
-	_, poll_err := linux.poll(sa.slice(&ctx._clients), 5)
-	if poll_err != nil do return
+IPC_Queue_Message :: struct {
+	sender: IPC_Endpoint_Kind,
+	msg:    Message,
+}
 
-	if sa.get(ctx._clients, 0).revents >= {.IN} {
-		client_fd, client_err := linux.accept(ctx.server_fd, &ctx.server_addr, {.NONBLOCK})
-		if client_err != nil do log.panicf("accept error %v", client_err)
-		log.debugf("client connected: socket %v", client_fd)
-		sa.append(&ctx._clients, linux.Poll_Fd{fd = client_fd, events = {.IN}})
+IPC_Endpoint :: struct {
+	fd:   linux.Fd,
+	kind: IPC_Endpoint_Kind,
+}
+
+IPC_State :: struct {
+	next_fd:        linux.Fd,
+	initialized:    bool,
+	state_mutex:    sync.Mutex,
+	endpoints:      [dynamic]IPC_Endpoint,
+	main_queue:     [dynamic]IPC_Queue_Message,
+	network_queue:  [dynamic]IPC_Queue_Message,
+	webadmin_queue: [dynamic]IPC_Queue_Message,
+	database_queue: [dynamic]IPC_Queue_Message,
+}
+
+ipcState := IPC_State {
+	next_fd = linux.Fd(10),
+}
+
+IPC__state_init :: proc() {
+	if ipcState.initialized {
+		return
 	}
+	ipcState.initialized = true
+	ipcState.endpoints = make([dynamic]IPC_Endpoint)
+	ipcState.main_queue = make([dynamic]IPC_Queue_Message)
+	ipcState.network_queue = make([dynamic]IPC_Queue_Message)
+	ipcState.webadmin_queue = make([dynamic]IPC_Queue_Message)
+	ipcState.database_queue = make([dynamic]IPC_Queue_Message)
+}
 
-	n_bytes: int
-	clear(&ctx.messages)
-	sa.clear(&ctx._removed_clients)
-	#reverse for &client, idx in sa.slice(&ctx._clients)[1:] {
-		if client.revents >= {.IN} {
-			bytes_read, read_err := linux.read(client.fd, ctx._buf[n_bytes:])
-			if read_err == .EWOULDBLOCK || read_err == .EAGAIN do continue
-			if read_err != nil {
-				log.debugf("client error %v disconnecting: socket %v", read_err, client.fd)
-				sa.unordered_remove(&ctx._clients, idx + 1)
-				sa.append(&ctx._removed_clients, client.fd)
-			} else if bytes_read == 0 {
-				log.debugf("client disconnected: socket %v", client.fd)
-				sa.unordered_remove(&ctx._clients, idx + 1)
-				sa.append(&ctx._removed_clients, client.fd)
-			} else if bytes_read == 1024 {
-				log.debugf("client error UNKNOWN disconnecting: socket %v", client.fd)
-				sa.unordered_remove(&ctx._clients, idx + 1)
-				sa.append(&ctx._removed_clients, client.fd)
-			} else {
-				log.debugf("read %v bytes: socket %v", bytes_read, client.fd)
-				msg_bytes := ctx._buf[n_bytes:n_bytes + bytes_read]
-				append(&ctx.messages, IPC_Message{msg_bytes, client.fd})
-				n_bytes += bytes_read
-			}
+IPC__endpoint_kind_from_socket :: proc(socket_name: string) -> IPC_Endpoint_Kind {
+	if strings.contains(socket_name, "network") {
+		return .Network
+	}
+	if strings.contains(socket_name, "webadmin") {
+		return .WebAdmin
+	}
+	if strings.contains(socket_name, "database") {
+		return .Database
+	}
+	if strings.contains(socket_name, "main") {
+		return .Main
+	}
+	return .Unknown
+}
+
+IPC__find_endpoint_kind :: proc(fd: linux.Fd) -> IPC_Endpoint_Kind {
+	for endpoint in ipcState.endpoints {
+		if endpoint.fd == fd {
+			return endpoint.kind
 		}
 	}
+	return .Unknown
+}
 
-	for fd in sa.slice(&ctx._removed_clients) {
-		// Example cleanup for a disconnected client - remove from subscription lists
-		// IPC_Server_remove_volume_subscriber(ctx, fd)
-		// IPC_Server_remove_program_subscriber(ctx, fd)
-		linux.close(fd)
+IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^[dynamic]IPC_Queue_Message {
+	switch kind {
+	case .Main:
+		return &ipcState.main_queue
+	case .Network:
+		return &ipcState.network_queue
+	case .WebAdmin:
+		return &ipcState.webadmin_queue
+	case .Database:
+		return &ipcState.database_queue
+	case .Unknown:
+		return nil
+	case:
+		return nil
 	}
 }
 
-IPC_Client_poll :: proc(client_fd: linux.Fd) -> (Message, linux.Errno) {
-	buf: [BUF_SIZE]u8
-	n_bytes, read_err := linux.read(client_fd, buf[:])
-	if read_err != nil do return Message{}, read_err
-	if n_bytes == 0 do return Message{}, linux.Errno(-1) // EOF
-
-	msg: Message
-	unmarshal_err := cbor.unmarshal(buf[:n_bytes], &msg)
-	if unmarshal_err != nil do return Message{}, linux.Errno(-1)
-
-	return msg, nil
-}
-
-IPC_Client_send :: proc(client_fd: linux.Fd, msg: Message) -> linux.Errno {
-	cbor_msg, _ := cbor.marshal(msg)
-	defer delete(cbor_msg)
-
-	bytes_sent, send_err := linux.send(client_fd, cbor_msg, {})
-	if send_err != nil {log.errorf("could not send with error %v: socket %v", send_err, client_fd)
-	} else {log.debugf("sent %v bytes from client: socket %v", bytes_sent, client_fd)}
-	return send_err
-}
-
-IPC_Server_send :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd, msg: Message) {
-	_, found := slice.linear_search(sa.slice(&ctx._removed_clients), client_fd)
-	if found {
-		log.debugf("attempted to send to removed socket: %v, skipping", client_fd)
-		return
+IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_Kind {
+	switch sender {
+	case .Main:
+		switch typeid_of(type_of(msg)) {
+		case NetworkSendData, NetworkBroadcast, NetworkDisconnectPeer:
+			return .Network
+		case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
+			return .WebAdmin
+		case DatabaseQuery:
+			return .Database
+		case ProcessShutdown, ProcessRestart:
+			return .Unknown
+		case:
+			return .Unknown
+		}
+	case .Network:
+		return .Main
+	case .WebAdmin:
+		return .Main
+	case .Database:
+		return .Main
+	case .Unknown:
+		return .Unknown
+	case:
+		return .Unknown
 	}
-
-	cbor_msg, _ := cbor.marshal(msg)
-	defer delete(cbor_msg)
-
-	bytes_sent, send_err := linux.send(client_fd, cbor_msg, {})
-	if send_err != nil {
-		log.errorf("could not send with error %v: socket %v", send_err, client_fd)
-		sa.append(&ctx._removed_clients, client_fd)
-		return
-	}
-
-	log.debugf("sent %v bytes from server: socket %v", bytes_sent, client_fd)
 }
 
-// Example subscription management functions for volume and program updates
+IPC_Server_init :: proc(ctx: ^IPC_Server_Context, socket_name: string) -> linux.Errno {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
 
-// IPC_Server_add_volume_subscriber :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd) {
-// 	_, found := slice.linear_search(sa.slice(&ctx._volume_subscribers), client_fd)
-// 	if !found do sa.append(&ctx._volume_subscribers, client_fd)
-// }
-
-// IPC_Server_remove_volume_subscriber :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd) {
-// 	idx, found := slice.linear_search(sa.slice(&ctx._volume_subscribers), client_fd)
-// 	if found {
-// 		log.debugf("removed volume subscriber: socket %v", client_fd)
-// 		sa.unordered_remove(&ctx._volume_subscribers, idx)
-// 	}
-// }
-
-// IPC_Server_add_program_subscriber :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd) {
-// 	_, found := slice.linear_search(sa.slice(&ctx._program_subscribers), client_fd)
-// 	if !found do sa.append(&ctx._program_subscribers, client_fd)
-// }
-
-// IPC_Server_remove_program_subscriber :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd) {
-// 	idx, found := slice.linear_search(sa.slice(&ctx._program_subscribers), client_fd)
-// 	if found {
-// 		log.debugf("removed program subscriber: socket %v", client_fd)
-// 		sa.unordered_remove(&ctx._program_subscribers, idx)
-// 	}
-// }
-
-// IPC_Server_notify_volume_subscription :: proc(ctx: ^IPC_Server_Context, volume: f32) {
-// 	msg := Volume{.Get, volume}
-// 	for client_fd in sa.slice(&ctx._volume_subscribers) do IPC_Server_send(ctx, client_fd, msg)
-// }
-
-IPC_Server_deinit :: proc(ctx: ^IPC_Server_Context) -> linux.Errno {
-	delete(ctx.messages)
-	for client in sa.slice(&ctx._clients) do linux.close(client.fd)
-	return linux.close(ctx.server_fd)
-}
-
-IPC_Client_deinit :: proc(ctx: ^IPC_Server_Context) -> linux.Errno {
-	// Client cleanup can be handled by the server when it detects a disconnect
+	IPC__state_init()
+	ctx.socket_name = socket_name
+	ctx.endpoint_kind = IPC__endpoint_kind_from_socket(socket_name)
 	return nil
 }
 
-// blank handler to ignore sigpipe
-IPC_Server__handle_sigpipe :: proc "c" (signum: posix.Signal) {}
+IPC_Main_init :: proc() -> linux.Fd {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	IPC__state_init()
+	fd := ipcState.next_fd
+	ipcState.next_fd += 1
+	append(&ipcState.endpoints, IPC_Endpoint{fd = fd, kind = .Main})
+	return fd
+}
+
+IPC_Client_init :: proc(ctx: ^IPC_Server_Context) -> (linux.Fd, linux.Errno) {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	IPC__state_init()
+	fd := ipcState.next_fd
+	ipcState.next_fd += 1
+	append(&ipcState.endpoints, IPC_Endpoint{fd = fd, kind = ctx.endpoint_kind})
+	return fd, nil
+}
+
+IPC_Server_poll :: proc(ctx: ^IPC_Server_Context) {
+	// In-memory coordinator does not need active polling for accept/read.
+}
+
+IPC_Client_poll :: proc(client_fd: linux.Fd) -> (Message, linux.Errno) {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	kind := IPC__find_endpoint_kind(client_fd)
+	queue := IPC__queue_for_kind(kind)
+	if queue == nil || len(queue^) == 0 {
+		return Message{}, linux.Errno(-1)
+	}
+
+	entry := queue^[0]
+	ordered_remove(queue, 0)
+	return entry.msg, nil
+}
+
+IPC_Client_send :: proc(client_fd: linux.Fd, msg: Message) -> linux.Errno {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	sender := IPC__find_endpoint_kind(client_fd)
+	destination := IPC__route_to(sender, msg)
+	if destination == .Unknown {
+		return linux.Errno(-1)
+	}
+
+	queue := IPC__queue_for_kind(destination)
+	if queue == nil {
+		return linux.Errno(-1)
+	}
+
+	append(queue, IPC_Queue_Message{sender = sender, msg = msg})
+	return nil
+}
+
+IPC_Server_send :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd, msg: Message) {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	destination := IPC__find_endpoint_kind(client_fd)
+	queue := IPC__queue_for_kind(destination)
+	if queue == nil {
+		return
+	}
+
+	sender := ctx.endpoint_kind
+	if sender == .Unknown {
+		sender = .Main
+	}
+	append(queue, IPC_Queue_Message{sender = sender, msg = msg})
+}
+
+IPC_Server_deinit :: proc(ctx: ^IPC_Server_Context) -> linux.Errno {
+	return nil
+}
+
+IPC_Client_deinit :: proc(ctx: ^IPC_Server_Context) -> linux.Errno {
+	return nil
+}

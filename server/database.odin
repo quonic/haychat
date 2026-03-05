@@ -12,6 +12,7 @@ import "shared:pg"
 databaseServerLoop :: proc(pm: ^ProcessManager) {
 
 	messageQueue: [dynamic]Message // Simple in-memory queue for incoming queries
+	currentRequestID: u64 = 0 // Track the request_id for the current query
 
 	fmt.println("[Database] Database server loop started (PID: %d)", os.get_pid())
 	// Connect to PostgreSQL database using shared:pg
@@ -27,7 +28,12 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	)
 	defer pg.finish(db_connection)
 
-	IPC_Client_init(&pm.config.databaseSocket)
+	databaseFd, ipcInitErr := IPC_Client_init(&pm.config.databaseSocket)
+	if ipcInitErr != nil {
+		fmt.eprintln("[Database] Failed to initialize coordinator endpoint:", ipcInitErr)
+		return
+	}
+	pm.config.databaseFd = databaseFd
 	defer IPC_Client_deinit(&pm.config.databaseSocket)
 
 	// Main event loop
@@ -70,7 +76,10 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 				fmt.eprintln("[Database] Query result:", result_status)
 				IPC_Client_send(
 					pm.config.databaseFd,
-					DatabaseQueryResult{result = fmt.aprintf("%s", result_status)},
+					DatabaseQueryResult {
+						request_id = currentRequestID,
+						result = fmt.aprintf("%s", result_status),
+					},
 				)
 				pg.clear(result)
 			}
@@ -79,12 +88,17 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 		for message in messageQueue {
 			switch typeid_of(type_of(message)) {
 			case DatabaseQuery:
-				query := message.(DatabaseQuery).query
+				dbQuery := message.(DatabaseQuery)
+				currentRequestID = dbQuery.request_id
+				query := dbQuery.query
 				fmt.eprintln("[Database] Received query:", query)
 				if pg.send_query(db_connection, strings.clone_to_cstring(query)) == false {
 					error_msg := fmt.aprintf("Failed to send query: %s", query)
 					fmt.eprintln("[Database]", error_msg)
-					IPC_Client_send(pm.config.databaseFd, DatabaseError{error = error_msg})
+					IPC_Client_send(
+						pm.config.databaseFd,
+						DatabaseError{request_id = currentRequestID, error = error_msg},
+					)
 					continue
 				}
 			case ProcessShutdown:

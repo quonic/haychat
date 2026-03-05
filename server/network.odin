@@ -123,9 +123,11 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 			switch msg in ipcMsg {
 			case NetworkSendData:
 				handleNetworkSendData(&peerManager, &threadPool, msg, enetHost)
+				delete(msg.data)
 
 			case NetworkBroadcast:
 				handleNetworkBroadcast(&peerManager, &threadPool, msg, enetHost)
+				delete(msg.data)
 
 			case NetworkDisconnectPeer:
 				handleNetworkDisconnectPeer(&peerManager, &threadPool, msg, enetHost)
@@ -231,10 +233,14 @@ handlePeerData :: proc(
 
 	// Send data to main process via IPC
 	packetData := packet.data[:packet.dataLength]
+	packetCopy := make([dynamic]u8, 0, len(packetData))
+	for b in packetData {
+		append(&packetCopy, b)
+	}
 	msg := NetworkDataReceived {
 		peerId  = peerId,
 		channel = channel,
-		data    = packetData,
+		data    = packetCopy[:],
 	}
 	IPC_Client_send(linux.Fd(ipcFd), msg)
 

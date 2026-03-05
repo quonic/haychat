@@ -11,6 +11,7 @@ import "core:time"
 // Configuration for the HayChat server
 ServerConfig :: struct {
 	// IPC socket paths for inter-process communication
+	mainFd:             linux.Fd,
 	networkSocket:      IPC_Server_Context,
 	networkFd:          linux.Fd,
 	networkSocketName:  string,
