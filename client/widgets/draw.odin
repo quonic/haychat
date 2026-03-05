@@ -224,7 +224,15 @@ drawRectangle :: proc(widget: ^Widget) {
 }
 
 drawRoundedRectangle :: proc(widget: ^Widget) {
-	raylib.DrawRectangleRounded(widget.rectangle, 0.2, 0, widget.backgroundColor)
+	roundness := widget.roundness
+	segments := widget.segments
+	if roundness <= 0 {
+		roundness = 1
+	}
+	if segments <= 0 {
+		segments = 16
+	}
+	raylib.DrawRectangleRounded(widget.rectangle, roundness, segments, widget.backgroundColor)
 }
 
 drawCircle :: proc(widget: ^Widget) {

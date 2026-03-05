@@ -26,6 +26,7 @@ Widget :: struct {
 	// Appearance
 	shape:                   Shape,
 	roundness:               f32,
+	segments:                i32, // For rounded rectangles and circles
 	foregroundColor:         raylib.Color,
 	backgroundColor:         raylib.Color,
 	enabled:                 bool,
