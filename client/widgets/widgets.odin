@@ -100,9 +100,9 @@ Anchor :: enum {
 
 SizingMode :: enum {
 	Fixed, // Widget maintains its specified size regardless of the parent container's size
-	Stretch, // Stretches to fill available space
-	StretchX, // Stretches horizontally to fill available space in the parent container
-	StretchY, // Stretches vertically to fill available space in the parent container
+	Fill, // Filles to fill available space
+	FillX, // Filles horizontally to fill available space in the parent container
+	FillY, // Filles vertically to fill available space in the parent container
 }
 
 Shape :: enum {

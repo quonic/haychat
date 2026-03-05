@@ -46,7 +46,7 @@ initUI :: proc() {
 		},
 		anchor = .TopLeft,
 		padding = 5,
-		SizingMode = .Stretch,
+		SizingMode = .Fill,
 		childrenLayout = .Vertical,
 		shape = .RoundedRectangle,
 		roundness = panelRoundness,
