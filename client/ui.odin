@@ -134,7 +134,7 @@ initUI :: proc() {
 		parent = serverPanelHandle,
 		visible = true,
 	}
-	widgets.addWidget(addServerButton)
+	addServerButtonHandle, _ := widgets.addWidget(addServerButton)
 
 	// Create user display label for status panel
 	userLabel := widgets.Widget {
@@ -150,7 +150,7 @@ initUI :: proc() {
 		parent = statusPanelHandle,
 		visible = true,
 	}
-	widgets.addWidget(userLabel)
+	userLabelHandle, _ := widgets.addWidget(userLabel)
 
 	// Create settings button for status panel
 	settingsButton := widgets.Widget {
@@ -174,14 +174,14 @@ initUI :: proc() {
 		parent = statusPanelHandle,
 		visible = true,
 	}
-	widgets.addWidget(settingsButton)
+	settingsButtonHandle, _ := widgets.addWidget(settingsButton)
 
 	statusSpacer := widgets.Widget {
 		type    = .FlexSpacer,
 		parent  = statusPanelHandle,
 		visible = true,
 	}
-	widgets.addWidget(statusSpacer)
+	statusSpacerHandle, _ := widgets.addWidget(statusSpacer)
 
 	friendsButton.parent = serverPanelHandle
 

@@ -124,13 +124,90 @@ anchorWidget :: proc(widget: ^Widget) {
 
 drawChildWidgets :: proc(parentHandle: Handle) {
 	if parent, ok := hm.get(&WidgetMap, parentHandle); ok {
-		it := hm.iterator_make(&WidgetMap)
-		for widget, handle in hm.iterate(&it) {
-			if widget.parent == parent.handle {
-				drawWidget(widget)
-				if len(widget.children) > 0 {
-					drawChildWidgets(widget.handle)
-				}
+		switch parent.childrenLayout {
+		case .Horizontal:
+			layoutHorizontal(parent)
+		case .Vertical:
+			layoutVertical(parent)
+		case .Overlay:
+			layoutOverlay(parent)
+		}
+	}
+}
+
+layoutHorizontal :: proc(parent: ^Widget) {
+	currentX := parent.rectangle.x + parent.padding
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = currentX
+			child.rectangle.y = parent.rectangle.y + parent.padding
+			child.rectangle.height = parent.rectangle.height - parent.padding * 2
+			if child.rectangle.width == 0 {
+				child.rectangle.width = child.fontSize * f32(len(child.text)) + child.padding * 2
+			}
+			currentX += child.rectangle.width + parent.childSpacing
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
+			}
+		}
+	}
+}
+
+layoutVertical :: proc(parent: ^Widget) {
+	currentY := parent.rectangle.y + parent.padding
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = parent.rectangle.x + parent.padding
+			child.rectangle.y = currentY
+			child.rectangle.width = parent.rectangle.width - parent.padding * 2
+			if child.rectangle.height == 0 {
+				child.rectangle.height = child.fontSize + child.padding * 2
+			}
+			currentY += child.rectangle.height + parent.childSpacing
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
+			}
+		}
+	}
+}
+
+layoutOverlay :: proc(parent: ^Widget) {
+	for childHandle in parent.children {
+		if child, ok := hm.get(&WidgetMap, childHandle); ok {
+			child.rectangle.x = parent.rectangle.x + parent.padding
+			child.rectangle.y = parent.rectangle.y + parent.padding
+			if child.rectangle.width == 0 {
+				child.rectangle.width = child.fontSize * f32(len(child.text)) + child.padding * 2
+			}
+			if child.rectangle.height == 0 {
+				child.rectangle.height = child.fontSize + child.padding * 2
+			}
+			switch child.shape {
+			case Shape.Rectangle:
+				drawRectangle(child)
+			case Shape.RoundedRectangle:
+				drawRoundedRectangle(child)
+			case Shape.Circle:
+				drawCircle(child)
+			}
+			if child.text != "" {
+				drawText(child)
 			}
 		}
 	}
@@ -179,20 +256,23 @@ drawText :: proc(widget: ^Widget) {
 		widget.textColor,
 	)
 
-	half_font_size: i32 = i32(widget.fontSize) / 2
-	x_offset: i32 = cast(i32)widget.rectangle.x + half_font_size
-	y_offset: i32 = cast(i32)widget.rectangle.y + half_font_size
+	if widget.type == .Text && widget.isInput && widget.focused {
 
-	cursor_x := x_offset + raylib.MeasureText(widget.text, i32(widget.fontSize))
-	_, after_cursor := cstringSplitAt(
-		widget.text,
-		cast(int)widget.cursorPosition,
-		context.temp_allocator,
-	)
-	cursor_x -= raylib.MeasureText(after_cursor, i32(widget.fontSize))
-	cursor_y := y_offset
+		half_font_size: i32 = i32(widget.fontSize) / 2
+		x_offset: i32 = cast(i32)widget.rectangle.x + half_font_size
+		y_offset: i32 = cast(i32)widget.rectangle.y + half_font_size
 
-	if widget.cursorBlinkTimer < 0.5 {
-		raylib.DrawRectangle(cursor_x, cursor_y, 2, i32(widget.fontSize), raylib.BLACK)
+		cursor_x := x_offset + raylib.MeasureText(widget.text, i32(widget.fontSize))
+		_, after_cursor := cstringSplitAt(
+			widget.text,
+			cast(int)widget.cursorPosition,
+			context.temp_allocator,
+		)
+		cursor_x -= raylib.MeasureText(after_cursor, i32(widget.fontSize))
+		cursor_y := y_offset
+
+		if widget.cursorBlinkTimer < 0.5 {
+			raylib.DrawRectangle(cursor_x, cursor_y, 2, i32(widget.fontSize), raylib.BLACK)
+		}
 	}
 }

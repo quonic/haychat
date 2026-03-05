@@ -134,11 +134,17 @@ addWidget :: proc(widget: Widget) -> (handle: Handle, err: runtime.Allocator_Err
 			return {}, runtime.Allocator_Error.Invalid_Argument
 		}
 	}
+
 	handle, err = hm.add(&WidgetMap, widget)
 	if err != nil {
 		fmt.eprintfln("[WIDGETS] Failed to create widget: %v", err)
 		return
 	}
+	if parentWidget, ok := hm.get(&WidgetMap, widget.parent); ok {
+		// Parent exists, add this widget to its children
+		append(&parentWidget.children, handle)
+	}
+
 	return
 }
 
