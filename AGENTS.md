@@ -20,16 +20,6 @@
 - `server/`: Contains the server-side code for the HayChat application, including the web service frontend, database management, and client-server communication.
 - `common/`: Contains shared code and definitions used by both the client and server.
 
-## Build & Commands
-
-`.` is the root directory of the project, and it can be replaced with the relative path to a specific subdirectory if you want to run the commands in that context.
-
-- Typecheck: `odin check .`
-- Test: `odin test .`
-- Build: `odin build .`
-- Run: `odin run .`
-- Documentation Generation: `odin doc .`
-
 ## Code Style
 
 - Tabs are used for indentation, with a standard indentation level of 4 spaces.
