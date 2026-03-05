@@ -16,7 +16,7 @@ Widget :: struct {
 	rectangle:               raylib.Rectangle,
 	anchor:                  Anchor,
 	padding:                 f32,
-	sideMode:                SideMode,
+	SizingMode:              SizingMode,
 	fontPath:                string,
 	fontSize:                f32,
 	fontSpacing:             f32,
@@ -26,7 +26,7 @@ Widget :: struct {
 	// Appearance
 	shape:                   Shape,
 	roundness:               f32,
-	forgroundColor:          raylib.Color,
+	foregroundColor:         raylib.Color,
 	backgroundColor:         raylib.Color,
 	enabled:                 bool,
 	visible:                 bool,
@@ -98,9 +98,11 @@ Anchor :: enum {
 	BottomRight,
 }
 
-SideMode :: enum {
-	Fixed,
-	Stretch,
+SizingMode :: enum {
+	Fixed, // Widget maintains its specified size regardless of the parent container's size
+	Stretch, // Stretches to fill available space
+	StretchX, // Stretches horizontally to fill available space in the parent container
+	StretchY, // Stretches vertically to fill available space in the parent container
 }
 
 Shape :: enum {
