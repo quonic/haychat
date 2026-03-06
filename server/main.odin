@@ -1,7 +1,8 @@
 package server
 
+import "../common"
+import "core:encoding/cbor"
 import "core:fmt"
-import "core:strings"
 import "core:thread"
 import "core:time"
 
@@ -41,20 +42,48 @@ MainRouterState_generateRequestID :: proc(state: ^MainRouterState) -> u64 {
 	return id
 }
 
-MainRouterState_makeBytesFromString :: proc(text: string) -> []u8 {
-	buf := make([dynamic]u8, 0, len(text))
-	for i in 0 ..< len(text) {
-		append(&buf, text[i])
-	}
-	return buf[:]
-}
-
-MainRouterState_sendPeerText :: proc(pm: ^ProcessManager, peerID: u32, text: string) {
-	payload := MainRouterState_makeBytesFromString(text)
+MainRouterState_sendPeerPacket :: proc(pm: ^ProcessManager, peerID: u32, packetBytes: []u8) {
 	IPC_Server_send(
 		&pm.config.networkSocket,
 		pm.config.networkFd,
-		NetworkSendData{peerId = peerID, channel = .Chat, data = payload},
+		NetworkSendData{peerId = peerID, channel = .Chat, data = packetBytes},
+	)
+}
+
+MainRouterState_sendPeerMessage :: proc(
+	pm: ^ProcessManager,
+	peerID: u32,
+	messageType: common.MessageType,
+	payload: any,
+) -> bool {
+	payloadBytes, payloadErr := cbor.marshal(payload)
+	if payloadErr != nil {
+		fmt.printf("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
+		return false
+	}
+	defer delete(payloadBytes)
+
+	packet := common.Packet {
+		messageType = messageType,
+		payload     = payloadBytes,
+	}
+
+	packetBytes, packetErr := cbor.marshal(packet)
+	if packetErr != nil {
+		fmt.printf("[Main] Failed to encode packet for peer %d: %v\n", peerID, packetErr)
+		return false
+	}
+
+	MainRouterState_sendPeerPacket(pm, peerID, packetBytes)
+	return true
+}
+
+MainRouterState_sendProtocolError :: proc(pm: ^ProcessManager, peerID: u32, message: string) {
+	MainRouterState_sendPeerMessage(
+		pm,
+		peerID,
+		common.MessageType.ServerProtocolError,
+		common.ProtocolErrorResponse{message = message},
 	)
 }
 
@@ -94,20 +123,38 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		return
 	}
 
-	payload := strings.trim(string(msg.data), " \t\r\n")
-	if len(payload) == 0 {
+	if len(msg.data) == 0 {
 		return
 	}
 
-	if strings.starts_with(payload, "AUTH ") {
-		nickname := strings.trim(payload[len("AUTH "):], " \t\r\n")
-		if len(nickname) == 0 {
-			MainRouterState_sendPeerText(pm, msg.peerId, "AUTH_ERROR missing nickname")
+	packet: common.Packet
+	packetErr := cbor.unmarshal(msg.data, &packet)
+	if packetErr != nil {
+		MainRouterState_sendProtocolError(pm, msg.peerId, "Invalid CBOR packet")
+		return
+	}
+	defer delete(packet.payload)
+
+	#partial switch packet.messageType {
+	case .ClientAuthLookup:
+		req: common.ClientAuthLookupRequest
+		err := cbor.unmarshal(packet.payload, &req)
+		if err != nil || len(req.nickname) == 0 {
+			MainRouterState_sendPeerMessage(
+				pm,
+				msg.peerId,
+				common.MessageType.ServerAuthLookupResponse,
+				common.ServerAuthLookupResult {
+					success = false,
+					message = "missing nickname",
+					result = "",
+				},
+			)
 			return
 		}
 
 		// NOTE: query generation is intentionally simple here and should be parameterized.
-		query := fmt.aprintf("SELECT id FROM users WHERE nickname = '%s' LIMIT 1;", nickname)
+		query := fmt.aprintf("SELECT id FROM users WHERE nickname = '%s' LIMIT 1;", req.nickname)
 		requestID := MainRouterState_generateRequestID(state)
 		MainRouterState_enqueueDatabaseRequest(state, requestID, msg.peerId, .Auth)
 		IPC_Server_send(
@@ -115,54 +162,62 @@ MainRouterState_handleNetworkDataReceived :: proc(
 			pm.config.databaseFd,
 			DatabaseQuery{request_id = requestID, query = query},
 		)
-		return
-	}
-
-	if strings.starts_with(payload, "STORE ") {
-		storePayload := payload[len("STORE "):]
-		delimiter := -1
-		for ch, idx in storePayload {
-			if ch == '|' {
-				delimiter = idx
-				break
-			}
-		}
-
-		if delimiter <= 0 || delimiter >= len(storePayload) - 1 {
-			MainRouterState_sendPeerText(
+	case .ClientStoreFile:
+		req: common.ClientStoreFileRequest
+		err := cbor.unmarshal(packet.payload, &req)
+		if err != nil || len(req.filename) == 0 || len(req.content) == 0 {
+			MainRouterState_sendPeerMessage(
 				pm,
 				msg.peerId,
-				"STORE_ERROR expected format STORE <filename>|<content>",
+				common.MessageType.ServerStoreFileResponse,
+				common.ServerStoreFileResult {
+					success = false,
+					message = "invalid payload",
+					hashedFilename = "",
+				},
 			)
 			return
 		}
 
-		filename := strings.trim(storePayload[:delimiter], " \t\r\n")
-		fileContent := storePayload[delimiter + 1:]
-		if len(filename) == 0 || len(fileContent) == 0 {
-			MainRouterState_sendPeerText(pm, msg.peerId, "STORE_ERROR invalid payload")
-			return
-		}
-
-		hashedName, ok := saveFile(
-			pm.config,
-			transmute([]u8)fileContent,
-			filename,
-			int(msg.peerId),
-		)
+		hashedName, ok := saveFile(pm.config, req.content, req.filename, int(msg.peerId))
 		if !ok {
-			MainRouterState_sendPeerText(pm, msg.peerId, "STORE_ERROR failed to save file")
+			MainRouterState_sendPeerMessage(
+				pm,
+				msg.peerId,
+				common.MessageType.ServerStoreFileResponse,
+				common.ServerStoreFileResult {
+					success = false,
+					message = "failed to save file",
+					hashedFilename = "",
+				},
+			)
 			return
 		}
 
-		MainRouterState_sendPeerText(pm, msg.peerId, fmt.aprintf("STORE_OK %s", hashedName))
-		return
-	}
-
-	if strings.starts_with(payload, "DB ") {
-		query := strings.trim(payload[len("DB "):], " \t\r\n")
-		if len(query) == 0 {
-			MainRouterState_sendPeerText(pm, msg.peerId, "DB_ERROR empty query")
+		MainRouterState_sendPeerMessage(
+			pm,
+			msg.peerId,
+			common.MessageType.ServerStoreFileResponse,
+			common.ServerStoreFileResult {
+				success = true,
+				message = "ok",
+				hashedFilename = hashedName,
+			},
+		)
+	case .ClientDatabaseQuery:
+		req: common.ClientDatabaseQueryRequest
+		err := cbor.unmarshal(packet.payload, &req)
+		if err != nil || len(req.query) == 0 {
+			MainRouterState_sendPeerMessage(
+				pm,
+				msg.peerId,
+				common.MessageType.ServerDatabaseQueryResponse,
+				common.ServerDatabaseQueryResult {
+					success = false,
+					message = "empty query",
+					result = "",
+				},
+			)
 			return
 		}
 
@@ -171,16 +226,11 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		IPC_Server_send(
 			&pm.config.databaseSocket,
 			pm.config.databaseFd,
-			DatabaseQuery{request_id = requestID, query = query},
+			DatabaseQuery{request_id = requestID, query = req.query},
 		)
-		return
+	case:
+		MainRouterState_sendProtocolError(pm, msg.peerId, "Unsupported message type")
 	}
-
-	MainRouterState_sendPeerText(
-		pm,
-		msg.peerId,
-		"UNKNOWN_COMMAND expected AUTH, STORE, or DB prefixes",
-	)
 }
 
 MainRouterState_handleDatabaseResult :: proc(
@@ -199,19 +249,35 @@ MainRouterState_handleDatabaseResult :: proc(
 	switch request.requestType {
 	case .Auth:
 		if isError {
-			MainRouterState_sendPeerText(pm, request.peerID, fmt.aprintf("AUTH_ERROR %s", result))
-		} else {
-			MainRouterState_sendPeerText(
+			MainRouterState_sendPeerMessage(
 				pm,
 				request.peerID,
-				fmt.aprintf("AUTH_DB_RESULT %s", result),
+				common.MessageType.ServerAuthLookupResponse,
+				common.ServerAuthLookupResult{success = false, message = result, result = ""},
+			)
+		} else {
+			MainRouterState_sendPeerMessage(
+				pm,
+				request.peerID,
+				common.MessageType.ServerAuthLookupResponse,
+				common.ServerAuthLookupResult{success = true, message = "ok", result = result},
 			)
 		}
 	case .Generic:
 		if isError {
-			MainRouterState_sendPeerText(pm, request.peerID, fmt.aprintf("DB_ERROR %s", result))
+			MainRouterState_sendPeerMessage(
+				pm,
+				request.peerID,
+				common.MessageType.ServerDatabaseQueryResponse,
+				common.ServerDatabaseQueryResult{success = false, message = result, result = ""},
+			)
 		} else {
-			MainRouterState_sendPeerText(pm, request.peerID, fmt.aprintf("DB_RESULT %s", result))
+			MainRouterState_sendPeerMessage(
+				pm,
+				request.peerID,
+				common.MessageType.ServerDatabaseQueryResponse,
+				common.ServerDatabaseQueryResult{success = true, message = "ok", result = result},
+			)
 		}
 	case:
 	}

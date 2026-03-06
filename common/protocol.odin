@@ -193,6 +193,15 @@ MessageType :: enum {
 	ServerShutdownServer, // Response to ClientShutdownServer, includes success/failure and reason if failure
 
 	// File Management
+	ClientAuthLookup, // Request auth lookup by nickname for threaded server routing
+	ServerAuthLookupResponse, // Response to ClientAuthLookup, includes success/failure and optional DB result
+	ClientStoreFile, // Request to store file content on server
+	ServerStoreFileResponse, // Response to ClientStoreFile, includes success/failure and stored hash name
+	ClientDatabaseQuery, // Request to execute a database query through main router
+	ServerDatabaseQueryResponse, // Response to ClientDatabaseQuery, includes success/failure and result text
+	ServerProtocolError, // Generic protocol decode/validation error response
+
+	// File Management
 	// Upload operations
 	ClientUploadFile, // Request to upload a file, includes file metadata (e.g. filename, size, etc.) and file data
 	ServerUploadFileResponse, // Response to ClientUploadFile, includes success/failure and reason if failure, and file URL if success
@@ -282,4 +291,39 @@ VideoData :: struct {
 	roomId:    int,
 	timestamp: datetime.DateTime, // Time the video data was sent, only used by the server when sending to clients, when receiving from clients this can be set to the current time on the server
 	data:      []u8, // Raw VP8-encoded video data
+}
+
+ClientAuthLookupRequest :: struct {
+	nickname: string,
+}
+
+ServerAuthLookupResult :: struct {
+	success: bool,
+	message: string,
+	result:  string,
+}
+
+ClientStoreFileRequest :: struct {
+	filename: string,
+	content:  []u8,
+}
+
+ServerStoreFileResult :: struct {
+	success:        bool,
+	message:        string,
+	hashedFilename: string,
+}
+
+ClientDatabaseQueryRequest :: struct {
+	query: string,
+}
+
+ServerDatabaseQueryResult :: struct {
+	success: bool,
+	message: string,
+	result:  string,
+}
+
+ProtocolErrorResponse :: struct {
+	message: string,
 }
