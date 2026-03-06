@@ -1,5 +1,9 @@
 # Agents.md
 
+## Project Status - Unreleased
+
+Making breaking changes to the project is currently allowed, but it is recommended to avoid doing so unless necessary. If breaking changes are made, they should be clearly documented in the commit messages and in the documentation to ensure that users are aware of the changes and can update their code accordingly. It is important to maintain clear communication with users and contributors about any changes that may affect them, especially if those changes are breaking.
+
 ## Odin Programming Language
 
 - Overview of the language: <https://odin-lang.org/docs/overview/>
