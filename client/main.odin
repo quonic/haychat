@@ -5,10 +5,15 @@ package client
 
 import "core:os"
 import "core:strings"
-import "vendor:raylib"
-import "widgets"
+import "shared:skald"
 
-TAKE_SCREENSHOT: bool : #config(TEST_SCREENSHOT, false) // Set to true to take a screenshot of the client window when it starts up, for testing purposes.
+State :: struct {}
+
+Msg :: union {}
+
+init :: proc() -> State {
+	return State{}
+}
 
 main :: proc() {
 
@@ -49,47 +54,16 @@ main :: proc() {
 		}
 	}
 
-	raylib.SetConfigFlags({.WINDOW_RESIZABLE})
-	raylib.InitWindow(800, 600, "HayChat Client")
-
-	when ODIN_OS == .Linux {
-		if lastMonitor >= 0 {
-			SetWindowToSpecificMonitor(lastMonitor, true)
-		} else {
-			SetWindowToPrimaryMonitor(true)
-		}
-	} else when ODIN_OS == .Windows {
-		// Let Windows handle the monitor selection automatically
-	}
-
-	// Initialize the UI widgets
-	initUI()
-
-	for !raylib.WindowShouldClose() {
-
-		updateUI()
-
-		raylib.BeginDrawing()
-		raylib.ClearBackground(raylib.BLACK)
-
-		drawUI()
-
-		raylib.EndDrawing()
-
-		when TAKE_SCREENSHOT {
-			if raylib.GetTime() > 1 { 	// Wait a few frames to ensure the window is fully rendered before taking the screenshot
-				raylib.TakeScreenshot("haychat_screenshot.png")
-				break
-			}
-		}
-	}
-
-	lastMonitor = raylib.GetCurrentMonitor()
-
-	// saveConfig()
-
-	raylib.CloseWindow()
-	widgets.close()
+	skald.run(
+		skald.App(State, Msg) {
+			title = "Skald — Variable-height Virtual List",
+			size = {680, 700},
+			theme = skald.theme_dark(),
+			init = init,
+			update = update,
+			view = view,
+		},
+	)
 }
 
 
