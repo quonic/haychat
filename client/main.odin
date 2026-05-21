@@ -61,8 +61,8 @@ main :: proc() {
 
 	skald.run(
 		skald.App(State, Msg) {
-			title = "Skald — Variable-height Virtual List",
-			size = {680, 700},
+			title = "HayChat",
+			size = {1920, 1080},
 			theme = skald.theme_dark(),
 			init = init,
 			update = update,
