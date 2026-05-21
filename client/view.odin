@@ -17,14 +17,29 @@ view_main_body :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		view_inner_body(s, ctx),
 		width = s.window_width,
 		cross_align = skald.Cross_Align.Stretch,
+		spacing = general_spacing,
 	)
 }
+
+server_width: f32 = 50
+friends_list_width: f32 = 200
+button_padding: f32 = 0
+general_spacing: f32 = 2
 
 view_server_selection :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
 	list: [dynamic]skald.View
-	width: f32 = 50
-	append(&list, skald.button(ctx, "DMs", Msg{kind = .SwitchToDMs}, width = width))
+
+	append(
+		&list,
+		skald.button(
+			ctx,
+			"DMs",
+			Msg{kind = .SwitchToDMs},
+			width = server_width,
+			padding = button_padding,
+		),
+	)
 	for server in s.config.servers {
 		append(
 			&list,
@@ -34,13 +49,14 @@ view_server_selection :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					server.short_name,
 					Msg{kind = .SwitchToServer, id = server.id},
-					width = width,
+					width = server_width,
+					padding = button_padding,
 				),
 				server.name, // Tooltip text shows the full server name when hovering over the button
 			),
 		)
 	}
-	return skald.col(..list[:])
+	return skald.col(..list[:], spacing = general_spacing)
 }
 
 view_inner_body :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
@@ -61,7 +77,7 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 			append(&server_list, skald.text(server.name, th.color.fg))
 		}
 	}
-	return skald.col(..server_list[:])
+	return skald.col(..server_list[:], spacing = general_spacing)
 }
 
 view_dms :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
@@ -79,6 +95,8 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					fmt.tprintf("🟢 %s", friend.display_name),
 					Msg{kind = .SwitchToFriendsList, id = friend.id},
+					width = friends_list_width,
+					padding = button_padding,
 				),
 			)
 		} else if friend.status == .Offline {
@@ -88,6 +106,8 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					fmt.tprintf("🔴 %s", friend.display_name),
 					Msg{kind = .SwitchToFriendsList, id = friend.id},
+					width = friends_list_width,
+					padding = button_padding,
 				),
 			)
 		} else if friend.status == .Idle {
@@ -97,6 +117,8 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					fmt.tprintf("🟡 %s", friend.display_name),
 					Msg{kind = .SwitchToFriendsList, id = friend.id},
+					width = friends_list_width,
+					padding = button_padding,
 				),
 			)
 		} else if friend.status == .DoNotDisturb {
@@ -106,6 +128,8 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					fmt.tprintf("⛔ %s", friend.display_name),
 					Msg{kind = .SwitchToFriendsList, id = friend.id},
+					width = friends_list_width,
+					padding = button_padding,
 				),
 			)
 		} else {
@@ -115,11 +139,13 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 					ctx,
 					fmt.tprintf("⚪ %s", friend.display_name),
 					Msg{kind = .SwitchToFriendsList, id = friend.id},
+					width = friends_list_width,
+					padding = button_padding,
 				),
 			)
 		}
 	}
-	return skald.col(..list[:])
+	return skald.col(..list[:], spacing = general_spacing)
 }
 
 dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
@@ -134,7 +160,7 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 			proc(v: string) -> Msg {return Draft_Changed(v)},
 			proc(v: string) -> Msg {return Send_Pressed(v)},
 			placeholder = "Message… (Enter to send, Shift+Enter for newline)",
-			width = s.window_width - 184,
+			width = s.window_width - server_width - friends_list_width,
 		),
 		main_align = skald.Main_Align.Start,
 		cross_align = skald.Cross_Align.Stretch,
