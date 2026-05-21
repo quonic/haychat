@@ -4,7 +4,6 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
-import "widgets"
 
 lastMonitor: i32 = -1 // Global variable to store the last monitor index used by the client, initialized to -1 (no monitor)
 
@@ -21,11 +20,10 @@ Config :: struct {
 }
 
 Server :: struct {
-	id:     int,
-	name:   string,
-	host:   string,
-	port:   i32,
-	handle: widgets.Handle, // Handle to the server button widget in the UI, used for event handling and updating the button state
+	id:   int,
+	name: string,
+	host: string,
+	port: i32,
 }
 
 Friend :: struct {
@@ -35,7 +33,7 @@ Friend :: struct {
 	servers:      [dynamic]int, // List of server IDs the friend is associated with, that the client can use to determine which server(s) to connect to when communicating with this friend
 }
 
-loadConfig :: proc() -> Config {
+loadConfig :: proc() -> (config: Config) {
 
 	when ODIN_OS == .Windows {
 		APP_DATA = os.get_env("APPDATA", context.allocator)
@@ -112,7 +110,7 @@ loadConfig :: proc() -> Config {
 		file, err := os.open(path, {.Read})
 		if err != nil {
 			fmt.println("[Error] Failed to open config file: ", err)
-			return
+			return {}
 		}
 		shouldLoad = true
 		defer os.close(file)
@@ -121,7 +119,7 @@ loadConfig :: proc() -> Config {
 		file, err := os.open(path, {.Create, .Read}, {.Read_User, .Write_User})
 		if err != nil {
 			fmt.println("[Error] Failed to create config file: ", err)
-			return
+			return {}
 		} else {
 			fmt.println("[Info] Created config file at: ", path)
 		}
@@ -131,7 +129,7 @@ loadConfig :: proc() -> Config {
 	data, err := os.read_entire_file_from_path(path, context.allocator)
 	if err != nil {
 		fmt.println("[Error] Failed to read config file: ", err)
-		return
+		return {}
 	}
 	if shouldLoad {
 		json.unmarshal(data, &config)
