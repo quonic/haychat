@@ -40,6 +40,8 @@ MsgKind :: enum {
 	UpdateWindowSize,
 	UpdateChatInputValue,
 	SendChatMessage,
+	New_Conversation,
+	AddFriend,
 }
 
 init :: proc() -> (init_state: State) {

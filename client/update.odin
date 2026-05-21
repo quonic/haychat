@@ -25,6 +25,22 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		append(&out.current_dm_chat, skald.span("\n", skald.theme_dark().color.fg)) // Add a newline after the message
 		append(&out.current_dm_chat, new_message)
 		out.dm_chat_draft = ""
+	case .New_Conversation:
+		// Handle starting a new conversation, such as by clearing the current DM chat and resetting the selected server or friend
+		out.current_dm_chat = [dynamic]skald.Text_Span{}
+		out.selected_server_id = 0
+		out.view_dms = true
+		out.view_friends_list = false
+	case .AddFriend:
+		// Handle adding a new friend, such as by showing a dialog to enter the friend's information and then updating the config with the new friend
+		// For this example, we'll just add a dummy friend to demonstrate the functionality
+		new_friend := Friend {
+			id           = len(s.config.friends) + 1,
+			display_name = "New Friend",
+			public_key   = "new_friend_public_key",
+			status       = .Online, // Set the new friend's status to Online for demonstration purposes
+		}
+		append(&out.config.friends, new_friend)
 	case .None:
 	}
 	return out, {}

@@ -87,6 +87,16 @@ view_dms :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
 	list: [dynamic]skald.View
+	append(
+		&list,
+		skald.button(
+			ctx,
+			"Add Friend",
+			Msg{kind = .AddFriend},
+			width = friends_list_width,
+			padding = button_padding,
+		),
+	)
 	for friend in s.config.friends {
 		if friend.status == .Online {
 			append(
