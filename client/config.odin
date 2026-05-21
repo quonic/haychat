@@ -5,8 +5,6 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 
-lastMonitor: i32 = -1 // Global variable to store the last monitor index used by the client, initialized to -1 (no monitor)
-
 XDG_CONFIG_HOME: string = "" // Global variable to store the XDG config home directory path, initialized to an empty string
 APP_DATA: string = "" // Global variable to store the APPDATA directory path on Windows, initialized to an empty string
 haychatFolder: string = "haychat" // Global variable to store the name of the haychat configuration folder, initialized to "haychat"
