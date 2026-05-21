@@ -7,18 +7,18 @@ import "core:os"
 import "core:strings"
 import "shared:skald"
 
-State :: struct {}
+State :: struct {
+	config:                         Config,
+	should_join_server_from_scheme: bool,
+	joinServerFromScheme_host:      string,
+	joinServerFromScheme_port:      string,
+}
 
 Msg :: union {}
 
-init :: proc() -> State {
-	return State{}
-}
-
-main :: proc() {
-
+init :: proc() -> (init_state: State) {
 	when ODIN_DEBUG {
-		config = Config {
+		init_state.config = {
 			private_key  = "test_private_key",
 			public_key   = "test_public_key",
 			display_name = "Test User",
@@ -37,22 +37,27 @@ main :: proc() {
 		}
 	} else {
 		registerSchemeHandler()
-		loadConfig()
+		init_state.config = loadConfig()
 	}
 
-	joinServerFromScheme_host: string
-	joinServerFromScheme_port: string
 	if len(os.args) > 1 {
 		for arg in os.args {
 			if strings.starts_with(arg, "haychat://") {
 				// Get the host and port
 				// schemeHandler() already handles checking if their is already an instance running and saving the URL data to a temporary file, so we just need to call it here to ensure that the URL data is processed correctly.
 				// If we are the first process to run, continue with the normal startup process and handle the URL data after the window is initialized. If we are a subsequent process, exit immediately to allow the existing instance to handle the URL data.
-				joinServerFromScheme_host, joinServerFromScheme_port = schemeHandler(arg)
+				init_state.joinServerFromScheme_host, init_state.joinServerFromScheme_port =
+					schemeHandler(arg)
+				init_state.should_join_server_from_scheme = true
 				// TODO: Implement logic to add the server to the config and connect to it after the window is initialized. This should include checking if the server is already in the config, and if not, adding it and then connecting to it.
 			}
 		}
 	}
+
+	return
+}
+
+main :: proc() {
 
 	skald.run(
 		skald.App(State, Msg) {

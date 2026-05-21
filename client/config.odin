@@ -35,9 +35,7 @@ Friend :: struct {
 	servers:      [dynamic]int, // List of server IDs the friend is associated with, that the client can use to determine which server(s) to connect to when communicating with this friend
 }
 
-config: Config // Global variable to store the client configuration
-
-loadConfig :: proc() {
+loadConfig :: proc() -> Config {
 
 	when ODIN_OS == .Windows {
 		APP_DATA = os.get_env("APPDATA", context.allocator)
@@ -138,10 +136,10 @@ loadConfig :: proc() {
 	if shouldLoad {
 		json.unmarshal(data, &config)
 	}
-
+	return config
 }
 
-saveConfig :: proc() {
+saveConfig :: proc(config: Config) {
 	if os.exists(getConfigPath()) {
 		file, file_err := os.open(getConfigPath(), {.Write})
 		if file_err != nil {
