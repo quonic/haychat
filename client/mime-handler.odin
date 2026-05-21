@@ -130,6 +130,7 @@ getJoinFilePath :: proc() -> string {
 
 // Function to handle incoming URLs with the "haychat" scheme. This function parses the URL, extracts relevant information, and saves it to a temporary file for the main application to read and act upon.
 schemeHandler :: proc(url: string) -> (host: string, port: string) {
+	// Example URL: haychat://example.com:1234/join
 	if strings.starts_with(url, "haychat://") {
 		// Extract the relevant part of the URL (e.g., the chat ID or action)
 		action := strings.trim_prefix(url, "haychat://")
@@ -150,9 +151,9 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 			fmt.println("Failed to match regex")
 			return
 		}
-		host = capture.groups[0]
-		port = capture.groups[1]
-		join := capture.groups[2] == "join"
+		host = capture.groups[1]
+		port = capture.groups[2]
+		join := capture.groups[3] == "join"
 		fmt.println("Parsed URL - Host:", host, "Port:", port, "Join:", join)
 		// Save the host and port to a temporary file
 		when ODIN_OS == .Windows {
