@@ -1,7 +1,7 @@
 #+feature dynamic-literals
 package client
 
-// HayChat Client - A simple chat client built in Odin using raylib for graphics and a custom protocol for communication with the server.
+// HayChat Client - A simple chat client built in Odin using skald for graphics and a custom protocol for communication with the server.
 
 import "core:os"
 import "core:strings"
