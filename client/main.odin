@@ -12,33 +12,52 @@ State :: struct {
 	should_join_server_from_scheme: bool,
 	joinServerFromScheme_host:      string,
 	joinServerFromScheme_port:      string,
+	view_dms:                       bool,
+	view_friends_list:              bool,
+	selected_server_id:             int, // ID of the currently selected server, used for determining which server's channels and friends to display in the UI
 }
 
-Msg :: union {}
+Msg :: struct {
+	kind: MsgKind,
+	id:   int, // Generic ID field
+}
+
+MsgKind :: enum {
+	None,
+	SwitchToDMs,
+	SwitchToServer,
+	SwitchToFriendsList,
+}
 
 init :: proc() -> (init_state: State) {
-	when ODIN_DEBUG {
-		init_state.config = {
-			private_key  = "test_private_key",
-			public_key   = "test_public_key",
-			display_name = "Test User",
-			servers      = {
-				Server{id = 1, name = "Test Server", host = "localhost", port = 12345},
-				Server{id = 2, name = "TestServer", host = "localhost", port = 12345},
+	// when ODIN_DEBUG {
+	init_state.config = {
+		private_key  = "test_private_key",
+		public_key   = "test_public_key",
+		display_name = "Test User",
+		servers      = {
+			Server{id = 1, name = "Test Server 1", host = "localhost", port = 12345},
+			Server{id = 2, name = "Test Server 2", host = "localhost", port = 12345},
+		},
+		friends      = {
+			Friend {
+				id = 1,
+				display_name = "Friend 1",
+				public_key = "friend1_public_key",
+				servers = {1},
 			},
-			friends      = {
-				Friend {
-					id = 1,
-					display_name = "Friend 1",
-					public_key = "friend1_public_key",
-					servers = {1},
-				},
+			Friend {
+				id = 2,
+				display_name = "Friend 2",
+				public_key = "friend2_public_key",
+				servers = {1, 2},
 			},
-		}
-	} else {
-		registerSchemeHandler()
-		init_state.config = loadConfig()
+		},
 	}
+	// } else {
+	// 	registerSchemeHandler()
+	// 	init_state.config = loadConfig()
+	// }
 
 	if len(os.args) > 1 {
 		for arg in os.args {
@@ -53,6 +72,8 @@ init :: proc() -> (init_state: State) {
 			}
 		}
 	}
+	init_state.view_dms = true
+	init_state.view_friends_list = true
 
 	return
 }

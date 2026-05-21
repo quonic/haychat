@@ -29,6 +29,7 @@ Friend :: struct {
 	display_name: string,
 	public_key:   string,
 	servers:      [dynamic]int, // List of server IDs the friend is associated with, that the client can use to determine which server(s) to connect to when communicating with this friend
+	online:       bool, // Flag to indicate whether the friend is currently online, used for displaying online/offline status in the UI and for determining whether to attempt to connect to the friend for direct messaging
 }
 
 loadConfig :: proc() -> (config: Config) {
