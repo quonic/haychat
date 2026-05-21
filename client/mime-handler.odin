@@ -157,18 +157,18 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 		fmt.println("Parsed URL - Host:", host, "Port:", port, "Join:", join)
 		// Save the host and port to a temporary file
 		when ODIN_OS == .Windows {
-			tempFilePath := getJoinFilePath()
-			writeErr := os.write_entire_file(tempFilePath, fmt.aprint(host, ":", port, "\n"))
+			path := getJoinFilePath()
+			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
 			if writeErr != nil {
 				fmt.println("Failed to write to temporary file:", writeErr)
-				return ""
+				return
 			}
-			fmt.println("Saved URL data to temporary file:", tempFilePath)
+			fmt.println("Saved URL data to temporary file:", path)
 		} else when ODIN_OS == .Linux {
 			path := getJoinFilePath()
-			tempFilePath := os.write_entire_file(path, fmt.aprint(host, ":", port, "\n"))
-			if tempFilePath != nil {
-				fmt.println("Failed to write to temporary file:", tempFilePath)
+			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
+			if writeErr != nil {
+				fmt.println("Failed to write to temporary file:", writeErr)
 				return
 			}
 			fmt.println("Saved URL data to temporary file:", path)
