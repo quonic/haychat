@@ -15,11 +15,21 @@ State :: struct {
 	view_dms:                       bool,
 	view_friends_list:              bool,
 	selected_server_id:             int, // ID of the currently selected server, used for determining which server's channels and friends to display in the UI
+	window_width:                   f32, // Current width of the application window, used for responsive UI layout
+	window_height:                  f32, // Current height of the application window, used for responsive UI layout
+	current_dm_chat:                [dynamic]skald.Text_Span,
+	dm_chat_draft:                  string,
 }
 
+Vector2 :: [2]f32
+iVector2 :: [2]i32
+
 Msg :: struct {
-	kind: MsgKind,
-	id:   int, // Generic ID field
+	kind:          MsgKind,
+	id:            int, // Generic ID field
+	vector:        Vector2, // Generic Vector2 field for passing position or size data in messages, such as for window resize events
+	window_vector: iVector2, // Generic iVector2 field for passing integer vector data in messages if needed
+	new_value:     string, // Generic string field for passing new values in messages, such as for updating the chat input value
 }
 
 MsgKind :: enum {
@@ -27,6 +37,9 @@ MsgKind :: enum {
 	SwitchToDMs,
 	SwitchToServer,
 	SwitchToFriendsList,
+	UpdateWindowSize,
+	UpdateChatInputValue,
+	SendChatMessage,
 }
 
 init :: proc() -> (init_state: State) {
@@ -36,8 +49,20 @@ init :: proc() -> (init_state: State) {
 		public_key   = "test_public_key",
 		display_name = "Test User",
 		servers      = {
-			Server{id = 1, name = "Test Server 1", host = "localhost", port = 12345},
-			Server{id = 2, name = "Test Server 2", host = "localhost", port = 12345},
+			Server {
+				id = 1,
+				name = "Test Server 1",
+				short_name = getShortServerName("Test Server 1"),
+				host = "localhost",
+				port = 12345,
+			},
+			Server {
+				id = 2,
+				name = "Test Server 2",
+				short_name = getShortServerName("Test Server 2"),
+				host = "localhost",
+				port = 12345,
+			},
 		},
 		friends      = {
 			Friend {
@@ -45,12 +70,28 @@ init :: proc() -> (init_state: State) {
 				display_name = "Friend 1",
 				public_key = "friend1_public_key",
 				servers = {1},
+				status = .Online,
 			},
 			Friend {
 				id = 2,
 				display_name = "Friend 2",
 				public_key = "friend2_public_key",
 				servers = {1, 2},
+				status = .Away,
+			},
+			Friend {
+				id = 3,
+				display_name = "Friend 3",
+				public_key = "friend3_public_key",
+				servers = {1, 2},
+				status = .Idle,
+			},
+			Friend {
+				id = 4,
+				display_name = "Friend 4",
+				public_key = "friend4_public_key",
+				servers = {1, 2},
+				status = .DoNotDisturb,
 			},
 		},
 	}
@@ -74,12 +115,14 @@ init :: proc() -> (init_state: State) {
 	}
 	init_state.view_dms = true
 	init_state.view_friends_list = true
+	init_state.window_width = 1920
+	init_state.window_height = 1080
+	append(&init_state.current_dm_chat, skald.span("Say Hi!", skald.theme_dark().color.fg_muted))
 
 	return
 }
 
 main :: proc() {
-
 	skald.run(
 		skald.App(State, Msg) {
 			title = "HayChat",
@@ -88,10 +131,14 @@ main :: proc() {
 			init = init,
 			update = update,
 			view = view,
+			on_window_state_change = changeWindowState,
 		},
 	)
 }
 
+changeWindowState :: proc(new_state: skald.Window_State) -> Msg {
+	return Msg{kind = .UpdateWindowSize, window_vector = new_state.size}
+}
 
 // Utility function to generate short server names
 getShortServerName :: proc(serverName: string) -> string {
