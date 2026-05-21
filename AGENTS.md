@@ -7,9 +7,9 @@ Making breaking changes to the project is currently allowed, but it is recommend
 ## Odin Programming Language
 
 - Overview of the language: <https://odin-lang.org/docs/overview/>
-- Base Library Collection: <https://pkg.odin-lang.org/base/>
-- Core Library Collection: <https://pkg.odin-lang.org/core/>
-- Vendor Library Collection: <https://pkg.odin-lang.org/vendor/>
+- Base Library Collection: `$HOME/Odin/base`
+- Core Library Collection: `$HOME/Odin/core`
+- Vendor Library Collection: `$HOME/Odin/vendor`
 - GitHub Repository: <https://github.com/odin-lang/Odin>
 
 ### Language Quirks
@@ -34,6 +34,11 @@ Making breaking changes to the project is currently allowed, but it is recommend
 - Constants should be in all uppercase letters with underscores separating words.
 - Comments should be used to explain the purpose of code blocks and any complex logic, and should be written in English.
 
+## Odin Checker
+
+- Checking for compile errors for server component: `odin check server`
+- Checking for compile errors for client component: `odin check client -target:windows_amd64` and `odin check client -target:linux_amd64` for Windows and Linux respectively.
+
 ## Testing
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
@@ -43,7 +48,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 
 ## Architecture
 
-- Client GUI: `vendor:raylib` bindings for raylib version 5.5
+- Client GUI: `shared:skald` an Elm-architecture GUI framework with immediate-mode-level performance, repository: <https://github.com/BuLEEto/Skald>
 - Server Web Service Frontend: `shared:odin-http`, repository: <https://github.com/laytan/odin-http>
 - Database: `shared:pg` bindings for libpq version 17, repository: <https://github.com/laytan/odin-postgresql>
 - Client-Server Communication: `vendor:ENet` bindings for enet
