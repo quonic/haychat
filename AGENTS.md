@@ -10,6 +10,8 @@ Making breaking changes to the project is currently allowed, but it is recommend
 - Base Library Collection: `$HOME/Odin/base`
 - Core Library Collection: `$HOME/Odin/core`
 - Vendor Library Collection: `$HOME/Odin/vendor`
+- Shared Library Collection: `$HOME/Odin/shared`
+- Skald GUI Framework: `$HOME/Odin/shared/skald`
 - GitHub Repository: <https://github.com/odin-lang/Odin>
 
 ### Language Quirks
