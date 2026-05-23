@@ -40,6 +40,7 @@ MsgKind :: enum {
 	UpdateWindowSize,
 	UpdateChatInputValue,
 	SendChatMessage,
+	RecieveChatMessage,
 	New_Conversation,
 	AddFriend,
 }

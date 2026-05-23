@@ -21,10 +21,20 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		out.dm_chat_draft = strings.clone(m.new_value)
 	case .SendChatMessage:
 		// Handle sending chat message, such as by appending the new message to the current DM chat and clearing the chat input draft
-		new_message := skald.span(m.new_value, skald.theme_dark().color.fg)
-		append(&out.current_dm_chat, skald.span("\n", skald.theme_dark().color.fg)) // Add a newline after the message
+		new_message := skald.span(
+			strings.concatenate({"\n", s.config.display_name, ": ", m.new_value}),
+			skald.theme_dark().color.fg,
+		)
 		append(&out.current_dm_chat, new_message)
 		out.dm_chat_draft = ""
+	case .RecieveChatMessage:
+		// Handle receiving a new chat message, such as by appending it to the current DM chat
+		sender_name := "Friend" // In a real implementation, you would look up the sender's name based on the message data
+		new_message := skald.span(
+			strings.concatenate({"\n", sender_name, ": ", m.new_value}),
+			skald.theme_dark().color.fg,
+		)
+		append(&out.current_dm_chat, new_message)
 	case .New_Conversation:
 		// Handle starting a new conversation, such as by clearing the current DM chat and resetting the selected server or friend
 		out.current_dm_chat = [dynamic]skald.Text_Span{}
