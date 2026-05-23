@@ -161,14 +161,18 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
 	return skald.col(
-		skald.rich_text(ctx, s.current_dm_chat[:], th.color.fg),
+		skald.scroll(
+			ctx,
+			{s.window_width - server_width - friends_list_width, s.window_height - 35},
+			skald.rich_text_selectable(ctx, s.current_dm_chat[:], th.color.fg), // Chat messages area
+		),
 		skald.flex(1, skald.spacer(0)),
 		skald.divider(ctx),
 		skald.chat_input(
 			ctx,
 			s.dm_chat_draft,
-			proc(v: string) -> Msg {return Draft_Changed(v)},
-			proc(v: string) -> Msg {return Send_Pressed(v)},
+			Draft_Changed,
+			Send_Pressed,
 			placeholder = "Message… (Enter to send, Shift+Enter for newline)",
 			width = s.window_width - server_width - friends_list_width,
 		),
@@ -176,6 +180,7 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		cross_align = skald.Cross_Align.Stretch,
 	)
 }
+
 Draft_Changed :: proc(new_value: string) -> Msg {
 	return Msg{kind = .UpdateChatInputValue, new_value = new_value}
 }
