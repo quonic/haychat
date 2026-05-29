@@ -1,5 +1,6 @@
 package client
 
+import "core:log"
 import "core:os"
 import "core:strings"
 import "shared:skald"

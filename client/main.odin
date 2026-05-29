@@ -3,6 +3,7 @@ package client
 
 // HayChat Client - A simple chat client built in Odin using skald for graphics and a custom protocol for communication with the server.
 
+import "core:log"
 import "core:os"
 import "core:strings"
 import "shared:skald"
@@ -126,6 +127,9 @@ init :: proc() -> (init_state: State) {
 }
 
 main :: proc() {
+
+	context.logger = log.create_console_logger()
+
 	skald.run(
 		skald.App(State, Msg) {
 			title = "HayChat",
