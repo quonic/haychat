@@ -16,7 +16,6 @@ Making breaking changes to the project is currently allowed, but it is recommend
 
 ### Language Quirks
 
-- When assigning values to a struct, Odin expects either names or no names, but not a mix of both. For example, `return Message{id = getNextMessageID(), type = type, timestamp = time.now(), pid = pid}` and `return Message{getNextMessageID(), type, time.now(), pid}` are valid, while `return Message{getNextMessageID(), type, timestamp = time.now(), pid}` is not valid and will result in a compilation error.
 - Variable declarations follow the syntax `name: type = value`, where the type can be inferred from the value if it is not explicitly specified. For example, `x := 5` will infer that `x` is of type `int`, while `y: f32 = 3.14` explicitly declares that `y` is of type `f32`. If the type cannot be inferred from the value, it must be explicitly declared to avoid compilation errors.
 - For getting the length of an array, use `len(array)`. This includes strings, slices, and other array-like structures.
 
