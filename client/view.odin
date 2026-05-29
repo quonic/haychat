@@ -1,6 +1,7 @@
 package client
 
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 import "shared:skald"
@@ -160,10 +161,16 @@ dm_list :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 
 dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
+	font_height := th.font.size_md
 	return skald.col(
 		skald.scroll(
 			ctx,
-			{s.window_width - server_width - friends_list_width, s.window_height - 35},
+			{
+				s.window_width - server_width - friends_list_width,
+				s.window_height -
+				35 -
+				f32(len(strings.split_lines(s.dm_chat_draft))) * font_height,
+			},
 			skald.rich_text_selectable(ctx, s.current_dm_chat[:], th.color.fg), // Chat messages area
 		),
 		skald.flex(1, skald.spacer(0)),
