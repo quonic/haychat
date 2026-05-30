@@ -181,7 +181,6 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 			Draft_Changed,
 			Send_Pressed,
 			placeholder = "Message… (Enter to send, Shift+Enter for newline)",
-			id = 483765,
 			width = s.window_width - server_width - friends_list_width,
 		),
 		main_align = skald.Main_Align.Start,
