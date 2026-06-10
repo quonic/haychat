@@ -31,11 +31,11 @@ Clone the repository and follow the instructions in the `client/` and `server/` 
 
 ## License
 
-HayChat is licensed under the GPLv3 License. See the [LICENSE](LICENSE) file for more information.
+HayChat is licensed under the AGPLv3 License. See the [LICENSE](LICENSE) file for more information.
 
-Remember that if you distribute modified versions of the software, you must also distribute the source code and include the same license. Always ensure you have the right to use and distribute any code you contribute under the GPLv3 License.
+Remember that if you distribute modified versions of the software, you must also distribute the source code and include the same license. Always ensure you have the right to use and distribute any code you contribute under the AGPLv3 License.
 
-If a user wants to use HayChat in a commercial product, they would need to comply with the GPLv3 License terms, which may require them to release their own source code under the same license if they distribute the software. This is a key aspect of the GPLv3 License, which promotes open-source software and ensures that derivative works also remain open-source.
+If a user wants to use HayChat in a commercial product, they would need to comply with the AGPLv3 License terms, which may require them to release their own source code under the same license if they distribute the software. This is a key aspect of the AGPLv3 License, which promotes open-source software and ensures that derivative works also remain open-source.
 
 ### Modding
 
