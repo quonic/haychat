@@ -71,13 +71,13 @@ getFileFromHash :: proc(
 	return data, true
 }
 
+// Utility function to generate a unique hashed filename based on the original filename, user ID, and current timestamp
+// This is just to hash a filename to ensure that there are no collisions in the storage directory. The original filename is not used for storage, but can be kept in a database for reference if needed.
 generateHashedFilename :: proc(originalFilename: string, userId: int) -> string {
-	// Create a unique string to hash using the original filename, user ID, and current timestamp
 	timestamp := time.now()
 	uniqueString := fmt.aprintf("%s_%d_%d", originalFilename, userId, timestamp)
 
-	// Generate a hash of the unique string to create a unique filename
-	hashedValue := hash.fnv64a(transmute([]u8)uniqueString)
+	hashedValue := hash.murmur64a(transmute([]u8)uniqueString)
 	hashedFilename := fmt.aprintf("%x", hashedValue)
 
 	return hashedFilename
