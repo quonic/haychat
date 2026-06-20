@@ -2,6 +2,7 @@ package client
 
 import "core:fmt"
 import "core:os"
+import filepath "core:path/filepath"
 import "core:strings"
 import "core:sys/linux"
 import "core:sys/windows"
@@ -119,13 +120,20 @@ registerSchemeHandlerLinux :: proc() {
 // Path to the temporary file
 getJoinFilePath :: proc() -> string {
 	when ODIN_OS == .Windows {
-		tempJoinFilePath := os.path.join(os.get_temp_dir(), "haychat_url_handler")
+		tempDir, tempDirErr := os.temp_directory(context.allocator)
+		if tempDirErr != nil {
+			return ""
+		}
+		tempJoinFilePath, joinErr := filepath.join({tempDir, "haychat_url_handler"})
+		if joinErr != nil {
+			return ""
+		}
+		return tempJoinFilePath
 	} else when ODIN_OS == .Linux {
-		tempJoinFilePath := "/tmp/haychat_url_handler"
+		return "/tmp/haychat_url_handler"
 	} else {
-		tempJoinFilePath := ""
+		return ""
 	}
-	return tempJoinFilePath
 }
 
 // Function to handle incoming URLs with the "haychat" scheme. This function parses the URL, extracts relevant information, and saves it to a temporary file for the main application to read and act upon.

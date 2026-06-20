@@ -82,6 +82,11 @@ TransportState :: struct {
 	nextReceiveSequence: u64,
 }
 
+HandshakeTranscript :: struct {
+	serverHelloProof: ServerHelloProof,
+	clientAuthProof:  ClientAuthProof,
+}
+
 generateRandomBytes :: proc(dst: []u8) -> bool {
 	if !crypto.HAS_RAND_BYTES {
 		return false
@@ -264,6 +269,144 @@ hashCborValue :: proc(value: any) -> (FingerprintBytes, bool) {
 	defer delete(encoded)
 
 	return hashBytes(encoded), true
+}
+
+buildServerHelloProof :: proc(
+	sessionID: SessionID,
+	clientIdentityPublicKey: IdentityPublicKeyBytes,
+	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	serverEphemeralPublicKey: KeyExchangePublicKeyBytes,
+) -> ServerHelloProof {
+	return ServerHelloProof {
+		version = protocolVersion,
+		sessionID = sessionID,
+		clientIdentityPublicKey = clientIdentityPublicKey,
+		clientEphemeralPublicKey = clientEphemeralPublicKey,
+		serverIdentityPublicKey = serverIdentityPublicKey,
+		serverEphemeralPublicKey = serverEphemeralPublicKey,
+	}
+}
+
+signServerHello :: proc(
+	privateKeyBytes: IdentityPrivateKeyBytes,
+	proof: ServerHelloProof,
+) -> (
+	ServerHello,
+	bool,
+) {
+	proofHash, hashOK := hashCborValue(proof)
+	if !hashOK {
+		return {}, false
+	}
+
+	signature, signOK := signBytes(privateKeyBytes, proofHash[:])
+	if !signOK {
+		return {}, false
+	}
+
+	return ServerHello {
+			version = proof.version,
+			sessionID = proof.sessionID,
+			serverIdentityPublicKey = proof.serverIdentityPublicKey,
+			serverEphemeralPublicKey = proof.serverEphemeralPublicKey,
+			signature = signature,
+		},
+		true
+}
+
+verifyServerHello :: proc(serverHello: ServerHello, clientHello: ClientHello) -> bool {
+	proof := buildServerHelloProof(
+		serverHello.sessionID,
+		clientHello.clientIdentityPublicKey,
+		clientHello.clientEphemeralPublicKey,
+		serverHello.serverIdentityPublicKey,
+		serverHello.serverEphemeralPublicKey,
+	)
+	proof.version = serverHello.version
+
+	proofHash, hashOK := hashCborValue(proof)
+	if !hashOK {
+		return false
+	}
+
+	return verifySignature(
+		serverHello.serverIdentityPublicKey,
+		proofHash[:],
+		serverHello.signature,
+	)
+}
+
+buildClientAuthProof :: proc(
+	sessionID: SessionID,
+	challenge: AuthChallengeBytes,
+	clientIdentityPublicKey: IdentityPublicKeyBytes,
+	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	serverEphemeralPublicKey: KeyExchangePublicKeyBytes,
+) -> ClientAuthProof {
+	return ClientAuthProof {
+		sessionID = sessionID,
+		challenge = challenge,
+		clientIdentityPublicKey = clientIdentityPublicKey,
+		clientEphemeralPublicKey = clientEphemeralPublicKey,
+		serverIdentityPublicKey = serverIdentityPublicKey,
+		serverEphemeralPublicKey = serverEphemeralPublicKey,
+	}
+}
+
+deriveHandshakeTranscriptHash :: proc(
+	serverHelloProof: ServerHelloProof,
+	clientAuthProof: ClientAuthProof,
+) -> (
+	FingerprintBytes,
+	bool,
+) {
+	return hashCborValue(
+		HandshakeTranscript {
+			serverHelloProof = serverHelloProof,
+			clientAuthProof = clientAuthProof,
+		},
+	)
+}
+
+signClientAuthRequest :: proc(
+	privateKeyBytes: IdentityPrivateKeyBytes,
+	proof: ClientAuthProof,
+) -> (
+	ClientAuthRequestPayload,
+	bool,
+) {
+	proofHash, hashOK := hashCborValue(proof)
+	if !hashOK {
+		return {}, false
+	}
+
+	signature, signOK := signBytes(privateKeyBytes, proofHash[:])
+	if !signOK {
+		return {}, false
+	}
+
+	return ClientAuthRequestPayload{sessionID = proof.sessionID, signature = signature}, true
+}
+
+verifyClientAuthRequestSignature :: proc(
+	publicKeyBytes: IdentityPublicKeyBytes,
+	proof: ClientAuthProof,
+	request: ClientAuthRequestPayload,
+) -> bool {
+	requestSessionID := request.sessionID
+	proofSessionID := proof.sessionID
+	if !constantTimeEqual(requestSessionID[:], proofSessionID[:]) {
+		return false
+	}
+
+	proofHash, hashOK := hashCborValue(proof)
+	if !hashOK {
+		return false
+	}
+
+	return verifySignature(publicKeyBytes, proofHash[:], request.signature)
 }
 
 marshalCborValue :: proc(value: any) -> ([]u8, bool) {

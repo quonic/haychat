@@ -47,6 +47,7 @@ NetworkPeerSession_init :: proc() -> NetworkPeerSession {
 NetworkPeer :: struct {
 	id:             u32,
 	address:        ENet.Address,
+	enetPeer:       ^ENet.Peer,
 	activeChannels: [NetworkChannel]ChannelState, // Rich channel state per channel
 	session:        NetworkPeerSession,
 }

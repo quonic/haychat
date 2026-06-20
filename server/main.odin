@@ -1,13 +1,14 @@
 package server
 
 import "../common"
+import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
 import "core:thread"
 import "core:time"
 
 PendingDBRequestType :: enum {
-	Auth,
+	AuthLookup,
 	Generic,
 }
 
@@ -17,22 +18,60 @@ PendingDBRequest :: struct {
 	requestType: PendingDBRequestType,
 }
 
-MainRouterState :: struct {
-	connectedPeers:          map[u32]bool,
-	pendingDatabaseRequests: map[u64]PendingDBRequest,
-	nextRequestID:           u64,
+RouterPeerSession :: struct {
+	transport:                 common.TransportState,
+	clientIdentityPublicKey:   common.IdentityPublicKeyBytes,
+	clientEphemeralPublicKey:  common.KeyExchangePublicKeyBytes,
+	serverIdentityPublicKey:   common.IdentityPublicKeyBytes,
+	serverEphemeralPrivateKey: ecdh.Private_Key,
+	serverEphemeralPublicKey:  common.KeyExchangePublicKeyBytes,
+	sessionID:                 common.SessionID,
+	authChallenge:             common.AuthChallengeBytes,
+	allowRegistration:         bool,
+	isAuthenticated:           bool,
+	authenticatedUserID:       int,
 }
 
-MainRouterState_init :: proc() -> MainRouterState {
-	return MainRouterState {
-		connectedPeers = make(map[u32]bool),
-		pendingDatabaseRequests = make(map[u64]PendingDBRequest),
-		nextRequestID = 1,
+RouterPeerSession_init :: proc() -> RouterPeerSession {
+	return RouterPeerSession {
+		transport = common.TransportState_init(.Server),
+		allowRegistration = true,
 	}
+}
+
+MainRouterState :: struct {
+	connectedPeers:           map[u32]bool,
+	peerSessions:             map[u32]RouterPeerSession,
+	pendingDatabaseRequests:  map[u64]PendingDBRequest,
+	nextRequestID:            u64,
+	serverIdentityPrivateKey: common.IdentityPrivateKeyBytes,
+	serverIdentityPublicKey:  common.IdentityPublicKeyBytes,
+}
+
+MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
+	state := MainRouterState {
+		connectedPeers          = make(map[u32]bool),
+		peerSessions            = make(map[u32]RouterPeerSession),
+		pendingDatabaseRequests = make(map[u64]PendingDBRequest),
+		nextRequestID           = 1,
+	}
+
+	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
+	if privateKeyOK {
+		state.serverIdentityPrivateKey = serverPrivateKey
+	}
+
+	serverPublicKey, publicKeyOK := common.identityPublicKeyFromHex(pm.config.serverPublicKey)
+	if publicKeyOK {
+		state.serverIdentityPublicKey = serverPublicKey
+	}
+
+	return state
 }
 
 MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	delete(state.connectedPeers)
+	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
 }
 
@@ -40,6 +79,71 @@ MainRouterState_generateRequestID :: proc(state: ^MainRouterState) -> u64 {
 	id := state.nextRequestID
 	state.nextRequestID += 1
 	return id
+}
+
+MainRouterState_setPeerSession :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+	session: RouterPeerSession,
+) {
+	state.peerSessions[peerID] = session
+}
+
+MainRouterState_getPeerSession :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+) -> (
+	RouterPeerSession,
+	bool,
+) {
+	session, ok := state.peerSessions[peerID]
+	return session, ok
+}
+
+MainRouterState_ensurePeerSession :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+) -> RouterPeerSession {
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if ok {
+		return session
+	}
+
+	session = RouterPeerSession_init()
+	MainRouterState_setPeerSession(state, peerID, session)
+	return session
+}
+
+MainRouterState_removePeerSession :: proc(state: ^MainRouterState, peerID: u32) {
+	delete_key(&state.peerSessions, peerID)
+}
+
+MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, peerID: u32) {
+	requestIDs := make([dynamic]u64)
+	defer delete(requestIDs)
+
+	for requestID, request in state.pendingDatabaseRequests {
+		if request.peerID == peerID {
+			append(&requestIDs, requestID)
+		}
+	}
+
+	for requestID in requestIDs {
+		delete_key(&state.pendingDatabaseRequests, requestID)
+	}
+}
+
+MainRouterState_isPlaintextHandshakeResponse :: proc(messageType: common.MessageType) -> bool {
+	#partial switch messageType {
+	case .ServerHello,
+	     .ServerRegisterResponse,
+	     .ServerAuthChallenge,
+	     .ServerAuthSuccess,
+	     .ServerAuthFailure:
+		return true
+	case:
+		return false
+	}
 }
 
 MainRouterState_sendPeerPacket :: proc(pm: ^ProcessManager, peerID: u32, packetBytes: []u8) {
@@ -52,10 +156,41 @@ MainRouterState_sendPeerPacket :: proc(pm: ^ProcessManager, peerID: u32, packetB
 
 MainRouterState_sendPeerMessage :: proc(
 	pm: ^ProcessManager,
+	state: ^MainRouterState,
 	peerID: u32,
 	messageType: common.MessageType,
 	payload: any,
 ) -> bool {
+	if session, ok := MainRouterState_getPeerSession(state, peerID);
+	   ok &&
+	   session.isAuthenticated &&
+	   !MainRouterState_isPlaintextHandshakeResponse(messageType) {
+		sealedPacket, sealOK := common.sealPacketForSession(
+			&session.transport,
+			messageType,
+			payload,
+		)
+		if !sealOK {
+			fmt.printf("[Main] Failed to seal packet for peer %d\n", peerID)
+			return false
+		}
+		defer delete(sealedPacket.payload)
+
+		packetBytes, packetErr := cbor.marshal(sealedPacket)
+		if packetErr != nil {
+			fmt.printf(
+				"[Main] Failed to encode sealed packet for peer %d: %v\n",
+				peerID,
+				packetErr,
+			)
+			return false
+		}
+
+		MainRouterState_setPeerSession(state, peerID, session)
+		MainRouterState_sendPeerPacket(pm, peerID, packetBytes)
+		return true
+	}
+
 	payloadBytes, payloadErr := cbor.marshal(payload)
 	if payloadErr != nil {
 		fmt.printf("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
@@ -78,12 +213,56 @@ MainRouterState_sendPeerMessage :: proc(
 	return true
 }
 
-MainRouterState_sendProtocolError :: proc(pm: ^ProcessManager, peerID: u32, message: string) {
+MainRouterState_sendProtocolError :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	message: string,
+) {
 	MainRouterState_sendPeerMessage(
 		pm,
+		state,
 		peerID,
 		common.MessageType.ServerProtocolError,
 		common.ProtocolErrorResponse{message = message},
+	)
+}
+
+MainRouterState_disconnectPeer :: proc(pm: ^ProcessManager, peerID: u32) {
+	IPC_Server_send(
+		&pm.config.networkSocket,
+		pm.config.networkFd,
+		NetworkDisconnectPeer{peerId = peerID},
+	)
+}
+
+MainRouterState_protocolViolation :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	message: string,
+) {
+	MainRouterState_sendProtocolError(pm, state, peerID, message)
+	if session, ok := MainRouterState_getPeerSession(state, peerID); ok {
+		session.transport.phase = .Failed
+		session.isAuthenticated = false
+		MainRouterState_setPeerSession(state, peerID, session)
+	}
+	MainRouterState_disconnectPeer(pm, peerID)
+}
+
+MainRouterState_sendAuthFailure :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	message: string,
+) {
+	MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerAuthFailure,
+		common.ServerAuthFailurePayload{message = message},
 	)
 }
 
@@ -114,27 +293,245 @@ MainRouterState_getDatabaseRequest :: proc(
 	return request, ok
 }
 
-MainRouterState_handleNetworkDataReceived :: proc(
+MainRouterState_authenticatedUserIDFromIdentity :: proc(
+	publicKey: common.IdentityPublicKeyBytes,
+) -> int {
+	fingerprint := common.fingerprintIdentityPublicKey(publicKey)
+	value: u32
+	for i in 0 ..< 4 {
+		value |= u32(fingerprint[i]) << u32(8 * i)
+	}
+	if value == 0 {
+		return 1
+	}
+	return int(value)
+}
+
+MainRouterState_handleClientHello :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
-	msg: NetworkDataReceived,
+	peerID: u32,
+	payload: []u8,
 ) {
-	if msg.channel != .Chat {
+	req: common.ClientHello
+	if cbor.unmarshal(payload, &req) != nil {
+		MainRouterState_protocolViolation(pm, state, peerID, "Invalid ClientHello payload")
+		return
+	}
+	if req.version != common.protocolVersion {
+		MainRouterState_protocolViolation(pm, state, peerID, "Unsupported protocol version")
 		return
 	}
 
-	if len(msg.data) == 0 {
+	session := MainRouterState_ensurePeerSession(state, peerID)
+	if session.isAuthenticated ||
+	   (session.transport.phase != .Disconnected && session.transport.phase != .Failed) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientHello")
 		return
 	}
 
-	packet: common.Packet
-	packetErr := cbor.unmarshal(msg.data, &packet)
-	if packetErr != nil {
-		MainRouterState_sendProtocolError(pm, msg.peerId, "Invalid CBOR packet")
+	session = RouterPeerSession_init()
+	session.clientIdentityPublicKey = req.clientIdentityPublicKey
+	session.clientEphemeralPublicKey = req.clientEphemeralPublicKey
+	session.serverIdentityPublicKey = state.serverIdentityPublicKey
+
+	sessionID, sessionIDOK := common.generateSessionID()
+	if !sessionIDOK {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to generate session ID")
 		return
 	}
-	defer delete(packet.payload)
+	session.sessionID = sessionID
 
+	challenge, challengeOK := common.generateAuthChallenge()
+	if !challengeOK {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to generate auth challenge")
+		return
+	}
+	session.authChallenge = challenge
+
+	serverEphemeralPrivateKey, serverEphemeralPublicKey, ephemeralOK :=
+		common.generateKeyExchangeKeyPair()
+	if !ephemeralOK {
+		MainRouterState_protocolViolation(
+			pm,
+			state,
+			peerID,
+			"Failed to generate server key exchange",
+		)
+		return
+	}
+	session.serverEphemeralPrivateKey = serverEphemeralPrivateKey
+	session.serverEphemeralPublicKey = serverEphemeralPublicKey
+	session.transport.phase = .AwaitingChallengeResponse
+
+	serverHelloProof := common.buildServerHelloProof(
+		session.sessionID,
+		session.clientIdentityPublicKey,
+		session.clientEphemeralPublicKey,
+		session.serverIdentityPublicKey,
+		session.serverEphemeralPublicKey,
+	)
+	serverHello, serverHelloOK := common.signServerHello(
+		state.serverIdentityPrivateKey,
+		serverHelloProof,
+	)
+	if !serverHelloOK {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to sign ServerHello")
+		return
+	}
+
+	MainRouterState_setPeerSession(state, peerID, session)
+	if !MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerHello,
+		serverHello,
+	) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send ServerHello")
+		return
+	}
+
+	if !MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerAuthChallenge,
+		common.ServerAuthChallengePayload {
+			sessionID = session.sessionID,
+			challenge = session.authChallenge,
+		},
+	) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth challenge")
+		return
+	}
+}
+
+MainRouterState_handleClientRegister :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientRegisterRequest
+	if cbor.unmarshal(payload, &req) != nil {
+		MainRouterState_protocolViolation(pm, state, peerID, "Invalid ClientRegister payload")
+		return
+	}
+
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || session.transport.phase != .AwaitingChallengeResponse || !session.allowRegistration {
+		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientRegister")
+		return
+	}
+
+	MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerRegisterResponse,
+		common.ServerRegisterResponsePayload {
+			success = false,
+			message = "registration not implemented",
+			userId = 0,
+		},
+	)
+}
+
+MainRouterState_handleClientAuthRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientAuthRequestPayload
+	if cbor.unmarshal(payload, &req) != nil {
+		MainRouterState_protocolViolation(pm, state, peerID, "Invalid ClientAuthRequest payload")
+		return
+	}
+
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || session.transport.phase != .AwaitingChallengeResponse || session.isAuthenticated {
+		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientAuthRequest")
+		return
+	}
+
+	clientAuthProof := common.buildClientAuthProof(
+		session.sessionID,
+		session.authChallenge,
+		session.clientIdentityPublicKey,
+		session.clientEphemeralPublicKey,
+		session.serverIdentityPublicKey,
+		session.serverEphemeralPublicKey,
+	)
+	if !common.verifyClientAuthRequestSignature(
+		session.clientIdentityPublicKey,
+		clientAuthProof,
+		req,
+	) {
+		MainRouterState_sendAuthFailure(pm, state, peerID, "invalid client auth signature")
+		MainRouterState_disconnectPeer(pm, peerID)
+		return
+	}
+
+	sharedSecret, sharedSecretOK := common.deriveSharedSecret(
+		&session.serverEphemeralPrivateKey,
+		session.clientEphemeralPublicKey,
+	)
+	if !sharedSecretOK {
+		MainRouterState_sendAuthFailure(pm, state, peerID, "failed to derive transport keys")
+		MainRouterState_disconnectPeer(pm, peerID)
+		return
+	}
+
+	serverHelloProof := common.buildServerHelloProof(
+		session.sessionID,
+		session.clientIdentityPublicKey,
+		session.clientEphemeralPublicKey,
+		session.serverIdentityPublicKey,
+		session.serverEphemeralPublicKey,
+	)
+	transcriptHash, transcriptHashOK := common.deriveHandshakeTranscriptHash(
+		serverHelloProof,
+		clientAuthProof,
+	)
+	if !transcriptHashOK {
+		MainRouterState_sendAuthFailure(pm, state, peerID, "failed to derive transcript hash")
+		MainRouterState_disconnectPeer(pm, peerID)
+		return
+	}
+
+	keys := common.deriveDirectionalTransportKeys(
+		.Server,
+		session.sessionID,
+		sharedSecret,
+		transcriptHash,
+	)
+	common.TransportState_activate(&session.transport, session.sessionID, keys, .Trusted)
+	session.isAuthenticated = true
+	session.authenticatedUserID = MainRouterState_authenticatedUserIDFromIdentity(
+		session.clientIdentityPublicKey,
+	)
+	MainRouterState_setPeerSession(state, peerID, session)
+
+	if !MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerAuthSuccess,
+		common.ServerAuthSuccessPayload{userId = session.authenticatedUserID, message = "ok"},
+	) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
+		return
+	}
+}
+
+MainRouterState_dispatchApplicationPacket :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	packet: common.Packet,
+) {
 	#partial switch packet.messageType {
 	case .ClientAuthLookup:
 		req: common.ClientAuthLookupRequest
@@ -142,7 +539,8 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		if err != nil || len(req.nickname) == 0 {
 			MainRouterState_sendPeerMessage(
 				pm,
-				msg.peerId,
+				state,
+				peerID,
 				common.MessageType.ServerAuthLookupResponse,
 				common.ServerAuthLookupResult {
 					success = false,
@@ -153,10 +551,9 @@ MainRouterState_handleNetworkDataReceived :: proc(
 			return
 		}
 
-		// NOTE: query generation is intentionally simple here and should be parameterized.
 		query := fmt.aprintf("SELECT id FROM users WHERE nickname = '%s' LIMIT 1;", req.nickname)
 		requestID := MainRouterState_generateRequestID(state)
-		MainRouterState_enqueueDatabaseRequest(state, requestID, msg.peerId, .Auth)
+		MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, .AuthLookup)
 		IPC_Server_send(
 			&pm.config.databaseSocket,
 			pm.config.databaseFd,
@@ -168,7 +565,8 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		if err != nil || len(req.filename) == 0 || len(req.content) == 0 {
 			MainRouterState_sendPeerMessage(
 				pm,
-				msg.peerId,
+				state,
+				peerID,
 				common.MessageType.ServerStoreFileResponse,
 				common.ServerStoreFileResult {
 					success = false,
@@ -179,11 +577,12 @@ MainRouterState_handleNetworkDataReceived :: proc(
 			return
 		}
 
-		hashedName, ok := saveFile(pm.config, req.content, req.filename, int(msg.peerId))
+		hashedName, ok := saveFile(pm.config, req.content, req.filename, int(peerID))
 		if !ok {
 			MainRouterState_sendPeerMessage(
 				pm,
-				msg.peerId,
+				state,
+				peerID,
 				common.MessageType.ServerStoreFileResponse,
 				common.ServerStoreFileResult {
 					success = false,
@@ -196,7 +595,8 @@ MainRouterState_handleNetworkDataReceived :: proc(
 
 		MainRouterState_sendPeerMessage(
 			pm,
-			msg.peerId,
+			state,
+			peerID,
 			common.MessageType.ServerStoreFileResponse,
 			common.ServerStoreFileResult {
 				success = true,
@@ -210,7 +610,8 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		if err != nil || len(req.query) == 0 {
 			MainRouterState_sendPeerMessage(
 				pm,
-				msg.peerId,
+				state,
+				peerID,
 				common.MessageType.ServerDatabaseQueryResponse,
 				common.ServerDatabaseQueryResult {
 					success = false,
@@ -222,15 +623,106 @@ MainRouterState_handleNetworkDataReceived :: proc(
 		}
 
 		requestID := MainRouterState_generateRequestID(state)
-		MainRouterState_enqueueDatabaseRequest(state, requestID, msg.peerId, .Generic)
+		MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, .Generic)
 		IPC_Server_send(
 			&pm.config.databaseSocket,
 			pm.config.databaseFd,
 			DatabaseQuery{request_id = requestID, query = req.query},
 		)
 	case:
-		MainRouterState_sendProtocolError(pm, msg.peerId, "Unsupported message type")
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
+}
+
+MainRouterState_handleEncryptedPacket :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	packet: common.Packet,
+) {
+	if packet.messageType != .EncryptedPacket {
+		MainRouterState_protocolViolation(
+			pm,
+			state,
+			peerID,
+			"Encrypted transport required after authentication",
+		)
+		return
+	}
+
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated || !common.TransportState_canEncrypt(&session.transport) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Unauthenticated encrypted packet")
+		return
+	}
+
+	innerPacket, openOK := common.openPacketForSession(&session.transport, packet)
+	if !openOK {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to open encrypted packet")
+		return
+	}
+	defer delete(innerPacket.payload)
+
+	MainRouterState_setPeerSession(state, peerID, session)
+	MainRouterState_dispatchApplicationPacket(pm, state, peerID, innerPacket)
+}
+
+MainRouterState_handlePlaintextPacket :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	packet: common.Packet,
+) {
+	#partial switch packet.messageType {
+	case .ClientHello:
+		MainRouterState_handleClientHello(pm, state, peerID, packet.payload)
+	case .ClientRegister:
+		MainRouterState_handleClientRegister(pm, state, peerID, packet.payload)
+	case .ClientAuthRequest:
+		MainRouterState_handleClientAuthRequest(pm, state, peerID, packet.payload)
+	case .EncryptedPacket:
+		MainRouterState_protocolViolation(
+			pm,
+			state,
+			peerID,
+			"Encrypted packet received before auth",
+		)
+	case:
+		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected plaintext message")
+	}
+}
+
+MainRouterState_handleNetworkDataReceived :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	msg: NetworkDataReceived,
+) {
+	if msg.channel != .Chat {
+		return
+	}
+	if len(msg.data) == 0 {
+		return
+	}
+
+	packet: common.Packet
+	packetErr := cbor.unmarshal(msg.data, &packet)
+	if packetErr != nil {
+		MainRouterState_protocolViolation(pm, state, msg.peerId, "Invalid CBOR packet")
+		return
+	}
+	defer delete(packet.payload)
+
+	session, ok := MainRouterState_getPeerSession(state, msg.peerId)
+	if !ok {
+		session = MainRouterState_ensurePeerSession(state, msg.peerId)
+	}
+
+	if session.isAuthenticated {
+		MainRouterState_handleEncryptedPacket(pm, state, msg.peerId, packet)
+		return
+	}
+
+	MainRouterState_handlePlaintextPacket(pm, state, msg.peerId, packet)
 }
 
 MainRouterState_handleDatabaseResult :: proc(
@@ -247,10 +739,11 @@ MainRouterState_handleDatabaseResult :: proc(
 	}
 
 	switch request.requestType {
-	case .Auth:
+	case .AuthLookup:
 		if isError {
 			MainRouterState_sendPeerMessage(
 				pm,
+				state,
 				request.peerID,
 				common.MessageType.ServerAuthLookupResponse,
 				common.ServerAuthLookupResult{success = false, message = result, result = ""},
@@ -258,6 +751,7 @@ MainRouterState_handleDatabaseResult :: proc(
 		} else {
 			MainRouterState_sendPeerMessage(
 				pm,
+				state,
 				request.peerID,
 				common.MessageType.ServerAuthLookupResponse,
 				common.ServerAuthLookupResult{success = true, message = "ok", result = result},
@@ -267,6 +761,7 @@ MainRouterState_handleDatabaseResult :: proc(
 		if isError {
 			MainRouterState_sendPeerMessage(
 				pm,
+				state,
 				request.peerID,
 				common.MessageType.ServerDatabaseQueryResponse,
 				common.ServerDatabaseQueryResult{success = false, message = result, result = ""},
@@ -274,6 +769,7 @@ MainRouterState_handleDatabaseResult :: proc(
 		} else {
 			MainRouterState_sendPeerMessage(
 				pm,
+				state,
 				request.peerID,
 				common.MessageType.ServerDatabaseQueryResponse,
 				common.ServerDatabaseQueryResult{success = true, message = "ok", result = result},
@@ -337,7 +833,7 @@ main :: proc() {
 @(private)
 mainLoop :: proc(pm: ^ProcessManager) {
 	running := true
-	routerState := MainRouterState_init()
+	routerState := MainRouterState_init(pm)
 	defer MainRouterState_deinit(&routerState)
 
 	for running {
@@ -348,8 +844,11 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			// Commands are generated by main and should not loop back here.
 			case NetworkPeerConnected:
 				routerState.connectedPeers[m.peerId] = true
+				MainRouterState_setPeerSession(&routerState, m.peerId, RouterPeerSession_init())
 			case NetworkPeerDisconnected:
 				delete_key(&routerState.connectedPeers, m.peerId)
+				MainRouterState_removePendingRequestsForPeer(&routerState, m.peerId)
+				MainRouterState_removePeerSession(&routerState, m.peerId)
 			case NetworkDataReceived:
 				MainRouterState_handleNetworkDataReceived(pm, &routerState, m)
 				delete(m.data)

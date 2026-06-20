@@ -184,8 +184,9 @@ handlePeerConnect :: proc(
 
 	// Create peer info and add to manager
 	peer := NetworkPeer {
-		id      = peerId,
-		address = enetPeer.address,
+		id       = peerId,
+		address  = enetPeer.address,
+		enetPeer = enetPeer,
 	}
 
 	if !PeerManager_addPeer(peerManager, peer) {
@@ -288,32 +289,33 @@ handleNetworkSendData :: proc(
 	msg: NetworkSendData,
 	enetHost: ^ENet.Host,
 ) {
-	// Validate peer exists
+	_ = threadPool
+
 	if peer, ok := PeerManager_getPeer(peerManager, msg.peerId); ok {
-		// Create IPC command event for the worker thread handling this peer
-		cmdData := make([dynamic]u8)
-
-		// Copy packet data
-		for b in msg.data {
-			append(&cmdData, b)
+		if peer.enetPeer == nil {
+			log.warnf("[Network] Cannot send data to peer %d (missing ENet peer)", msg.peerId)
+			return
 		}
 
-		event := IPCCommandData {
-			peerId  = msg.peerId,
-			channel = msg.channel,
-			data    = cmdData,
+		dataPtr: rawptr = nil
+		if len(msg.data) > 0 {
+			dataPtr = rawptr(&msg.data[0])
+		}
+		packet := ENet.packet_create(dataPtr, uint(len(msg.data)), {ENet.PacketFlag.RELIABLE})
+		if packet == nil {
+			log.warnf("[Network] Failed to allocate ENet packet for peer %d", msg.peerId)
+			return
 		}
 
-		// Queue event to worker thread handling this peer
-		if !NetworkThreadPool_enqueueToPeer(threadPool, msg.peerId, event) {
-			log.warnf(
-				"[Network] Failed to queue send command for peer %d (queue full or peer not found)",
-				msg.peerId,
-			)
+		if ENet.peer_send(peer.enetPeer, u8(msg.channel), packet) != 0 {
+			ENet.packet_destroy(packet)
+			log.warnf("[Network] Failed to send data to peer %d", msg.peerId)
+			return
 		}
 
+		ENet.host_flush(enetHost)
 		log.debugf(
-			"[Network] Queued send data for peer %d on channel %v (%d bytes)",
+			"[Network] Sent data to peer %d on channel %v (%d bytes)",
 			msg.peerId,
 			msg.channel,
 			len(msg.data),
@@ -330,35 +332,34 @@ handleNetworkBroadcast :: proc(
 	msg: NetworkBroadcast,
 	enetHost: ^ENet.Host,
 ) {
-	// Get all peers with the active channel
+	_ = threadPool
 	allPeers := PeerManager_getAllPeers(peerManager)
 	defer delete(allPeers)
 
 	broadcastCount := 0
 	for peerId in allPeers {
 		if peer, ok := PeerManager_getPeer(peerManager, peerId); ok {
-			// Check if peer has this channel active
-			if peer.activeChannels[msg.channel].status == .Active {
-				// Create IPC command event
-				cmdData := make([dynamic]u8)
-				for b in msg.data {
-					append(&cmdData, b)
-				}
+			if peer.activeChannels[msg.channel].status != .Active || peer.enetPeer == nil {
+				continue
+			}
 
-				event := IPCCommandData {
-					peerId  = peerId,
-					channel = msg.channel,
-					data    = cmdData,
-				}
-
-				// Queue event to worker thread handling this peer
-				if NetworkThreadPool_enqueueToPeer(threadPool, peerId, event) {
-					broadcastCount += 1
-				}
+			dataPtr: rawptr = nil
+			if len(msg.data) > 0 {
+				dataPtr = rawptr(&msg.data[0])
+			}
+			packet := ENet.packet_create(dataPtr, uint(len(msg.data)), {ENet.PacketFlag.RELIABLE})
+			if packet == nil {
+				continue
+			}
+			if ENet.peer_send(peer.enetPeer, u8(msg.channel), packet) == 0 {
+				broadcastCount += 1
+			} else {
+				ENet.packet_destroy(packet)
 			}
 		}
 	}
 
+	ENet.host_flush(enetHost)
 	log.infof(
 		"[Network] Broadcast data on channel %v to %d peers (%d bytes per message)",
 		msg.channel,
@@ -374,17 +375,18 @@ handleNetworkDisconnectPeer :: proc(
 	msg: NetworkDisconnectPeer,
 	enetHost: ^ENet.Host,
 ) {
-	// Find and disconnect the peer's ENet connection
-	// This is more complex since we need to find the ENet peer from the peer ID
-	// For now, we just remove from manager and thread pool
-
-	if !PeerManager_removePeer(peerManager, msg.peerId) {
+	peer, ok := PeerManager_getPeer(peerManager, msg.peerId)
+	if !ok {
 		log.warnf("[Network] Cannot disconnect peer %d (peer not found)", msg.peerId)
 		return
 	}
 
-	// Remove from thread pool assignment
-	NetworkThreadPool_removePeer(threadPool, msg.peerId)
+	if peer.enetPeer != nil {
+		ENet.peer_disconnect_now(peer.enetPeer, 0)
+		ENet.host_flush(enetHost)
+	}
 
+	PeerManager_removePeer(peerManager, msg.peerId)
+	NetworkThreadPool_removePeer(threadPool, msg.peerId)
 	log.infof("[Network] Disconnected peer %d via IPC command", msg.peerId)
 }

@@ -10,6 +10,7 @@ import "shared:skald"
 
 State :: struct {
 	config:                         Config,
+	serverTransports:               [dynamic]ClientServerTransport,
 	should_join_server_from_scheme: bool,
 	joinServerFromScheme_host:      string,
 	joinServerFromScheme_port:      string,
@@ -118,6 +119,7 @@ init :: proc() -> (init_state: State) {
 			}
 		}
 	}
+	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
 	init_state.view_dms = true
 	init_state.view_friends_list = true
 	init_state.window_width = 1920
