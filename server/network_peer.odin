@@ -1,5 +1,7 @@
 package server
 
+import "../common"
+import "core:crypto/ecdh"
 import "core:log"
 import "core:net"
 import "core:sync"
@@ -21,11 +23,32 @@ ChannelStatus :: enum u8 {
 	Error,
 }
 
+NetworkPeerSession :: struct {
+	transport:                 common.TransportState,
+	clientIdentityPublicKey:   common.IdentityPublicKeyBytes,
+	clientEphemeralPublicKey:  common.KeyExchangePublicKeyBytes,
+	serverIdentityPublicKey:   common.IdentityPublicKeyBytes,
+	serverEphemeralPrivateKey: ecdh.Private_Key,
+	serverEphemeralPublicKey:  common.KeyExchangePublicKeyBytes,
+	sessionID:                 common.SessionID,
+	authChallenge:             common.AuthChallengeBytes,
+	allowRegistration:         bool,
+	isAuthenticated:           bool,
+}
+
+NetworkPeerSession_init :: proc() -> NetworkPeerSession {
+	return NetworkPeerSession {
+		transport = common.TransportState_init(.Server),
+		allowRegistration = true,
+	}
+}
+
 // NetworkPeer represents a connected client peer
 NetworkPeer :: struct {
 	id:             u32,
 	address:        ENet.Address,
 	activeChannels: [NetworkChannel]ChannelState, // Rich channel state per channel
+	session:        NetworkPeerSession,
 }
 
 // PeerManager manages all connected peers with thread-safe access
@@ -124,6 +147,35 @@ PeerManager_deinit :: proc(pm: ^PeerManager) {
 	defer sync.mutex_unlock(&pm.mutex)
 
 	delete(pm.peers)
+}
+
+PeerManager_getSession :: proc(pm: ^PeerManager, peerId: u32) -> (NetworkPeerSession, bool) {
+	sync.mutex_lock(&pm.mutex)
+	defer sync.mutex_unlock(&pm.mutex)
+
+	if peerId not_in pm.peers {
+		return {}, false
+	}
+
+	return pm.peers[peerId].session, true
+}
+
+PeerManager_setSession :: proc(
+	pm: ^PeerManager,
+	peerId: u32,
+	session: NetworkPeerSession,
+) -> bool {
+	sync.mutex_lock(&pm.mutex)
+	defer sync.mutex_unlock(&pm.mutex)
+
+	if peerId not_in pm.peers {
+		return false
+	}
+
+	peer := pm.peers[peerId]
+	peer.session = session
+	pm.peers[peerId] = peer
+	return true
 }
 
 // PeerManager_setChannelState sets the state of a channel for a peer

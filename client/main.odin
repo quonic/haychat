@@ -47,12 +47,14 @@ MsgKind :: enum {
 }
 
 init :: proc() -> (init_state: State) {
-	// when ODIN_DEBUG {
-	init_state.config = {
-		private_key  = "test_private_key",
-		public_key   = "test_public_key",
-		display_name = "Test User",
-		servers      = {
+	init_state.config = loadConfig()
+
+	if len(init_state.config.display_name) == 0 {
+		init_state.config.display_name = "Test User"
+	}
+
+	if len(init_state.config.servers) == 0 {
+		init_state.config.servers = {
 			Server {
 				id = 1,
 				name = "Test Server 1",
@@ -67,8 +69,11 @@ init :: proc() -> (init_state: State) {
 				host = "localhost",
 				port = 12345,
 			},
-		},
-		friends      = {
+		}
+	}
+
+	if len(init_state.config.friends) == 0 {
+		init_state.config.friends = {
 			Friend {
 				id = 1,
 				display_name = "Friend 1",
@@ -97,12 +102,8 @@ init :: proc() -> (init_state: State) {
 				servers = {1, 2},
 				status = .DoNotDisturb,
 			},
-		},
+		}
 	}
-	// } else {
-	// 	registerSchemeHandler()
-	// 	init_state.config = loadConfig()
-	// }
 
 	if len(os.args) > 1 {
 		for arg in os.args {

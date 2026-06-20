@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -18,11 +19,13 @@ Config :: struct {
 }
 
 Server :: struct {
-	id:         int,
-	name:       string,
-	short_name: string,
-	host:       string,
-	port:       i32,
+	id:                        int,
+	name:                      string,
+	short_name:                string,
+	host:                      string,
+	port:                      i32,
+	pinned_server_public_key:  string,
+	pinned_server_fingerprint: string,
 }
 
 Friend :: struct {
@@ -142,6 +145,11 @@ loadConfig :: proc() -> (config: Config) {
 	if shouldLoad {
 		json.unmarshal(data, &config)
 	}
+
+	if ensureIdentityKeys(&config) {
+		saveConfig(config)
+	}
+
 	return config
 }
 
@@ -191,4 +199,47 @@ getConfigPath :: proc() -> string {
 		)
 	}
 	return ""
+}
+
+ensureIdentityKeys :: proc(config: ^Config) -> bool {
+	if len(config.private_key) > 0 && len(config.public_key) > 0 {
+		_, privateKeyOK := common.identityPrivateKeyFromHex(config.private_key)
+		_, publicKeyOK := common.identityPublicKeyFromHex(config.public_key)
+		if privateKeyOK && publicKeyOK {
+			return false
+		}
+	}
+
+	privateKeyBytes, publicKeyBytes, ok := common.generateIdentityKeyPair()
+	if !ok {
+		fmt.println("[Error] Failed to generate client identity key pair")
+		return false
+	}
+
+	config.private_key = common.identityPrivateKeyToHex(privateKeyBytes)
+	config.public_key = common.identityPublicKeyToHex(publicKeyBytes)
+	return true
+}
+
+pinServerIdentity :: proc(
+	server: ^Server,
+	serverPublicKey: common.IdentityPublicKeyBytes,
+) -> common.PeerTrustState {
+	serverPublicKeyHex := common.identityPublicKeyToHex(serverPublicKey)
+	serverFingerprintHex := common.fingerprintToHex(
+		common.fingerprintIdentityPublicKey(serverPublicKey),
+	)
+
+	if len(server.pinned_server_public_key) == 0 && len(server.pinned_server_fingerprint) == 0 {
+		server.pinned_server_public_key = serverPublicKeyHex
+		server.pinned_server_fingerprint = serverFingerprintHex
+		return .Trusted
+	}
+
+	if server.pinned_server_public_key == serverPublicKeyHex &&
+	   server.pinned_server_fingerprint == serverFingerprintHex {
+		return .Trusted
+	}
+
+	return .Changed
 }
