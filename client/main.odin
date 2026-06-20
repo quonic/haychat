@@ -3,6 +3,7 @@ package client
 
 // HayChat Client - A simple chat client built in Odin using skald for graphics and a custom protocol for communication with the server.
 
+import "../common"
 import "core:log"
 import "core:os"
 import "core:strings"
@@ -58,52 +59,16 @@ init :: proc() -> (init_state: State) {
 		init_state.config.servers = {
 			Server {
 				id = 1,
-				name = "Test Server 1",
-				short_name = getShortServerName("Test Server 1"),
+				name = "Test Server",
+				short_name = getShortServerName("Test Server"),
 				host = "localhost",
-				port = 12345,
-			},
-			Server {
-				id = 2,
-				name = "Test Server 2",
-				short_name = getShortServerName("Test Server 2"),
-				host = "localhost",
-				port = 12345,
+				port = common.DEFAULT_SERVER_PORT,
 			},
 		}
 	}
 
 	if len(init_state.config.friends) == 0 {
-		init_state.config.friends = {
-			Friend {
-				id = 1,
-				display_name = "Friend 1",
-				public_key = "friend1_public_key",
-				servers = {1},
-				status = .Online,
-			},
-			Friend {
-				id = 2,
-				display_name = "Friend 2",
-				public_key = "friend2_public_key",
-				servers = {1, 2},
-				status = .Away,
-			},
-			Friend {
-				id = 3,
-				display_name = "Friend 3",
-				public_key = "friend3_public_key",
-				servers = {1, 2},
-				status = .Idle,
-			},
-			Friend {
-				id = 4,
-				display_name = "Friend 4",
-				public_key = "friend4_public_key",
-				servers = {1, 2},
-				status = .DoNotDisturb,
-			},
-		}
+		init_state.config.friends = {}
 	}
 
 	if len(os.args) > 1 {

@@ -104,7 +104,9 @@ loadConfig :: proc() -> ServerConfig {
 
 		// Network server
 		listenAddr             = getEnvOr("HAYCHAT_LISTEN_ADDR", "0.0.0.0"),
-		listenPort             = u16(parseOr("HAYCHAT_LISTEN_PORT", uint(6667))),
+		listenPort             = u16(
+			parseOr("HAYCHAT_LISTEN_PORT", uint(common.DEFAULT_SERVER_PORT)),
+		),
 		maxNetworkThreads      = parseOr("HAYCHAT_MAX_NETWORK_THREADS", int(4)),
 
 		// Server identity
