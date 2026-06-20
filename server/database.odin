@@ -41,7 +41,7 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	for running {
 		message, err := IPC_Client_poll(pm.config.databaseFd)
 		if err != nil {
-			fmt.eprintln("[Database] IPC poll error:", err)
+			fmt.eprintfln("[Database] IPC poll error: %s", err)
 			continue
 		}
 		if message != nil {
