@@ -25,8 +25,6 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	defer IPC_Client_deinit(&pm.config.webAdminSocket)
 
 	s: http.Server
-	// Register a graceful shutdown when the program receives a SIGINT signal.
-	http.server_shutdown_on_interrupt(&s)
 
 	// Set up routing
 	router: http.Router

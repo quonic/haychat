@@ -1,6 +1,8 @@
 package server
 
 import "../common"
+import "base:runtime"
+import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
@@ -31,6 +33,37 @@ RouterPeerSession :: struct {
 	allowRegistration:         bool,
 	isAuthenticated:           bool,
 	authenticatedUserID:       int,
+}
+
+@(private)
+mainInterruptContext: runtime.Context
+
+@(private)
+mainInterruptRequested := false
+
+@(private)
+mainInterruptShutdownQueued := false
+
+registerMainInterruptHandler :: proc() {
+	mainInterruptContext = context
+	libc.signal(libc.SIGINT, proc "cdecl" (_: i32) {
+		context = mainInterruptContext
+		mainInterruptRequested = true
+		log.info("[Main] SIGINT received, requesting shutdown")
+	})
+}
+
+queueMainInterruptShutdown :: proc(pm: ^ProcessManager) {
+	if mainInterruptShutdownQueued {
+		return
+	}
+
+	mainInterruptRequested = false
+	mainInterruptShutdownQueued = true
+	log.info("[Main] Received SIGINT (Ctrl+C), starting graceful shutdown")
+
+	mainContext := IPC_Server_Context{}
+	IPC_Server_send(&mainContext, pm.config.mainFd, ProcessShutdown{})
 }
 
 RouterPeerSession_init :: proc() -> RouterPeerSession {
@@ -804,6 +837,10 @@ main :: proc() {
 
 	pm := initProcessManager(&config)
 
+	mainInterruptRequested = false
+	mainInterruptShutdownQueued = false
+	registerMainInterruptHandler()
+
 	log.info("=== Starting Service Threads ===")
 	if !spawnProcess(&pm, .Network) {
 		log.info("[Network] Failed to start network service thread")
@@ -834,6 +871,10 @@ mainLoop :: proc(pm: ^ProcessManager) {
 	defer MainRouterState_deinit(&routerState)
 
 	for running {
+		if mainInterruptRequested {
+			queueMainInterruptShutdown(pm)
+		}
+
 		msg, err := IPC_Client_poll(pm.config.mainFd)
 		if err == nil {
 			switch m in msg {
