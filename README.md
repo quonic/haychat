@@ -2,7 +2,7 @@
 
 ![HayChat Logo](assets/icon.png)
 
-HayChat is a secure, real-time chat application built with the Odin programming language. It features end-to-end encryption, a responsive user interface, and a modular architecture for easy extensibility.
+HayChat is an alternative to Discord. It features end-to-end encryption, a responsive user interface, and a modular architecture for easy extensibility.
 
 > [!IMPORTANT]
 > HayChat is currently in early development and is not yet ready for production use. The project is open-source and welcomes contributions from the community.
