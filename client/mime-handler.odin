@@ -1,7 +1,6 @@
 package client
 
 import "core:fmt"
-import "core:log"
 import "core:os"
 import filepath "core:path/filepath"
 import "core:strings"
@@ -19,14 +18,14 @@ registerSchemeHandler :: proc() {
 	} else when ODIN_OS == .Windows {
 		registerSchemeHandlerWindows()
 	} else {
-		log.info("Unsupported operating system for URL scheme handler registration.")
+		fmt.println("Unsupported operating system for URL scheme handler registration.")
 	}
 }
 
 registerSchemeHandlerWindows :: proc() {
 	// Check if the reg command is available
 	if !os.exists("C:\\Windows\\System32\\reg.exe") {
-		log.info(
+		fmt.println(
 			"reg command not found. Please ensure you have the necessary permissions to modify the registry.",
 		)
 		return
@@ -35,7 +34,7 @@ registerSchemeHandlerWindows :: proc() {
 	// Register the custom URL scheme handler for "haychat"
 	currentExecutablePath, err_exe := os.get_executable_path(context.allocator)
 	if err_exe != nil {
-		log.info("Failed to get executable path:", err_exe)
+		fmt.println("Failed to get executable path:", err_exe)
 		return
 	}
 	cmd, concat_err := strings.concatenate(
@@ -50,28 +49,28 @@ registerSchemeHandlerWindows :: proc() {
 		},
 	)
 	if concat_err != nil {
-		log.info("Failed to concatenate command:", concat_err)
+		fmt.println("Failed to concatenate command:", concat_err)
 		return
 	}
 	if _, _, _, err := os.process_exec(os.Process_Desc{command = {cmd}}, context.allocator);
 	   err != nil {
-		log.info("Failed to register URL scheme handler:", err)
+		fmt.println("Failed to register URL scheme handler:", err)
 	} else {
-		log.info("Successfully registered URL scheme handler for haychat.")
+		fmt.println("Successfully registered URL scheme handler for haychat.")
 	}
 }
 
 registerSchemeHandlerLinux :: proc() {
 	// Check if the xdg-mime command is available
 	if !os.exists("/usr/bin/xdg-mime") {
-		log.info("xdg-mime command not found. Please ensure xdg-utils is installed.")
+		fmt.println("xdg-mime command not found. Please ensure xdg-utils is installed.")
 		return
 	}
 
 	// Get the current executable path to use as the handler for the haychat scheme
 	currentExecutablePath, err_exe := os.get_executable_path(context.allocator)
 	if err_exe != nil {
-		log.info("Failed to get executable path:", err_exe)
+		fmt.println("Failed to get executable path:", err_exe)
 		return
 	}
 
@@ -81,18 +80,18 @@ registerSchemeHandlerLinux :: proc() {
 			{"/bin/sh", "-c", "xdg-mime query default", xScheme},
 		)
 		if concat_err != nil {
-			log.info("Failed to concatenate command:", concat_err)
+			fmt.println("Failed to concatenate command:", concat_err)
 			return
 		}
 		if state, stdout, stderr, err := os.process_exec(
 			os.Process_Desc{command = {checkCmd}},
 			context.allocator,
 		); err != nil {
-			log.info("Failed to check existing URL scheme handler:", err)
+			fmt.println("Failed to check existing URL scheme handler:", err)
 		} else {
 			existingHandler := strings.trim(string(stdout), "\n")
 			if existingHandler == currentExecutablePath {
-				log.info(
+				fmt.println(
 					"Current executable is already registered as the handler for haychat scheme.",
 				)
 				return
@@ -106,14 +105,14 @@ registerSchemeHandlerLinux :: proc() {
 			{"/bin/sh", "-c", "xdg-mime", "default", currentExecutablePath, xScheme},
 		)
 		if concat_err != nil {
-			log.info("Failed to concatenate command:", concat_err)
+			fmt.println("Failed to concatenate command:", concat_err)
 			return
 		}
 		if _, _, _, err := os.process_exec(os.Process_Desc{command = {cmd}}, context.allocator);
 		   err != nil {
-			log.info("Failed to register URL scheme handler:", err)
+			fmt.println("Failed to register URL scheme handler:", err)
 		} else {
-			log.info("Successfully registered URL scheme handler for haychat.")
+			fmt.println("Successfully registered URL scheme handler for haychat.")
 		}
 	}
 }
@@ -143,7 +142,7 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 	if strings.starts_with(url, "haychat://") {
 		// Extract the relevant part of the URL (e.g., the chat ID or action)
 		action := strings.trim_prefix(url, "haychat://")
-		log.info("Received haychat URL with action:", action)
+		fmt.println("Received haychat URL with action:", action)
 
 		// We are looking for a patter like "example.com:1234/join"
 		regex_create_result, regex_err := regex.create(
@@ -151,40 +150,40 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 			{.Case_Insensitive, .Ignore_Whitespace},
 		)
 		if regex_err != nil {
-			log.info("Failed to create regex:", regex_err)
+			fmt.println("Failed to create regex:", regex_err)
 			return
 		}
 
 		capture, success := regex.match_and_allocate_capture(regex_create_result, action)
 		if !success {
-			log.info("Failed to match regex")
+			fmt.println("Failed to match regex")
 			return
 		}
 		host = capture.groups[1]
 		port = capture.groups[2]
 		join := capture.groups[3] == "join"
-		log.info("Parsed URL - Host:", host, "Port:", port, "Join:", join)
+		fmt.println("Parsed URL - Host:", host, "Port:", port, "Join:", join)
 		// Save the host and port to a temporary file
 		when ODIN_OS == .Windows {
 			path := getJoinFilePath()
 			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
 			if writeErr != nil {
-				log.info("Failed to write to temporary file:", writeErr)
+				fmt.println("Failed to write to temporary file:", writeErr)
 				return
 			}
-			log.info("Saved URL data to temporary file:", path)
+			fmt.println("Saved URL data to temporary file:", path)
 		} else when ODIN_OS == .Linux {
 			path := getJoinFilePath()
 			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
 			if writeErr != nil {
-				log.info("Failed to write to temporary file:", writeErr)
+				fmt.println("Failed to write to temporary file:", writeErr)
 				return
 			}
-			log.info("Saved URL data to temporary file:", path)
+			fmt.println("Saved URL data to temporary file:", path)
 			// Check if we are already running and if so, exit to allow the existing instance to handle the URL
 			pid_list, err := os.process_list(context.allocator)
 			if err != nil {
-				log.info("Failed to list processes:", err)
+				fmt.println("Failed to list processes:", err)
 				return
 			}
 			currentPid := os.get_pid()
@@ -199,7 +198,7 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 						continue
 					}
 					if pid != currentPid && process_info.command_line == "haychat" {
-						log.info(
+						fmt.println(
 							"Another instance of haychat is already running. Exiting to allow it to handle the URL.",
 						)
 						os.exit(0)
@@ -207,11 +206,11 @@ schemeHandler :: proc(url: string) -> (host: string, port: string) {
 				}
 			}
 		} else {
-			log.info("Unsupported operating system for URL scheme handling.")
+			fmt.println("Unsupported operating system for URL scheme handling.")
 		}
 		return host, port
 	} else {
-		log.info("Received URL with unsupported scheme:", url)
+		fmt.println("Received URL with unsupported scheme:", url)
 		os.exit(1) // Exit with an error code for unsupported schemes
 	}
 }

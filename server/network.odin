@@ -1,7 +1,7 @@
 package server
 
 import "core:fmt"
-import "core:log"
+
 import "core:net"
 import "core:os"
 import "core:sys/linux"
@@ -15,11 +15,11 @@ NetworkPeerInfo :: struct {
 
 // networkServerLoop is the main entry point for the network server process
 networkServerLoop :: proc(pm: ^ProcessManager) {
-	log.info("[Network] Network server loop started (PID: %d)", os.get_pid())
+	fmt.println("[Network] Network server loop started (PID: %d)", os.get_pid())
 
 	// Initialize ENet
 	if ENet.initialize() != 0 {
-		log.fatalf("[Network] Failed to initialize ENet library")
+		fmt.eprint("[Network] Failed to initialize ENet library")
 		return
 	}
 	defer ENet.deinitialize()
@@ -39,23 +39,23 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 	)
 
 	if enetHost == nil {
-		log.fatalf("[Network] Failed to create ENet host on port %d", pm.config.listenPort)
+		fmt.eprintfln("[Network] Failed to create ENet host on port %d", pm.config.listenPort)
 		return
 	}
 	defer ENet.host_destroy(enetHost)
 
-	log.infof("[Network] ENet host listening on port %d", pm.config.listenPort)
+	fmt.printfln("[Network] ENet host listening on port %d", pm.config.listenPort)
 
 	// Initialize IPC client connection to main process
 	client_fd, ipc_err := IPC_Client_init(&pm.config.networkSocket)
 	if ipc_err != nil {
-		log.fatalf("[Network] Failed to connect to main process via IPC: %v", ipc_err)
+		fmt.eprintfln("[Network] Failed to connect to main process via IPC: %v", ipc_err)
 		return
 	}
 	pm.config.networkFd = client_fd
 	defer IPC_Client_deinit(&pm.config.networkSocket)
 
-	log.info("[Network] Connected to main process via IPC")
+	fmt.println("[Network] Connected to main process via IPC")
 
 	// Initialize peer manager
 	peerManager := PeerManager_init()
@@ -68,12 +68,12 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 		int(pm.config.networkFd),
 	)
 	if !NetworkThreadPool_spawn(&threadPool, pm.config.maxNetworkThreads) {
-		log.fatal("[Network] Failed to spawn worker threads")
+		fmt.eprint("[Network] Failed to spawn worker threads")
 		return
 	}
 	defer NetworkThreadPool_shutdown(&threadPool)
 
-	log.infof(
+	fmt.printfln(
 		"[Network] Network server initialized with %d worker threads",
 		pm.config.maxNetworkThreads,
 	)
@@ -133,11 +133,11 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 				handleNetworkDisconnectPeer(&peerManager, &threadPool, msg, enetHost)
 
 			case ProcessShutdown:
-				log.info("[Network] Received shutdown signal from main process")
+				fmt.println("[Network] Received shutdown signal from main process")
 				running = false
 
 			case ProcessRestart:
-				log.info("[Network] Received restart signal from main process")
+				fmt.println("[Network] Received restart signal from main process")
 				running = false
 
 			case Wake:
@@ -146,28 +146,28 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 
 			case NetworkPeerConnected, NetworkPeerDisconnected, NetworkDataReceived:
 				// These shouldn't be sent to network process
-				log.warn("[Network] Received unexpected message type from main process")
+				fmt.eprintfln("[Network] Received unexpected message type from main process")
 
 			case AdminQueryStatus, AdminQueryStatusResponse, AdminGetPeers, AdminGetPeersResponse:
 				// Admin messages not for network process
-				log.warn("[Network] Received admin message, ignoring")
+				fmt.eprintfln("[Network] Received admin message, ignoring")
 
 			case AdminGetLogs, AdminGetLogsResponse:
 				// Log messages not for network process
-				log.warn("[Network] Received log message, ignoring")
+				fmt.eprintfln("[Network] Received log message, ignoring")
 
 			case DatabaseQuery, DatabaseQueryResult, DatabaseError:
 				// Database messages not for network process
-				log.warn("[Network] Received database message, ignoring")
+				fmt.eprintfln("[Network] Received database message, ignoring")
 
 			case ProcessError:
 				// Process error message
-				log.errorf("[Network] Received process error: %v", msg)
+				fmt.eprintfln("[Network] Received process error: %v", msg)
 			}
 		}
 	}
 
-	log.info("[Network] Network server shutting down")
+	fmt.println("[Network] Network server shutting down")
 }
 
 // handlePeerConnect handles a new incoming peer connection
@@ -190,14 +190,14 @@ handlePeerConnect :: proc(
 	}
 
 	if !PeerManager_addPeer(peerManager, peer) {
-		log.warnf("[Network] Failed to add peer %d to manager", peerId)
+		fmt.eprintfln("[Network] Failed to add peer %d to manager", peerId)
 		ENet.peer_disconnect(enetPeer, 0)
 		return
 	}
 
 	// Assign peer to worker thread
 	if !NetworkThreadPool_assignPeer(threadPool, peerId) {
-		log.warnf("[Network] Failed to assign peer %d to worker thread", peerId)
+		fmt.eprintfln("[Network] Failed to assign peer %d to worker thread", peerId)
 		PeerManager_removePeer(peerManager, peerId)
 		ENet.peer_disconnect(enetPeer, 0)
 		return
@@ -209,7 +209,7 @@ handlePeerConnect :: proc(
 		address = enetPeer.address,
 	}
 	IPC_Client_send(linux.Fd(ipcFd), msg)
-	log.infof("[Network] New peer connected: ID=%d", peerId)
+	fmt.printfln("[Network] New peer connected: ID=%d", peerId)
 }
 
 // handlePeerData handles incoming data from a peer
@@ -223,7 +223,7 @@ handlePeerData :: proc(
 	peerId := u32(uintptr(enetPeer.data))
 
 	if peerId == 0 {
-		log.warn("[Network] Received data from peer with invalid ID")
+		fmt.eprintfln("[Network] Received data from peer with invalid ID")
 		ENet.packet_destroy(packet)
 		return
 	}
@@ -279,7 +279,7 @@ handlePeerDisconnect :: proc(
 		peerId = peerId,
 	}
 	IPC_Client_send(linux.Fd(ipcFd), msg)
-	log.infof("[Network] Peer disconnected: ID=%d", peerId)
+	fmt.printfln("[Network] Peer disconnected: ID=%d", peerId)
 }
 
 // handleNetworkSendData sends data to a specific peer
@@ -293,7 +293,7 @@ handleNetworkSendData :: proc(
 
 	if peer, ok := PeerManager_getPeer(peerManager, msg.peerId); ok {
 		if peer.enetPeer == nil {
-			log.warnf("[Network] Cannot send data to peer %d (missing ENet peer)", msg.peerId)
+			fmt.eprintfln("[Network] Cannot send data to peer %d (missing ENet peer)", msg.peerId)
 			return
 		}
 
@@ -303,25 +303,25 @@ handleNetworkSendData :: proc(
 		}
 		packet := ENet.packet_create(dataPtr, uint(len(msg.data)), {ENet.PacketFlag.RELIABLE})
 		if packet == nil {
-			log.warnf("[Network] Failed to allocate ENet packet for peer %d", msg.peerId)
+			fmt.eprintfln("[Network] Failed to allocate ENet packet for peer %d", msg.peerId)
 			return
 		}
 
 		if ENet.peer_send(peer.enetPeer, u8(msg.channel), packet) != 0 {
 			ENet.packet_destroy(packet)
-			log.warnf("[Network] Failed to send data to peer %d", msg.peerId)
+			fmt.eprintfln("[Network] Failed to send data to peer %d", msg.peerId)
 			return
 		}
 
 		ENet.host_flush(enetHost)
-		log.debugf(
+		fmt.printfln(
 			"[Network] Sent data to peer %d on channel %v (%d bytes)",
 			msg.peerId,
 			msg.channel,
 			len(msg.data),
 		)
 	} else {
-		log.warnf("[Network] Cannot send data to peer %d (peer not found)", msg.peerId)
+		fmt.eprintfln("[Network] Cannot send data to peer %d (peer not found)", msg.peerId)
 	}
 }
 
@@ -360,7 +360,7 @@ handleNetworkBroadcast :: proc(
 	}
 
 	ENet.host_flush(enetHost)
-	log.infof(
+	fmt.printfln(
 		"[Network] Broadcast data on channel %v to %d peers (%d bytes per message)",
 		msg.channel,
 		broadcastCount,
@@ -377,7 +377,7 @@ handleNetworkDisconnectPeer :: proc(
 ) {
 	peer, ok := PeerManager_getPeer(peerManager, msg.peerId)
 	if !ok {
-		log.warnf("[Network] Cannot disconnect peer %d (peer not found)", msg.peerId)
+		fmt.eprintfln("[Network] Cannot disconnect peer %d (peer not found)", msg.peerId)
 		return
 	}
 
@@ -388,5 +388,5 @@ handleNetworkDisconnectPeer :: proc(
 
 	PeerManager_removePeer(peerManager, msg.peerId)
 	NetworkThreadPool_removePeer(threadPool, msg.peerId)
-	log.infof("[Network] Disconnected peer %d via IPC command", msg.peerId)
+	fmt.printfln("[Network] Disconnected peer %d via IPC command", msg.peerId)
 }

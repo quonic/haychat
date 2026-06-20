@@ -3,7 +3,7 @@
 ```odin
 package main
 
-import "core:log"
+import "core:fmt"
 
 sum :: proc(a: int, b: int) -> int {
 	return a + b
@@ -12,7 +12,7 @@ sum :: proc(a: int, b: int) -> int {
 main :: proc() {
 	total := sum(2, 3)
 	for i := 0; i < total; i += 1 {
-		log.info(i)
+		fmt.println(i)
 	}
 }
 ```

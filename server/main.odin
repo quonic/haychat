@@ -6,7 +6,7 @@ import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
-import "core:log"
+
 import "core:thread"
 import "core:time"
 
@@ -49,7 +49,7 @@ registerMainInterruptHandler :: proc() {
 	libc.signal(libc.SIGINT, proc "cdecl" (_: i32) {
 		context = mainInterruptContext
 		mainInterruptRequested = true
-		log.info("[Main] SIGINT received, requesting shutdown")
+		fmt.println("[Main] SIGINT received, requesting shutdown")
 	})
 }
 
@@ -60,7 +60,7 @@ queueMainInterruptShutdown :: proc(pm: ^ProcessManager) {
 
 	mainInterruptRequested = false
 	mainInterruptShutdownQueued = true
-	log.info("[Main] Received SIGINT (Ctrl+C), starting graceful shutdown")
+	fmt.println("[Main] Received SIGINT (Ctrl+C), starting graceful shutdown")
 
 	mainContext := IPC_Server_Context{}
 	IPC_Server_send(&mainContext, pm.config.mainFd, ProcessShutdown{})
@@ -205,14 +205,18 @@ MainRouterState_sendPeerMessage :: proc(
 			payload,
 		)
 		if !sealOK {
-			log.infof("[Main] Failed to seal packet for peer %d\n", peerID)
+			fmt.printfln("[Main] Failed to seal packet for peer %d\n", peerID)
 			return false
 		}
 		defer delete(sealedPacket.payload)
 
 		packetBytes, packetErr := cbor.marshal(sealedPacket)
 		if packetErr != nil {
-			log.infof("[Main] Failed to encode sealed packet for peer %d: %v\n", peerID, packetErr)
+			fmt.printfln(
+				"[Main] Failed to encode sealed packet for peer %d: %v\n",
+				peerID,
+				packetErr,
+			)
 			return false
 		}
 
@@ -223,7 +227,7 @@ MainRouterState_sendPeerMessage :: proc(
 
 	payloadBytes, payloadErr := cbor.marshal(payload)
 	if payloadErr != nil {
-		log.infof("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
+		fmt.printfln("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
 		return false
 	}
 	defer delete(payloadBytes)
@@ -235,7 +239,7 @@ MainRouterState_sendPeerMessage :: proc(
 
 	packetBytes, packetErr := cbor.marshal(packet)
 	if packetErr != nil {
-		log.infof("[Main] Failed to encode packet for peer %d: %v\n", peerID, packetErr)
+		fmt.printfln("[Main] Failed to encode packet for peer %d: %v\n", peerID, packetErr)
 		return false
 	}
 
@@ -764,7 +768,7 @@ MainRouterState_handleDatabaseResult :: proc(
 ) {
 	request, ok := MainRouterState_getDatabaseRequest(state, requestID)
 	if !ok {
-		log.infof("[Main] Received database response for unknown request ID %d\n", requestID)
+		fmt.printfln("[Main] Received database response for unknown request ID %d\n", requestID)
 		return
 	}
 
@@ -811,20 +815,20 @@ MainRouterState_handleDatabaseResult :: proc(
 
 main :: proc() {
 
-	log.info("=== HayChat Server - Threaded Architecture ===")
-	log.info("")
+	fmt.println("=== HayChat Server - Threaded Architecture ===")
+	fmt.println("")
 
 	config := loadConfig()
-	log.info("Configuration loaded:")
-	log.infof("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
-	log.infof(
+	fmt.println("Configuration loaded:")
+	fmt.printfln("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
+	fmt.printfln(
 		"  Database: %s@%s:%d/%s",
 		config.databaseUser,
 		config.databaseURL,
 		config.databasePort,
 		config.databaseName,
 	)
-	log.infof(
+	fmt.printfln(
 		"  Max Restarts: %d (backoff: %v-%v)",
 		config.maxRestarts,
 		config.restartBackoffMin,
@@ -841,27 +845,27 @@ main :: proc() {
 	mainInterruptShutdownQueued = false
 	registerMainInterruptHandler()
 
-	log.info("=== Starting Service Threads ===")
+	fmt.println("=== Starting Service Threads ===")
 	if !spawnProcess(&pm, .Network) {
-		log.info("[Network] Failed to start network service thread")
+		fmt.println("[Network] Failed to start network service thread")
 		return
 	}
 	if !spawnProcess(&pm, .WebAdmin) {
-		log.info("[WebAdmin] Failed to start web admin service thread")
+		fmt.println("[WebAdmin] Failed to start web admin service thread")
 		return
 	}
 	if !spawnProcess(&pm, .Database) {
-		log.info("[Database] Failed to start database service thread")
+		fmt.println("[Database] Failed to start database service thread")
 		return
 	}
 
-	log.info("\n=== Server Running ===")
-	log.info("Main thread is supervising network, web admin, and database threads")
-	log.info()
+	fmt.println("\n=== Server Running ===")
+	fmt.println("Main thread is supervising network, web admin, and database threads")
+	fmt.println()
 
 	mainLoop(&pm)
 
-	log.info("\n=== Server Shutdown Complete ===")
+	fmt.println("\n=== Server Shutdown Complete ===")
 }
 
 @(private)
@@ -934,7 +938,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			case Wake:
 				IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, Wake{})
 			case ProcessError:
-				log.infof("[Main] Process error: %s\n", m.error)
+				fmt.printfln("[Main] Process error: %s\n", m.error)
 			case:
 			}
 		}

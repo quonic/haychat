@@ -2,7 +2,7 @@ package server
 
 import "../common"
 import "core:crypto/ecdh"
-import "core:log"
+import "core:fmt"
 import "core:net"
 import "core:sync"
 import "vendor:ENet"
@@ -81,7 +81,7 @@ PeerManager_addPeer :: proc(pm: ^PeerManager, peer: NetworkPeer) -> bool {
 	defer sync.mutex_unlock(&pm.mutex)
 
 	if peer.id in pm.peers {
-		log.warnf("Attempted to add duplicate peer ID: %d", peer.id)
+		fmt.eprintfln("Attempted to add duplicate peer ID: %d\n", peer.id)
 		return false
 	}
 

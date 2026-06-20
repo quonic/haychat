@@ -1,6 +1,6 @@
 package server
 
-import "core:log"
+import "core:fmt"
 import "core:slice"
 import "core:sync"
 import "core:thread"
@@ -111,7 +111,7 @@ NetworkThreadPool_spawn :: proc(pool: ^NetworkThreadPool, numThreads: int) -> bo
 		})
 
 		if threadHandle == nil {
-			log.errorf("[NetworkThreadPool] Failed to spawn worker thread %d", i)
+			fmt.eprintfln("[NetworkThreadPool] Failed to spawn worker thread %d", i)
 			WorkerEventQueue_deinit(&ctx.eventQueue)
 			delete(ctx.peerIds)
 			free(ctx)
@@ -122,13 +122,13 @@ NetworkThreadPool_spawn :: proc(pool: ^NetworkThreadPool, numThreads: int) -> bo
 		append(&pool.threads, ctx)
 	}
 
-	log.infof("[NetworkThreadPool] Spawned %d worker threads", numThreads)
+	fmt.printfln("[NetworkThreadPool] Spawned %d worker threads", numThreads)
 	return true
 }
 
 // networkThreadWorker is the main worker thread procedure
 networkThreadWorker :: proc(ctx: ^NetworkThreadContext) {
-	log.infof("[NetworkThread-%d] Worker thread started", ctx.id)
+	fmt.printfln("[NetworkThread-%d] Worker thread started", ctx.id)
 
 	// Main worker loop - process events from queue
 	for !ctx.shouldShutdown {
@@ -168,7 +168,7 @@ networkThreadWorker :: proc(ctx: ^NetworkThreadContext) {
 		}
 	}
 
-	log.infof("[NetworkThread-%d] Worker thread shutting down", ctx.id)
+	fmt.printfln("[NetworkThread-%d] Worker thread shutting down", ctx.id)
 }
 
 // handleWorkerENetEvent processes an ENet event for a peer
@@ -176,13 +176,13 @@ handleWorkerENetEvent :: proc(ctx: ^NetworkThreadContext, event: ENetEventData) 
 	// In this hybrid model, the main loop already handled the IPC send
 	// This handler could be extended for additional per-thread processing
 	// For now, mainly used for potential encryption/decryption logic
-	log.debugf("[NetworkThread-%d] ENet event for peer %d", ctx.id, event.peerId)
+	fmt.printfln("[NetworkThread-%d] ENet event for peer %d", ctx.id, event.peerId)
 }
 
 // handleWorkerIPCCommand processes an IPC command routed to this thread
 handleWorkerIPCCommand :: proc(ctx: ^NetworkThreadContext, cmd: IPCCommandData) {
 	// This would handle NetworkSendData/NetworkBroadcast routed to this thread's peers
-	log.debugf(
+	fmt.printfln(
 		"[NetworkThread-%d] IPC command for peer %d on channel %v",
 		ctx.id,
 		cmd.peerId,
@@ -197,7 +197,7 @@ handleWorkerChannelStateChange :: proc(
 	ctx: ^NetworkThreadContext,
 	change: ChannelStateChangeData,
 ) {
-	log.infof(
+	fmt.printfln(
 		"[NetworkThread-%d] Channel state change for peer %d: %v -> %v",
 		ctx.id,
 		change.peerId,
@@ -210,7 +210,7 @@ handleWorkerChannelStateChange :: proc(
 // NetworkThreadPool_assignPeer assigns a peer to the least-loaded thread
 NetworkThreadPool_assignPeer :: proc(pool: ^NetworkThreadPool, peerId: u32) -> bool {
 	if len(pool.threads) == 0 {
-		log.warn("[NetworkThreadPool] No worker threads available")
+		fmt.eprintfln("[NetworkThreadPool] No worker threads available")
 		return false
 	}
 
@@ -234,7 +234,7 @@ NetworkThreadPool_assignPeer :: proc(pool: ^NetworkThreadPool, peerId: u32) -> b
 	append(&leastLoadedThread.peerIds, peerId)
 	sync.mutex_unlock(&leastLoadedThread.peersMutex)
 
-	log.infof("[NetworkThreadPool] Assigned peer %d to thread %d", peerId, leastLoadedThread.id)
+	fmt.printfln("[NetworkThreadPool] Assigned peer %d to thread %d", peerId, leastLoadedThread.id)
 	return true
 }
 
@@ -247,7 +247,7 @@ NetworkThreadPool_removePeer :: proc(pool: ^NetworkThreadPool, peerId: u32) -> b
 		if found {
 			ordered_remove(&thread.peerIds, idx)
 			sync.mutex_unlock(&thread.peersMutex)
-			log.infof("[NetworkThreadPool] Removed peer %d from thread %d", peerId, thread.id)
+			fmt.printfln("[NetworkThreadPool] Removed peer %d from thread %d", peerId, thread.id)
 			return true
 		}
 		sync.mutex_unlock(&thread.peersMutex)
@@ -264,7 +264,7 @@ NetworkThreadPool_broadcast :: proc(
 	data: []u8,
 ) -> int {
 	if pool.peerManager == nil {
-		log.warn("[NetworkThreadPool] Cannot broadcast: peer manager not initialized")
+		fmt.eprintfln("[NetworkThreadPool] Cannot broadcast: peer manager not initialized")
 		return 0
 	}
 
@@ -296,7 +296,7 @@ NetworkThreadPool_broadcast :: proc(
 					broadcastCount += 1
 				} else {
 					// Queue full - log overflow and clean up allocated data
-					log.warnf(
+					fmt.eprintfln(
 						"[NetworkThreadPool] Broadcast queue full for peer %d on channel %v",
 						peerId,
 						channel,
@@ -307,7 +307,7 @@ NetworkThreadPool_broadcast :: proc(
 		}
 	}
 
-	log.infof(
+	fmt.printfln(
 		"[NetworkThreadPool] Broadcast queued to %d peers on channel %v (%d bytes)",
 		broadcastCount,
 		channel,
@@ -366,7 +366,7 @@ NetworkThreadPool_enqueueEventToThread :: proc(
 	event: WorkerEvent,
 ) -> bool {
 	if threadId < 0 || threadId >= len(pool.threads) {
-		log.warnf("[NetworkThreadPool] Invalid thread ID: %d", threadId)
+		fmt.eprintfln("[NetworkThreadPool] Invalid thread ID: %d", threadId)
 		return false
 	}
 
@@ -391,13 +391,13 @@ NetworkThreadPool_enqueueToPeer :: proc(
 		}
 	}
 
-	log.warnf("[NetworkThreadPool] Peer %d not found in any thread", peerId)
+	fmt.eprintfln("[NetworkThreadPool] Peer %d not found in any thread", peerId)
 	return false
 }
 
 // NetworkThreadPool_shutdown gracefully shuts down all worker threads
 NetworkThreadPool_shutdown :: proc(pool: ^NetworkThreadPool) {
-	log.info("[NetworkThreadPool] Initiating shutdown of worker threads")
+	fmt.println("[NetworkThreadPool] Initiating shutdown of worker threads")
 
 	// Signal all threads to shut down
 	for threadPtr in pool.threads {
@@ -419,7 +419,7 @@ NetworkThreadPool_shutdown :: proc(pool: ^NetworkThreadPool) {
 	}
 
 	delete(pool.threads)
-	log.info("[NetworkThreadPool] All worker threads shut down")
+	fmt.println("[NetworkThreadPool] All worker threads shut down")
 }
 
 // NetworkThreadPool_deinit cleans up the thread pool

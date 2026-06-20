@@ -1,7 +1,6 @@
 package server
 
 import "core:fmt"
-import "core:log"
 import "core:math/rand"
 import "core:sync"
 import "core:thread"
@@ -127,7 +126,7 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 		ProcessManager__serviceThreadEntry,
 	)
 	if threadHandle == nil {
-		log.infof("[Supervisor] Failed to start %v thread\n", procType)
+		fmt.printfln("[Supervisor] Failed to start %v thread\n", procType)
 		free(startData)
 		return false
 	}
@@ -139,7 +138,7 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 	procInfo.isRunning = true
 	sync.mutex_unlock(&pm.processMutex)
 
-	log.infof("[Supervisor] Started %v thread (ID: %d)\n", procType, threadID)
+	fmt.printfln("[Supervisor] Started %v thread (ID: %d)\n", procType, threadID)
 	return true
 }
 
@@ -156,7 +155,7 @@ restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) {
 	sync.mutex_unlock(&pm.processMutex)
 
 	if restartCount > pm.config.maxRestarts {
-		log.infof("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
+		fmt.printfln("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
 		return
 	}
 
@@ -167,7 +166,12 @@ restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) {
 	jitter := time.Duration(rand.float64() * f64(pm.config.restartBackoffMin))
 	backoff += jitter
 
-	log.infof("[Supervisor] Restarting %v in %v (attempt %d)\n", procType, backoff, restartCount)
+	fmt.printfln(
+		"[Supervisor] Restarting %v in %v (attempt %d)\n",
+		procType,
+		backoff,
+		restartCount,
+	)
 	time.sleep(backoff)
 
 	if !pm.shouldShutdown {
@@ -180,7 +184,7 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 	pm.shouldShutdown = true
 	sync.mutex_unlock(&pm.processMutex)
 
-	log.info("[Shutdown] Signaling service threads to stop...")
+	fmt.println("[Shutdown] Signaling service threads to stop...")
 	IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, ProcessShutdown{})
 	IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, ProcessShutdown{})
 	IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, ProcessShutdown{})
@@ -194,11 +198,11 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 			!pm.databaseProcess.isRunning
 		sync.mutex_unlock(&pm.processMutex)
 		if allStopped {
-			log.info("[Shutdown] All service threads exited")
+			fmt.println("[Shutdown] All service threads exited")
 			return
 		}
 		thread.yield()
 	}
 
-	log.info("[Shutdown] Timed out waiting for all service threads to stop")
+	fmt.println("[Shutdown] Timed out waiting for all service threads to stop")
 }

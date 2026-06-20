@@ -3,7 +3,6 @@ package server
 import "../common"
 import "core:encoding/json"
 import "core:fmt"
-import "core:log"
 import "core:mem"
 import "core:net"
 import "core:os"
@@ -189,7 +188,7 @@ ensureServerIdentityKeys :: proc(config: ^ServerConfig) {
 
 	privateKeyBytes, publicKeyBytes, ok := common.generateIdentityKeyPair()
 	if !ok {
-		log.info("[Error] Failed to generate server identity key pair")
+		fmt.println("[Error] Failed to generate server identity key pair")
 		return
 	}
 
@@ -237,13 +236,13 @@ saveServerIdentityFile :: proc(config: ServerConfig) {
 	}
 	jsonData, err := json.marshal(identityFile)
 	if err != nil {
-		log.info("[Error] Failed to marshal server identity file: ", err)
+		fmt.println("[Error] Failed to marshal server identity file: ", err)
 		return
 	}
 	defer delete(jsonData)
 
 	writeErr := os.write_entire_file_from_bytes(config.serverIdentityFilePath, jsonData)
 	if writeErr != nil {
-		log.info("[Warning] Failed to persist server identity file: ", writeErr)
+		fmt.println("[Warning] Failed to persist server identity file: ", writeErr)
 	}
 }
