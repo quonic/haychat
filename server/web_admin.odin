@@ -11,7 +11,7 @@ import http "shared:odin-http"
 pmWebAdmin: ^ProcessManager // Global pointer to process manager for web admin handlers
 
 webAdminServerLoop :: proc(pm: ^ProcessManager) {
-	fmt.println("[WebAdmin] Web admin server loop started (PID: %d)", os.get_pid())
+	fmt.printfln("[WebAdmin] Web admin server loop started (PID: %d)", os.get_pid())
 	pmWebAdmin = pm // Set global pointer so handlers can access process manager
 
 	webAdminFd, ipcInitErr := IPC_Client_init(&pm.config.webAdminSocket)
