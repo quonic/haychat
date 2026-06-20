@@ -816,7 +816,6 @@ MainRouterState_handleDatabaseResult :: proc(
 main :: proc() {
 
 	fmt.println("=== HayChat Server - Threaded Architecture ===")
-	fmt.println("")
 
 	config := loadConfig()
 	fmt.println("Configuration loaded:")
@@ -848,24 +847,29 @@ main :: proc() {
 	fmt.println("=== Starting Service Threads ===")
 	if !spawnProcess(&pm, .Network) {
 		fmt.println("[Network] Failed to start network service thread")
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
 		return
 	}
 	if !spawnProcess(&pm, .WebAdmin) {
 		fmt.println("[WebAdmin] Failed to start web admin service thread")
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
 		return
 	}
 	if !spawnProcess(&pm, .Database) {
 		fmt.println("[Database] Failed to start database service thread")
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
 		return
 	}
 
-	fmt.println("\n=== Server Running ===")
+	fmt.println("=== Server Running ===")
 	fmt.println("Main thread is supervising network, web admin, and database threads")
-	fmt.println()
 
 	mainLoop(&pm)
 
-	fmt.println("\n=== Server Shutdown Complete ===")
+	fmt.println("=== Server Shutdown Complete ===")
 }
 
 @(private)
