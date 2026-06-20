@@ -172,18 +172,14 @@ MainRouterState_sendPeerMessage :: proc(
 			payload,
 		)
 		if !sealOK {
-			fmt.printf("[Main] Failed to seal packet for peer %d\n", peerID)
+			log.infof("[Main] Failed to seal packet for peer %d\n", peerID)
 			return false
 		}
 		defer delete(sealedPacket.payload)
 
 		packetBytes, packetErr := cbor.marshal(sealedPacket)
 		if packetErr != nil {
-			fmt.printf(
-				"[Main] Failed to encode sealed packet for peer %d: %v\n",
-				peerID,
-				packetErr,
-			)
+			log.infof("[Main] Failed to encode sealed packet for peer %d: %v\n", peerID, packetErr)
 			return false
 		}
 
@@ -194,7 +190,7 @@ MainRouterState_sendPeerMessage :: proc(
 
 	payloadBytes, payloadErr := cbor.marshal(payload)
 	if payloadErr != nil {
-		fmt.printf("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
+		log.infof("[Main] Failed to encode payload for peer %d: %v\n", peerID, payloadErr)
 		return false
 	}
 	defer delete(payloadBytes)
@@ -206,7 +202,7 @@ MainRouterState_sendPeerMessage :: proc(
 
 	packetBytes, packetErr := cbor.marshal(packet)
 	if packetErr != nil {
-		fmt.printf("[Main] Failed to encode packet for peer %d: %v\n", peerID, packetErr)
+		log.infof("[Main] Failed to encode packet for peer %d: %v\n", peerID, packetErr)
 		return false
 	}
 
@@ -735,7 +731,7 @@ MainRouterState_handleDatabaseResult :: proc(
 ) {
 	request, ok := MainRouterState_getDatabaseRequest(state, requestID)
 	if !ok {
-		fmt.printf("[Main] Received database response for unknown request ID %d\n", requestID)
+		log.infof("[Main] Received database response for unknown request ID %d\n", requestID)
 		return
 	}
 
@@ -897,7 +893,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			case Wake:
 				IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, Wake{})
 			case ProcessError:
-				fmt.printf("[Main] Process error: %s\n", m.error)
+				log.infof("[Main] Process error: %s\n", m.error)
 			case:
 			}
 		}

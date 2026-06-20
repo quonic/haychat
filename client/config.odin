@@ -3,6 +3,7 @@ package client
 import "../common"
 import "core:encoding/json"
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 
@@ -49,7 +50,7 @@ loadConfig :: proc() -> (config: Config) {
 	when ODIN_OS == .Windows {
 		APP_DATA = os.get_env("APPDATA", context.allocator)
 		if APP_DATA == "" {
-			fmt.println(
+			log.info(
 				"[Warning] APPDATA environment variable is not set. Defaulting to current directory.",
 			)
 			APP_DATA = "."
@@ -66,12 +67,12 @@ loadConfig :: proc() -> (config: Config) {
 	path := getConfigPath()
 	when ODIN_OS == .Windows {
 		if os.exists(strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator)) {
-			fmt.println(
+			log.info(
 				"[Info] Found existing config directory at: ",
 				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
 			)
 		} else {
-			fmt.println(
+			log.info(
 				"[Info] No existing config directory found at: ",
 				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
 			)
@@ -79,9 +80,9 @@ loadConfig :: proc() -> (config: Config) {
 				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
 			)
 			if err != nil {
-				fmt.println("[Error] Failed to create config directory: ", err)
+				log.info("[Error] Failed to create config directory: ", err)
 			} else {
-				fmt.println(
+				log.info(
 					"[Info] Created config directory at: ",
 					strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
 				)
@@ -91,12 +92,12 @@ loadConfig :: proc() -> (config: Config) {
 		if os.exists(
 			strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
 		) {
-			fmt.println(
+			log.info(
 				"[Info] Found existing config directory at: ",
 				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
 			)
 		} else {
-			fmt.println(
+			log.info(
 				"[Info] No existing config directory found at: ",
 				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
 			)
@@ -104,9 +105,9 @@ loadConfig :: proc() -> (config: Config) {
 				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
 			)
 			if err != nil {
-				fmt.println("[Error] Failed to create config directory: ", err)
+				log.info("[Error] Failed to create config directory: ", err)
 			} else {
-				fmt.println(
+				log.info(
 					"[Info] Created config directory at: ",
 					strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
 				)
@@ -117,29 +118,29 @@ loadConfig :: proc() -> (config: Config) {
 	shouldLoad := false
 
 	if os.exists(path) {
-		fmt.println("[Info] Loaded config from: ", path)
+		log.info("[Info] Loaded config from: ", path)
 		file, err := os.open(path, {.Read})
 		if err != nil {
-			fmt.println("[Error] Failed to open config file: ", err)
+			log.info("[Error] Failed to open config file: ", err)
 			return {}
 		}
 		shouldLoad = true
 		defer os.close(file)
 	} else {
-		fmt.println("[Info] No config file found at: ", path)
+		log.info("[Info] No config file found at: ", path)
 		file, err := os.open(path, {.Create, .Read}, {.Read_User, .Write_User})
 		if err != nil {
-			fmt.println("[Error] Failed to create config file: ", err)
+			log.info("[Error] Failed to create config file: ", err)
 			return {}
 		} else {
-			fmt.println("[Info] Created config file at: ", path)
+			log.info("[Info] Created config file at: ", path)
 		}
 		defer os.close(file)
 	}
 
 	data, err := os.read_entire_file_from_path(path, context.allocator)
 	if err != nil {
-		fmt.println("[Error] Failed to read config file: ", err)
+		log.info("[Error] Failed to read config file: ", err)
 		return {}
 	}
 	if shouldLoad {
@@ -157,25 +158,25 @@ saveConfig :: proc(config: Config) {
 	if os.exists(getConfigPath()) {
 		file, file_err := os.open(getConfigPath(), {.Write})
 		if file_err != nil {
-			fmt.println("[Error] Failed to open config file for writing: ", file_err)
+			log.info("[Error] Failed to open config file for writing: ", file_err)
 			return
 		}
 		defer os.close(file)
 
 		jsonData, json_err := json.marshal(config)
 		if json_err != nil {
-			fmt.println("[Error] Failed to marshal config to JSON: ", json_err)
+			log.info("[Error] Failed to marshal config to JSON: ", json_err)
 			return
 		}
 
 		write_err := os.write_entire_file_from_bytes(getConfigPath(), jsonData)
 		if write_err != nil {
-			fmt.println("[Error] Failed to write config file: ", write_err)
+			log.info("[Error] Failed to write config file: ", write_err)
 			return
 		}
-		fmt.println("[Info] Config saved successfully to: ", getConfigPath())
+		log.info("[Info] Config saved successfully to: ", getConfigPath())
 	} else {
-		fmt.println("[Error] Config file does not exist at: ", getConfigPath())
+		log.info("[Error] Config file does not exist at: ", getConfigPath())
 	}
 }
 
@@ -212,7 +213,7 @@ ensureIdentityKeys :: proc(config: ^Config) -> bool {
 
 	privateKeyBytes, publicKeyBytes, ok := common.generateIdentityKeyPair()
 	if !ok {
-		fmt.println("[Error] Failed to generate client identity key pair")
+		log.info("[Error] Failed to generate client identity key pair")
 		return false
 	}
 

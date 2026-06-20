@@ -127,7 +127,7 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 		ProcessManager__serviceThreadEntry,
 	)
 	if threadHandle == nil {
-		fmt.printf("[Supervisor] Failed to start %v thread\n", procType)
+		log.infof("[Supervisor] Failed to start %v thread\n", procType)
 		free(startData)
 		return false
 	}
@@ -139,7 +139,7 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 	procInfo.isRunning = true
 	sync.mutex_unlock(&pm.processMutex)
 
-	fmt.printf("[Supervisor] Started %v thread (ID: %d)\n", procType, threadID)
+	log.infof("[Supervisor] Started %v thread (ID: %d)\n", procType, threadID)
 	return true
 }
 
@@ -156,7 +156,7 @@ restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) {
 	sync.mutex_unlock(&pm.processMutex)
 
 	if restartCount > pm.config.maxRestarts {
-		fmt.printf("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
+		log.infof("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
 		return
 	}
 
@@ -167,7 +167,7 @@ restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) {
 	jitter := time.Duration(rand.float64() * f64(pm.config.restartBackoffMin))
 	backoff += jitter
 
-	fmt.printf("[Supervisor] Restarting %v in %v (attempt %d)\n", procType, backoff, restartCount)
+	log.infof("[Supervisor] Restarting %v in %v (attempt %d)\n", procType, backoff, restartCount)
 	time.sleep(backoff)
 
 	if !pm.shouldShutdown {
