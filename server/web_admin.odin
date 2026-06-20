@@ -12,13 +12,13 @@ import http "shared:odin-http"
 pmWebAdmin: ^ProcessManager // Global pointer to process manager for web admin handlers
 
 webAdminServerLoop :: proc(pm: ^ProcessManager) {
-	fmt.println("[WebAdmin] Web admin server loop started (PID: %d)", os.get_pid())
+	log.info("[WebAdmin] Web admin server loop started (PID: %d)", os.get_pid())
 	pmWebAdmin = pm // Set global pointer so handlers can access process manager
 	context.logger = log.create_console_logger(.Info)
 
 	webAdminFd, ipcInitErr := IPC_Client_init(&pm.config.webAdminSocket)
 	if ipcInitErr != nil {
-		fmt.eprintln("[WebAdmin] Failed to initialize coordinator endpoint:", ipcInitErr)
+		log.error("[WebAdmin] Failed to initialize coordinator endpoint:", ipcInitErr)
 		return
 	}
 	pm.config.webAdminFd = webAdminFd
@@ -48,7 +48,7 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 
 	routed := http.router_handler(&router)
 
-	log.info("Listening on http://localhost:%d", pm.config.webAdminPort)
+	log.infof("Listening on http://localhost:%d", pm.config.webAdminPort)
 
 	err := http.listen_and_serve(
 		&s,
@@ -56,23 +56,23 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 		net.Endpoint{address = net.IP4_Loopback, port = pm.config.webAdminPort},
 	)
 	if err != nil {
-		fmt.eprintln("[WebAdmin] HTTP server error:", err)
+		log.errorf("[WebAdmin] HTTP server error: %s", err)
 	}
 
-	fmt.eprintln("[WebAdmin] Process shutting down")
+	log.error("[WebAdmin] Process shutting down")
 }
 
 statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, Wake{})
 	if err_send != nil {
-		fmt.eprintln("[WebAdmin] IPC send error:", err_send)
+		log.errorf("[WebAdmin] IPC send error: %s", err_send)
 		http.respond_plain(res, "Error sending wake signal")
 		return
 	}
 	for {
 		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
 		if err != nil {
-			fmt.eprintln("[WebAdmin] IPC poll error:", err)
+			log.errorf("[WebAdmin] IPC poll error: %s", err)
 			http.respond_plain(res, "Error retrieving peer list")
 			return
 		}
@@ -83,8 +83,8 @@ statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 				http.respond_plain(res, "Server is running")
 				return
 			case:
-				fmt.eprintln(
-					"[WebAdmin] Received unexpected message type:",
+				log.errorf(
+					"[WebAdmin] Received unexpected message type: %s",
 					typeid_of(type_of(message)),
 				)
 				http.respond_plain(res, "Error retrieving peer list")
@@ -98,14 +98,14 @@ peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 	http.respond_plain(res, "Peer list is currently unavailable")
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetPeers{})
 	if err_send != nil {
-		fmt.eprintln("[WebAdmin] IPC send error:", err_send)
+		log.errorf("[WebAdmin] IPC send error: %s", err_send)
 		http.respond_plain(res, "Error sending peer list request")
 		return
 	}
 	for {
 		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
 		if err != nil {
-			fmt.eprintln("[WebAdmin] IPC poll error:", err)
+			log.errorf("[WebAdmin] IPC poll error: %s", err)
 			http.respond_plain(res, "Error retrieving peer list")
 			return
 		}
@@ -125,8 +125,8 @@ peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 				http.respond_plain(res, fmt.aprintf("Peers:\n%s", peer_list_str))
 				return
 			case:
-				fmt.eprintln(
-					"[WebAdmin] Received unexpected message type:",
+				log.errorf(
+					"[WebAdmin] Received unexpected message type: %s",
 					typeid_of(type_of(message)),
 				)
 				http.respond_plain(res, "Error retrieving peer list")
@@ -140,14 +140,14 @@ logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 	http.respond_plain(res, "Logs are currently unavailable")
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetLogs{})
 	if err_send != nil {
-		fmt.eprintln("[WebAdmin] IPC send error:", err_send)
+		log.errorf("[WebAdmin] IPC send error: %s", err_send)
 		http.respond_plain(res, "Error sending log request")
 		return
 	}
 	for {
 		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
 		if err != nil {
-			fmt.eprintln("[WebAdmin] IPC poll error:", err)
+			log.errorf("[WebAdmin] IPC poll error: %s", err)
 			http.respond_plain(res, "Error retrieving logs")
 			return
 		}
@@ -162,8 +162,8 @@ logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 				http.respond_plain(res, fmt.aprintf("Logs:\n%s", logs_str))
 				return
 			case:
-				fmt.eprintln(
-					"[WebAdmin] Received unexpected message type:",
+				log.errorf(
+					"[WebAdmin] Received unexpected message type: %s",
 					typeid_of(type_of(message)),
 				)
 				http.respond_plain(res, "Error retrieving logs")
@@ -176,7 +176,7 @@ logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 shutdownWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 	err := IPC_Client_send(pmWebAdmin.config.webAdminFd, ProcessShutdown{})
 	if err != nil {
-		fmt.eprintln("[WebAdmin] IPC send error:", err)
+		log.errorf("[WebAdmin] IPC send error: %s", err)
 		http.respond_plain(res, "Error sending shutdown signal")
 		return
 	}
@@ -186,7 +186,7 @@ shutdownWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 restartWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 	err := IPC_Client_send(pmWebAdmin.config.webAdminFd, ProcessRestart{})
 	if err != nil {
-		fmt.eprintln("[WebAdmin] IPC send error:", err)
+		log.errorf("[WebAdmin] IPC send error: %s", err)
 		http.respond_plain(res, "Error sending restart signal")
 		return
 	}

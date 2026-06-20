@@ -1,6 +1,7 @@
 package server
 
 import "core:fmt"
+import "core:log"
 import "core:math/rand"
 import "core:sync"
 import "core:thread"
@@ -179,7 +180,7 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 	pm.shouldShutdown = true
 	sync.mutex_unlock(&pm.processMutex)
 
-	fmt.println("[Shutdown] Signaling service threads to stop...")
+	log.info("[Shutdown] Signaling service threads to stop...")
 	IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, ProcessShutdown{})
 	IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, ProcessShutdown{})
 	IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, ProcessShutdown{})
@@ -193,11 +194,11 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 			!pm.databaseProcess.isRunning
 		sync.mutex_unlock(&pm.processMutex)
 		if allStopped {
-			fmt.println("[Shutdown] All service threads exited")
+			log.info("[Shutdown] All service threads exited")
 			return
 		}
 		thread.yield()
 	}
 
-	fmt.println("[Shutdown] Timed out waiting for all service threads to stop")
+	log.info("[Shutdown] Timed out waiting for all service threads to stop")
 }

@@ -15,7 +15,7 @@ NetworkPeerInfo :: struct {
 
 // networkServerLoop is the main entry point for the network server process
 networkServerLoop :: proc(pm: ^ProcessManager) {
-	fmt.println("[Network] Network server loop started (PID: %d)", os.get_pid())
+	log.info("[Network] Network server loop started (PID: %d)", os.get_pid())
 
 	// Initialize ENet
 	if ENet.initialize() != 0 {

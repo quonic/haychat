@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:log"
 import "core:thread"
 import "core:time"
 
@@ -780,26 +781,26 @@ MainRouterState_handleDatabaseResult :: proc(
 }
 
 main :: proc() {
-	fmt.println("=== HayChat Server - Threaded Architecture ===")
-	fmt.println()
+
+	log.info("=== HayChat Server - Threaded Architecture ===")
+	log.info("")
 
 	config := loadConfig()
-	fmt.println("Configuration loaded:")
-	fmt.printf("  Web Admin: %s:%d\n", config.webAdminHost, config.webAdminPort)
-	fmt.printf(
-		"  Database: %s@%s:%d/%s\n",
+	log.info("Configuration loaded:")
+	log.infof("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
+	log.infof(
+		"  Database: %s@%s:%d/%s",
 		config.databaseUser,
 		config.databaseURL,
 		config.databasePort,
 		config.databaseName,
 	)
-	fmt.printf(
-		"  Max Restarts: %d (backoff: %v-%v)\n",
+	log.infof(
+		"  Max Restarts: %d (backoff: %v-%v)",
 		config.maxRestarts,
 		config.restartBackoffMin,
 		config.restartBackoffMax,
 	)
-	fmt.println()
 
 	config.networkSocketName = fmt.aprintf("%s_network", SERVER_SOCKET)
 	config.webAdminSocketName = fmt.aprintf("%s_webadmin", SERVER_SOCKET)
@@ -807,27 +808,27 @@ main :: proc() {
 
 	pm := initProcessManager(&config)
 
-	fmt.println("=== Starting Service Threads ===")
+	log.info("=== Starting Service Threads ===")
 	if !spawnProcess(&pm, .Network) {
-		fmt.println("[Network] Failed to start network service thread")
+		log.info("[Network] Failed to start network service thread")
 		return
 	}
 	if !spawnProcess(&pm, .WebAdmin) {
-		fmt.println("[WebAdmin] Failed to start web admin service thread")
+		log.info("[WebAdmin] Failed to start web admin service thread")
 		return
 	}
 	if !spawnProcess(&pm, .Database) {
-		fmt.println("[Database] Failed to start database service thread")
+		log.info("[Database] Failed to start database service thread")
 		return
 	}
 
-	fmt.println("\n=== Server Running ===")
-	fmt.println("Main thread is supervising network, web admin, and database threads")
-	fmt.println()
+	log.info("\n=== Server Running ===")
+	log.info("Main thread is supervising network, web admin, and database threads")
+	log.info()
 
 	mainLoop(&pm)
 
-	fmt.println("\n=== Server Shutdown Complete ===")
+	log.info("\n=== Server Shutdown Complete ===")
 }
 
 @(private)

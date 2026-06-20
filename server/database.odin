@@ -1,6 +1,7 @@
 package server
 
 import "core:fmt"
+import "core:log"
 import "core:os"
 import "core:strings"
 import "core:sys/linux"
@@ -14,7 +15,7 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	messageQueue: [dynamic]Message // Simple in-memory queue for incoming queries
 	currentRequestID: u64 = 0 // Track the request_id for the current query
 
-	fmt.println("[Database] Database server loop started (PID: %d)", os.get_pid())
+	log.infof("[Database] Database server loop started (PID: %d)", os.get_pid())
 	// Connect to PostgreSQL database using shared:pg
 	db_connection := pg.connectdb(
 		fmt.caprintf(
@@ -30,7 +31,7 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 
 	databaseFd, ipcInitErr := IPC_Client_init(&pm.config.databaseSocket)
 	if ipcInitErr != nil {
-		fmt.eprintln("[Database] Failed to initialize coordinator endpoint:", ipcInitErr)
+		log.errorf("[Database] Failed to initialize coordinator endpoint: %s", ipcInitErr)
 		return
 	}
 	pm.config.databaseFd = databaseFd
@@ -40,8 +41,8 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	running := true
 	for running {
 		message, err := IPC_Client_poll(pm.config.databaseFd)
-		if err != nil {
-			fmt.eprintfln("[Database] IPC poll error: %s", err)
+		if err != nil && message != nil {
+			log.errorf("[Database] IPC poll error: %s, %s", err, message)
 			continue
 		}
 		if message != nil {
@@ -53,10 +54,10 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 			for message in messageQueue {
 				switch typeid_of(type_of(message)) {
 				case ProcessShutdown:
-					fmt.eprintln("[Database] Received shutdown signal")
+					log.infof("[Database] Received shutdown signal")
 					running = false
 				case ProcessRestart:
-					fmt.eprintln("[Database] Received restart signal")
+					log.infof("[Database] Received restart signal")
 					// For simplicity, we'll just break the loop and let the process manager restart us
 					running = false
 				case Wake:
@@ -73,7 +74,7 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 			result := pg.get_result(db_connection)
 			if result != nil {
 				result_status := pg.result_status(result) // Clear the result to free memory
-				fmt.eprintln("[Database] Query result:", result_status)
+				log.errorf("[Database] Query result: %s", result_status)
 				IPC_Client_send(
 					pm.config.databaseFd,
 					DatabaseQueryResult {
@@ -91,10 +92,10 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 				dbQuery := message.(DatabaseQuery)
 				currentRequestID = dbQuery.request_id
 				query := dbQuery.query
-				fmt.eprintln("[Database] Received query:", query)
+				log.infof("[Database] Received query: %s", query)
 				if pg.send_query(db_connection, strings.clone_to_cstring(query)) == false {
 					error_msg := fmt.aprintf("Failed to send query: %s", query)
-					fmt.eprintln("[Database]", error_msg)
+					log.errorf("[Database] %s", error_msg)
 					IPC_Client_send(
 						pm.config.databaseFd,
 						DatabaseError{request_id = currentRequestID, error = error_msg},
@@ -102,20 +103,20 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 					continue
 				}
 			case ProcessShutdown:
-				fmt.eprintln("[Database] Received shutdown signal")
+				log.infof("[Database] Received shutdown signal")
 				running = false
 			case ProcessRestart:
-				fmt.eprintln("[Database] Received restart signal")
+				log.infof("[Database] Received restart signal")
 				// For simplicity, we'll just break the loop and let the process manager restart us
 				running = false
 			case Wake:
 			// No-op, just wake up to check for shutdown/restart signals
 			case:
-				fmt.eprintln("[Database] Received unknown message type")
+				log.errorf("[Database] Received unknown message type")
 			}
 		}
 		time.sleep(1 * time.Millisecond)
 	}
 
-	fmt.eprintln("[Database] Process shutting down")
+	log.infof("[Database] Process shutting down")
 }
