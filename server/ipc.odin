@@ -1,5 +1,6 @@
 package server
 
+import "../common"
 import "core:strings"
 import "core:sync"
 import "core:sys/linux"
@@ -93,12 +94,12 @@ AdminGetLogsResponse :: struct {
 
 DatabaseQuery :: struct {
 	request_id: u64,
-	query:      string,
+	request:    common.DatabaseQueryRequest,
 }
 
 DatabaseQueryResult :: struct {
 	request_id: u64,
-	result:     string,
+	response:   common.DatabaseQueryResponse,
 }
 
 DatabaseError :: struct {

@@ -276,9 +276,190 @@ testMainRouterHandshakeRoutesEncryptedApplicationPackets :: proc(t: ^testing.T) 
 
 	databaseQuery := routerPollDatabaseQuery(&h)
 	assert(
-		databaseQuery.query == "SELECT 1",
+		databaseQuery.request.queryType == .RawSQL,
+		"expected encrypted ClientDatabaseQuery to be routed as a raw SQL database request",
+	)
+	assert(
+		databaseQuery.request.rawSQL.query == "SELECT 1",
 		"expected encrypted ClientDatabaseQuery to reach database IPC intact",
 	)
+}
+
+@(test)
+testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	sealedPacket, sealOK := common.sealPacketForSession(
+		&clientTransport,
+		.ClientAuthLookup,
+		common.ClientAuthLookupRequest{nickname = "hayseed"},
+	)
+	assert(sealOK, "expected encrypted auth lookup packet sealing to succeed")
+	defer delete(sealedPacket.payload)
+
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	databaseQuery := routerPollDatabaseQuery(&h)
+	assert(
+		databaseQuery.request.queryType == .AuthLookupByNickname,
+		"expected auth lookup to use structured auth lookup request type",
+	)
+	assert(
+		databaseQuery.request.authLookup.nickname == "hayseed",
+		"expected auth lookup nickname to be forwarded in structured request",
+	)
+}
+
+@(test)
+testMainRouterRejectsMalformedOuterPacket :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = []u8{1, 2, 3}},
+	)
+
+	protocolErrorMsg := routerPollNetworkSend(&h)
+	defer delete(protocolErrorMsg.data)
+	protocolErrorPacket := routerDecodePacketBytes(protocolErrorMsg.data)
+	defer delete(protocolErrorPacket.payload)
+	assert(
+		protocolErrorPacket.messageType == .ServerProtocolError,
+		"expected malformed outer packet to produce plaintext protocol error before auth",
+	)
+
+	protocolErrorPayload: common.ProtocolErrorResponse
+	protocolErrorPayloadErr := cbor.unmarshal(protocolErrorPacket.payload, &protocolErrorPayload)
+	assert(protocolErrorPayloadErr == nil, "expected malformed packet error payload to decode")
+	defer delete(protocolErrorPayload.message)
+	assert(
+		protocolErrorPayload.message == "Invalid CBOR packet",
+		"expected malformed outer packet to report invalid CBOR packet",
+	)
+
+	disconnectMsg := routerPollDisconnect(&h)
+	assert(
+		disconnectMsg.peerId == peerID,
+		"expected malformed outer packet to disconnect offending peer",
+	)
+}
+
+@(test)
+testMainRouterRejectsUnexpectedPlaintextMessageBeforeAuth :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	packetBytes, packetOK := common.buildPacketBytes(
+		.ClientDatabaseQuery,
+		common.ClientDatabaseQueryRequest{query = "SELECT 3"},
+	)
+	assert(packetOK, "expected plaintext application packet encoding to succeed")
+	defer delete(packetBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = packetBytes},
+	)
+
+	protocolErrorMsg := routerPollNetworkSend(&h)
+	defer delete(protocolErrorMsg.data)
+	protocolErrorPacket := routerDecodePacketBytes(protocolErrorMsg.data)
+	defer delete(protocolErrorPacket.payload)
+	assert(
+		protocolErrorPacket.messageType == .ServerProtocolError,
+		"expected unexpected plaintext application packet to produce plaintext protocol error before auth",
+	)
+
+	protocolErrorPayload: common.ProtocolErrorResponse
+	protocolErrorPayloadErr := cbor.unmarshal(protocolErrorPacket.payload, &protocolErrorPayload)
+	assert(protocolErrorPayloadErr == nil, "expected unexpected plaintext error payload to decode")
+	defer delete(protocolErrorPayload.message)
+	assert(
+		protocolErrorPayload.message == "Unexpected plaintext message",
+		"expected unexpected plaintext application packet to report protocol violation",
+	)
+
+	disconnectMsg := routerPollDisconnect(&h)
+	assert(
+		disconnectMsg.peerId == peerID,
+		"expected unexpected plaintext application packet to disconnect peer",
+	)
+}
+
+@(test)
+testMainRouterIgnoresNonChatChannelPackets :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	packetBytes, packetOK := common.buildPacketBytes(.ClientHello, common.ClientHello{})
+	assert(packetOK, "expected ClientHello packet encoding to succeed")
+	defer delete(packetBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Voice, data = packetBytes},
+	)
+
+	_, networkErr := IPC_Client_poll(h.networkFd)
+	assert(networkErr != nil, "expected non-chat channel packet to be ignored")
+}
+
+@(test)
+testMainRouterIgnoresEmptyPacketData :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = 1, channel = .Chat, data = nil},
+	)
+
+	_, networkErr := IPC_Client_poll(h.networkFd)
+	assert(networkErr != nil, "expected empty packet data to be ignored")
 }
 
 @(test)

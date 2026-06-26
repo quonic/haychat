@@ -370,6 +370,33 @@ ServerDatabaseQueryResult :: struct {
 	result:  string,
 }
 
+DatabaseQueryType :: enum u8 {
+	None = 0,
+	AuthLookupByNickname,
+	RawSQL,
+}
+
+DatabaseAuthLookupRequest :: struct {
+	nickname: string,
+}
+
+DatabaseRawQueryRequest :: struct {
+	query: string,
+}
+
+DatabaseQueryRequest :: struct {
+	queryType:  DatabaseQueryType,
+	authLookup: DatabaseAuthLookupRequest,
+	rawSQL:     DatabaseRawQueryRequest,
+}
+
+DatabaseQueryResponse :: struct {
+	queryType: DatabaseQueryType,
+	success:   bool,
+	message:   string,
+	result:    string,
+}
+
 ProtocolErrorResponse :: struct {
 	message: string,
 }

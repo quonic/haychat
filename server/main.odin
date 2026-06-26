@@ -327,6 +327,119 @@ MainRouterState_getDatabaseRequest :: proc(
 	return request, ok
 }
 
+MainRouterState_sendDatabaseRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	requestType: PendingDBRequestType,
+	request: common.DatabaseQueryRequest,
+) {
+	requestID := MainRouterState_generateRequestID(state)
+	MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, requestType)
+	IPC_Server_send(
+		&pm.config.databaseSocket,
+		pm.config.databaseFd,
+		DatabaseQuery{request_id = requestID, request = request},
+	)
+}
+
+MainRouterState_handleClientAuthLookupPacket :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientAuthLookupRequest
+	err := cbor.unmarshal(payload, &req)
+	if err != nil {
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			peerID,
+			common.MessageType.ServerAuthLookupResponse,
+			common.ServerAuthLookupResult {
+				success = false,
+				message = "invalid payload",
+				result = "",
+			},
+		)
+		return
+	}
+
+	if len(req.nickname) < 3 || len(req.nickname) > 32 {
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			peerID,
+			common.MessageType.ServerAuthLookupResponse,
+			common.ServerAuthLookupResult {
+				success = false,
+				message = "invalid nickname length",
+				result = "",
+			},
+		)
+		return
+	}
+
+	MainRouterState_sendDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		.AuthLookup,
+		common.DatabaseQueryRequest {
+			queryType = .AuthLookupByNickname,
+			authLookup = {nickname = req.nickname},
+		},
+	)
+}
+
+MainRouterState_handleClientDatabaseQueryPacket :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientDatabaseQueryRequest
+	err := cbor.unmarshal(payload, &req)
+	if err != nil {
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			peerID,
+			common.MessageType.ServerDatabaseQueryResponse,
+			common.ServerDatabaseQueryResult {
+				success = false,
+				message = "invalid payload",
+				result = "",
+			},
+		)
+		return
+	}
+
+	if len(req.query) == 0 {
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			peerID,
+			common.MessageType.ServerDatabaseQueryResponse,
+			common.ServerDatabaseQueryResult {
+				success = false,
+				message = "empty query",
+				result = "",
+			},
+		)
+		return
+	}
+
+	MainRouterState_sendDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		.Generic,
+		common.DatabaseQueryRequest{queryType = .RawSQL, rawSQL = {query = req.query}},
+	)
+}
+
 MainRouterState_authenticatedUserIDFromIdentity :: proc(
 	publicKey: common.IdentityPublicKeyBytes,
 ) -> int {
@@ -568,31 +681,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 ) {
 	#partial switch packet.messageType {
 	case .ClientAuthLookup:
-		req: common.ClientAuthLookupRequest
-		err := cbor.unmarshal(packet.payload, &req)
-		if err != nil || len(req.nickname) < 3 || len(req.nickname) > 32 {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				peerID,
-				common.MessageType.ServerAuthLookupResponse,
-				common.ServerAuthLookupResult {
-					success = false,
-					message = "invalid nickname length",
-					result = "",
-				},
-			)
-			return
-		}
-
-		query := fmt.aprintf("SELECT id FROM users WHERE nickname = '%s' LIMIT 1;", req.nickname)
-		requestID := MainRouterState_generateRequestID(state)
-		MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, .AuthLookup)
-		IPC_Server_send(
-			&pm.config.databaseSocket,
-			pm.config.databaseFd,
-			DatabaseQuery{request_id = requestID, query = query},
-		)
+		MainRouterState_handleClientAuthLookupPacket(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -639,30 +728,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			},
 		)
 	case .ClientDatabaseQuery:
-		req: common.ClientDatabaseQueryRequest
-		err := cbor.unmarshal(packet.payload, &req)
-		if err != nil || len(req.query) == 0 {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				peerID,
-				common.MessageType.ServerDatabaseQueryResponse,
-				common.ServerDatabaseQueryResult {
-					success = false,
-					message = "empty query",
-					result = "",
-				},
-			)
-			return
-		}
-
-		requestID := MainRouterState_generateRequestID(state)
-		MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, .Generic)
-		IPC_Server_send(
-			&pm.config.databaseSocket,
-			pm.config.databaseFd,
-			DatabaseQuery{request_id = requestID, query = req.query},
-		)
+		MainRouterState_handleClientDatabaseQueryPacket(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -763,8 +829,7 @@ MainRouterState_handleDatabaseResult :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	requestID: u64,
-	result: string,
-	isError: bool,
+	response: common.DatabaseQueryResponse,
 ) {
 	request, ok := MainRouterState_getDatabaseRequest(state, requestID)
 	if !ok {
@@ -774,41 +839,29 @@ MainRouterState_handleDatabaseResult :: proc(
 
 	switch request.requestType {
 	case .AuthLookup:
-		if isError {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerAuthLookupResponse,
-				common.ServerAuthLookupResult{success = false, message = result, result = ""},
-			)
-		} else {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerAuthLookupResponse,
-				common.ServerAuthLookupResult{success = true, message = "ok", result = result},
-			)
-		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			common.MessageType.ServerAuthLookupResponse,
+			common.ServerAuthLookupResult {
+				success = response.success,
+				message = response.message,
+				result = response.result,
+			},
+		)
 	case .Generic:
-		if isError {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerDatabaseQueryResponse,
-				common.ServerDatabaseQueryResult{success = false, message = result, result = ""},
-			)
-		} else {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerDatabaseQueryResponse,
-				common.ServerDatabaseQueryResult{success = true, message = "ok", result = result},
-			)
-		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			common.MessageType.ServerDatabaseQueryResponse,
+			common.ServerDatabaseQueryResult {
+				success = response.success,
+				message = response.message,
+				result = response.result,
+			},
+		)
 	case:
 	}
 }
@@ -924,15 +977,14 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			case DatabaseQuery:
 				IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, m)
 			case DatabaseQueryResult:
+				MainRouterState_handleDatabaseResult(pm, &routerState, m.request_id, m.response)
+			case DatabaseError:
 				MainRouterState_handleDatabaseResult(
 					pm,
 					&routerState,
 					m.request_id,
-					m.result,
-					false,
+					common.DatabaseQueryResponse{success = false, message = m.error, result = ""},
 				)
-			case DatabaseError:
-				MainRouterState_handleDatabaseResult(pm, &routerState, m.request_id, m.error, true)
 			case ProcessShutdown:
 				running = false
 			case ProcessRestart:
