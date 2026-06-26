@@ -6,6 +6,7 @@ import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:sync"
 
 import "core:thread"
 import "core:time"
@@ -325,6 +326,72 @@ MainRouterState_getDatabaseRequest :: proc(
 		delete_key(&state.pendingDatabaseRequests, requestID)
 	}
 	return request, ok
+}
+
+MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
+	delete(state.connectedPeers)
+	delete(state.peerSessions)
+	delete(state.pendingDatabaseRequests)
+	state.connectedPeers = make(map[u32]bool)
+	state.peerSessions = make(map[u32]RouterPeerSession)
+	state.pendingDatabaseRequests = make(map[u64]PendingDBRequest)
+}
+
+MainRouterState_failPendingDatabaseRequests :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	message: string,
+) {
+	requestIDs := make([dynamic]u64)
+	defer delete(requestIDs)
+
+	for requestID in state.pendingDatabaseRequests {
+		append(&requestIDs, requestID)
+	}
+
+	for requestID in requestIDs {
+		request, ok := MainRouterState_getDatabaseRequest(state, requestID)
+		if !ok {
+			continue
+		}
+
+		switch request.requestType {
+		case .AuthLookup:
+			MainRouterState_sendPeerMessage(
+				pm,
+				state,
+				request.peerID,
+				common.MessageType.ServerAuthLookupResponse,
+				common.ServerAuthLookupResult{success = false, message = message, result = ""},
+			)
+		case .Generic:
+			MainRouterState_sendPeerMessage(
+				pm,
+				state,
+				request.peerID,
+				common.MessageType.ServerDatabaseQueryResponse,
+				common.ServerDatabaseQueryResult{success = false, message = message, result = ""},
+			)
+		case:
+		}
+	}
+}
+
+MainRouterState_prepareForProcessStop :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	procType: ProcessType,
+	message: string,
+) {
+	switch procType {
+	case .Network:
+		MainRouterState_failPendingDatabaseRequests(pm, state, message)
+		MainRouterState_clearTransientRuntimeState(state)
+	case .Database:
+		MainRouterState_failPendingDatabaseRequests(pm, state, message)
+	case .WebAdmin:
+	case:
+	}
 }
 
 MainRouterState_sendDatabaseRequest :: proc(
@@ -986,8 +1053,28 @@ mainLoop :: proc(pm: ^ProcessManager) {
 					common.DatabaseQueryResponse{success = false, message = m.error, result = ""},
 				)
 			case ProcessShutdown:
+				sync.mutex_lock(&pm.processMutex)
+				pm.shouldShutdown = true
+				sync.mutex_unlock(&pm.processMutex)
+				MainRouterState_failPendingDatabaseRequests(
+					pm,
+					&routerState,
+					"server shutting down",
+				)
 				running = false
 			case ProcessRestart:
+				MainRouterState_prepareForProcessStop(
+					pm,
+					&routerState,
+					.Database,
+					"database restarting",
+				)
+				MainRouterState_prepareForProcessStop(
+					pm,
+					&routerState,
+					.Network,
+					"server restarting",
+				)
 				restartProcess(pm, .Network)
 				restartProcess(pm, .WebAdmin)
 				restartProcess(pm, .Database)
@@ -1000,15 +1087,28 @@ mainLoop :: proc(pm: ^ProcessManager) {
 		}
 
 		if !pm.shouldShutdown {
-			if !pm.networkProcess.isRunning {
+			if ProcessManager_shouldScheduleRestart(pm, .Network) {
+				MainRouterState_prepareForProcessStop(
+					pm,
+					&routerState,
+					.Network,
+					"network service restarted",
+				)
 				restartProcess(pm, .Network)
 			}
-			if !pm.webAdminProcess.isRunning {
+			if ProcessManager_shouldScheduleRestart(pm, .WebAdmin) {
 				restartProcess(pm, .WebAdmin)
 			}
-			if !pm.databaseProcess.isRunning {
+			if ProcessManager_shouldScheduleRestart(pm, .Database) {
+				MainRouterState_prepareForProcessStop(
+					pm,
+					&routerState,
+					.Database,
+					"database service restarted",
+				)
 				restartProcess(pm, .Database)
 			}
+			ProcessManager_pumpRestarts(pm)
 		}
 
 		thread.yield()

@@ -18,7 +18,10 @@ ProcessInfo :: struct {
 	threadID:        int,
 	restartCount:    int,
 	lastRestartTime: time.Time,
+	restartAt:       time.Time,
 	isRunning:       bool,
+	stopRequested:   bool,
+	restartPending:  bool,
 }
 
 ProcessManager :: struct {
@@ -101,6 +104,51 @@ ProcessManager__serviceThreadEntry :: proc(startDataRaw: rawptr) {
 	sync.mutex_unlock(&pm.processMutex)
 }
 
+ProcessManager_restartBackoff :: proc(pm: ^ProcessManager, restartCount: int) -> time.Duration {
+	backoff := pm.config.restartBackoffMin
+	for i in 1 ..< restartCount {
+		_ = i
+		if backoff >= pm.config.restartBackoffMax {
+			break
+		}
+		backoff *= 2
+	}
+
+	if backoff > pm.config.restartBackoffMax {
+		backoff = pm.config.restartBackoffMax
+	}
+	jitter := time.Duration(rand.float64() * f64(pm.config.restartBackoffMin))
+	return backoff + jitter
+}
+
+ProcessManager_signalProcess :: proc(pm: ^ProcessManager, procType: ProcessType, msg: Message) {
+	switch procType {
+	case .Network:
+		IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, msg)
+	case .WebAdmin:
+		IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, msg)
+	case .Database:
+		IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, msg)
+	case:
+	}
+}
+
+ProcessManager_shouldScheduleRestart :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
+	sync.mutex_lock(&pm.processMutex)
+	defer sync.mutex_unlock(&pm.processMutex)
+
+	if pm.shouldShutdown {
+		return false
+	}
+
+	procInfo := ProcessManager_getProcessInfo(pm, procType)
+	if procInfo == nil {
+		return false
+	}
+
+	return !procInfo.isRunning && !procInfo.restartPending && !procInfo.stopRequested
+}
+
 spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 	sync.mutex_lock(&pm.processMutex)
 	procInfo := ProcessManager_getProcessInfo(pm, procType)
@@ -136,58 +184,120 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 	procInfo.threadHandle = threadHandle
 	procInfo.threadID = threadID
 	procInfo.isRunning = true
+	procInfo.stopRequested = false
+	procInfo.restartPending = false
 	sync.mutex_unlock(&pm.processMutex)
 
 	fmt.printfln("[Supervisor] Started %v thread (ID: %d)\n", procType, threadID)
 	return true
 }
 
-restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) {
-	procInfo := ProcessManager_getProcessInfo(pm, procType)
-	if procInfo == nil {
-		return
-	}
+restartProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
+	now := time.now()
+	backoff := time.Duration(0)
+	restartCount := 0
+	shouldSignal := false
 
 	sync.mutex_lock(&pm.processMutex)
-	procInfo.restartCount += 1
-	procInfo.lastRestartTime = time.now()
-	restartCount := procInfo.restartCount
+	procInfo := ProcessManager_getProcessInfo(pm, procType)
+	if procInfo == nil || pm.shouldShutdown {
+		sync.mutex_unlock(&pm.processMutex)
+		return false
+	}
+	if procInfo.restartPending {
+		sync.mutex_unlock(&pm.processMutex)
+		return true
+	}
+
+	restartCount = procInfo.restartCount + 1
+	procInfo.lastRestartTime = now
+	if restartCount > pm.config.maxRestarts {
+		procInfo.restartCount = restartCount
+		procInfo.stopRequested = true
+		sync.mutex_unlock(&pm.processMutex)
+		fmt.printfln("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
+		return false
+	}
+
+	backoff = ProcessManager_restartBackoff(pm, restartCount)
+	procInfo.restartCount = restartCount
+	procInfo.restartPending = true
+	procInfo.stopRequested = true
+	procInfo.restartAt = time.time_add(now, backoff)
+	shouldSignal = procInfo.isRunning
+	if !procInfo.isRunning {
+		procInfo.threadHandle = nil
+	}
 	sync.mutex_unlock(&pm.processMutex)
 
-	if restartCount > pm.config.maxRestarts {
-		fmt.printfln("[Supervisor] %v exceeded max restart attempts, not restarting\n", procType)
-		return
-	}
-
-	backoff := pm.config.restartBackoffMin * time.Duration(restartCount)
-	if backoff > pm.config.restartBackoffMax {
-		backoff = pm.config.restartBackoffMax
-	}
-	jitter := time.Duration(rand.float64() * f64(pm.config.restartBackoffMin))
-	backoff += jitter
-
 	fmt.printfln(
-		"[Supervisor] Restarting %v in %v (attempt %d)\n",
+		"[Supervisor] Scheduled restart for %v in %v (attempt %d)\n",
 		procType,
 		backoff,
 		restartCount,
 	)
-	time.sleep(backoff)
-
-	if !pm.shouldShutdown {
-		spawnProcess(pm, procType)
+	if shouldSignal {
+		ProcessManager_signalProcess(pm, procType, ProcessRestart{})
 	}
+	return true
+}
+
+ProcessManager_restartDue :: proc(pm: ^ProcessManager, procType: ProcessType, now: time.Time) {
+	shouldSpawn := false
+
+	sync.mutex_lock(&pm.processMutex)
+	procInfo := ProcessManager_getProcessInfo(pm, procType)
+	if procInfo != nil &&
+	   !pm.shouldShutdown &&
+	   procInfo.restartPending &&
+	   !procInfo.isRunning &&
+	   time.time_to_unix_nano(now) >= time.time_to_unix_nano(procInfo.restartAt) {
+		procInfo.restartPending = false
+		procInfo.stopRequested = false
+		shouldSpawn = true
+	}
+	sync.mutex_unlock(&pm.processMutex)
+
+	if !shouldSpawn {
+		return
+	}
+
+	if spawnProcess(pm, procType) {
+		return
+	}
+
+	sync.mutex_lock(&pm.processMutex)
+	procInfo = ProcessManager_getProcessInfo(pm, procType)
+	if procInfo != nil && !pm.shouldShutdown {
+		procInfo.restartPending = true
+		procInfo.restartAt = time.time_add(time.now(), pm.config.restartBackoffMin)
+	}
+	sync.mutex_unlock(&pm.processMutex)
+}
+
+ProcessManager_pumpRestarts :: proc(pm: ^ProcessManager) {
+	now := time.now()
+	ProcessManager_restartDue(pm, .Network, now)
+	ProcessManager_restartDue(pm, .WebAdmin, now)
+	ProcessManager_restartDue(pm, .Database, now)
 }
 
 shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 	sync.mutex_lock(&pm.processMutex)
 	pm.shouldShutdown = true
+	pm.networkProcess.stopRequested = true
+	pm.webAdminProcess.stopRequested = true
+	pm.databaseProcess.stopRequested = true
+	pm.networkProcess.restartPending = false
+	pm.webAdminProcess.restartPending = false
+	pm.databaseProcess.restartPending = false
 	sync.mutex_unlock(&pm.processMutex)
 
 	fmt.println("[Shutdown] Signaling service threads to stop...")
-	IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, ProcessShutdown{})
-	IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, ProcessShutdown{})
-	IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, ProcessShutdown{})
+	ProcessManager_signalProcess(pm, .Network, ProcessShutdown{})
+	ProcessManager_signalProcess(pm, .WebAdmin, ProcessShutdown{})
+	ProcessManager_signalProcess(pm, .Database, ProcessShutdown{})
+	shutdownWebAdminHTTPServer()
 
 	shutdownStart := time.now()
 	for time.since(shutdownStart) < 10 * time.Second {

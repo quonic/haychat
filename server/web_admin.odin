@@ -9,6 +9,13 @@ import "core:time"
 import http "shared:odin-http"
 
 pmWebAdmin: ^ProcessManager // Global pointer to process manager for web admin handlers
+webAdminHTTPServer: ^http.Server
+
+shutdownWebAdminHTTPServer :: proc() {
+	if webAdminHTTPServer != nil {
+		http.server_shutdown(webAdminHTTPServer)
+	}
+}
 
 webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	fmt.printfln("[WebAdmin] Web admin server loop started (PID: %d)", os.get_pid())
@@ -23,6 +30,12 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	defer IPC_Client_deinit(&pm.config.webAdminSocket)
 
 	s: http.Server
+	webAdminHTTPServer = &s
+	defer {
+		if webAdminHTTPServer == &s {
+			webAdminHTTPServer = nil
+		}
+	}
 
 	// Set up routing
 	router: http.Router

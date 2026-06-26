@@ -100,6 +100,19 @@ routerPollDisconnect :: proc(h: ^RouterTestHarness) -> NetworkDisconnectPeer {
 	return {}
 }
 
+routerPollDatabaseResponseMessage :: proc(h: ^RouterTestHarness) -> NetworkSendData {
+	msg, err := IPC_Client_poll(h.networkFd)
+	assert(err == nil, "expected queued database response message")
+
+	#partial switch m in msg {
+	case NetworkSendData:
+		return m
+	case:
+		assert(false, "expected NetworkSendData message for database response")
+	}
+	return {}
+}
+
 routerDecodePacketBytes :: proc(packetBytes: []u8) -> common.Packet {
 	packet: common.Packet
 	err := cbor.unmarshal(packetBytes, &packet)
@@ -550,5 +563,129 @@ testMainRouterRejectsPlaintextAfterAuthentication :: proc(t: ^testing.T) {
 	assert(
 		session.transport.phase == .Failed,
 		"expected protocol violation to mark transport phase failed",
+	)
+}
+
+@(test)
+testMainRouterPrepareForDatabaseRestartFailsPendingRequest :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	sealedPacket, sealOK := common.sealPacketForSession(
+		&clientTransport,
+		.ClientDatabaseQuery,
+		common.ClientDatabaseQueryRequest{query = "SELECT restart"},
+	)
+	assert(sealOK, "expected encrypted database query packet sealing to succeed")
+	defer delete(sealedPacket.payload)
+
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	databaseQuery := routerPollDatabaseQuery(&h)
+	assert(
+		databaseQuery.request.rawSQL.query == "SELECT restart",
+		"expected database request to be queued before restart cleanup",
+	)
+
+	MainRouterState_prepareForProcessStop(&h.pm, &h.state, .Database, "database restarting")
+
+	responseSend := routerPollDatabaseResponseMessage(&h)
+	defer delete(responseSend.data)
+	responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+	defer delete(responseOuterPacket.payload)
+	assert(
+		responseOuterPacket.messageType == .EncryptedPacket,
+		"expected restart failure notification to use encrypted transport",
+	)
+
+	responseInnerPacket, openOK := common.openPacketForSession(
+		&clientTransport,
+		responseOuterPacket,
+	)
+	assert(openOK, "expected client to decrypt restart failure response")
+	defer delete(responseInnerPacket.payload)
+	assert(
+		responseInnerPacket.messageType == .ServerDatabaseQueryResponse,
+		"expected failed pending generic database request to produce database query response",
+	)
+
+	responsePayload: common.ServerDatabaseQueryResult
+	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
+	assert(responsePayloadErr == nil, "expected failed restart response payload decode to succeed")
+	defer delete(responsePayload.message)
+	assert(!responsePayload.success, "expected pending request to fail during database restart")
+	assert(
+		responsePayload.message == "database restarting",
+		"expected restart failure message to explain database restart",
+	)
+	assert(
+		len(h.state.pendingDatabaseRequests) == 0,
+		"expected pending database requests to be drained during database restart",
+	)
+}
+
+@(test)
+testProcessManagerRestartSchedulingIsDeduplicated :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	h.pm.config.maxRestarts = 5
+	h.pm.config.restartBackoffMin = 0
+	h.pm.config.restartBackoffMax = 0
+
+	h.pm.networkProcess.isRunning = false
+	firstScheduled := restartProcess(&h.pm, .Network)
+	secondScheduled := restartProcess(&h.pm, .Network)
+
+	assert(firstScheduled, "expected first restart schedule to succeed")
+	assert(
+		secondScheduled,
+		"expected duplicate restart request to be treated as already scheduled",
+	)
+	assert(
+		h.pm.networkProcess.restartPending,
+		"expected restart scheduling to mark the process restart as pending",
+	)
+	assert(
+		h.pm.networkProcess.restartCount == 1,
+		"expected duplicate restart scheduling to avoid incrementing restart count twice",
+	)
+
+	ProcessManager_pumpRestarts(&h.pm)
+	assert(
+		h.pm.networkProcess.isRunning,
+		"expected due restart pumping to spawn the scheduled process once",
+	)
+	assert(
+		!h.pm.networkProcess.restartPending,
+		"expected due restart pumping to clear pending restart state",
+	)
+	assert(
+		!h.pm.networkProcess.stopRequested,
+		"expected due restart pumping to clear stop requested state after respawn",
+	)
+	assert(
+		h.pm.networkProcess.threadID == 1,
+		"expected a single respawn to consume only one thread identifier",
 	)
 }
