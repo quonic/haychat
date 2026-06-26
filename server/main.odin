@@ -570,7 +570,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 	case .ClientAuthLookup:
 		req: common.ClientAuthLookupRequest
 		err := cbor.unmarshal(packet.payload, &req)
-		if err != nil || len(req.nickname) == 0 {
+		if err != nil || len(req.nickname) < 3 || len(req.nickname) > 32 {
 			MainRouterState_sendPeerMessage(
 				pm,
 				state,
@@ -578,7 +578,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 				common.MessageType.ServerAuthLookupResponse,
 				common.ServerAuthLookupResult {
 					success = false,
-					message = "missing nickname",
+					message = "invalid nickname length",
 					result = "",
 				},
 			)
