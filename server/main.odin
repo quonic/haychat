@@ -6,6 +6,7 @@ import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 
 import "core:thread"
@@ -418,6 +419,7 @@ MainRouterState_handleClientAuthLookupPacket :: proc(
 ) {
 	req: common.ClientAuthLookupRequest
 	err := cbor.unmarshal(payload, &req)
+	defer delete(req.nickname)
 	if err != nil {
 		MainRouterState_sendPeerMessage(
 			pm,
@@ -455,7 +457,7 @@ MainRouterState_handleClientAuthLookupPacket :: proc(
 		.AuthLookup,
 		common.DatabaseQueryRequest {
 			queryType = .AuthLookupByNickname,
-			authLookup = {nickname = req.nickname},
+			authLookup = {nickname = strings.clone(req.nickname)},
 		},
 	)
 }
@@ -468,6 +470,7 @@ MainRouterState_handleClientDatabaseQueryPacket :: proc(
 ) {
 	req: common.ClientDatabaseQueryRequest
 	err := cbor.unmarshal(payload, &req)
+	defer delete(req.query)
 	if err != nil {
 		MainRouterState_sendPeerMessage(
 			pm,
@@ -503,7 +506,10 @@ MainRouterState_handleClientDatabaseQueryPacket :: proc(
 		state,
 		peerID,
 		.Generic,
-		common.DatabaseQueryRequest{queryType = .RawSQL, rawSQL = {query = req.query}},
+		common.DatabaseQueryRequest {
+			queryType = .RawSQL,
+			rawSQL = {query = strings.clone(req.query)},
+		},
 	)
 }
 
@@ -752,6 +758,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
+		defer delete(req.filename)
+		defer delete(req.content)
 		if err != nil || len(req.filename) == 0 || len(req.content) == 0 {
 			MainRouterState_sendPeerMessage(
 				pm,
@@ -782,6 +790,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			)
 			return
 		}
+		defer delete(hashedName)
 
 		MainRouterState_sendPeerMessage(
 			pm,
@@ -791,7 +800,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			common.ServerStoreFileResult {
 				success = true,
 				message = storeMessage,
-				hashedFilename = hashedName,
+				hashedFilename = strings.clone(hashedName),
 			},
 		)
 	case .ClientDatabaseQuery:

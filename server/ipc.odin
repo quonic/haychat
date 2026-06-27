@@ -180,6 +180,69 @@ IPC__state_init :: proc() {
 	ipcState.database_queue = make([dynamic]IPC_Queue_Message)
 }
 
+IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest) {
+	#partial switch request.queryType {
+	case .AuthLookupByNickname:
+		delete(request.authLookup.nickname)
+	case .RawSQL:
+		delete(request.rawSQL.query)
+	case:
+	}
+}
+
+IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryResponse) {
+	delete(response.message)
+	delete(response.result)
+}
+
+IPC__message_deinit :: proc(msg: ^Message) {
+	#partial switch m in msg^ {
+	case NetworkDataReceived:
+		delete(m.data)
+	case NetworkSendData:
+		delete(m.data)
+	case NetworkBroadcast:
+		delete(m.data)
+	case AdminGetPeersResponse:
+		delete(m.peers)
+	case AdminGetLogsResponse:
+		for i in 0 ..< len(m.logs) {
+			delete(m.logs[i])
+		}
+		delete(m.logs)
+	case DatabaseQuery:
+		IPC__database_query_request_deinit(m.request)
+	case DatabaseQueryResult:
+		IPC__database_query_response_deinit(m.response)
+	case DatabaseError:
+		delete(m.error)
+	case ProcessError:
+		delete(m.error)
+	case:
+	}
+	msg^ = Message{}
+}
+
+IPC__queue_deinit :: proc(queue: ^[dynamic]IPC_Queue_Message) {
+	for i in 0 ..< len(queue^) {
+		IPC__message_deinit(&queue^[i].msg)
+	}
+	delete(queue^)
+}
+
+IPC__state_deinit :: proc() {
+	if !ipcState.initialized {
+		return
+	}
+
+	delete(ipcState.endpoints)
+	IPC__queue_deinit(&ipcState.main_queue)
+	IPC__queue_deinit(&ipcState.network_queue)
+	IPC__queue_deinit(&ipcState.webadmin_queue)
+	IPC__queue_deinit(&ipcState.database_queue)
+	ipcState.initialized = false
+}
+
 IPC__endpoint_kind_from_socket :: proc(socket_name: string) -> IPC_Endpoint_Kind {
 	if strings.contains(socket_name, "network") {
 		return .Network

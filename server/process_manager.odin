@@ -99,7 +99,6 @@ ProcessManager__serviceThreadEntry :: proc(startDataRaw: rawptr) {
 	procInfo = ProcessManager_getProcessInfo(pm, procType)
 	if procInfo != nil {
 		procInfo.isRunning = false
-		procInfo.threadHandle = nil
 	}
 	sync.mutex_unlock(&pm.processMutex)
 }
@@ -172,6 +171,9 @@ spawnProcess :: proc(pm: ^ProcessManager, procType: ProcessType) -> bool {
 	threadHandle := thread.create_and_start_with_data(
 		startData,
 		ProcessManager__serviceThreadEntry,
+		nil,
+		thread.Thread_Priority.Normal,
+		true,
 	)
 	if threadHandle == nil {
 		fmt.printfln("[Supervisor] Failed to start %v thread\n", procType)
@@ -306,11 +308,15 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 			!pm.networkProcess.isRunning &&
 			!pm.webAdminProcess.isRunning &&
 			!pm.databaseProcess.isRunning
-		sync.mutex_unlock(&pm.processMutex)
 		if allStopped {
+			pm.networkProcess.threadHandle = nil
+			pm.webAdminProcess.threadHandle = nil
+			pm.databaseProcess.threadHandle = nil
+			sync.mutex_unlock(&pm.processMutex)
 			fmt.println("[Shutdown] All service threads exited")
 			return
 		}
+		sync.mutex_unlock(&pm.processMutex)
 		thread.yield()
 	}
 
