@@ -1020,26 +1020,77 @@ mainLoop :: proc(pm: ^ProcessManager) {
 				delete(m.data)
 			case AdminQueryStatus:
 				uptime := i64(time.duration_seconds(time.since(pm.startTime)))
+				sync.mutex_lock(&pm.processMutex)
 				response := AdminQueryStatusResponse {
-					uptime         = uptime,
-					connectedPeers = len(routerState.connectedPeers),
+					uptime                 = uptime,
+					connectedPeers         = len(routerState.connectedPeers),
+					networkRunning         = pm.networkProcess.isRunning,
+					webAdminRunning        = pm.webAdminProcess.isRunning,
+					databaseRunning        = pm.databaseProcess.isRunning,
+					networkRestartPending  = pm.networkProcess.restartPending,
+					webAdminRestartPending = pm.webAdminProcess.restartPending,
+					databaseRestartPending = pm.databaseProcess.restartPending,
+					shutdownRequested      = pm.shouldShutdown,
 				}
+				sync.mutex_unlock(&pm.processMutex)
 				IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, response)
 			case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
 			// Responses are consumed by web admin.
 			case AdminGetPeers:
+				peerSnapshots := make([dynamic]AdminPeerInfo, 0, len(routerState.connectedPeers))
+				for peerID in routerState.connectedPeers {
+					session, ok := MainRouterState_getPeerSession(&routerState, peerID)
+					if !ok {
+						append(&peerSnapshots, AdminPeerInfo{peerId = peerID})
+						continue
+					}
+					append(
+						&peerSnapshots,
+						AdminPeerInfo {
+							peerId = peerID,
+							isAuthenticated = session.isAuthenticated,
+							authenticatedId = session.authenticatedUserID,
+						},
+					)
+				}
 				IPC_Server_send(
 					&pm.config.webAdminSocket,
 					pm.config.webAdminFd,
-					AdminGetPeersResponse{peers = make([dynamic]NetworkPeerInfo)[:]},
+					AdminGetPeersResponse{peers = peerSnapshots[:]},
 				)
 			case AdminGetLogs:
+				sync.mutex_lock(&pm.processMutex)
+				logs := make([dynamic]string, 0, 4)
+				append(
+					&logs,
+					fmt.aprintf(
+						"network running=%v restart_pending=%v",
+						pm.networkProcess.isRunning,
+						pm.networkProcess.restartPending,
+					),
+				)
+				append(
+					&logs,
+					fmt.aprintf(
+						"web_admin running=%v restart_pending=%v",
+						pm.webAdminProcess.isRunning,
+						pm.webAdminProcess.restartPending,
+					),
+				)
+				append(
+					&logs,
+					fmt.aprintf(
+						"database running=%v restart_pending=%v",
+						pm.databaseProcess.isRunning,
+						pm.databaseProcess.restartPending,
+					),
+				)
+				append(&logs, fmt.aprintf("shutdown_requested=%v", pm.shouldShutdown))
+				sync.mutex_unlock(&pm.processMutex)
 				IPC_Server_send(
 					&pm.config.webAdminSocket,
 					pm.config.webAdminFd,
-					AdminGetLogsResponse {
-						logs = []string{"Logs are not wired yet in threaded mode."},
-					},
+					AdminGetLogsResponse{logs = logs[:]},
 				)
 			case DatabaseQuery:
 				IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, m)

@@ -105,6 +105,7 @@ ClientServerTransport_beginHandshake :: proc(transport: ^ClientServerTransport) 
 ClientServerTransport_handleIncomingPacket :: proc(
 	transport: ^ClientServerTransport,
 	server: ^Server,
+	config: ^Config,
 	packetBytes: []u8,
 ) -> (
 	ClientTransportResult,
@@ -142,8 +143,11 @@ ClientServerTransport_handleIncomingPacket :: proc(
 			return result, false
 		}
 
-		trustState := pinServerIdentity(server, serverHello.serverIdentityPublicKey)
+		trustState, configChanged := pinServerIdentity(server, serverHello.serverIdentityPublicKey)
 		transport.transport.peerTrustState = trustState
+		if configChanged {
+			saveConfig(config^)
+		}
 		transport.serverIdentityPublicKey = serverHello.serverIdentityPublicKey
 		transport.serverEphemeralPublicKey = serverHello.serverEphemeralPublicKey
 		transport.sessionID = serverHello.sessionID

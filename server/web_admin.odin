@@ -71,114 +71,121 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	fmt.eprintfln("[WebAdmin] Process shutting down")
 }
 
+WEB_ADMIN_POLL_TIMEOUT :: 250 * time.Millisecond
+
+awaitWebAdminMessage :: proc(clientFd: linux.Fd, timeout: time.Duration) -> (Message, bool) {
+	start := time.now()
+	for time.since(start) < timeout {
+		message, err := IPC_Client_poll(clientFd)
+		if err == nil {
+			return message, true
+		}
+		time.sleep(1 * time.Millisecond)
+	}
+	return Message{}, false
+}
+
 statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
-	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, Wake{})
+	_ = req
+	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminQueryStatus{})
 	if err_send != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err_send)
-		http.respond_plain(res, "Error sending wake signal")
+		http.respond_plain(res, "Error sending status request")
 		return
 	}
-	for {
-		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
-		if err != nil {
-			fmt.eprintfln("[WebAdmin] IPC poll error: %s", err)
-			http.respond_plain(res, "Error retrieving peer list")
-			return
-		}
-		if message != nil {
-			switch typeid_of(type_of(message)) {
-			case Wake:
-				// This is just a wake signal to check if the main process is alive, we can ignore it and just respond with status
-				http.respond_plain(res, "Server is running")
-				return
-			case:
-				fmt.eprintfln(
-					"[WebAdmin] Received unexpected message type: %s",
-					typeid_of(type_of(message)),
-				)
-				http.respond_plain(res, "Error retrieving peer list")
-				return
-			}
-		}
+
+	message, ok := awaitWebAdminMessage(pmWebAdmin.config.webAdminFd, WEB_ADMIN_POLL_TIMEOUT)
+	if !ok {
+		http.respond_plain(res, "Timed out waiting for status response")
+		return
+	}
+
+	#partial switch msg in message {
+	case AdminQueryStatusResponse:
+		http.respond_plain(
+			res,
+			fmt.aprintf(
+				"uptime=%d\nconnected_peers=%d\nnetwork_running=%v\nweb_admin_running=%v\ndatabase_running=%v\nnetwork_restart_pending=%v\nweb_admin_restart_pending=%v\ndatabase_restart_pending=%v\nshutdown_requested=%v",
+				msg.uptime,
+				msg.connectedPeers,
+				msg.networkRunning,
+				msg.webAdminRunning,
+				msg.databaseRunning,
+				msg.networkRestartPending,
+				msg.webAdminRestartPending,
+				msg.databaseRestartPending,
+				msg.shutdownRequested,
+			),
+		)
+	case:
+		fmt.eprintfln("[WebAdmin] Received unexpected message type")
+		http.respond_plain(res, "Error retrieving status")
 	}
 }
 
 peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
-	http.respond_plain(res, "Peer list is currently unavailable")
+	_ = req
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetPeers{})
 	if err_send != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err_send)
 		http.respond_plain(res, "Error sending peer list request")
 		return
 	}
-	for {
-		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
-		if err != nil {
-			fmt.eprintfln("[WebAdmin] IPC poll error: %s", err)
-			http.respond_plain(res, "Error retrieving peer list")
-			return
+
+	message, ok := awaitWebAdminMessage(pmWebAdmin.config.webAdminFd, WEB_ADMIN_POLL_TIMEOUT)
+	if !ok {
+		http.respond_plain(res, "Timed out waiting for peer list response")
+		return
+	}
+
+	#partial switch msg in message {
+	case AdminGetPeersResponse:
+		peerListStr := ""
+		for peer in msg.peers {
+			peerListStr, _ = strings.concatenate(
+				{
+					peerListStr,
+					fmt.aprintfln(
+						"Peer ID: %d auth=%v user_id=%d\n",
+						peer.peerId,
+						peer.isAuthenticated,
+						peer.authenticatedId,
+					),
+				},
+			)
 		}
-		if message != nil {
-			switch typeid_of(type_of(message)) {
-			case AdminGetPeersResponse:
-				peer_list := message.(AdminGetPeersResponse)
-				peer_list_str := ""
-				for peer in peer_list.peers {
-					peer_list_str, _ = strings.concatenate(
-						{
-							peer_list_str,
-							fmt.aprintfln("Peer: %s (ID: %d)\n", peer.address, peer.peerId),
-						},
-					)
-				}
-				http.respond_plain(res, fmt.aprintf("Peers:\n%s", peer_list_str))
-				return
-			case:
-				fmt.eprintfln(
-					"[WebAdmin] Received unexpected message type: %s",
-					typeid_of(type_of(message)),
-				)
-				http.respond_plain(res, "Error retrieving peer list")
-				return
-			}
-		}
+		http.respond_plain(res, fmt.aprintf("Peers:\n%s", peerListStr))
+	case:
+		fmt.eprintfln("[WebAdmin] Received unexpected message type")
+		http.respond_plain(res, "Error retrieving peer list")
 	}
 }
 
 logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
-	http.respond_plain(res, "Logs are currently unavailable")
+	_ = req
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetLogs{})
 	if err_send != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err_send)
 		http.respond_plain(res, "Error sending log request")
 		return
 	}
-	for {
-		message, err := IPC_Client_poll(pmWebAdmin.config.webAdminFd)
-		if err != nil {
-			fmt.eprintfln("[WebAdmin] IPC poll error: %s", err)
-			http.respond_plain(res, "Error retrieving logs")
-			return
+
+	message, ok := awaitWebAdminMessage(pmWebAdmin.config.webAdminFd, WEB_ADMIN_POLL_TIMEOUT)
+	if !ok {
+		http.respond_plain(res, "Timed out waiting for log response")
+		return
+	}
+
+	#partial switch msg in message {
+	case AdminGetLogsResponse:
+		logsStr := ""
+		for logEntry in msg.logs {
+			logsStr, _ = strings.concatenate({logsStr, fmt.aprintfln("%s\n", logEntry)})
 		}
-		if message != nil {
-			switch typeid_of(type_of(message)) {
-			case AdminGetLogsResponse:
-				logs := message.(AdminGetLogsResponse)
-				logs_str := ""
-				for log_entry in logs.logs {
-					logs_str, _ = strings.concatenate({logs_str, fmt.aprintfln("%s\n", log_entry)})
-				}
-				http.respond_plain(res, fmt.aprintf("Logs:\n%s", logs_str))
-				return
-			case:
-				fmt.eprintfln(
-					"[WebAdmin] Received unexpected message type: %s",
-					typeid_of(type_of(message)),
-				)
-				http.respond_plain(res, "Error retrieving logs")
-				return
-			}
-		}
+		http.respond_plain(res, fmt.aprintf("Logs:\n%s", logsStr))
+	case:
+		fmt.eprintfln("[WebAdmin] Received unexpected message type")
+		http.respond_plain(res, "Error retrieving logs")
 	}
 }
 

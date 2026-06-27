@@ -9,11 +9,22 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 	switch m.kind {
 	case .SwitchToFriendsList:
 		out.view_friends_list = true
+		out.view_dms = true
 	case .SwitchToDMs:
 		out.view_dms = true
+		out.view_friends_list = false
 	case .SwitchToServer:
 		out.view_dms = false
+		out.view_friends_list = false
 		out.selected_server_id = m.id
+		out.selected_transport_index = -1
+		for i in 0 ..< len(out.config.servers) {
+			server := out.config.servers[i]
+			if server.id == m.id {
+				out.selected_transport_index = i
+				break
+			}
+		}
 	case .UpdateWindowSize:
 		out.window_width = f32(m.window_vector.x)
 		out.window_height = f32(m.window_vector.y)
@@ -46,6 +57,7 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		// Handle starting a new conversation, such as by clearing the current DM chat and resetting the selected server or friend
 		out.current_dm_chat = [dynamic]skald.Text_Span{}
 		out.selected_server_id = 0
+		out.selected_transport_index = -1
 		out.view_dms = true
 		out.view_friends_list = false
 	case .AddFriend:

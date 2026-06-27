@@ -17,6 +17,7 @@ State :: struct {
 	view_dms:                       bool,
 	view_friends_list:              bool,
 	selected_server_id:             int, // ID of the currently selected server, used for determining which server's channels and friends to display in the UI
+	selected_transport_index:       int,
 	window_width:                   f32, // Current width of the application window, used for responsive UI layout
 	window_height:                  f32, // Current height of the application window, used for responsive UI layout
 	current_dm_chat:                [dynamic]skald.Text_Span,
@@ -85,7 +86,12 @@ init :: proc() -> (init_state: State) {
 	}
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
 	init_state.view_dms = true
-	init_state.view_friends_list = true
+	init_state.view_friends_list = false
+	init_state.selected_transport_index = -1
+	if len(init_state.config.servers) > 0 {
+		init_state.selected_server_id = init_state.config.servers[0].id
+		init_state.selected_transport_index = 0
+	}
 	init_state.window_width = 1920
 	init_state.window_height = 1080
 	append(&init_state.current_dm_chat, skald.span("Say Hi!", skald.theme_dark().color.fg_muted))

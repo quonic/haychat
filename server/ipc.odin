@@ -76,14 +76,27 @@ NetworkDisconnectPeer :: struct {
 AdminQueryStatus :: struct {}
 
 AdminQueryStatusResponse :: struct {
-	uptime:         i64,
-	connectedPeers: int,
+	uptime:                 i64,
+	connectedPeers:         int,
+	networkRunning:         bool,
+	webAdminRunning:        bool,
+	databaseRunning:        bool,
+	networkRestartPending:  bool,
+	webAdminRestartPending: bool,
+	databaseRestartPending: bool,
+	shutdownRequested:      bool,
+}
+
+AdminPeerInfo :: struct {
+	peerId:          u32,
+	isAuthenticated: bool,
+	authenticatedId: int,
 }
 
 AdminGetPeers :: struct {}
 
 AdminGetPeersResponse :: struct {
-	peers: []NetworkPeerInfo,
+	peers: []AdminPeerInfo,
 }
 
 AdminGetLogs :: struct {}

@@ -218,7 +218,10 @@ ensureIdentityKeys :: proc(config: ^Config) -> bool {
 pinServerIdentity :: proc(
 	server: ^Server,
 	serverPublicKey: common.IdentityPublicKeyBytes,
-) -> common.PeerTrustState {
+) -> (
+	common.PeerTrustState,
+	bool,
+) {
 	serverPublicKeyHex := common.identityPublicKeyToHex(serverPublicKey)
 	serverFingerprintHex := common.fingerprintToHex(
 		common.fingerprintIdentityPublicKey(serverPublicKey),
@@ -227,13 +230,13 @@ pinServerIdentity :: proc(
 	if len(server.pinned_server_public_key) == 0 && len(server.pinned_server_fingerprint) == 0 {
 		server.pinned_server_public_key = serverPublicKeyHex
 		server.pinned_server_fingerprint = serverFingerprintHex
-		return .Trusted
+		return .Trusted, true
 	}
 
 	if server.pinned_server_public_key == serverPublicKeyHex &&
 	   server.pinned_server_fingerprint == serverFingerprintHex {
-		return .Trusted
+		return .Trusted, false
 	}
 
-	return .Changed
+	return .Changed, false
 }

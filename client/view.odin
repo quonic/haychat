@@ -74,9 +74,41 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	for server in s.config.servers {
 		if server.id == s.selected_server_id {
 			append(&server_list, skald.text(server.name, th.color.fg))
+			append(
+				&server_list,
+				skald.text(
+					fmt.tprintf("Host: %s:%d", server.host, server.port),
+					th.color.fg_muted,
+				),
+			)
 		}
 	}
+	append(&server_list, view_selected_transport_status(s, ctx))
 	return skald.col(..server_list[:], spacing = general_spacing)
+}
+
+view_selected_transport_status :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
+	th := ctx.theme
+	if s.selected_transport_index < 0 || s.selected_transport_index >= len(s.serverTransports) {
+		return skald.text("No transport selected", th.color.fg_muted)
+	}
+
+	transport := s.serverTransports[s.selected_transport_index]
+	status := fmt.tprintf(
+		"Transport phase: %v | Trust: %v | User ID: %d",
+		transport.transport.phase,
+		transport.transport.peerTrustState,
+		transport.authenticatedUserID,
+	)
+	if len(transport.lastError) > 0 {
+		return skald.col(
+			skald.text(status, th.color.fg_muted),
+			skald.text(fmt.tprintf("Last error: %s", transport.lastError), th.color.danger),
+			spacing = general_spacing,
+		)
+	}
+
+	return skald.text(status, th.color.fg_muted)
 }
 
 view_dms :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {

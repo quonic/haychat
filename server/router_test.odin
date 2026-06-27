@@ -689,3 +689,64 @@ testProcessManagerRestartSchedulingIsDeduplicated :: proc(t: ^testing.T) {
 		"expected a single respawn to consume only one thread identifier",
 	)
 }
+
+@(test)
+testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	searedPacket, sealOK := common.sealPacketForSession(
+		&clientTransport,
+		.ClientStoreFile,
+		common.ClientStoreFileRequest{filename = "", content = []u8{1}},
+	)
+	assert(sealOK, "expected encrypted file-store packet sealing to succeed")
+	defer delete(searedPacket.payload)
+
+	sealedPacketBytes := routerEncodePacketBytes(searedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	responseSend := routerPollDatabaseResponseMessage(&h)
+	defer delete(responseSend.data)
+	responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+	defer delete(responseOuterPacket.payload)
+	assert(
+		responseOuterPacket.messageType == .EncryptedPacket,
+		"expected file-store validation failure to use encrypted transport",
+	)
+
+	responseInnerPacket, openOK := common.openPacketForSession(
+		&clientTransport,
+		responseOuterPacket,
+	)
+	assert(openOK, "expected client to decrypt file-store validation response")
+	defer delete(responseInnerPacket.payload)
+	assert(
+		responseInnerPacket.messageType == .ServerStoreFileResponse,
+		"expected file-store validation failure to return a file-store response",
+	)
+
+	responsePayload: common.ServerStoreFileResult
+	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
+	assert(responsePayloadErr == nil, "expected file-store response payload decode to succeed")
+	defer delete(responsePayload.message)
+	assert(!responsePayload.success, "expected invalid file-store request to fail")
+	assert(
+		responsePayload.message == "invalid payload",
+		"expected invalid file-store request to explain payload validation failure",
+	)
+}
