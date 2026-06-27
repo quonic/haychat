@@ -121,8 +121,110 @@ loadConfig :: proc() -> ServerConfig {
 		serverPublicKey        = getEnvOr("HAYCHAT_SERVER_PUBLIC_KEY", ""),
 	}
 
+	validateAndNormalizeConfig(&config)
 	ensureServerIdentityKeys(&config)
 	return config
+}
+
+validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
+	if config.webAdminPort <= 0 || config.webAdminPort > 65535 {
+		config.webAdminPort = 8080
+	}
+	if config.databasePort <= 0 || config.databasePort > 65535 {
+		config.databasePort = 5432
+	}
+	if config.maxRestarts < 0 {
+		config.maxRestarts = 0
+	}
+	if config.maxNetworkThreads < 1 {
+		config.maxNetworkThreads = 1
+	}
+	if config.maxFileSize < 1 {
+		config.maxFileSize = i64(10 * mem.Megabyte)
+	}
+	if config.maxStorageCapacity < config.maxFileSize {
+		config.maxStorageCapacity = config.maxFileSize
+	}
+	if config.restartBackoffMin < 0 {
+		config.restartBackoffMin = 0
+	}
+	if config.restartBackoffMax < config.restartBackoffMin {
+		config.restartBackoffMax = config.restartBackoffMin
+	}
+	if len(config.logPath) == 0 {
+		config.logPath = "/var/log/haychat"
+	}
+	if len(config.fileStoragePath) == 0 {
+		config.fileStoragePath = "/var/lib/haychat/files"
+	}
+	if len(config.serverIdentityFilePath) == 0 {
+		config.serverIdentityFilePath = fmt.aprintf(
+			"%s/server_identity.json",
+			config.fileStoragePath,
+		)
+	}
+
+	ensureDirectoryPathExists(config.logPath)
+	ensureDirectoryPathExists(config.fileStoragePath)
+	identityDir := pathDirname(config.serverIdentityFilePath)
+	if len(identityDir) > 0 {
+		ensureDirectoryPathExists(identityDir)
+	}
+}
+
+pathDirname :: proc(path: string) -> string {
+	lastSeparator := -1
+	for i := len(path) - 1; i >= 0; i -= 1 {
+		if path[i] == '/' || path[i] == '\\' {
+			lastSeparator = i
+			break
+		}
+	}
+	if lastSeparator <= 0 {
+		return ""
+	}
+	return path[:lastSeparator]
+}
+
+ensureDirectoryPathExists :: proc(path: string) -> bool {
+	if len(path) == 0 {
+		return false
+	}
+	if os.exists(path) {
+		return true
+	}
+
+	start := 0
+	when ODIN_OS != .Windows {
+		if path[0] == '/' {
+			start = 1
+		}
+	}
+
+	for i := start; i < len(path); i += 1 {
+		if path[i] != '/' && path[i] != '\\' {
+			continue
+		}
+		if i == 0 {
+			continue
+		}
+		prefix := path[:i]
+		if len(prefix) == 0 || os.exists(prefix) {
+			continue
+		}
+		err := os.make_directory(prefix)
+		if err != nil {
+			fmt.println("[Warning] Failed to create directory: ", prefix, " - ", err)
+			return false
+		}
+	}
+
+	err := os.make_directory(path)
+	if err != nil {
+		fmt.println("[Warning] Failed to create directory: ", path, " - ", err)
+		return false
+	}
+	return true
 }
 
 // Helper procedures for environment variable parsing

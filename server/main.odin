@@ -767,7 +767,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			return
 		}
 
-		hashedName, ok := saveFile(pm.config, req.content, req.filename, int(peerID))
+		hashedName, storeMessage, ok := saveFile(pm.config, req.content, req.filename, int(peerID))
 		if !ok {
 			MainRouterState_sendPeerMessage(
 				pm,
@@ -776,7 +776,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 				common.MessageType.ServerStoreFileResponse,
 				common.ServerStoreFileResult {
 					success = false,
-					message = "failed to save file",
+					message = storeMessage,
 					hashedFilename = "",
 				},
 			)
@@ -790,7 +790,7 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			common.MessageType.ServerStoreFileResponse,
 			common.ServerStoreFileResult {
 				success = true,
-				message = "ok",
+				message = storeMessage,
 				hashedFilename = hashedName,
 			},
 		)

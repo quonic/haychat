@@ -45,7 +45,6 @@ FriendStatus :: enum {
 }
 
 loadConfig :: proc() -> (config: Config) {
-
 	when ODIN_OS == .Windows {
 		APP_DATA = os.get_env("APPDATA", context.allocator)
 		if APP_DATA == "" {
@@ -55,6 +54,7 @@ loadConfig :: proc() -> (config: Config) {
 			APP_DATA = "."
 		}
 	} else when ODIN_OS == .Linux {
+		XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.allocator)
 		if XDG_CONFIG_HOME == "" {
 			XDG_CONFIG_HOME = strings.concatenate(
 				{os.get_env("HOME", context.allocator), "/.config"},
@@ -63,90 +63,47 @@ loadConfig :: proc() -> (config: Config) {
 		}
 	}
 
-	path := getConfigPath()
-	when ODIN_OS == .Windows {
-		if os.exists(strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator)) {
-			fmt.println(
-				"[Info] Found existing config directory at: ",
-				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
-			)
-		} else {
-			fmt.println(
-				"[Info] No existing config directory found at: ",
-				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
-			)
-			err := os.make_directory(
-				strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
-			)
-			if err != nil {
-				fmt.println("[Error] Failed to create config directory: ", err)
-			} else {
-				fmt.println(
-					"[Info] Created config directory at: ",
-					strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator),
-				)
-			}
-		}
-	} else when ODIN_OS == .Linux {
-		if os.exists(
-			strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
-		) {
-			fmt.println(
-				"[Info] Found existing config directory at: ",
-				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
-			)
-		} else {
-			fmt.println(
-				"[Info] No existing config directory found at: ",
-				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
-			)
-			err := os.make_directory(
-				strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
-			)
-			if err != nil {
-				fmt.println("[Error] Failed to create config directory: ", err)
-			} else {
-				fmt.println(
-					"[Info] Created config directory at: ",
-					strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator),
-				)
-			}
-		}
-	}
-
-	shouldLoad := false
-
-	if os.exists(path) {
-		fmt.println("[Info] Loaded config from: ", path)
-		file, err := os.open(path, {.Read})
-		if err != nil {
-			fmt.println("[Error] Failed to open config file: ", err)
-			return {}
-		}
-		shouldLoad = true
-		defer os.close(file)
-	} else {
-		fmt.println("[Info] No config file found at: ", path)
-		file, err := os.open(path, {.Create, .Read}, {.Read_User, .Write_User})
-		if err != nil {
-			fmt.println("[Error] Failed to create config file: ", err)
-			return {}
-		} else {
-			fmt.println("[Info] Created config file at: ", path)
-		}
-		defer os.close(file)
-	}
-
-	data, err := os.read_entire_file_from_path(path, context.allocator)
-	if err != nil {
-		fmt.println("[Error] Failed to read config file: ", err)
+	if !ensureConfigDirExists() {
 		return {}
 	}
+
+	path := getConfigPath()
+	shouldLoad := false
+	shouldPersist := false
+	readPath := path
+
+	when ODIN_OS == .Linux {
+		legacyPath := getLegacyLinuxConfigPath()
+		if !os.exists(path) && legacyPath != path && os.exists(legacyPath) {
+			fmt.println("[Info] Migrating config from legacy path: ", legacyPath)
+			readPath = legacyPath
+			shouldLoad = true
+			shouldPersist = true
+		}
+	}
+
+	if !shouldLoad && os.exists(readPath) {
+		fmt.println("[Info] Loaded config from: ", readPath)
+		shouldLoad = true
+	} else if !shouldLoad {
+		fmt.println("[Info] No config file found at: ", path)
+		shouldPersist = true
+	}
+
 	if shouldLoad {
+		data, err := os.read_entire_file_from_path(readPath, context.allocator)
+		if err != nil {
+			fmt.println("[Error] Failed to read config file: ", err)
+			return {}
+		}
 		json.unmarshal(data, &config)
 	}
 
 	if ensureIdentityKeys(&config) {
+		shouldPersist = true
+	}
+
+	if shouldPersist {
 		saveConfig(config)
 	}
 
@@ -154,39 +111,76 @@ loadConfig :: proc() -> (config: Config) {
 }
 
 saveConfig :: proc(config: Config) {
-	if os.exists(getConfigPath()) {
-		file, file_err := os.open(getConfigPath(), {.Write})
-		if file_err != nil {
-			fmt.println("[Error] Failed to open config file for writing: ", file_err)
-			return
-		}
-		defer os.close(file)
-
-		jsonData, json_err := json.marshal(config)
-		if json_err != nil {
-			fmt.println("[Error] Failed to marshal config to JSON: ", json_err)
-			return
-		}
-
-		write_err := os.write_entire_file_from_bytes(getConfigPath(), jsonData)
-		if write_err != nil {
-			fmt.println("[Error] Failed to write config file: ", write_err)
-			return
-		}
-		fmt.println("[Info] Config saved successfully to: ", getConfigPath())
-	} else {
-		fmt.println("[Error] Config file does not exist at: ", getConfigPath())
+	if !ensureConfigDirExists() {
+		return
 	}
+
+	jsonData, json_err := json.marshal(config)
+	if json_err != nil {
+		fmt.println("[Error] Failed to marshal config to JSON: ", json_err)
+		return
+	}
+
+	write_err := os.write_entire_file_from_bytes(getConfigPath(), jsonData)
+	if write_err != nil {
+		fmt.println("[Error] Failed to write config file: ", write_err)
+		return
+	}
+	fmt.println("[Info] Config saved successfully to: ", getConfigPath())
+}
+
+ensureConfigDirExists :: proc() -> bool {
+	configDir := getConfigDir()
+	if configDir == "" {
+		fmt.println("[Error] Config directory could not be determined")
+		return false
+	}
+
+	when ODIN_OS == .Linux {
+		if !os.exists(XDG_CONFIG_HOME) {
+			err := os.make_directory(XDG_CONFIG_HOME)
+			if err != nil {
+				fmt.println("[Error] Failed to create base config directory: ", err)
+				return false
+			}
+		}
+	}
+
+	if os.exists(configDir) {
+		return true
+	}
+
+	err := os.make_directory(configDir)
+	if err != nil {
+		fmt.println("[Error] Failed to create config directory: ", err)
+		return false
+	}
+
+	fmt.println("[Info] Created config directory at: ", configDir)
+	return true
+}
+
+getConfigDir :: proc() -> string {
+	when ODIN_OS == .Windows {
+		return strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator)
+	} else when ODIN_OS == .Linux {
+		return strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator)
+	}
+	return ""
 }
 
 getConfigPath :: proc() -> string {
 	// Returns the path to the configuration file based on the operating system
 	when ODIN_OS == .Windows {
-		return strings.concatenate(
-			{APP_DATA, "\\", haychatFolder, "\\config.json"},
-			context.allocator,
-		)
+		return strings.concatenate({getConfigDir(), "\\config.json"}, context.allocator)
 	} else when ODIN_OS == .Linux {
+		return strings.concatenate({getConfigDir(), "/config.json"}, context.allocator)
+	}
+	return ""
+}
+
+getLegacyLinuxConfigPath :: proc() -> string {
+	when ODIN_OS == .Linux {
 		return strings.concatenate(
 			{
 				os.get_env("HOME", context.allocator),
