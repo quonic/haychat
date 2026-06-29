@@ -2,7 +2,8 @@
 
 ## Objective
 
-Define the smallest HayChat release that internal or external testers can install, run, and evaluate without needing source-level help from a developer.
+Define the smallest HayChat release that internal-only testers can compile from source and evaluate
+with limited support.
 
 ## Current State
 
@@ -14,6 +15,9 @@ Define the smallest HayChat release that internal or external testers can instal
 
 ## Assumptions
 
+- The first tester cohort is internal-only.
+- Support for the first wave is limited to "does it work or not?" triage.
+- The first release format is source-based and expects testers to compile from source.
 - The first tester wave should prioritize Linux because the client Linux target is already checked and server paths are Linux-oriented.
 - Windows can be kept as a secondary target if packaging is cheap.
 - A first tester build only needs one successful core scenario: start server, start two clients, authenticate, and exchange text messages.
@@ -26,11 +30,11 @@ Define the smallest HayChat release that internal or external testers can instal
 
 ## Prioritized Tasks
 
-1. Define the tester persona for the first release: internal engineering, trusted external testers, or both.
+1. Keep the tester persona for the first release internal-only.
 2. Freeze the supported matrix for the first wave: server on Linux, client on Linux, optional Windows client.
 3. Define the minimum evaluable workflow and explicitly exclude everything else from release scope.
 4. Write a release checklist that requires build success, smoke validation, docs, known limitations, and onboarding assets.
-5. Decide whether the first release is source-based, packaged binaries, or both.
+5. Keep the first release handoff source-based so testers compile from source.
 6. Publish a short list of features intentionally deferred until after feedback.
 
 ## Risks
@@ -43,7 +47,7 @@ Define the smallest HayChat release that internal or external testers can instal
 
 - Is the first release intended to validate networking and chat only, or also file upload and web admin?
 - Are testers expected to self-host PostgreSQL, or should the release bundle its runtime dependencies?
-- Is a source checkout acceptable for internal testers, or must the first handoff already be binary-first?
+- What minimum build and run commands must be documented so internal testers can compile reliably?
 
 ## Exit Criteria
 

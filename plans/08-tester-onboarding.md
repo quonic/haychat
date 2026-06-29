@@ -14,7 +14,8 @@ Give testers a complete, low-friction path to install HayChat, exercise the inte
 
 - The first tester wave should be tightly scoped and scenario-driven.
 - Testers should not need to invent their own accounts, data, or evaluation steps.
-- Internal and external testers may need different levels of setup access and support.
+- The first tester cohort is internal-only and compiles from source.
+- Support for the first wave is limited to "does it work or not?" and reproducible setup checks.
 
 ## Dependencies
 
@@ -31,7 +32,7 @@ Give testers a complete, low-friction path to install HayChat, exercise the inte
 4. Create a known-issues list so testers can distinguish expected gaps from new regressions.
 5. Define the feedback path: issue template, repro data to collect, logs to attach, and who receives reports.
 6. Add a lightweight support playbook for maintainers responding to tester setup failures.
-7. Decide whether external testers receive local-host-only instructions or a hosted/shared test environment.
+7. Keep onboarding instructions aligned with internal-only, source-build handoff expectations.
 
 ## Risks
 
@@ -43,7 +44,7 @@ Give testers a complete, low-friction path to install HayChat, exercise the inte
 
 - Will testers run their own PostgreSQL and server, or connect to a centrally hosted test server?
 - What logs should testers be asked to include by default?
-- Is the first tester wave focused on usability feedback, correctness, or deployment friction?
+- Is the first tester wave focused on correctness and deployment friction before broader usability feedback?
 
 ## Exit Criteria
 
