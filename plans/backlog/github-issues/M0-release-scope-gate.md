@@ -153,6 +153,22 @@ Deliverables:
 - A release-scope list.
 - A deferred-features list.
 
+Release scope list (MVP-first, aligned with HC-003 workflow):
+
+- Build and run HayChat server and client from source on supported Linux and Windows targets.
+- Configure PostgreSQL and HayChat with documented sample settings.
+- Start one server and two clients, then authenticate both clients with test identities.
+- Exchange text chat messages through the server.
+- Restart cleanly and verify startup/auth/message events through logs.
+
+Deferred features list (not in first-release scope):
+
+- Voice, video, and screensharing protocol families.
+- Forum-style and other long-form social content flows.
+- Rich presence and broader social graph/discovery features.
+- macOS support and polished URL scheme integration.
+- Any workflow not required to complete the MVP evaluator flow above.
+
 Acceptance Criteria:
 
 - The release scope stays aligned with the MVP evaluator workflow.

@@ -26,6 +26,14 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 - The public docs are too thin for a clean-machine install and run.
 - There is no packaging or release artifact flow for handing a build to testers.
 
+## First-Release Feature Families (Included)
+
+- Build and run the server and client from source on supported Linux and Windows targets.
+- Configure PostgreSQL and HayChat settings with documented sample values.
+- Authenticate two test users.
+- Exchange text chat messages through the server.
+- Restart server and clients cleanly and inspect logs for startup, auth, message, and restart events.
+
 ## What Can Be Deferred Until After First Tester Feedback
 
 - Voice, video, screenshare, and forum flows already modeled in `common/protocol.odin`.
