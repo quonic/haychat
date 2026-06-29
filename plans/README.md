@@ -62,6 +62,7 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 
 ## Plan Files
 
+- [release-decision-record.md](release-decision-record.md): canonical M0 release contract (scope, platform, and handoff baseline).
 - [01-product-readiness.md](01-product-readiness.md): scope, release definition, and go/no-go framing.
 - [02-core-functionality.md](02-core-functionality.md): minimum feature set for a tester-usable build.
 - [03-stability-bug-fixing.md](03-stability-bug-fixing.md): operational hardening and blocker fixes.

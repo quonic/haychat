@@ -5,6 +5,8 @@
 Define the smallest HayChat release that internal-only testers can compile from source and evaluate
 with limited support.
 
+Canonical reference: [release-decision-record.md](release-decision-record.md).
+
 ## Current State
 
 - The repo compiles and has passing `server` and `common` tests.

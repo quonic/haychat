@@ -6,6 +6,7 @@ chat workflow on a reproducible setup for the supported first-wave platform matr
 
 ## Release Target
 
+- Canonical release contract: [../release-decision-record.md](../release-decision-record.md).
 - Primary target: Linux and Windows support for both server and client.
 - First evaluable scenario: start PostgreSQL, start server, start two clients, authenticate, exchange text messages, restart cleanly, collect logs.
 - Deferred from this backlog unless needed to unblock the first release: voice, video, screenshare,

@@ -67,6 +67,7 @@ Linux and Windows instead of the full protocol surface.
 ### HC-006 `P1` Create release decision record
 
 - Outcome: a short canonical markdown note captures scope, target platforms, artifact model, and release gate.
+- Canonical record: [../release-decision-record.md](../release-decision-record.md).
 - Depends on: `HC-002`, `HC-003`, `HC-004`.
 - Touched areas: [plans/backlog/README.md](/home/jim/Projects/haychat/plans/backlog/README.md), [plans/01-product-readiness.md](/home/jim/Projects/haychat/plans/01-product-readiness.md).
 - Acceptance criteria:
