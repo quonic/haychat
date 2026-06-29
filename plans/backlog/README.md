@@ -1,12 +1,15 @@
 # HayChat Tester-Ready Milestone Backlog
 
-This backlog converts the critical-path plans into milestone-sized execution slices with issue-sized tasks. It is intentionally biased toward a first tester release that proves one real end-to-end text chat workflow on a reproducible Linux setup.
+This backlog converts the critical-path plans into milestone-sized execution slices with issue-sized
+tasks. It is intentionally biased toward a first tester release that proves one real end-to-end text
+chat workflow on a reproducible setup for the supported first-wave platform matrix.
 
 ## Release Target
 
-- Primary target: Linux server plus Linux client.
+- Primary target: Linux and Windows support for both server and client.
 - First evaluable scenario: start PostgreSQL, start server, start two clients, authenticate, exchange text messages, restart cleanly, collect logs.
-- Deferred from this backlog unless needed to unblock the first release: voice, video, screenshare, forum flows, rich presence, macOS packaging, and polished URL scheme integration.
+- Deferred from this backlog unless needed to unblock the first release: voice, video, screenshare,
+  forum flows, rich presence, macOS support, and polished URL scheme integration.
 
 ## Milestone Order
 

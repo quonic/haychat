@@ -32,7 +32,7 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 - Rich friend presence, discovery, and sync beyond static config entries.
 - Desktop URL scheme registration polish.
 - Production-grade log shipping, metrics, and signing.
-- macOS support if the first tester wave is limited to Linux and optionally Windows.
+- macOS support, which is out of scope for the first tester wave.
 
 ## Critical Path
 

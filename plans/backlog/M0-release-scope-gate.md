@@ -2,7 +2,8 @@
 
 ## Goal
 
-Freeze the first tester release so implementation work stays focused on a Linux-first text-chat evaluation build instead of the full protocol surface.
+Freeze the first tester release so implementation work stays focused on a text-chat evaluation build for
+Linux and Windows instead of the full protocol surface.
 
 ## Exit Criteria
 
@@ -24,11 +25,12 @@ Freeze the first tester release so implementation work stays focused on a Linux-
 
 ### HC-002 `P0` Freeze supported platform matrix
 
-- Outcome: the first release explicitly supports Linux server plus Linux client, with optional Windows client clearly marked if retained.
+- Outcome: the first release explicitly supports Linux and Windows for both server and client, with
+  macOS explicitly out of scope.
 - Depends on: `HC-001`.
 - Touched areas: [plans/01-product-readiness.md](/home/jim/Projects/haychat/plans/01-product-readiness.md), [plans/backlog/README.md](/home/jim/Projects/haychat/plans/backlog/README.md).
 - Acceptance criteria:
-  - Required platforms are named.
+  - Required platforms are named for both server and client.
   - Non-target platforms are marked out of scope for milestone planning.
 
 ### HC-003 `P0` Freeze MVP evaluator workflow
