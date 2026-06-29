@@ -2,7 +2,8 @@
 
 ## Goal
 
-Turn the existing client and server skeleton into a real Linux-first text-chat flow that can be exercised by two testers on a clean setup.
+Turn the existing client and server skeleton into a real text-chat flow on the first-wave supported
+Linux and Windows matrix that can be exercised by two testers on a clean setup.
 
 ## Exit Criteria
 

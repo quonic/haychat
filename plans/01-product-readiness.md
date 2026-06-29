@@ -18,8 +18,8 @@ with limited support.
 - The first tester cohort is internal-only.
 - Support for the first wave is limited to "does it work or not?" triage.
 - The first release format is source-based and expects testers to compile from source.
-- The first tester wave should prioritize Linux because the client Linux target is already checked and server paths are Linux-oriented.
-- Windows can be kept as a secondary target if packaging is cheap.
+- The first tester wave supports Linux and Windows for both server and client components.
+- macOS is out of scope for the first tester wave.
 - A first tester build only needs one successful core scenario: start server, start two clients, authenticate, and exchange text messages.
 
 ## Dependencies
@@ -31,7 +31,8 @@ with limited support.
 ## Prioritized Tasks
 
 1. Keep the tester persona for the first release internal-only.
-2. Freeze the supported matrix for the first wave: server on Linux, client on Linux, optional Windows client.
+2. Freeze the supported matrix for the first wave: server and client on Linux and Windows, with
+   macOS explicitly unsupported.
 3. Define the minimum evaluable workflow and explicitly exclude everything else from release scope.
 4. Write a release checklist that requires build success, smoke validation, docs, known limitations, and onboarding assets.
 5. Keep the first release handoff source-based so testers compile from source.
@@ -41,7 +42,8 @@ with limited support.
 
 - If scope is not frozen early, the large protocol surface in `common/protocol.odin` will keep pulling work away from tester readiness.
 - If external testers are included too early, packaging, documentation, and support requirements expand sharply.
-- If Linux and Windows are both treated as mandatory on day one, delivery risk increases for no clear tester value.
+- If the supported platform matrix keeps changing, packaging and validation scope can expand
+  unexpectedly.
 
 ## Open Questions
 

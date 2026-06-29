@@ -49,8 +49,8 @@ Deliverables:
 
 Acceptance Criteria:
 
-- Linux server and Linux client support are either confirmed or replaced with a documented alternative.
-- Any optional Windows client support is marked clearly as supported or deferred.
+- Linux and Windows support are confirmed for both server and client.
+- macOS is explicitly marked unsupported for the first tester wave.
 
 ## HC-003
 
