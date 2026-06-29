@@ -46,7 +46,9 @@ Linux and Windows instead of the full protocol surface.
 
 ### HC-004 `P0` Decide handoff model
 
-- Outcome: maintainers choose between source-based setup, packaged binaries, or both for the first wave.
+- Outcome: first-wave handoff is source-based only; packaged binaries are deferred beyond M0.
+- Rationale: this keeps the first internal-only tester wave aligned with current repo capabilities and
+  limited maintainer support, while unblocking packaging and onboarding planning against one artifact model.
 - Depends on: `HC-001`, `HC-002`.
 - Touched areas: [plans/01-product-readiness.md](/home/jim/Projects/haychat/plans/01-product-readiness.md), [plans/06-deployment-packaging.md](/home/jim/Projects/haychat/plans/06-deployment-packaging.md).
 - Acceptance criteria:
