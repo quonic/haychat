@@ -20,6 +20,22 @@ Deliver one real end-to-end HayChat experience that testers can evaluate without
 - A temporary simplified room model is acceptable if it supports meaningful tester evaluation.
 - Registration can remain limited or scripted if authentication and seeded identities are reliable.
 
+## Included vs Deferred Feature Families (First Release)
+
+Included feature families (must align to the MVP evaluator workflow):
+
+- Source build and startup on supported OS targets.
+- Configuration and authentication for documented test identities.
+- Server-mediated text chat message send and receive.
+- Clean restart behavior and log inspection for the core flow.
+
+Deferred feature families (non-blocking for first release):
+
+- Voice, video, and screensharing.
+- Forum-style and long-form social content.
+- Rich presence and broader social graph features.
+- Polished URL scheme integration and non-MVP transport/UI expansions.
+
 ## Dependencies
 
 - [01-product-readiness.md](01-product-readiness.md) for the final MVP definition.
