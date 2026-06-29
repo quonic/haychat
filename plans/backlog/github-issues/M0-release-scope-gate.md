@@ -113,6 +113,15 @@ Summary:
 
 Choose the supported delivery model for the first tester wave so setup, packaging, and documentation can be planned against a stable target.
 
+Decision:
+
+- Source-based only for the first tester wave.
+
+Rationale:
+
+- The current project and plan assumptions already target internal-only testers compiling from source.
+- Deferring packaged binaries keeps first-wave support expectations realistic while allowing packaging and onboarding work to proceed against one stable model.
+
 Deliverables:
 
 - A handoff model decision.
