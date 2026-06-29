@@ -62,3 +62,13 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 - [06-deployment-packaging.md](06-deployment-packaging.md): build artifacts, runtime layout, and distribution.
 - [07-documentation.md](07-documentation.md): install, config, troubleshooting, and known limitations docs.
 - [08-tester-onboarding.md](08-tester-onboarding.md): accounts, scenarios, feedback loop, and support path.
+
+## Backlog Conversion
+
+- [backlog/README.md](backlog/README.md): milestone backlog index for the critical path.
+- [backlog/M0-release-scope-gate.md](backlog/M0-release-scope-gate.md): release-definition decisions and scope guardrails.
+- [backlog/M1-mvp-chat-flow.md](backlog/M1-mvp-chat-flow.md): implementation backlog for the first real chat flow.
+- [backlog/M2-reproducible-release-candidate.md](backlog/M2-reproducible-release-candidate.md): reproducible setup, validation, and artifact production.
+- [backlog/M3-tester-handoff.md](backlog/M3-tester-handoff.md): docs, onboarding, and release-handoff tasks.
+
+Use the backlog files when turning the critical path into tracker tickets or milestone boards.
