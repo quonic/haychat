@@ -73,6 +73,25 @@ Deliverables:
 - A written MVP workflow.
 - A list of explicit non-goals for the first release.
 
+MVP workflow (release gate):
+
+1. Install required dependencies and build server and client from source on a supported OS.
+2. Configure PostgreSQL and HayChat server/client settings using the documented sample values.
+3. Start PostgreSQL and the HayChat server, then verify the server stays healthy at startup.
+4. Start two HayChat clients and authenticate both with documented test identities.
+5. Exchange at least one text message from client A to client B through the server.
+6. Restart server and clients on a clean run, then repeat authentication and one message round trip.
+7. Collect and inspect server and client logs for startup, auth, message, and restart events.
+
+Explicit first-release non-goals:
+
+- Voice, video, and screensharing flows.
+- Forum-style and other long-form social content.
+- Rich presence and broad social graph features.
+- macOS support.
+- Polished URL scheme integration.
+- Any feature path not required to complete the release-gate workflow above.
+
 Acceptance Criteria:
 
 - The first-release flow is short, concrete, and tester-evaluable.

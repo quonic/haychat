@@ -36,6 +36,8 @@ Linux and Windows instead of the full protocol surface.
 ### HC-003 `P0` Freeze MVP evaluator workflow
 
 - Outcome: the first release is limited to install, configure, authenticate, exchange text messages, restart, and inspect logs.
+- Release-gate workflow: install and build from source on a supported OS, configure PostgreSQL and app settings, start server and two clients, authenticate both users, exchange text messages, restart cleanly, and inspect logs.
+- Explicit non-goals: voice, video, screensharing, forum flows, rich presence, macOS support, polished URL scheme integration, and any path outside the release-gate workflow.
 - Depends on: `HC-001`, `HC-002`.
 - Touched areas: [plans/01-product-readiness.md](/home/jim/Projects/haychat/plans/01-product-readiness.md), [plans/02-core-functionality.md](/home/jim/Projects/haychat/plans/02-core-functionality.md).
 - Acceptance criteria:
