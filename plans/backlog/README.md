@@ -44,3 +44,11 @@ This backlog converts the critical-path plans into milestone-sized execution sli
 - A release artifact or clearly supported source-based handoff exists.
 - Quickstart, troubleshooting, known limitations, and tester guide exist.
 - Smoke validation is run on the exact artifact handed to testers.
+
+## GitHub Issue Drafts
+
+- [github-issues/README.md](github-issues/README.md): issue draft index and usage notes.
+- [github-issues/M0-release-scope-gate.md](github-issues/M0-release-scope-gate.md): issue drafts for release-definition decisions.
+- [github-issues/M1-mvp-chat-flow.md](github-issues/M1-mvp-chat-flow.md): issue drafts for the first real end-to-end chat flow.
+- [github-issues/M2-reproducible-release-candidate.md](github-issues/M2-reproducible-release-candidate.md): issue drafts for reproducible setup, validation, and packaging.
+- [github-issues/M3-tester-handoff.md](github-issues/M3-tester-handoff.md): issue drafts for docs, onboarding, and tester support.
