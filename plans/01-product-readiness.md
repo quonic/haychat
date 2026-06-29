@@ -2,8 +2,8 @@
 
 ## Objective
 
-Define the smallest HayChat release that internal-only testers can compile from source, run, and
-evaluate with limited support.
+Define the smallest HayChat release that internal-only testers can compile from source and evaluate
+with limited support.
 
 ## Current State
 

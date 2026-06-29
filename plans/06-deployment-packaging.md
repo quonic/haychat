@@ -43,7 +43,7 @@ Define the source-based handoff and runtime layout for the internal-only tester 
 ## Open Questions
 
 - Should the first server bundle target a single local-host test environment or a small shared test deployment?
-- Are Linux source-build instructions sufficient, or is an early binary artifact still needed for internal speed?
+- What minimum source-build automation should be added to reduce setup time for internal testers?
 - Should Windows client packaging be included in the same milestone or deferred?
 
 ## Exit Criteria
