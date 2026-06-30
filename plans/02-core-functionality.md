@@ -17,7 +17,7 @@ Deliver one real end-to-end HayChat experience that testers can evaluate without
 ## Assumptions
 
 - The first tester release only needs text chat, not the full Discord-like feature set.
-- A temporary simplified room model is acceptable if it supports meaningful tester evaluation.
+- MVP runtime topology is one shared global chat room for authenticated users (`roomId = 1`).
 - Registration can remain limited or scripted if authentication and seeded identities are reliable.
 
 ## Included vs Deferred Feature Families (First Release)
@@ -49,7 +49,8 @@ Deferred feature families (non-blocking for first release):
 2. Implement a minimal connect and authenticate flow from client startup or explicit user action.
 3. Add a minimal post-auth message flow for `ClientChatMessage` and `ServerChatMessage` in `server/main.odin`.
 4. Replace the local-only append behavior in `client/update.odin` with real send and receive handling.
-5. Define a minimal room or DM model for the first release and keep it intentionally small.
+5. Keep MVP chat routing fixed to the shared room (`roomId = 1`); defer DM and dynamic room
+   routing until after tester feedback.
 6. Provide a way to authenticate test users consistently, either by seeded database data or a narrowly scoped registration flow.
 7. Decide whether file upload is part of the first tester scope and either finish it or hide it.
 8. Explicitly disable or hide unfinished protocol families in the client UI and release notes.
@@ -60,9 +61,19 @@ Deferred feature families (non-blocking for first release):
 - If authentication depends on manual database edits, testers will not be able to reproduce results cleanly.
 - UI polish work can easily mask the more important missing network integration.
 
+## MVP Runtime Message Path (HC-101 Decision)
+
+- One server-managed shared room is the only supported message destination in M1.
+- Client behavior:
+  - Send `ClientChatMessage` only with `roomId = 1`.
+  - Treat room/DM selection as out of scope for the first tester release.
+- Server behavior:
+  - Accept post-auth `ClientChatMessage` packets for `roomId = 1`.
+  - Emit `ServerChatMessage` to all authenticated clients in that shared room.
+  - Reject or ignore unsupported room IDs in the MVP path.
+
 ## Open Questions
 
-- Should the first release use server-backed DM-style messaging only, or a shared room model?
 - Is registration needed for testers, or are seeded identities sufficient?
 - Should the client auto-connect to the first configured server or expose an explicit connect action?
 

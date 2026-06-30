@@ -16,7 +16,10 @@ Linux and Windows matrix that can be exercised by two testers on a clean setup.
 
 ### HC-101 `P0` Define minimal runtime data model
 
-- Outcome: the first release chooses a minimal chat topology, such as one shared room or one simplified DM flow, instead of trying to implement the full room system in `common/protocol.odin`.
+- Outcome: the first release uses one shared global chat room (room ID `1`) for all
+  authenticated users, instead of implementing the full room system in `common/protocol.odin`.
+- Client/server notes: client sends `ClientChatMessage` only with `roomId = 1`, and server emits
+  `ServerChatMessage` as a broadcast to authenticated clients in that room.
 - Depends on: `HC-003`.
 - Touched areas: [common/protocol.odin](/home/jim/Projects/haychat/common/protocol.odin), [plans/02-core-functionality.md](/home/jim/Projects/haychat/plans/02-core-functionality.md).
 - Acceptance criteria:
