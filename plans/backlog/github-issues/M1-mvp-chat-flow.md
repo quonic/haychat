@@ -16,6 +16,20 @@ Summary:
 
 Choose the smallest message topology that supports tester evaluation, such as one shared room or one simplified DM flow, instead of trying to implement the full room model.
 
+Decision (MVP runtime topology):
+
+- One shared global chat room for all authenticated users.
+- `ClientChatMessage` is valid only for the shared room (`roomId = 1`).
+- `ServerChatMessage` is broadcast by the server to all authenticated clients in that room.
+- DM and dynamic room routing are deferred beyond the first tester release.
+
+Client/server treatment notes:
+
+- Client: set outgoing chat packets to `roomId = 1`; do not expose DM or room selection in the
+  MVP path.
+- Server: accept authenticated `ClientChatMessage` packets for `roomId = 1` and broadcast as
+  `ServerChatMessage`; reject or ignore unsupported room IDs in the MVP path.
+
 Deliverables:
 
 - A concrete first-release message topology.
