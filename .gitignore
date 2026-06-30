@@ -4,6 +4,8 @@ client/haychat-client
 client/haychat_screenshot.png
 ols.json
 *.bin
+logs/
+storage/
 
 # Created by https://www.toptal.com/developers/gitignore/api/cmake,xmake,dotenv,powershell,visualstudiocode,executable,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=cmake,xmake,dotenv,powershell,visualstudiocode,executable,linux
