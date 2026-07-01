@@ -14,12 +14,12 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 
 - Shared transport/authentication primitives exist in `common/`.
 - The server process manager, IPC, ENet network loop, database worker, and web admin worker exist in `server/`.
-- The client has configuration persistence, a GUI shell, and transport handshake helpers in `client/`.
+- The client has configuration persistence, a GUI shell, transport handshake helpers, and a one-shot selected/default server startup attempt in `client/`.
 - The server and common packages already have meaningful unit and routing tests.
 
 ## What Blocks Tester Usage Today
 
-- The client does not appear to use its transport layer to establish a real server connection.
+- The client only auto-attempts the selected/default configured server at startup; authenticated-session completion still belongs to HC-103.
 - The client chat UI currently appends messages locally instead of sending them over the network.
 - The server only dispatches a narrow set of post-auth application packets today: auth lookup, file store, and raw database query routing.
 - There is no checked-in database schema, migration flow, seed data, or sample test accounts.

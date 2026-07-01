@@ -46,23 +46,39 @@ ClientServerTransport_fail :: proc(transport: ^ClientServerTransport, message: s
 	transport.transport.phase = .Failed
 }
 
+ClientServerTransport_initFailed :: proc(
+	server: Server,
+	message: string,
+) -> ClientServerTransport {
+	transport := ClientServerTransport {
+		serverID   = server.id,
+		serverName = strings.clone(server.name),
+		serverHost = strings.clone(server.host),
+		serverPort = server.port,
+		transport  = common.TransportState_init(.Client),
+	}
+	ClientServerTransport_fail(&transport, message)
+	return transport
+}
+
 ClientServerTransport_init :: proc(
 	server: Server,
 	config: Config,
 ) -> (
 	ClientServerTransport,
+	string,
 	bool,
 ) {
 	clientPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(config.private_key)
 	clientPublicKey, publicKeyOK := common.identityPublicKeyFromHex(config.public_key)
 	if !privateKeyOK || !publicKeyOK {
-		return {}, false
+		return {}, "client identity keys are missing or invalid", false
 	}
 
 	clientEphemeralPrivateKey, clientEphemeralPublicKey, clientEphemeralOK :=
 		common.generateKeyExchangeKeyPair()
 	if !clientEphemeralOK {
-		return {}, false
+		return {}, "failed to generate client ephemeral key pair", false
 	}
 
 	transport := ClientServerTransport {
@@ -76,15 +92,17 @@ ClientServerTransport_init :: proc(
 			clientEphemeralPublicKey  = clientEphemeralPublicKey,
 			transport                 = common.TransportState_init(.Client),
 		}
-	return transport, true
+	return transport, "", true
 }
 
 ClientTransportCatalog_init :: proc(config: ^Config) -> [dynamic]ClientServerTransport {
 	catalog := make([dynamic]ClientServerTransport, 0, len(config.servers))
 	for server in config.servers {
-		transport, ok := ClientServerTransport_init(server, config^)
+		transport, message, ok := ClientServerTransport_init(server, config^)
 		if ok {
 			append(&catalog, transport)
+		} else {
+			append(&catalog, ClientServerTransport_initFailed(server, message))
 		}
 	}
 	return catalog

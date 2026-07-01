@@ -7,7 +7,7 @@ Deliver one real end-to-end HayChat experience that testers can evaluate without
 ## Current State
 
 - `client/transport.odin` contains handshake and encrypted packet helpers.
-- `client/main.odin` initializes transport state for configured servers.
+- `client/main.odin` initializes transport state for configured servers and auto-attempts the selected/default configured server at startup.
 - `client/view.odin` shows transport phase and a chat UI.
 - `client/update.odin` handles send and receive events locally inside the UI state.
 - `server/main.odin` supports handshake, auth lookup routing, file storage, and raw database query routing.
@@ -45,8 +45,8 @@ Deferred feature families (non-blocking for first release):
 
 ## Prioritized Tasks
 
-1. Wire the client to a real network transport path instead of only keeping local transport metadata.
-2. Implement a minimal connect and authenticate flow from client startup or explicit user action.
+1. Extend the current selected/default startup attempt into a real authenticated transport flow instead of stopping at handshake kickoff and visible failure surfacing.
+2. Implement the minimal HC-103 connect and authenticate completion path without widening HC-102 into retries, background loops, or multi-server orchestration.
 3. Add a minimal post-auth message flow for `ClientChatMessage` and `ServerChatMessage` in `server/main.odin`.
 4. Replace the local-only append behavior in `client/update.odin` with real send and receive handling.
 5. Keep MVP chat routing fixed to the shared room (`roomId = 1`); defer DM and dynamic room
@@ -75,7 +75,7 @@ Deferred feature families (non-blocking for first release):
 ## Open Questions
 
 - Is registration needed for testers, or are seeded identities sufficient?
-- Should the client auto-connect to the first configured server or expose an explicit connect action?
+- Should reconnect remain manual after the current one-shot startup attempt, or move into a later runtime issue?
 
 ## Exit Criteria
 

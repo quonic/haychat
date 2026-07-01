@@ -54,16 +54,16 @@ Acceptance Criteria:
 
 Summary:
 
-Move the client from passive transport metadata to an actual connection lifecycle that can initiate handshake and session setup for a configured server.
+Move the client from passive transport metadata to a one-shot startup attempt that can initiate the handshake for the selected/default configured server without claiming authenticated-session completion.
 
 Deliverables:
 
-- Client-side session orchestration around the existing transport code.
-- Error propagation for handshake and connect failures.
+- Client-side startup orchestration around the existing transport code.
+- Error propagation for selected-server init and handshake-start failures.
 
 Acceptance Criteria:
 
-- A configured server can leave idle state and begin a real session attempt.
+- The selected/default configured server can leave idle state and begin a real session attempt.
 - Failures are visible in logs or the client UI.
 
 ## HC-103

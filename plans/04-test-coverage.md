@@ -8,7 +8,7 @@ Turn the current build and test baseline into release confidence for a tester-fa
 
 - `odin test server` passes with router, restart scheduling, queue, auth lookup, and file-store validation coverage.
 - `odin test common` passes with crypto, key encoding, and replay-protection coverage.
-- There are no client test files under `client/`.
+- `client/main_test.odin` covers selected/default startup-attempt kickoff and visible selected-server init failure surfacing.
 - There are no end-to-end tests that start a server, connect clients, and exchange user-visible messages.
 - There is no documented manual smoke checklist for release candidates.
 
@@ -27,7 +27,7 @@ Turn the current build and test baseline into release confidence for a tester-fa
 ## Prioritized Tasks
 
 1. Keep the existing `server` and `common` tests green as a non-negotiable baseline.
-2. Add client-side tests for config loading, transport state transitions, and any new connect/send logic.
+2. Extend client-side coverage from startup-attempt regression tests into transport state transitions and HC-103 connect/auth behavior.
 3. Add integration tests for server startup, auth success, and one message round trip between two clients.
 4. Add database-related tests for bootstrap, seed data expectations, and failure reporting.
 5. Add storage tests if file upload remains in scope for the first tester release.

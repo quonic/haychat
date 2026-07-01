@@ -4,6 +4,7 @@ package client
 // HayChat Client - A simple chat client built in Odin using skald for graphics and a custom protocol for communication with the server.
 
 import "../common"
+import "core:fmt"
 import "core:os"
 import "core:strings"
 import "shared:skald"
@@ -48,8 +49,38 @@ MsgKind :: enum {
 	AddFriend,
 }
 
-init :: proc() -> (init_state: State) {
-	init_state.config = loadConfig()
+State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
+	for i in 0 ..< len(state.serverTransports) {
+		if state.serverTransports[i].serverID == serverID {
+			return i
+		}
+	}
+	return -1
+}
+
+State_attemptSelectedServerStartup :: proc(state: ^State) {
+	if state.selected_transport_index < 0 ||
+	   state.selected_transport_index >= len(state.serverTransports) {
+		return
+	}
+
+	transport := &state.serverTransports[state.selected_transport_index]
+	if transport.transport.phase == .Failed {
+		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
+		return
+	}
+
+	packetBytes, ok := ClientServerTransport_beginHandshake(transport)
+	if !ok {
+		ClientServerTransport_fail(transport, "failed to encode client hello packet")
+		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
+		return
+	}
+	delete(packetBytes)
+}
+
+State_initFromConfig :: proc(config: Config) -> (init_state: State) {
+	init_state.config = config
 
 	if len(init_state.config.display_name) == 0 {
 		init_state.config.display_name = "Test User"
@@ -71,6 +102,28 @@ init :: proc() -> (init_state: State) {
 		init_state.config.friends = {}
 	}
 
+	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
+	init_state.view_dms = true
+	init_state.view_friends_list = false
+	init_state.selected_transport_index = -1
+	if len(init_state.config.servers) > 0 {
+		init_state.selected_server_id = init_state.config.servers[0].id
+		init_state.selected_transport_index = State_selectedTransportIndexForServerID(
+			init_state,
+			init_state.selected_server_id,
+		)
+		State_attemptSelectedServerStartup(&init_state)
+	}
+	init_state.window_width = 1920
+	init_state.window_height = 1080
+	append(&init_state.current_dm_chat, skald.span("Say Hi!", skald.theme_dark().color.fg_muted))
+
+	return
+}
+
+init :: proc() -> (init_state: State) {
+	init_state = State_initFromConfig(loadConfig())
+
 	if len(os.args) > 1 {
 		for arg in os.args {
 			if strings.starts_with(arg, "haychat://") {
@@ -84,17 +137,6 @@ init :: proc() -> (init_state: State) {
 			}
 		}
 	}
-	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
-	init_state.view_dms = true
-	init_state.view_friends_list = false
-	init_state.selected_transport_index = -1
-	if len(init_state.config.servers) > 0 {
-		init_state.selected_server_id = init_state.config.servers[0].id
-		init_state.selected_transport_index = 0
-	}
-	init_state.window_width = 1920
-	init_state.window_height = 1080
-	append(&init_state.current_dm_chat, skald.span("Say Hi!", skald.theme_dark().color.fg_muted))
 
 	return
 }

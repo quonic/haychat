@@ -28,12 +28,12 @@ Linux and Windows matrix that can be exercised by two testers on a clean setup.
 
 ### HC-102 `P0` Add client network session orchestration
 
-- Outcome: the client stops treating `client/transport.odin` as passive metadata and actually begins a server handshake for a configured server.
+- Outcome: the client stops treating `client/transport.odin` as passive metadata and performs a one-shot startup handshake attempt for the selected/default configured server.
 - Depends on: `HC-101`.
 - Touched areas: [client/main.odin](/home/jim/Projects/haychat/client/main.odin), [client/transport.odin](/home/jim/Projects/haychat/client/transport.odin), [client/update.odin](/home/jim/Projects/haychat/client/update.odin).
 - Acceptance criteria:
-  - A configured server can transition out of idle transport state.
-  - Handshake failures surface a user-visible or log-visible error.
+  - The selected/default configured server can transition out of idle transport state.
+  - Pre-attempt or handshake-start failures surface a user-visible or log-visible error.
 
 ### HC-103 `P0` Implement minimal connect and authenticate flow
 
