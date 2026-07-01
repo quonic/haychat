@@ -17,14 +17,7 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		out.view_dms = false
 		out.view_friends_list = false
 		out.selected_server_id = m.id
-		out.selected_transport_index = -1
-		for i in 0 ..< len(out.config.servers) {
-			server := out.config.servers[i]
-			if server.id == m.id {
-				out.selected_transport_index = i
-				break
-			}
-		}
+		out.selected_transport_index = State_selectedTransportIndexForServerID(out, m.id)
 	case .UpdateWindowSize:
 		out.window_width = f32(m.window_vector.x)
 		out.window_height = f32(m.window_vector.y)
