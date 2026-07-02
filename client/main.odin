@@ -25,6 +25,7 @@ State :: struct {
 	dm_chat_draft:                  string,
 	chat_input_draft:               string, // Current draft text in the chat input field, used for sending messages
 	current_chat_messages:          [dynamic]skald.Text_Span, // List of chat messages currently displayed in the chat area, used for rendering the chat history
+	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
 }
 
 Vector2 :: [2]f32
@@ -33,6 +34,7 @@ iVector2 :: [2]i32
 Msg :: struct {
 	kind:          MsgKind,
 	id:            int, // Generic ID field
+	channel_id:    int, // ID of the channel, used for switching to a specific channel
 	vector:        Vector2, // Generic Vector2 field for passing position or size data in messages, such as for window resize events
 	window_vector: iVector2, // Generic iVector2 field for passing integer vector data in messages if needed
 	new_value:     string, // Generic string field for passing new values in messages, such as for updating the chat input value
@@ -42,6 +44,7 @@ MsgKind :: enum {
 	None,
 	SwitchToDMs,
 	SwitchToServer,
+	SwitchToChannel,
 	SwitchToFriendsList,
 	UpdateWindowSize,
 	UpdateChatInputValue,

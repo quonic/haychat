@@ -77,7 +77,7 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		skald.button(
 			ctx,
 			"General",
-			Msg{kind = .SwitchToServer, id = s.selected_server_id},
+			Msg{kind = .SwitchToChannel, id = s.selected_server_id, new_value = "general"},
 			padding = button_padding,
 		),
 	)
