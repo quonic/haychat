@@ -46,12 +46,13 @@ Linux and Windows matrix that can be exercised by two testers on a clean setup.
 
 ### HC-104 `P0` Implement server-side chat packet dispatch
 
-- Outcome: `server/main.odin` handles `ClientChatMessage` and emits `ServerChatMessage` for the selected MVP flow.
+- Outcome: completed. `server/main.odin` handles authenticated `ClientChatMessage` for `roomId = 1`, broadcasts encrypted `ServerChatMessage` to all authenticated peers including the sender, and returns encrypted `ServerProtocolError` for unsupported room IDs.
 - Depends on: `HC-101`, `HC-103`.
-- Touched areas: [server/main.odin](/home/jim/Projects/haychat/server/main.odin), [common/protocol.odin](/home/jim/Projects/haychat/common/protocol.odin).
+- Touched areas: [server/main.odin](/home/jim/Projects/haychat/server/main.odin), [common/protocol.odin](/home/jim/Projects/haychat/common/protocol.odin), [server/router_test.odin](/home/jim/Projects/haychat/server/router_test.odin).
 - Acceptance criteria:
   - Authenticated client chat packets are accepted.
-  - The server forwards or broadcasts chat messages according to the MVP design.
+  - The server broadcasts chat messages to authenticated peers according to the MVP shared-room design.
+  - Focused router tests cover successful broadcast and unsupported-room rejection.
 
 ### HC-105 `P0` Replace local-only client chat append path
 

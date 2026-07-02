@@ -325,6 +325,17 @@ Message :: struct {
 	content:   string,
 }
 
+ClientChatMessagePayload :: struct {
+	roomId:  int,
+	content: string,
+}
+
+ServerChatMessagePayload :: struct {
+	senderId: int,
+	roomId:   int,
+	content:  string,
+}
+
 VoiceData :: struct {
 	senderId:  int,
 	roomId:    int,

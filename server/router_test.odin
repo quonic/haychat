@@ -350,6 +350,167 @@ testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
 }
 
 @(test)
+testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	senderPeerID := u32(1)
+	recipientPeerID := u32(2)
+	h.state.connectedPeers[recipientPeerID] = true
+
+	senderTransport := routerCompleteHandshake(&h, senderPeerID)
+	recipientTransport := routerCompleteHandshake(&h, recipientPeerID)
+
+	senderSession, senderOK := MainRouterState_getPeerSession(&h.state, senderPeerID)
+	assert(senderOK, "expected sender router peer session to exist")
+
+	sealedPacket, sealOK := common.sealPacketForSession(
+		&senderTransport,
+		.ClientChatMessage,
+		common.ClientChatMessagePayload{roomId = 1, content = "hello haychat"},
+	)
+	assert(sealOK, "expected encrypted client chat packet sealing to succeed")
+	defer delete(sealedPacket.payload)
+
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = senderPeerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	seenSender := false
+	seenRecipient := false
+	for _ in 0 ..< 2 {
+		broadcastSend := routerPollNetworkSend(&h)
+		defer delete(broadcastSend.data)
+		broadcastOuterPacket := routerDecodePacketBytes(broadcastSend.data)
+		defer delete(broadcastOuterPacket.payload)
+		assert(
+			broadcastOuterPacket.messageType == .EncryptedPacket,
+			"expected chat broadcast to use encrypted transport",
+		)
+
+		clientTransport := &senderTransport
+		if broadcastSend.peerId == recipientPeerID {
+			clientTransport = &recipientTransport
+		}
+
+		broadcastInnerPacket, openOK := common.openPacketForSession(
+			clientTransport,
+			broadcastOuterPacket,
+		)
+		assert(openOK, "expected client to decrypt chat broadcast packet")
+		defer delete(broadcastInnerPacket.payload)
+		assert(
+			broadcastInnerPacket.messageType == .ServerChatMessage,
+			"expected chat broadcast inner packet to be ServerChatMessage",
+		)
+
+		chatPayload: common.ServerChatMessagePayload
+		chatPayloadErr := cbor.unmarshal(broadcastInnerPacket.payload, &chatPayload)
+		assert(chatPayloadErr == nil, "expected chat broadcast payload decode to succeed")
+		defer delete(chatPayload.content)
+		assert(chatPayload.roomId == 1, "expected chat broadcast roomId to remain the MVP room")
+		assert(
+			chatPayload.senderId == senderSession.authenticatedUserID,
+			"expected chat broadcast senderId to match authenticated sender",
+		)
+		assert(
+			chatPayload.content == "hello haychat",
+			"expected chat broadcast content to remain intact",
+		)
+
+		if broadcastSend.peerId == senderPeerID {
+			seenSender = true
+		} else if broadcastSend.peerId == recipientPeerID {
+			seenRecipient = true
+		} else {
+			assert(false, "expected chat broadcast to target only authenticated peers")
+		}
+	}
+
+	assert(seenSender, "expected sender to receive broadcasted chat message")
+	assert(seenRecipient, "expected other authenticated peer to receive broadcasted chat message")
+	_, networkErr := IPC_Client_poll(h.networkFd)
+	assert(networkErr != nil, "expected only two chat broadcast messages to be queued")
+}
+
+@(test)
+testMainRouterRejectsUnsupportedChatRoomID :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	sealedPacket, sealOK := common.sealPacketForSession(
+		&clientTransport,
+		.ClientChatMessage,
+		common.ClientChatMessagePayload{roomId = 2, content = "wrong room"},
+	)
+	assert(sealOK, "expected encrypted client chat packet sealing to succeed")
+	defer delete(sealedPacket.payload)
+
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	responseSend := routerPollNetworkSend(&h)
+	defer delete(responseSend.data)
+	responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+	defer delete(responseOuterPacket.payload)
+	assert(
+		responseOuterPacket.messageType == .EncryptedPacket,
+		"expected unsupported roomId response to use encrypted transport",
+	)
+
+	responseInnerPacket, openOK := common.openPacketForSession(
+		&clientTransport,
+		responseOuterPacket,
+	)
+	assert(openOK, "expected client to decrypt unsupported roomId response")
+	defer delete(responseInnerPacket.payload)
+	assert(
+		responseInnerPacket.messageType == .ServerProtocolError,
+		"expected unsupported roomId to return ServerProtocolError",
+	)
+
+	responsePayload: common.ProtocolErrorResponse
+	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
+	assert(responsePayloadErr == nil, "expected unsupported roomId payload decode to succeed")
+	defer delete(responsePayload.message)
+	assert(
+		responsePayload.message == "Unsupported roomId",
+		"expected unsupported roomId error message to match MVP contract",
+	)
+
+	_, networkErr := IPC_Client_poll(h.networkFd)
+	assert(networkErr != nil, "expected unsupported roomId to avoid extra network messages")
+
+	session, ok := MainRouterState_getPeerSession(&h.state, peerID)
+	assert(ok, "expected peer session to remain available after unsupported roomId")
+	assert(session.isAuthenticated, "expected unsupported roomId to preserve authentication state")
+}
+
+@(test)
 testMainRouterRejectsMalformedOuterPacket :: proc(t: ^testing.T) {
 	_ = t
 

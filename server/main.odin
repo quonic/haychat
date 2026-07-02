@@ -46,6 +46,8 @@ mainInterruptRequested := false
 @(private)
 mainInterruptShutdownQueued := false
 
+MVPChatRoomID :: 1
+
 registerMainInterruptHandler :: proc() {
 	mainInterruptContext = context
 	libc.signal(libc.SIGINT, proc "cdecl" (_: i32) {
@@ -746,6 +748,58 @@ MainRouterState_handleClientAuthRequest :: proc(
 	}
 }
 
+MainRouterState_handleClientChatMessage :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientChatMessagePayload
+	err := cbor.unmarshal(payload, &req)
+	defer delete(req.content)
+	if err != nil {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientChatMessage payload")
+		return
+	}
+
+	if req.roomId != MVPChatRoomID {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported roomId")
+		return
+	}
+
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated chat message")
+		return
+	}
+
+	chatPayload := common.ServerChatMessagePayload {
+		senderId = session.authenticatedUserID,
+		roomId   = req.roomId,
+		content  = req.content,
+	}
+
+	authenticatedRecipientPeerIDs := make([dynamic]u32, 0, len(state.peerSessions))
+	defer delete(authenticatedRecipientPeerIDs)
+
+	for recipientPeerID, recipientSession in state.peerSessions {
+		if recipientSession.isAuthenticated {
+			append(&authenticatedRecipientPeerIDs, recipientPeerID)
+		}
+	}
+
+	for recipientPeerID in authenticatedRecipientPeerIDs {
+
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			recipientPeerID,
+			common.MessageType.ServerChatMessage,
+			chatPayload,
+		)
+	}
+}
+
 MainRouterState_dispatchApplicationPacket :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -753,6 +807,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 	packet: common.Packet,
 ) {
 	#partial switch packet.messageType {
+	case .ClientChatMessage:
+		MainRouterState_handleClientChatMessage(pm, state, peerID, packet.payload)
 	case .ClientAuthLookup:
 		MainRouterState_handleClientAuthLookupPacket(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
