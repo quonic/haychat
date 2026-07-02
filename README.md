@@ -29,6 +29,21 @@ HayChat is an alternative to Discord. It features end-to-end encryption, a respo
 
 Clone the repository and follow the instructions in the `client/` and `server/` directories to set up the development environment and run the application locally.
 
+### Local Test Server Bootstrap
+
+The repository now includes one supported bootstrap path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
+
+1. Ensure PostgreSQL has a local database and user that match the helper and server defaults: host `localhost`, port `5432`, user `haychat`, database `haychat`, and password `haychat`. If your local setup differs, export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
+2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
+3. Run `./run-test-server.sh start` to launch the server, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
+
+Seeded test identities:
+
+- `hayseed` resolves to user ID `1`
+- `haypeer` resolves to user ID `2`
+
+The bootstrap SQL lives in `server/sql/auth_bootstrap.sql` and is safe to rerun. It keeps those seeded nickname-to-user-ID mappings deterministic without requiring testers to write SQL by hand.
+
 ## License
 
 HayChat is licensed under the AGPLv3 License. See the [LICENSE](LICENSE) file for more information.

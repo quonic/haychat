@@ -1,0 +1,420 @@
+{
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260702-hc-106-database-bootstrap-test-identity",
+            "created_at": "2026-07-02T11:05:00-05:00",
+            "last_updated": "2026-07-02T11:05:00-05:00",
+            "version": 1,
+            "source": [
+                "user_request:implementation_and_validation_plan",
+                "repo_memory:/memories/repo/threaded-migration-baseline.md",
+                "workspace:AGENTS.md",
+                "workspace:server/AGENTS.md",
+                "workspace:plans/backlog/M1-mvp-chat-flow.md",
+                "workspace:plans/backlog/github-issues/M1-mvp-chat-flow.md"
+            ]
+        },
+        "scope": {
+            "purpose": [
+                "Reusable implementation context for HC-106 database bootstrap and test identity support.",
+                "Helps future agents avoid re-discovery of the current auth contract, startup seams, and tester workflow gap."
+            ],
+            "applies_to": [
+                "server/database.odin",
+                "server/config.odin",
+                "server/main.odin",
+                "server/router_test.odin",
+                "run-test-server.sh",
+                "plans/05-developer-experience.md"
+            ],
+            "non_goals": [
+                "Changing server identity persistence or storage/server_identity.json handling.",
+                "Implementing HC-107 startup preflight or broader failure messaging.",
+                "Designing a full migration framework unless that is proven to be the smallest viable path.",
+                "Broadening auth beyond the current nickname lookup contract without concrete code evidence."
+            ]
+        },
+        "tech_stack": [
+            {
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Primary language for server runtime, configuration, and focused tests.",
+                "config_files": [
+                    "AGENTS.md",
+                    "server/AGENTS.md"
+                ]
+            },
+            {
+                "name": "PostgreSQL",
+                "version": "external service",
+                "usage_context": "Auth lookup persistence backing the users table queried by the database worker.",
+                "config_files": [
+                    "server/config.odin",
+                    "run-test-server.sh"
+                ]
+            },
+            {
+                "name": "shared:pg",
+                "version": "workspace-managed",
+                "usage_context": "Database connection and query execution inside server/database.odin.",
+                "config_files": [
+                    "server/database.odin"
+                ]
+            },
+            {
+                "name": "Bash",
+                "version": "system",
+                "usage_context": "Current repository-supported local helper workflow via run-test-server.sh.",
+                "config_files": [
+                    "run-test-server.sh"
+                ]
+            }
+        ],
+        "conventions": [
+            "Use tabs, OTBS braces, descriptive camelCase, and Odin naming conventions from AGENTS.md.",
+            "Server validation commands are odin check server and odin test server from server/AGENTS.md.",
+            "Keep edits minimal and focused on HC-106 only.",
+            "Use Odin tests where practical and prefer additive changes over wider architecture changes."
+        ],
+        "constraints": {
+            "hard": [
+                "Focus on HC-106 only.",
+                "Minimize blast radius.",
+                "Current confirmed auth contract is nickname lookup in server/database.odin using SELECT id::text FROM users WHERE nickname = $1 LIMIT 1.",
+                "No checked-in schema, bootstrap, or seed path currently exists.",
+                "Testers must not need manual SQL for the supported auth setup flow."
+            ],
+            "soft": [
+                "Prefer the current local helper path instead of inventing multiple new entrypoints.",
+                "Keep schema and seed scope to the minimum required MVP auth records.",
+                "Avoid coupling HC-106 to future preflight or packaging work beyond what the acceptance criteria require."
+            ],
+            "compatibility": [
+                "server/main.odin validates nickname length 3..32 before dispatching AuthLookupByNickname database work.",
+                "server/router_test.odin already asserts auth lookup messages are forwarded as structured database requests.",
+                "run-test-server.sh already sets local log and storage paths plus a database password default, so it is the clearest existing tester helper seam."
+            ],
+            "security_requirements": [
+                "Do not commit secrets or API keys.",
+                "Use environment variables for sensitive database connection inputs.",
+                "Validate all bootstrap inputs and keep seeded data limited to non-sensitive test identities.",
+                "Prefer idempotent setup to reduce risky manual database intervention."
+            ]
+        },
+        "architecture_snapshot": {
+            "key_dirs": {
+                "path": [
+                    "server/",
+                    "common/",
+                    "plans/",
+                    "docs/plan/"
+                ]
+            },
+            "patterns": [
+                "server/database.odin is the single confirmed database execution surface and currently offers raw SQL plus structured auth lookup requests.",
+                "server/config.odin owns environment-driven runtime configuration and storage path normalization.",
+                "run-test-server.sh is a thin local launcher that already exports tester-local defaults before odin run server.",
+                "Router tests use an in-process IPC harness with focused assertions instead of full PostgreSQL integration."
+            ],
+            "key_components": [
+                {
+                    "name": "databaseExecuteAuthLookup",
+                    "location": "server/database.odin:57",
+                    "responsibility": [
+                        "Executes the only confirmed auth lookup query contract against users.nickname and returns id::text."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "loadConfig and validateAndNormalizeConfig",
+                    "location": "server/config.odin:57",
+                    "responsibility": [
+                        "Own server runtime environment parsing, default paths, and directory creation for local runs."
+                    ],
+                    "confidence": 0.97
+                },
+                {
+                    "name": "MainRouterState_handleClientAuthLookupPacket",
+                    "location": "server/main.odin:420",
+                    "responsibility": [
+                        "Validates nickname length and forwards structured auth lookup requests without extra identity state."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "run-test-server.sh",
+                    "location": "run-test-server.sh:1",
+                    "responsibility": [
+                        "Current supported local helper that can expose bootstrap or seed setup to testers with minimal workflow change."
+                    ],
+                    "confidence": 0.98
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "server/database.odin",
+                    "purpose": [
+                        "Current database worker behavior and lowest-level auth lookup contract."
+                    ],
+                    "why_relevant": [
+                        "HC-106 must create the exact state this file expects.",
+                        "This file is the likeliest home for explicit bootstrap execution if runtime-owned bootstrap is chosen."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "databaseExecuteAuthLookup",
+                            "type": "function",
+                            "location": "server/database.odin:57",
+                            "description": "Resolves nickname to id::text from users with LIMIT 1."
+                        },
+                        {
+                            "element": "databaseExecuteRawQuery",
+                            "type": "function",
+                            "location": "server/database.odin:35",
+                            "description": "Shows raw SQL execution already exists as a lower-level capability."
+                        },
+                        {
+                            "element": "databaseServerLoop",
+                            "type": "function",
+                            "location": "server/database.odin:120",
+                            "description": "Database process startup seam where explicit bootstrap support could be wired if needed."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "server/config.odin",
+                    "purpose": [
+                        "Environment parsing and local path defaults."
+                    ],
+                    "why_relevant": [
+                        "Any gated bootstrap flag, asset path, or tester-safe default belongs here if code config is required."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "ServerConfig",
+                            "type": "struct",
+                            "location": "server/config.odin:12",
+                            "description": "Current runtime config surface for database and storage paths."
+                        },
+                        {
+                            "element": "loadConfig",
+                            "type": "function",
+                            "location": "server/config.odin:57",
+                            "description": "Environment-driven config loading with local defaults."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.97
+                },
+                {
+                    "path": "server/main.odin",
+                    "purpose": [
+                        "Proof of the current structured auth lookup path and nickname validation."
+                    ],
+                    "why_relevant": [
+                        "Confirms HC-106 can stay scoped to nickname-based user lookup unless execution finds stricter requirements."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "MainRouterState_handleClientAuthLookupPacket",
+                            "type": "function",
+                            "location": "server/main.odin:420",
+                            "description": "Forwards structured auth lookup requests after validating nickname length."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "server/router_test.odin",
+                    "purpose": [
+                        "Focused test patterns for auth lookup routing."
+                    ],
+                    "why_relevant": [
+                        "Provides the narrowest existing automated validation seam for seeded nickname expectations."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "testMainRouterAuthLookupUsesStructuredDatabaseRequest",
+                            "type": "function",
+                            "location": "server/router_test.odin:319",
+                            "description": "Asserts nickname-based auth lookup is forwarded structurally to the database worker."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.97
+                },
+                {
+                    "path": "run-test-server.sh",
+                    "purpose": [
+                        "Current local server launch helper."
+                    ],
+                    "why_relevant": [
+                        "HC-106 needs a tester-facing path that avoids manual SQL, and this is the existing support surface."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "environment defaults plus odin run server",
+                            "type": "pattern",
+                            "location": "run-test-server.sh:1",
+                            "description": "Thin shell wrapper already used for local runs."
+                        }
+                    ],
+                    "security_sensitivity": "none",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "Environment-driven server configuration",
+                    "category": "configuration",
+                    "confidence": 0.98,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/config.odin"
+                    ]
+                },
+                {
+                    "name": "Focused Odin IPC-based router tests",
+                    "category": "testing",
+                    "confidence": 0.96,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/router_test.odin"
+                    ]
+                },
+                {
+                    "name": "Thin shell helper for local server runs",
+                    "category": "workflow",
+                    "confidence": 0.95,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "run-test-server.sh"
+                    ]
+                }
+            ],
+            "dependencies": {
+                "internal": [
+                    "server/database.odin -> common.DatabaseQueryRequest / Response",
+                    "server/main.odin -> database IPC request path",
+                    "run-test-server.sh -> odin run server"
+                ],
+                "external": [
+                    "PostgreSQL",
+                    "shared:pg"
+                ]
+            },
+            "gotchas": [
+                {
+                    "text": "There is no existing migration or seed framework to extend, so file placement and invocation must be chosen deliberately.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "Current tests stub database IPC rather than exercise a live database, so fresh-environment bootstrap validation may need one narrow new command-path check.",
+                    "confidence": 0.94
+                },
+                {
+                    "text": "run-test-server.sh currently defaults only logs, storage path, and database password; it does not provision database state.",
+                    "confidence": 0.98
+                }
+            ],
+            "domain_context": {
+                "security_considerations": [
+                    {
+                        "area": "database credentials",
+                        "location": "server/config.odin and run-test-server.sh",
+                        "concern": "Bootstrap support must continue to rely on environment variables for secrets and avoid checked-in credentials beyond existing local defaults."
+                    },
+                    {
+                        "area": "seed data",
+                        "location": "new bootstrap assets",
+                        "concern": "Only non-sensitive test identities should be seeded, and the flow should be safe to rerun locally."
+                    }
+                ],
+                "testing_patterns": {
+                    "framework": "core:testing",
+                    "coverage_areas": [
+                        "structured auth lookup routing",
+                        "server-side focused behavior tests"
+                    ],
+                    "test_organization": "*_test.odin and @(test) procedures within server test files",
+                    "mock_patterns": [
+                        "in-process IPC harness rather than live database integration"
+                    ]
+                },
+                "error_handling": "Database worker returns structured DatabaseQueryResponse errors; router path sends explicit auth lookup failure payloads for invalid input.",
+                "data_flow": "ClientAuthLookup nickname -> server/main structured DatabaseQueryRequest.AuthLookupByNickname -> server/database SQL lookup on users.nickname -> string user ID result."
+            },
+            "open_questions": [
+                {
+                    "question": "Is the smallest supported bootstrap flow code-owned in the database worker or shell-owned using checked-in SQL assets?",
+                    "context": "Both are plausible from current seams, but only one should be blessed to minimize blast radius.",
+                    "type": "decision_blocker",
+                    "affects": [
+                        "T1-debug-bootstrap-seam-and-required-state",
+                        "T2-implement-database-bootstrap-and-seeds"
+                    ]
+                }
+            ]
+        },
+        "prior_decisions": [
+            {
+                "decision": "Keep HC-106 scoped to the current nickname lookup contract unless stronger schema requirements are proven during execution.",
+                "rationale": [
+                    "Code evidence only proves users.nickname to id lookup today.",
+                    "The user requested MVP-only scope and minimal blast radius."
+                ],
+                "evidence": [
+                    "path:server/database.odin",
+                    "path:server/main.odin"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Focus on HC-106 only",
+                    "Minimize blast radius"
+                ],
+                "linked_patterns": [
+                    "server/database.odin is the single confirmed database execution surface"
+                ]
+            },
+            {
+                "decision": "Use the existing local helper path as the primary tester-facing surface if possible.",
+                "rationale": [
+                    "run-test-server.sh is already the repository-supported local launcher.",
+                    "HC-106 acceptance is workflow-oriented rather than purely internal."
+                ],
+                "evidence": [
+                    "path:run-test-server.sh",
+                    "path:plans/05-developer-experience.md"
+                ],
+                "confidence": 0.96,
+                "linked_constraints": [
+                    "Testers must not need manual SQL"
+                ],
+                "linked_patterns": [
+                    "Thin shell helper for local server runs"
+                ]
+            }
+        ],
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/threaded-migration-baseline.md",
+                "trust": "high"
+            }
+        ]
+    }
+}

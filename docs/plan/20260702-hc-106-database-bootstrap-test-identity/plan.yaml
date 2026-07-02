@@ -1,0 +1,295 @@
+plan_id: 20260702-hc-106-database-bootstrap-test-identity
+objective: "Implement HC-106 by adding database bootstrap and test identity support for the MVP flow in haychat."
+created_at: 2026-07-02T11:05:00-05:00
+created_by: gem-planner
+status: completed
+tldr: |
+  Add one explicit, idempotent bootstrap path for the minimum database state required by the
+  existing nickname-based auth lookup, then expose seeded test identities through the current
+  local server helper so testers can authenticate without manual SQL. Keep scope tight: no
+  broader auth redesign, no startup preflight work, and no changes to server identity persistence.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 3
+  risk_score: medium
+
+quality_warnings:
+  - There is no checked-in schema, seed asset, or bootstrap command today, so file placement and invocation path must be made explicit in the first execution wave.
+  - Current auth behavior only proves nickname-to-user-ID lookup; adding schema or seed fields beyond that contract would widen scope without evidence.
+  - Automatic bootstrap on every normal startup would increase blast radius; prefer an explicit or tightly gated path unless diagnosis proves startup ownership is already the intended seam.
+
+reviewer_focus:
+  - Confirm the bootstrap path is idempotent and can initialize a fresh local database without manual SQL.
+  - Confirm seeded identities satisfy the existing auth lookup contract and do not require undocumented extra user state.
+  - Confirm run-test-server or equivalent tester entrypoint exposes the supported bootstrap or seed workflow clearly.
+  - Confirm validation covers both schema creation and deterministic nickname lookup for at least one seeded identity.
+
+prd_update_recommended: false
+
+suggested_plan_files:
+  - docs/plan/20260702-hc-106-database-bootstrap-test-identity/plan.yaml
+  - docs/plan/20260702-hc-106-database-bootstrap-test-identity/context_envelope.json
+
+resolved_decisions:
+  - decision: Scope bootstrap to the minimum auth data contract already enforced by the server.
+    context: server/main.odin forwards ClientAuthLookup by nickname into a structured database request, and server/database.odin currently resolves only SELECT id::text FROM users WHERE nickname = $1 LIMIT 1.
+    affects:
+      - T1-debug-bootstrap-seam-and-required-state
+      - T2-implement-database-bootstrap-and-seeds
+      - T3-wire-tester-entrypoint-and-validation
+  - decision: Prefer an explicit or narrowly gated bootstrap flow over unconditional startup mutation.
+    context: HC-106 requires a concrete bootstrap path but HC-107 separately owns startup preflight and failure messaging, so broad startup-time schema mutation would increase blast radius beyond this issue.
+    affects:
+      - T1-debug-bootstrap-seam-and-required-state
+      - T2-implement-database-bootstrap-and-seeds
+      - T3-wire-tester-entrypoint-and-validation
+  - decision: Seeded tester identities should be surfaced through the existing local helper path.
+    context: run-test-server.sh is the current repository-supported local launcher, so the smallest tester-facing workflow is to extend that helper or add one adjacent helper instead of requiring ad hoc SQL.
+    affects:
+      - T2-implement-database-bootstrap-and-seeds
+      - T3-wire-tester-entrypoint-and-validation
+      - T4-document-bootstrap-and-test-identity-flow
+
+open_questions:
+  - question: Should the supported bootstrap path be an explicit environment-gated server code path, a dedicated helper command, or a shell-driven raw SQL invocation using checked-in assets?
+    context: The repository has no migration framework today, and the best owning seam must be chosen for minimal blast radius.
+    type: decision_blocker
+    affects:
+      - T1-debug-bootstrap-seam-and-required-state
+      - T2-implement-database-bootstrap-and-seeds
+  - question: What is the smallest checked-in schema required for a successful auth lookup in a fresh environment?
+    context: Code evidence only proves the need for a users row with nickname and id, but the table definition and any constraints must be inferred from existing expectations or added minimally.
+    type: research
+    affects:
+      - T1-debug-bootstrap-seam-and-required-state
+      - T2-implement-database-bootstrap-and-seeds
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: The chosen bootstrap path works only on already-initialized databases and fails on truly fresh local environments.
+      likelihood: medium
+      impact: high
+      mitigation: Require diagnosis of the exact minimum schema and make validation include a clean-database bootstrap run.
+    - scenario: Seeded identities are created, but their fields do not match the existing nickname auth contract, so testers still cannot authenticate.
+      likelihood: medium
+      impact: high
+      mitigation: Validate using the existing structured auth lookup path or a focused database test that proves a seeded nickname resolves to a user ID.
+    - scenario: Bootstrap logic is wired into ordinary startup and creates unintended runtime failures or repeated mutation.
+      likelihood: medium
+      impact: medium
+      mitigation: Prefer an explicit or tightly gated invocation path and require idempotence checks.
+    - scenario: Helper automation obscures required PostgreSQL prerequisites and gives testers a partially working flow.
+      likelihood: low
+      impact: medium
+      mitigation: Keep helper behavior explicit, fail fast on missing database connectivity, and document the exact invocation in the final wave.
+  assumptions:
+    - HC-106 only needs the database state required by the current nickname-based auth lookup unless code inspection during execution proves a stricter contract.
+    - Server identity persistence in storage/server_identity.json remains unchanged and out of scope.
+    - Narrow validation can rely on Odin server tests plus one bootstrap or seed execution path rather than full end-to-end client automation.
+
+tasks:
+  - id: T1-debug-bootstrap-seam-and-required-state
+    title: Diagnose the minimum schema, seed contract, and owning bootstrap seam
+    description: Identify the smallest required database objects and seed records needed for the existing auth lookup to succeed, then choose the lowest-blast-radius bootstrap entrypoint among server/database.odin, server/config.odin, and the existing local helper path.
+    wave: 1
+    agent: gem-debugger
+    status: pending
+    covers:
+      - Minimum database schema required for nickname-based auth lookup
+      - Existing startup and helper seams suitable for bootstrap invocation
+      - Idempotent seed strategy for deterministic tester identities
+      - Focused validation surface for fresh-environment bootstrap
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: server/database.odin
+        description: Owns the database worker and the only concrete auth lookup query contract.
+      - path: server/main.odin
+        description: Proves the auth request path validates nickname length and forwards lookup requests without extra identity state.
+      - path: server/config.odin
+        description: Owns server runtime config and any new gated bootstrap settings or file paths.
+      - path: run-test-server.sh
+        description: Current repository-supported local server helper and likely tester-facing entrypoint.
+      - path: server/router_test.odin
+        description: Shows the structured auth lookup test pattern and nickname expectations.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - A fresh environment can create required auth data.
+      - Testers can authenticate without ad hoc database editing.
+    success_criteria:
+      - Names the exact minimum table or columns required to satisfy the current auth lookup.
+      - Chooses one bootstrap invocation path with the smallest blast radius and explains why adjacent seams are inferior.
+      - Names the deterministic seeded identities or seed generation contract needed for MVP auth testing.
+      - Produces a minimal implementation file list without widening into HC-107 preflight or broader auth redesign.
+
+  - id: T2-implement-database-bootstrap-and-seeds
+    title: Implement checked-in bootstrap assets and server-side bootstrap support
+    description: Add the checked-in schema and seed assets plus the minimal server or config support needed to execute them in an explicit, idempotent bootstrap flow that creates auth-ready test identities for MVP usage.
+    wave: 2
+    agent: gem-implementer
+    status: pending
+    covers:
+      - Checked-in schema or bootstrap asset creation
+      - Checked-in seeded test identities or deterministic seed generation
+      - Minimal config or database-worker support for invoking bootstrap safely
+      - Idempotence behavior for repeated local setup runs
+    dependencies:
+      - T1-debug-bootstrap-seam-and-required-state
+    conflicts_with: []
+    context_files:
+      - path: server/database.odin
+        description: Likely home for explicit bootstrap execution support if code-owned execution is selected.
+      - path: server/config.odin
+        description: Likely home for any gated bootstrap flags, asset paths, or tester-safe defaults needed by the flow.
+      - path: run-test-server.sh
+        description: May need environment or invocation changes once the bootstrap seam is selected.
+      - path: plans/05-developer-experience.md
+        description: Existing project plan already calls for a bootstrap command and seed workflow.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: The repository has no schema, seed, or bootstrap execution path even though auth already depends on nickname lookup against the users table.
+      target_files:
+        - server/database.odin
+        - server/config.odin
+        - run-test-server.sh
+      fix_recommendations: Add the smallest explicit bootstrap mechanism that can execute checked-in schema and seed assets idempotently, keeping normal startup behavior stable unless a narrow opt-in flag or helper path is used.
+      injected_at: 2026-07-02T11:05:00-05:00
+    acceptance_criteria:
+      - A fresh environment can create required auth data.
+      - Testers can authenticate without ad hoc database editing.
+    success_criteria:
+      - A checked-in bootstrap asset can create the required users lookup state on an empty local database.
+      - The bootstrap flow is idempotent or clearly safe to rerun for local testing.
+      - At least one deterministic test identity is created through the supported flow.
+      - No broader auth model, registration flow, or server identity persistence is changed.
+    tech_stack:
+      - Odin
+      - PostgreSQL via shared:pg
+      - Shell helper workflow
+    test_coverage: Add only focused server-side tests or bootstrap assertions needed to lock schema and seeded-identity expectations.
+    diag:
+      paired_debugger_task: T1-debug-bootstrap-seam-and-required-state
+      current_auth_contract: SELECT id::text FROM users WHERE nickname = $1 LIMIT 1
+      likely_new_assets: checked-in SQL schema and seed files or their smallest equivalent
+    handoff:
+      do_not_reinvestigate:
+        - server/main.odin already proves auth currently depends on nickname length validation plus database lookup only.
+        - server/database.odin is the only confirmed database execution surface in the runtime today.
+        - HC-107 owns startup preflight and failure messaging, so avoid broad startup diagnostics here.
+      required_test_first: odin check server
+      target_files:
+        - server/database.odin
+        - server/config.odin
+        - run-test-server.sh
+      minimal_change: Add only the explicit bootstrap and seed path needed for MVP auth records; do not introduce a full migration framework unless the diagnosis proves it is the smallest viable option.
+      acceptance_checks:
+        - odin check server
+        - odin test server
+        - supported bootstrap command against a fresh local database
+
+  - id: T3-wire-tester-entrypoint-and-validation
+    title: Expose the supported tester workflow and add focused validation
+    description: Wire the chosen bootstrap or seed path into the current local helper flow, then add focused validation that proves a fresh local environment can produce a lookupable seeded identity without manual SQL.
+    wave: 3
+    agent: gem-implementer
+    status: pending
+    covers:
+      - Tester-facing local bootstrap or seed invocation
+      - Focused validation for fresh-environment setup
+      - Verification that a deterministic nickname resolves through the supported contract
+    dependencies:
+      - T2-implement-database-bootstrap-and-seeds
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Current launcher that should become the simplest supported local flow.
+      - path: server/router_test.odin
+        description: Existing focused test pattern for structured auth lookup by nickname.
+      - path: server/database.odin
+        description: May need narrow validation helpers or bootstrap assertions depending on execution design.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: Even with bootstrap assets present, testers still fail the HC-106 acceptance criteria unless a repository-supported command or helper path exposes them and validation proves the flow on fresh state.
+      target_files:
+        - run-test-server.sh
+        - server/router_test.odin
+      fix_recommendations: Make the supported local helper invoke or clearly enable bootstrap, then add one focused validation path that starts from empty database state and proves a seeded nickname resolves.
+      injected_at: 2026-07-02T11:05:00-05:00
+    acceptance_criteria:
+      - A fresh environment can create required auth data.
+      - Testers can authenticate without ad hoc database editing.
+    success_criteria:
+      - The repository exposes one documented command or helper sequence for local bootstrap and seeded identities.
+      - Validation proves the flow from fresh database state to successful nickname lookup.
+      - The helper path does not require testers to type raw SQL.
+      - Re-running the helper path does not corrupt or duplicate the MVP seed contract in a breaking way.
+    tech_stack:
+      - Odin
+      - PostgreSQL
+      - Bash
+    test_coverage: Prefer one focused automated bootstrap validation plus existing server tests over broad end-to-end coverage.
+    diag:
+      paired_debugger_task: T1-debug-bootstrap-seam-and-required-state
+      expected_validation_anchor: structured auth lookup by nickname for a seeded user
+      expected_user_surface: tester helper command rather than manual database shell use
+    handoff:
+      do_not_reinvestigate:
+        - The acceptance criteria are workflow-oriented, so a hidden bootstrap path is insufficient.
+        - Existing router tests already model the structured auth lookup request shape.
+      required_test_first: odin test server
+      target_files:
+        - run-test-server.sh
+        - server/router_test.odin
+      minimal_change: Extend the existing helper flow and add the narrowest validation that proves fresh-state bootstrap plus seeded lookup.
+      acceptance_checks:
+        - odin test server
+        - supported local helper execution from fresh state
+
+  - id: T4-document-bootstrap-and-test-identity-flow
+    title: Document the supported bootstrap and seeded identity workflow
+    description: Update the existing developer-experience planning or supporting repo docs so maintainers and testers have one clear, reproducible local database bootstrap and test identity path aligned with the implemented helper flow.
+    wave: 4
+    agent: gem-documentation-writer
+    status: pending
+    covers:
+      - Supported local bootstrap command or helper sequence
+      - Seeded test identity names or generation contract
+      - Reset or rerun expectations for local workflows
+    dependencies:
+      - T3-wire-tester-entrypoint-and-validation
+    conflicts_with: []
+    context_files:
+      - path: plans/05-developer-experience.md
+        description: Existing plan explicitly calls for bootstrap commands and seed workflows.
+      - path: README.md
+        description: Candidate high-level entrypoint if implementation adds a user-facing local workflow.
+      - path: run-test-server.sh
+        description: Final documented command surface should match actual helper behavior.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - A fresh environment can create required auth data.
+      - Testers can authenticate without ad hoc database editing.
+    success_criteria:
+      - One repository document names the supported bootstrap and seeded identity flow exactly as implemented.
+      - The doc warns against manual SQL as the normal tester path.
+      - The documented commands align with the helper and validation surfaces from prior waves.
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - bootstrap command or helper path
+      - seeded test identity contract
+      - rerun or reset expectations

@@ -7,8 +7,9 @@ Make it easy for maintainers and internal testers to set up, run, reset, and val
 ## Current State
 
 - Build commands exist in `client/AGENTS.md` and `server/AGENTS.md`.
-- The top-level README only points users at `client/` and `server/` without a real setup guide.
-- There are no helper scripts, no checked-in env example, no bootstrap command, and no seed/reset workflow.
+- The top-level README now includes the supported local auth bootstrap flow for PostgreSQL-backed MVP testing.
+- `run-test-server.sh` exposes explicit `bootstrap`, `start`, and `bootstrap-start` commands for the local server helper path.
+- The minimum checked-in auth bootstrap asset lives at `server/sql/auth_bootstrap.sql` and seeds deterministic test identities.
 - The server relies on PostgreSQL and several Odin shared/vendor dependencies that are not explained in onboarding docs.
 
 ## Assumptions
