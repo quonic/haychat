@@ -9,6 +9,42 @@ import "core:os"
 import "core:strings"
 import "shared:skald"
 
+StartupAuthBridge :: proc(
+	transport: ^ClientServerTransport,
+	server: ^Server,
+	config: ^Config,
+	clientHelloPacketBytes: []u8,
+) -> ClientStartupAuthSession
+
+startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
+
+startupAuthBridge_noop :: proc(
+	transport: ^ClientServerTransport,
+	server: ^Server,
+	config: ^Config,
+	clientHelloPacketBytes: []u8,
+) -> ClientStartupAuthSession {
+	_ = transport
+	_ = server
+	_ = config
+	_ = clientHelloPacketBytes
+	return {}
+}
+
+startupAuthBridge_real :: proc(
+	transport: ^ClientServerTransport,
+	server: ^Server,
+	config: ^Config,
+	clientHelloPacketBytes: []u8,
+) -> ClientStartupAuthSession {
+	return ClientServerTransport_completeStartupAuthOverENet(
+		transport,
+		server,
+		config,
+		clientHelloPacketBytes,
+	)
+}
+
 State :: struct {
 	config:                         Config,
 	serverTransports:               [dynamic]ClientServerTransport,
@@ -66,6 +102,21 @@ State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> 
 	return -1
 }
 
+State_serverForTransport :: proc(
+	state: ^State,
+	transport: ^ClientServerTransport,
+) -> (
+	^Server,
+	bool,
+) {
+	for i in 0 ..< len(state.config.servers) {
+		if state.config.servers[i].id == transport.serverID {
+			return &state.config.servers[i], true
+		}
+	}
+	return nil, false
+}
+
 State_attemptSelectedServerStartup :: proc(state: ^State) {
 	if state.selected_transport_index < 0 ||
 	   state.selected_transport_index >= len(state.serverTransports) {
@@ -83,6 +134,19 @@ State_attemptSelectedServerStartup :: proc(state: ^State) {
 		ClientServerTransport_fail(transport, "failed to encode client hello packet")
 		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
 		return
+	}
+
+	server, serverOK := State_serverForTransport(state, transport)
+	if !serverOK {
+		delete(packetBytes)
+		ClientServerTransport_fail(transport, "selected transport is missing server config")
+		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
+		return
+	}
+
+	session := startupAuthBridge(transport, server, &state.config, packetBytes)
+	if transport.transport.phase == .Established {
+		ClientServerTransport_adoptStartupAuthSession(transport, session)
 	}
 	delete(packetBytes)
 }
@@ -130,6 +194,7 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 }
 
 init :: proc() -> (init_state: State) {
+	startupAuthBridge = startupAuthBridge_real
 	init_state = State_initFromConfig(loadConfig())
 
 	if len(os.args) > 1 {

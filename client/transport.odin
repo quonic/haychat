@@ -5,12 +5,25 @@ import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
 import "core:strings"
+import "vendor:ENet"
+
+STARTUP_AUTH_CHANNEL_CHAT :: u8(1)
+STARTUP_AUTH_CHANNEL_COUNT :: uint(5)
+STARTUP_AUTH_CONNECT_TIMEOUT_MS :: u32(1000)
+STARTUP_AUTH_EVENT_TIMEOUT_MS :: u32(1000)
+STARTUP_AUTH_MAX_EVENTS :: 8
 
 ClientTransportResult :: struct {
 	responsePacketBytes: []u8,
 	hasResponse:         bool,
 	openedPacket:        common.Packet,
 	hasOpenedPacket:     bool,
+}
+
+ClientStartupAuthSession :: struct {
+	enetHost:        ^ENet.Host,
+	enetPeer:        ^ENet.Peer,
+	enetInitialized: bool,
 }
 
 ClientServerTransport :: struct {
@@ -31,6 +44,9 @@ ClientServerTransport :: struct {
 	transport:                 common.TransportState,
 	authenticatedUserID:       int,
 	lastError:                 string,
+	enetHost:                  ^ENet.Host,
+	enetPeer:                  ^ENet.Peer,
+	enetInitialized:           bool,
 }
 
 ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, message: string) {
@@ -40,10 +56,61 @@ ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, me
 	transport.lastError = strings.clone(message)
 }
 
+ClientServerTransport_hasLiveENetSession :: proc(transport: ^ClientServerTransport) -> bool {
+	return transport.enetInitialized && transport.enetHost != nil && transport.enetPeer != nil
+}
+
+ClientServerTransport_releaseENetSession :: proc(transport: ^ClientServerTransport) {
+	if transport.enetPeer != nil {
+		ENet.peer_reset(transport.enetPeer)
+		transport.enetPeer = nil
+	}
+	if transport.enetHost != nil {
+		ENet.host_destroy(transport.enetHost)
+		transport.enetHost = nil
+	}
+	if transport.enetInitialized {
+		ENet.deinitialize()
+		transport.enetInitialized = false
+	}
+}
+
+ClientServerTransport_adoptStartupAuthSession :: proc(
+	transport: ^ClientServerTransport,
+	session: ClientStartupAuthSession,
+) {
+	ClientServerTransport_releaseENetSession(transport)
+	transport.enetHost = session.enetHost
+	transport.enetPeer = session.enetPeer
+	transport.enetInitialized = session.enetInitialized
+}
+
+ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerTransport) {
+	ClientServerTransport_releaseENetSession(transport)
+	peerTrustState := transport.transport.peerTrustState
+	common.TransportState_reset(&transport.transport)
+	transport.transport.peerTrustState = peerTrustState
+	transport.serverIdentityPublicKey = {}
+	transport.serverEphemeralPublicKey = {}
+	transport.sessionID = {}
+	transport.authChallenge = {}
+	transport.pendingKeys = {}
+	transport.pendingKeysReady = false
+	transport.authenticatedUserID = 0
+}
+
 ClientServerTransport_fail :: proc(transport: ^ClientServerTransport, message: string) {
 	ClientServerTransport_setLastError(transport, message)
-	transport.pendingKeysReady = false
+	ClientServerTransport_clearSessionRuntimeState(transport)
 	transport.transport.phase = .Failed
+}
+
+ClientServerTransport_handleDisconnect :: proc(transport: ^ClientServerTransport) {
+	wasFailed := transport.transport.phase == .Failed
+	ClientServerTransport_clearSessionRuntimeState(transport)
+	if wasFailed {
+		transport.transport.phase = .Failed
+	}
 }
 
 ClientServerTransport_initFailed :: proc(
@@ -108,15 +175,187 @@ ClientTransportCatalog_init :: proc(config: ^Config) -> [dynamic]ClientServerTra
 	return catalog
 }
 
+ClientServerTransport_sendENetPacket :: proc(
+	host: ^ENet.Host,
+	peer: ^ENet.Peer,
+	channelID: u8,
+	packetBytes: []u8,
+) -> bool {
+	dataPtr: rawptr = nil
+	if len(packetBytes) > 0 {
+		dataPtr = rawptr(&packetBytes[0])
+	}
+
+	packet := ENet.packet_create(dataPtr, uint(len(packetBytes)), {ENet.PacketFlag.RELIABLE})
+	if packet == nil {
+		return false
+	}
+
+	if ENet.peer_send(peer, channelID, packet) != 0 {
+		ENet.packet_destroy(packet)
+		return false
+	}
+
+	ENet.host_flush(host)
+	return true
+}
+
+ClientServerTransport_completeStartupAuthOverENet :: proc(
+	transport: ^ClientServerTransport,
+	server: ^Server,
+	config: ^Config,
+	clientHelloPacketBytes: []u8,
+) -> ClientStartupAuthSession {
+	session: ClientStartupAuthSession
+	shouldReleaseSession := true
+	defer if shouldReleaseSession {
+		if session.enetPeer != nil {
+			ENet.peer_reset(session.enetPeer)
+			session.enetPeer = nil
+		}
+		if session.enetHost != nil {
+			ENet.host_destroy(session.enetHost)
+			session.enetHost = nil
+		}
+		if session.enetInitialized {
+			ENet.deinitialize()
+			session.enetInitialized = false
+		}
+	}
+
+	if ENet.initialize() != 0 {
+		ClientServerTransport_fail(transport, "failed to initialize ENet")
+		return session
+	}
+	session.enetInitialized = true
+
+	session.enetHost = ENet.host_create(nil, 1, STARTUP_AUTH_CHANNEL_COUNT, 0, 0)
+	if session.enetHost == nil {
+		ClientServerTransport_fail(transport, "failed to create ENet client host")
+		return session
+	}
+
+	serverHostCString, serverHostCStringErr := strings.clone_to_cstring(server.host)
+	if serverHostCStringErr != nil {
+		ClientServerTransport_fail(transport, "failed to prepare server host")
+		return session
+	}
+	defer delete(serverHostCString)
+
+	address := ENet.Address {
+			port = u16(server.port),
+		}
+	if ENet.address_set_host(&address, serverHostCString) != 0 {
+		ClientServerTransport_fail(
+			transport,
+			fmt.aprintf("failed to resolve server host: %s", server.host),
+		)
+		return session
+	}
+
+	session.enetPeer = ENet.host_connect(session.enetHost, &address, STARTUP_AUTH_CHANNEL_COUNT, 0)
+	if session.enetPeer == nil {
+		ClientServerTransport_fail(transport, "failed to start ENet connection")
+		return session
+	}
+
+	connectEvent: ENet.Event
+	connectResult := ENet.host_service(
+		session.enetHost,
+		&connectEvent,
+		STARTUP_AUTH_CONNECT_TIMEOUT_MS,
+	)
+	if connectResult <= 0 || connectEvent.type != .CONNECT {
+		ClientServerTransport_fail(transport, "timed out connecting to server")
+		return session
+	}
+
+	if !ClientServerTransport_sendENetPacket(
+		session.enetHost,
+		session.enetPeer,
+		STARTUP_AUTH_CHANNEL_CHAT,
+		clientHelloPacketBytes,
+	) {
+		ClientServerTransport_fail(transport, "failed to send client hello packet")
+		return session
+	}
+
+	for _ in 0 ..< STARTUP_AUTH_MAX_EVENTS {
+		event: ENet.Event
+		eventResult := ENet.host_service(session.enetHost, &event, STARTUP_AUTH_EVENT_TIMEOUT_MS)
+		if eventResult <= 0 {
+			if transport.transport.phase == .Failed {
+				return session
+			}
+			ClientServerTransport_fail(transport, "timed out waiting for auth response")
+			return session
+		}
+
+		switch event.type {
+		case .RECEIVE:
+			packetData := event.packet.data[:event.packet.dataLength]
+			packetCopy := make([dynamic]u8, 0, len(packetData))
+			for b in packetData {
+				append(&packetCopy, b)
+			}
+			ENet.packet_destroy(event.packet)
+
+			result, ok := ClientServerTransport_handleIncomingPacket(
+				transport,
+				server,
+				config,
+				packetCopy[:],
+			)
+			delete(packetCopy)
+			defer if result.hasOpenedPacket do delete(result.openedPacket.payload)
+
+			if result.hasResponse {
+				responseSent := ClientServerTransport_sendENetPacket(
+					session.enetHost,
+					session.enetPeer,
+					STARTUP_AUTH_CHANNEL_CHAT,
+					result.responsePacketBytes,
+				)
+				delete(result.responsePacketBytes)
+				if !responseSent {
+					ClientServerTransport_fail(transport, "failed to send auth response packet")
+					return session
+				}
+			}
+
+			if transport.transport.phase == .Established {
+				shouldReleaseSession = false
+				return session
+			}
+
+			if !ok && transport.transport.phase == .Failed {
+				continue
+			}
+
+		case .DISCONNECT:
+			ClientServerTransport_handleDisconnect(transport)
+			return session
+
+		case .CONNECT, .NONE:
+		}
+	}
+
+	if transport.transport.phase != .Established && transport.transport.phase != .Failed {
+		ClientServerTransport_fail(transport, "startup auth did not complete")
+	}
+
+	return session
+}
+
 ClientServerTransport_beginHandshake :: proc(transport: ^ClientServerTransport) -> ([]u8, bool) {
 	transport.pendingKeysReady = false
 	transport.transport.phase = .ClientHelloSent
 
 	clientHello := common.ClientHello {
-			version                  = common.protocolVersion,
-			clientIdentityPublicKey  = transport.clientIdentityPublicKey,
-			clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
-		}
+		version                  = common.protocolVersion,
+		clientIdentityPublicKey  = transport.clientIdentityPublicKey,
+		clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
+	}
 	return common.buildPacketBytes(.ClientHello, clientHello)
 }
 
@@ -152,10 +391,10 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		}
 
 		clientHello := common.ClientHello {
-				version                  = common.protocolVersion,
-				clientIdentityPublicKey  = transport.clientIdentityPublicKey,
-				clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
-			}
+			version                  = common.protocolVersion,
+			clientIdentityPublicKey  = transport.clientIdentityPublicKey,
+			clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
+		}
 		if !common.verifyServerHello(serverHello, clientHello) {
 			ClientServerTransport_fail(transport, "server hello signature verification failed")
 			return result, false
