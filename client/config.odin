@@ -56,10 +56,7 @@ loadConfig :: proc() -> (config: Config) {
 	} else when ODIN_OS == .Linux {
 		XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.allocator)
 		if XDG_CONFIG_HOME == "" {
-			XDG_CONFIG_HOME = strings.concatenate(
-				{os.get_env("HOME", context.allocator), "/.config"},
-				context.allocator,
-			)
+			XDG_CONFIG_HOME = getDefaultLinuxConfigHome(os.get_env("HOME", context.allocator))
 		}
 	}
 
@@ -160,11 +157,45 @@ ensureConfigDirExists :: proc() -> bool {
 	return true
 }
 
+getDefaultLinuxConfigHome :: proc(home: string) -> string {
+	when ODIN_OS == .Linux {
+		return strings.concatenate({home, "/.config"}, context.allocator)
+	}
+	return ""
+}
+
+getLinuxConfigDirForConfigHome :: proc(configHome: string) -> string {
+	when ODIN_OS == .Linux {
+		return strings.concatenate({configHome, "/", haychatFolder}, context.allocator)
+	}
+	return ""
+}
+
+getLinuxConfigPathForConfigHome :: proc(configHome: string) -> string {
+	when ODIN_OS == .Linux {
+		return strings.concatenate(
+			{getLinuxConfigDirForConfigHome(configHome), "/config.json"},
+			context.allocator,
+		)
+	}
+	return ""
+}
+
+getHistoricalLegacyLinuxConfigPathForConfigHome :: proc(home, configHome: string) -> string {
+	when ODIN_OS == .Linux {
+		return strings.concatenate(
+			{home, getLinuxConfigPathForConfigHome(configHome)},
+			context.allocator,
+		)
+	}
+	return ""
+}
+
 getConfigDir :: proc() -> string {
 	when ODIN_OS == .Windows {
 		return strings.concatenate({APP_DATA, "\\", haychatFolder}, context.allocator)
 	} else when ODIN_OS == .Linux {
-		return strings.concatenate({XDG_CONFIG_HOME, "/", haychatFolder}, context.allocator)
+		return getLinuxConfigDirForConfigHome(XDG_CONFIG_HOME)
 	}
 	return ""
 }
@@ -174,23 +205,24 @@ getConfigPath :: proc() -> string {
 	when ODIN_OS == .Windows {
 		return strings.concatenate({getConfigDir(), "\\config.json"}, context.allocator)
 	} else when ODIN_OS == .Linux {
-		return strings.concatenate({getConfigDir(), "/config.json"}, context.allocator)
+		return getLinuxConfigPathForConfigHome(XDG_CONFIG_HOME)
 	}
 	return ""
 }
 
 getLegacyLinuxConfigPath :: proc() -> string {
 	when ODIN_OS == .Linux {
-		return strings.concatenate(
-			{
-				os.get_env("HOME", context.allocator),
-				XDG_CONFIG_HOME,
-				"/",
-				haychatFolder,
-				"/config.json",
-			},
-			context.allocator,
-		)
+		home := os.get_env("HOME", context.allocator)
+		legacyConfigHome := XDG_CONFIG_HOME
+		if legacyConfigHome == "" {
+			legacyConfigHome = os.get_env("XDG_CONFIG_HOME", context.allocator)
+		}
+		if legacyConfigHome == "" {
+			legacyConfigHome = getDefaultLinuxConfigHome(home)
+		}
+
+		// The original Linux client wrote to HOME + XDG_CONFIG_HOME + /haychat/config.json.
+		return getHistoricalLegacyLinuxConfigPathForConfigHome(home, legacyConfigHome)
 	}
 	return ""
 }
