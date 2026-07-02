@@ -1,0 +1,429 @@
+{
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260702-hc-104-server-chat-dispatch",
+            "created_at": "2026-07-02T09:54:21-05:00",
+            "last_updated": "2026-07-02T09:54:21-05:00",
+            "version": 1,
+            "source": [
+                "user_request",
+                "repo_memory:/memories/repo/threaded-migration-baseline.md",
+                "workspace:common/protocol.odin",
+                "workspace:server/main.odin",
+                "workspace:server/router_test.odin",
+                "workspace:server/AGENTS.md"
+            ]
+        },
+        "scope": {
+            "purpose": [
+                "Reusable implementation context for HC-104 server-side MVP chat dispatch.",
+                "Helps future agents avoid re-discovery of the router entry point, payload surface, and test harness constraints."
+            ],
+            "applies_to": [
+                "common/protocol.odin",
+                "server/main.odin",
+                "server/router_test.odin"
+            ],
+            "non_goals": [
+                "Changing auth or encrypted handshake flow.",
+                "Adding room membership tracking, persistence, or presence state.",
+                "Expanding scope beyond authenticated MVP shared-room chat."
+            ]
+        },
+        "tech_stack": [
+            {
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Primary language for shared protocol, router, and tests.",
+                "config_files": [
+                    "AGENTS.md",
+                    "server/AGENTS.md"
+                ]
+            },
+            {
+                "name": "CBOR",
+                "version": "core:encoding/cbor",
+                "usage_context": "Packet and payload encoding for router IO and tests.",
+                "config_files": [
+                    "common/protocol.odin",
+                    "common/auth.odin"
+                ]
+            },
+            {
+                "name": "HayChat transport encryption",
+                "version": "current workspace",
+                "usage_context": "Post-auth encrypted application packets opened in server/main.odin and sealed in common/auth.odin.",
+                "config_files": [
+                    "server/main.odin",
+                    "common/auth.odin"
+                ]
+            }
+        ],
+        "conventions": [
+            "Use existing router helpers and handshake harnesses instead of inventing new test frameworks.",
+            "Server commands from server/AGENTS.md: odin check server, odin test server, odin build server, odin run server.",
+            "Top-level project guidance uses tabs in code, OTB-style braces, and camelCase names with ID/URL/API/HTTP uppercase conventions.",
+            "server/main.odin switches on common.MessageType use #partial switch in the current codebase."
+        ],
+        "constraints": {
+            "hard": [
+                "Only implement authenticated MVP chat dispatch.",
+                "Keep implementation scope to shared protocol, server router, and router tests.",
+                "Preserve existing auth and encrypted transport flow.",
+                "Do not add room membership beyond the shared MVP room assumption.",
+                "MVP roomId is fixed to 1."
+            ],
+            "soft": [
+                "Prefer reusing existing payload types and send helpers.",
+                "Keep changes minimal and focused.",
+                "Favor router-level validation over new subsystems or state."
+            ],
+            "compatibility": [
+                "Authenticated inner packets already flow through MainRouterState_handleEncryptedPacket into MainRouterState_dispatchApplicationPacket.",
+                "Outbound messages to authenticated peers should continue using MainRouterState_sendPeerMessage so encryption behavior stays centralized."
+            ],
+            "security_requirements": [
+                "Accept chat packets only from authenticated peers after transport activation.",
+                "Do not bypass encrypted transport for post-auth chat traffic.",
+                "Validate room scope narrowly to avoid cross-room or unauthenticated forwarding."
+            ]
+        },
+        "architecture_snapshot": {
+            "key_dirs": {
+                "path": [
+                    "common/",
+                    "server/",
+                    "docs/plan/"
+                ]
+            },
+            "patterns": [
+                "Encrypted application packets are opened in MainRouterState_handleEncryptedPacket and then routed by MainRouterState_dispatchApplicationPacket.",
+                "MainRouterState_sendPeerMessage decides whether to emit plaintext handshake packets or encrypted authenticated packets.",
+                "Router tests drive the router directly, then inspect queued IPC messages through polling helpers and decrypt outer packets with client transport state."
+            ],
+            "key_components": [
+                {
+                    "name": "common.MessageType",
+                    "location": "common/protocol.odin",
+                    "responsibility": [
+                        "Defines ClientChatMessage and ServerChatMessage enum variants.",
+                        "Controls which packet kinds server/main.odin can route."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "name": "common.Message",
+                    "location": "common/protocol.odin",
+                    "responsibility": [
+                        "Existing shared message struct with id, senderId, roomId, timestamp, and content.",
+                        "Likely candidate for MVP chat packet payload reuse."
+                    ],
+                    "confidence": 0.86
+                },
+                {
+                    "name": "MainRouterState_dispatchApplicationPacket",
+                    "location": "server/main.odin",
+                    "responsibility": [
+                        "Routes authenticated inner packets after transport decryption.",
+                        "Currently handles auth lookup, file store, and database query, but not chat."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "MainRouterState_sendPeerMessage",
+                    "location": "server/main.odin",
+                    "responsibility": [
+                        "Encrypts outbound packets for authenticated peers.",
+                        "Mutates per-peer transport session state during sealing."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "name": "routerCompleteHandshake",
+                    "location": "server/router_test.odin",
+                    "responsibility": [
+                        "Establishes an authenticated peer session in tests.",
+                        "Returns client-side transport state for decrypting router responses."
+                    ],
+                    "confidence": 0.99
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "common/protocol.odin",
+                    "purpose": [
+                        "Shared packet enum and payload contract for chat messages."
+                    ],
+                    "why_relevant": [
+                        "Already contains ClientChatMessage and ServerChatMessage enum entries.",
+                        "Already contains a generic Message struct that may satisfy MVP chat payload needs."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "MessageType.ClientChatMessage / MessageType.ServerChatMessage",
+                            "type": "variable",
+                            "location": "common/protocol.odin:178",
+                            "description": "Chat packet enum variants already exist."
+                        },
+                        {
+                            "element": "Message",
+                            "type": "class",
+                            "location": "common/protocol.odin:321",
+                            "description": "Shared message payload includes senderId, roomId, timestamp, content, and id."
+                        },
+                        {
+                            "element": "ProtocolErrorResponse",
+                            "type": "class",
+                            "location": "common/protocol.odin:400",
+                            "description": "Existing protocol error payload shape used by router tests."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.97
+                },
+                {
+                    "path": "server/main.odin",
+                    "purpose": [
+                        "Authenticated dispatch and outbound send path."
+                    ],
+                    "why_relevant": [
+                        "Missing chat handling is the current implementation gap.",
+                        "Existing send helper centralizes encryption behavior for authenticated peers."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "MainRouterState_sendPeerMessage",
+                            "type": "function",
+                            "location": "server/main.odin:193",
+                            "description": "Seals outbound packets when the target peer session is authenticated."
+                        },
+                        {
+                            "element": "MainRouterState_authenticatedUserIDFromIdentity",
+                            "type": "function",
+                            "location": "server/main.odin:516",
+                            "description": "Derives stable authenticated user IDs from client identity public keys."
+                        },
+                        {
+                            "element": "MainRouterState_dispatchApplicationPacket",
+                            "type": "function",
+                            "location": "server/main.odin:749",
+                            "description": "Authenticated application dispatcher currently lacks ClientChatMessage handling."
+                        },
+                        {
+                            "element": "MainRouterState_handleEncryptedPacket",
+                            "type": "function",
+                            "location": "server/main.odin:813",
+                            "description": "Opens encrypted outer packets, enforces authentication, and forwards inner packets to application dispatch."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "server/router_test.odin",
+                    "purpose": [
+                        "Existing router harness and encrypted packet tests."
+                    ],
+                    "why_relevant": [
+                        "Provides the shortest path to validate chat broadcast behavior without spinning up the full server.",
+                        "Shows current assertions for encrypted post-auth behavior and protocol errors."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "routerTestHarness_init",
+                            "type": "function",
+                            "location": "server/router_test.odin:19",
+                            "description": "Initializes router state with one connected peer and IPC channels."
+                        },
+                        {
+                            "element": "routerCompleteHandshake",
+                            "type": "function",
+                            "location": "server/router_test.odin:106",
+                            "description": "Authenticates a peer and returns client-side transport state."
+                        },
+                        {
+                            "element": "testMainRouterHandshakeRoutesEncryptedApplicationPackets",
+                            "type": "function",
+                            "location": "server/router_test.odin:218",
+                            "description": "Baseline encrypted application dispatch test pattern."
+                        },
+                        {
+                            "element": "testMainRouterRejectsPlaintextAfterAuthentication",
+                            "type": "function",
+                            "location": "server/router_test.odin:467",
+                            "description": "Demonstrates decrypting encrypted error responses and verifying disconnect behavior."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "Encrypted-router dispatch funnel",
+                    "category": "control_flow",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/main.odin:813",
+                        "server/main.odin:843"
+                    ]
+                },
+                {
+                    "name": "Authenticated send helper as single outbound encryption point",
+                    "category": "transport",
+                    "confidence": 0.98,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/main.odin:193"
+                    ]
+                },
+                {
+                    "name": "Router-level test harness with IPC polling",
+                    "category": "testing",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/router_test.odin:53",
+                        "server/router_test.odin:64",
+                        "server/router_test.odin:106"
+                    ]
+                }
+            ],
+            "dependencies": {
+                "internal": [
+                    "common/protocol.odin",
+                    "common/auth.odin",
+                    "server/main.odin",
+                    "server/router_test.odin"
+                ],
+                "external": [
+                    "core:encoding/cbor",
+                    "core:testing",
+                    "core:crypto/ecdh",
+                    "core:sync",
+                    "core:sys/linux"
+                ]
+            },
+            "gotchas": [
+                {
+                    "text": "server/main.odin message-type switches use #partial switch; new cases should follow that style.",
+                    "confidence": 0.98
+                },
+                {
+                    "text": "MainRouterState_sendPeerMessage mutates transport state while sealing, so broadcast loops must persist each recipient session correctly.",
+                    "confidence": 0.95
+                },
+                {
+                    "text": "routerTestHarness_init currently marks only peer 1 as connected; multi-peer broadcast tests need an explicit second-peer setup step.",
+                    "confidence": 0.97
+                },
+                {
+                    "text": "The existing common.Message payload is richer than the minimal guidance in the task; payload choice should not silently widen behavior expectations.",
+                    "confidence": 0.84
+                }
+            ],
+            "domain_context": {
+                "security_considerations": [
+                    {
+                        "area": "Authenticated application packets",
+                        "location": "server/main.odin:829",
+                        "concern": "Only authenticated sessions with active transport keys may open encrypted inner packets."
+                    },
+                    {
+                        "area": "Outbound chat delivery",
+                        "location": "server/main.odin:193",
+                        "concern": "Authenticated outbound responses should remain on the encrypted send path rather than hand-building outer packets."
+                    }
+                ],
+                "testing_patterns": {
+                    "framework": "core:testing",
+                    "coverage_areas": [
+                        "Handshake success and post-auth encrypted routing",
+                        "Protocol violation handling before and after auth",
+                        "Database/file router side effects via IPC polling"
+                    ],
+                    "test_organization": "Table-free targeted tests in server/router_test.odin using a shared mutex and explicit harness lifecycle.",
+                    "mock_patterns": [
+                        "Direct router invocation with fake IPC sockets",
+                        "Client-side transport state used to decrypt server responses"
+                    ]
+                },
+                "error_handling": "Router validation failures usually respond with an error packet and, for protocol violations, also disconnect the offending peer.",
+                "data_flow": "NetworkDataReceived -> MainRouterState_handleNetworkDataReceived -> MainRouterState_handleEncryptedPacket -> MainRouterState_dispatchApplicationPacket -> MainRouterState_sendPeerMessage or IPC side-effect."
+            },
+            "open_questions": [
+                {
+                    "question": "Reuse common.Message or add dedicated chat payload structs?",
+                    "context": "The enum already exists, but the current shared payload may include extra fields beyond the MVP requirement.",
+                    "type": "decision_blocker",
+                    "affects": [
+                        "common/protocol.odin",
+                        "server/main.odin",
+                        "server/router_test.odin"
+                    ]
+                },
+                {
+                    "question": "What precise failure packet should represent unsupported roomId?",
+                    "context": "The router currently uses protocol-error responses for unsupported message types, but room validation semantics are still open.",
+                    "type": "decision_blocker",
+                    "affects": [
+                        "server/main.odin",
+                        "server/router_test.odin"
+                    ]
+                }
+            ]
+        },
+        "prior_decisions": [
+            {
+                "decision": "HC-103 left placeholder application routing in server/main.odin after establishing the real auth flow.",
+                "rationale": [
+                    "Repo memory explicitly records that full app-level dispatch remained a follow-up slice after the threaded migration.",
+                    "User context identifies HC-104 as the next server-side dispatch step."
+                ],
+                "evidence": [
+                    "path:/memories/repo/threaded-migration-baseline.md",
+                    "path:server/main.odin"
+                ],
+                "confidence": 0.98,
+                "linked_constraints": [
+                    "Preserve existing auth and encrypted transport flow."
+                ],
+                "linked_patterns": [
+                    "Encrypted-router dispatch funnel"
+                ]
+            },
+            {
+                "decision": "MVP chat uses one shared room with roomId = 1 and no room membership tracking.",
+                "rationale": [
+                    "User-provided constraints and prior decisions explicitly cap scope to the shared MVP room assumption."
+                ],
+                "evidence": [
+                    "path:user_request"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Do not add room membership beyond the shared MVP room assumption.",
+                    "Only implement authenticated MVP chat dispatch."
+                ],
+                "linked_patterns": [
+                    "Stateless router validation"
+                ]
+            }
+        ],
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/threaded-migration-baseline.md",
+                "trust": "high"
+            }
+        ]
+    }
+}

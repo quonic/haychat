@@ -1,0 +1,250 @@
+plan_id: 20260702-hc-104-server-chat-dispatch
+objective: Implement HC-104 server-side dispatch for MVP chat packets.
+created_at: 2026-07-02T09:54:21-05:00
+created_by: gem-planner
+status: completed
+tldr: |
+  HC-104 is implemented and validated: the authenticated application-packet router
+  accepts ClientChatMessage, enforces the MVP shared room contract (roomId = 1),
+  broadcasts an encrypted ServerChatMessage to every authenticated peer including
+  the sender, and returns an encrypted ServerProtocolError for unsupported roomId
+  values.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 4
+  risk_score: medium
+
+quality_warnings:
+  - Current router test harness only seeds peer 1; broadcast coverage likely needs a small multi-peer harness extension.
+  - Chat payload shape must be chosen carefully to avoid expanding scope into room membership, persistence, or presence tracking.
+
+reviewer_focus:
+  - Preserve encrypted transport semantics for authenticated peers during broadcast fan-out.
+  - Confirm per-peer transport state is written back after each sealed outbound chat packet.
+  - Keep unsupported-room handling narrow and consistent with existing router error patterns.
+
+prd_update_recommended: false
+
+suggested_plan_files:
+  - docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml
+  - docs/plan/20260702-hc-104-server-chat-dispatch/context_envelope.json
+
+resolved_decisions:
+  - decision: Use an asymmetric MVP chat payload contract.
+    context: ClientChatMessage should use a minimal client-owned payload, while ServerChatMessage may reuse or mirror the richer server-owned message shape.
+    affects:
+      - T2-implement-chat-dispatch
+      - T3-add-router-chat-tests
+  - decision: Unsupported MVP room IDs must return encrypted ServerProtocolError.
+    context: This matches the existing router error surface and avoids inventing a new validation contract for HC-104.
+    affects:
+      - T2-implement-chat-dispatch
+      - T3-add-router-chat-tests
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Broadcast logic seals one outbound packet but fails to persist updated transport state per recipient, causing later encrypted traffic or tests to fail.
+      likelihood: medium
+      impact: high
+      mitigation: Route all chat fan-out through MainRouterState_sendPeerMessage and explicitly verify sender and recipient can decrypt their own queued packets in router tests.
+    - scenario: Chat handling accidentally widens scope into room membership or presence state.
+      likelihood: low
+      impact: medium
+      mitigation: Limit validation to roomId == 1 and authenticated peers only; avoid adding room maps or membership bookkeeping.
+    - scenario: Multi-peer router tests become brittle because the current harness and IPC polling helpers assume a single connected peer.
+      likelihood: medium
+      impact: medium
+      mitigation: Add the smallest harness helper needed to register a second peer and consume two queued encrypted sends deterministically.
+  assumptions:
+    - MVP uses one shared room with roomId = 1.
+    - Authenticated sender receives their own broadcast.
+    - Chat dispatch remains stateless at the router layer and does not persist messages.
+    - Existing auth and encrypted transport helpers remain authoritative and unchanged.
+
+tasks:
+  - id: T1-debug-chat-dispatch
+    title: Diagnose HC-104 dispatch integration slice
+    description: Confirm the exact protocol payload contract, router insertion point, and test-harness gaps needed to implement authenticated MVP chat without touching auth or handshake logic.
+    wave: 1
+    agent: gem-debugger
+    status: completed
+    covers:
+      - Shared chat payload contract in common protocol types
+      - Missing ClientChatMessage branch in authenticated application dispatch
+      - Broadcast feasibility through existing encrypted send helper
+      - Multi-peer router test harness requirements
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: common/protocol.odin
+        description: Shared message type enum and existing message structs.
+      - path: server/main.odin
+        description: Authenticated packet dispatch, auth state, and encrypted send path.
+      - path: server/router_test.odin
+        description: Existing handshake helper and encrypted router tests.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Authenticated chat packets are accepted.
+      - The server forwards or broadcasts messages correctly for the MVP scenario.
+      - Scope remains limited to authenticated MVP chat dispatch.
+    success_criteria:
+      - Produces a diagnosis that names the exact missing switch branch, payload type choice, and broadcast iteration strategy.
+      - Identifies the minimum harness changes required to exercise a sender plus at least one additional authenticated recipient.
+      - Leaves auth, handshake, and encrypted transport code paths unchanged except for the new dispatch entry.
+
+  - id: T2-implement-chat-dispatch
+    title: Implement authenticated MVP chat dispatch
+    description: Add the authenticated ClientChatMessage handling path, validate the shared-room MVP contract, and broadcast an encrypted ServerChatMessage to all authenticated peers including the sender.
+    wave: 2
+    agent: gem-implementer
+    status: completed
+    covers:
+      - Common chat payload contract needed by client-to-server and server-to-client packets
+      - MainRouterState_dispatchApplicationPacket chat branch
+      - Authenticated broadcast iteration over connected/authenticated peers
+      - Negative unsupported-room handling
+    dependencies:
+      - T1-debug-chat-dispatch
+    conflicts_with: []
+    context_files:
+      - path: common/protocol.odin
+        description: Candidate payload structs for chat packets.
+      - path: server/main.odin
+        description: Application dispatch and encrypted send helper.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: server/main.odin has no ClientChatMessage case in MainRouterState_dispatchApplicationPacket, so authenticated application chat packets currently fall through to Unsupported message type. The existing send path can already encrypt per-peer outbound packets.
+      target_files:
+        - common/protocol.odin
+        - server/main.odin
+      fix_recommendations: Reuse the smallest shared chat payload contract already present if possible, validate roomId == 1 and non-empty content, construct a server chat payload with the authenticated sender user ID, and fan out through MainRouterState_sendPeerMessage only to authenticated peers.
+      injected_at: 2026-07-02T09:54:21-05:00
+    acceptance_criteria:
+      - Authenticated chat packets are accepted.
+      - The server forwards or broadcasts messages correctly for the MVP scenario.
+      - Broadcast includes the sender and all other authenticated peers.
+      - Unsupported roomId values are rejected without introducing room membership state.
+    success_criteria:
+      - Authenticated encrypted ClientChatMessage reaches a dedicated chat branch instead of the default protocol error path.
+      - Server emits encrypted ServerChatMessage packets for every authenticated connected peer.
+      - Unsupported roomId produces the chosen narrow failure response and does not enqueue broadcasts.
+      - No auth, handshake, or generic database/file dispatch behavior regresses in the touched slice.
+    tech_stack:
+      - Odin
+      - Shared CBOR packet protocol
+      - Existing transport encryption helpers in common/auth.odin
+    test_coverage: Add focused router tests for positive encrypted broadcast behavior and one unsupported-room rejection.
+    diag:
+      paired_debugger_task: T1-debug-chat-dispatch
+      likely_broadcast_surface: MainRouterState_sendPeerMessage
+      likely_payload_source: common.Message or a minimal adjacent chat payload type
+    handoff:
+      do_not_reinvestigate:
+        - Authenticated inner packets already enter MainRouterState_dispatchApplicationPacket through MainRouterState_handleEncryptedPacket.
+        - MainRouterState_sendPeerMessage already auto-seals non-handshake messages for authenticated peers.
+        - MVP room scope is fixed to roomId = 1 and does not require membership tracking.
+      required_test_first: odin test server
+      target_files:
+        - common/protocol.odin
+        - server/main.odin
+      minimal_change: Add one chat-routing slice and only the shared protocol definition changes required for that slice.
+      acceptance_checks:
+        - odin check server
+        - odin test server
+
+  - id: T3-add-router-chat-tests
+    title: Add focused router tests for chat dispatch
+    description: Extend the router test harness only as needed to authenticate multiple peers and verify encrypted broadcast success plus unsupported-room rejection.
+    wave: 3
+    agent: gem-implementer
+    status: completed
+    covers:
+      - Multi-peer authenticated router harness support
+      - Positive encrypted chat broadcast assertions
+      - Negative unsupported-room assertions
+    dependencies:
+      - T2-implement-chat-dispatch
+    conflicts_with: []
+    context_files:
+      - path: server/router_test.odin
+        description: Existing handshake helper, packet helpers, and encrypted router test style.
+      - path: server/main.odin
+        description: Broadcast behavior under test.
+      - path: common/protocol.odin
+        description: Chat payload types used by test packets.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: The current router tests only exercise single-peer encrypted routing and do not cover broadcast fan-out or chat-specific validation.
+      target_files:
+        - server/router_test.odin
+      fix_recommendations: Reuse routerCompleteHandshake for a second peer, add deterministic helpers to poll multiple network sends, and assert decrypted ServerChatMessage contents on both sender and recipient paths.
+      injected_at: 2026-07-02T09:54:21-05:00
+    acceptance_criteria:
+      - Add focused tests for positive broadcast behavior.
+      - Add one negative unsupported-room behavior test.
+      - Keep changes minimal and focused on router coverage.
+    success_criteria:
+      - A router test proves one authenticated sender broadcast reaches at least one additional authenticated peer and the sender.
+      - A router test proves unsupported roomId does not broadcast and returns the selected failure response.
+      - Tests remain isolated to server/router_test.odin and use the existing handshake/encrypted packet helpers.
+    tech_stack:
+      - Odin
+      - core:testing
+      - Shared CBOR packet protocol
+    test_coverage: Extend server/router_test.odin with two focused tests and any tiny helper additions needed for deterministic multi-peer polling.
+    diag:
+      paired_debugger_task: T1-debug-chat-dispatch
+      focus: broadcast validation and negative-room coverage
+    handoff:
+      do_not_reinvestigate:
+        - routerCompleteHandshake already yields a client-side TransportState that can open encrypted server responses.
+        - Network IPC assertions are already the canonical way to inspect router output in this test file.
+      required_test_first: odin test server
+      target_files:
+        - server/router_test.odin
+      minimal_change: Add only the extra harness support and chat tests needed to validate HC-104.
+      acceptance_checks:
+        - odin test server
+
+  - id: T4-update-mvp-doc-trace
+    title: Record HC-104 behavior in developer-facing docs
+    description: Update the smallest existing developer-facing planning or release-tracking document so HC-104’s authenticated shared-room chat dispatch behavior is visible to future contributors.
+    wave: 4
+    agent: gem-documentation-writer
+    status: completed
+    covers:
+      - MVP behavior traceability
+      - Release/backlog documentation consistency
+    dependencies:
+      - T3-add-router-chat-tests
+    conflicts_with: []
+    context_files:
+      - path: plans/02-core-functionality.md
+        description: Core functionality planning document for MVP behavior tracking.
+      - path: plans/backlog/M1-mvp-chat-flow.md
+        description: MVP flow/backlog artifact likely to reference chat dispatch status.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria: []
+    success_criteria:
+      - One existing developer-facing planning artifact notes that authenticated server-side MVP chat dispatch is implemented for roomId = 1.
+      - Documentation does not broaden feature claims beyond the tested MVP shared-room behavior.
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - HC-104 completion note
+      - MVP shared-room assumption
+      - Router-test backed validation reference
