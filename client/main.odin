@@ -19,11 +19,7 @@ StartupAuthBridge :: proc(
 	clientHelloPacketBytes: []u8,
 ) -> ClientStartupAuthSession
 
-RoomChatSendBridge :: proc(
-	transport: ^ClientServerTransport,
-	roomID: int,
-	content: string,
-) -> bool
+RoomChatSendBridge :: proc(transport: ^ClientServerTransport, roomID: int, content: string) -> bool
 
 startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
 roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
@@ -110,19 +106,17 @@ ClientTransportRuntimeEvent_toMsg :: proc(event: ClientTransportRuntimeEvent) ->
 	switch event.kind {
 	case .RoomChatReceived:
 		return Msg {
-			kind = .RecieveChannelChatMessage,
-			id = event.serverID,
-			channel_id = event.roomID,
-			sender_id = event.senderID,
-			new_value = event.message,
-		}, true
+				kind = .RecieveChannelChatMessage,
+				id = event.serverID,
+				channel_id = event.roomID,
+				sender_id = event.senderID,
+				new_value = event.message,
+			},
+			true
 
 	case .ProtocolError:
-		return Msg {
-			kind = .TransportProtocolError,
-			id = event.serverID,
-			new_value = event.message,
-		}, true
+		return Msg{kind = .TransportProtocolError, id = event.serverID, new_value = event.message},
+			true
 
 	case .Disconnected, .None:
 		return {}, false
@@ -137,7 +131,8 @@ State_serviceSelectedTransportRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)
 	}
 
 	transport := &state.serverTransports[state.selected_transport_index]
-	if transport.transport.phase != .Established || !ClientServerTransport_hasLiveENetSession(transport) {
+	if transport.transport.phase != .Established ||
+	   !ClientServerTransport_hasLiveENetSession(transport) {
 		return
 	}
 

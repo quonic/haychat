@@ -68,7 +68,10 @@ testConfigWithServers :: proc(servers: [dynamic]Server) -> Config {
 	}
 }
 
-buildEstablishedTransportPair :: proc(server: Server, config: Config) -> (
+buildEstablishedTransportPair :: proc(
+	server: Server,
+	config: Config,
+) -> (
 	ClientServerTransport,
 	common.TransportState,
 	bool,
@@ -139,12 +142,7 @@ testViewCtx :: proc(
 	msgs: ^[dynamic]Msg,
 	widgets: ^skald.Widget_Store,
 ) -> skald.Ctx(Msg) {
-	return skald.Ctx(Msg){
-		theme = theme,
-		input = input,
-		msgs = msgs,
-		widgets = widgets,
-	}
+	return skald.Ctx(Msg){theme = theme, input = input, msgs = msgs, widgets = widgets}
 }
 
 testRoomChatAreaView :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> (skald.View_Stack, bool) {
@@ -173,11 +171,11 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
 
 	server := Server {
-		id = 501,
-		name = "Reducer Server",
+		id         = 501,
+		name       = "Reducer Server",
 		short_name = getShortServerName("Reducer Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
 
@@ -231,11 +229,11 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
 
 	server := Server {
-		id = 502,
-		name = "Authoritative Server",
+		id         = 502,
+		name       = "Authoritative Server",
 		short_name = getShortServerName("Authoritative Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
 	state.serverTransports[state.selected_transport_index].authenticatedUserID = 77
@@ -328,11 +326,11 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 @(test)
 testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^testing.T) {
 	server := Server {
-		id = 503,
-		name = "DM Server",
+		id         = 503,
+		name       = "DM Server",
 		short_name = getShortServerName("DM Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
 	state.view_dms = true
@@ -368,11 +366,11 @@ testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^tes
 @(test)
 testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 	server := Server {
-		id = 504,
-		name = "Narrow Server",
+		id         = 504,
+		name       = "Narrow Server",
 		short_name = getShortServerName("Narrow Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
 
@@ -429,18 +427,18 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 @(test)
 testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testing.T) {
 	serverA := Server {
-		id = 506,
-		name = "First Server",
+		id         = 506,
+		name       = "First Server",
 		short_name = getShortServerName("First Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	serverB := Server {
-		id = 507,
-		name = "Second Server",
+		id         = 507,
+		name       = "Second Server",
 		short_name = getShortServerName("Second Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := State_initFromConfig(testConfigWithServers({serverA, serverB}))
 	state.view_dms = false
@@ -466,11 +464,7 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 
 	afterChannelSwitch, _ := update(
 		withTranscript,
-		Msg {
-			kind = .SwitchToChannel,
-			id = serverA.id,
-			channel_id = common.GENERAL_ROOM_ID + 1,
-		},
+		Msg{kind = .SwitchToChannel, id = serverA.id, channel_id = common.GENERAL_ROOM_ID + 1},
 	)
 	testing.expect(
 		t,
@@ -490,10 +484,7 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 	)
 	afterServerSwitch, _ := update(
 		restoredTranscript,
-		Msg {
-			kind = .SwitchToServer,
-			id = serverB.id,
-		},
+		Msg{kind = .SwitchToServer, id = serverB.id},
 	)
 	testing.expect(
 		t,
@@ -507,11 +498,11 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 @(test)
 testViewServerRendersChatStatusInRoomChat :: proc(t: ^testing.T) {
 	server := Server {
-		id = 505,
-		name = "Room View Server",
+		id         = 505,
+		name       = "Room View Server",
 		short_name = getShortServerName("Room View Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
 	State_setChatStatus(&state, "Unsupported roomId")
@@ -545,11 +536,11 @@ testViewServerRendersChatStatusInRoomChat :: proc(t: ^testing.T) {
 @(test)
 testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.T) {
 	server := Server {
-		id = 77,
-		name = "Room Server",
+		id         = 77,
+		name       = "Room Server",
 		short_name = getShortServerName("Room Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
 
@@ -600,11 +591,11 @@ testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.
 @(test)
 testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t: ^testing.T) {
 	server := Server {
-		id = 88,
-		name = "Runtime Server",
+		id         = 88,
+		name       = "Runtime Server",
 		short_name = getShortServerName("Runtime Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
 
@@ -645,10 +636,7 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 		runtimeEvent.roomID == common.GENERAL_ROOM_ID,
 		"expected room chat event to preserve roomId metadata",
 	)
-	assert(
-		runtimeEvent.senderID == 42,
-		"expected room chat event to preserve senderId metadata",
-	)
+	assert(runtimeEvent.senderID == 42, "expected room chat event to preserve senderId metadata")
 	assert(
 		runtimeEvent.message == "authoritative chat",
 		"expected room chat event to preserve chat content",
@@ -660,11 +648,11 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 @(test)
 testClientServerTransportTranslatesProtocolErrorIntoRuntimeEvent :: proc(t: ^testing.T) {
 	server := Server {
-		id = 99,
-		name = "Protocol Server",
+		id         = 99,
+		name       = "Protocol Server",
 		short_name = getShortServerName("Protocol Server"),
-		host = "localhost",
-		port = common.DEFAULT_SERVER_PORT,
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
 

@@ -670,11 +670,7 @@ ClientServerTransport_sendRoomChatMessage :: proc(
 		return false
 	}
 
-	packetBytes, ok := ClientServerTransport_buildRoomChatPacketBytes(
-		transport,
-		roomID,
-		content,
-	)
+	packetBytes, ok := ClientServerTransport_buildRoomChatPacketBytes(transport, roomID, content)
 	if !ok {
 		return false
 	}
@@ -706,20 +702,22 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 		if cbor.unmarshal(innerPacket.payload, &chatPayload) != nil {
 			ClientServerTransport_runtimeProtocolError(transport, "invalid server chat payload")
 			return ClientServerTransport_makeRuntimeEvent(
-				transport,
-				.ProtocolError,
-				transport.lastError,
-			), true
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		defer delete(chatPayload.content)
 
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.RoomChatReceived,
-			chatPayload.content,
-			chatPayload.roomId,
-			chatPayload.senderId,
-		), true
+				transport,
+				.RoomChatReceived,
+				chatPayload.content,
+				chatPayload.roomId,
+				chatPayload.senderId,
+			),
+			true
 
 	case .ServerProtocolError:
 		protocolError: common.ProtocolErrorResponse
@@ -730,10 +728,11 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 			ClientServerTransport_runtimeProtocolError(transport, "server protocol error")
 		}
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.ProtocolError,
-			transport.lastError,
-		), true
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			),
+			true
 
 	case:
 		ClientServerTransport_runtimeProtocolError(
@@ -741,10 +740,11 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 			fmt.aprintf("unexpected runtime message type: %v", innerPacket.messageType),
 		)
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.ProtocolError,
-			transport.lastError,
-		), true
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			),
+			true
 	}
 	return {}, false
 }
@@ -760,10 +760,11 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 	if cbor.unmarshal(packetBytes, &outerPacket) != nil {
 		ClientServerTransport_fail(transport, "invalid outer packet")
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.ProtocolError,
-			transport.lastError,
-		), true
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			),
+			true
 	}
 	defer delete(outerPacket.payload)
 
@@ -772,20 +773,22 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 		if !common.TransportState_canEncrypt(&transport.transport) {
 			ClientServerTransport_fail(transport, "encrypted packet received before auth success")
 			return ClientServerTransport_makeRuntimeEvent(
-				transport,
-				.ProtocolError,
-				transport.lastError,
-			), true
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 
 		innerPacket, openOK := common.openPacketForSession(&transport.transport, outerPacket)
 		if !openOK {
 			ClientServerTransport_fail(transport, "failed to open encrypted packet")
 			return ClientServerTransport_makeRuntimeEvent(
-				transport,
-				.ProtocolError,
-				transport.lastError,
-			), true
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		defer delete(innerPacket.payload)
 
@@ -800,10 +803,11 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 			ClientServerTransport_runtimeProtocolError(transport, "server protocol error")
 		}
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.ProtocolError,
-			transport.lastError,
-		), true
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			),
+			true
 
 	case:
 		ClientServerTransport_fail(
@@ -811,10 +815,11 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 			fmt.aprintf("unexpected runtime outer message type: %v", outerPacket.messageType),
 		)
 		return ClientServerTransport_makeRuntimeEvent(
-			transport,
-			.ProtocolError,
-			transport.lastError,
-		), true
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			),
+			true
 	}
 	return {}, false
 }
@@ -825,7 +830,8 @@ ClientServerTransport_serviceRuntime :: proc(
 	ClientTransportRuntimeEvent,
 	bool,
 ) {
-	if transport.transport.phase != .Established || !ClientServerTransport_hasLiveENetSession(transport) {
+	if transport.transport.phase != .Established ||
+	   !ClientServerTransport_hasLiveENetSession(transport) {
 		return {}, false
 	}
 

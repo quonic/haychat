@@ -1,460 +1,460 @@
 {
-  "context_envelope": {
-    "meta": {
-      "plan_id": "20260702-hc-105-real-chat-send-receive",
-      "created_at": "2026-07-02T10:22:52-05:00",
-      "last_updated": "2026-07-02T10:22:52-05:00",
-      "version": 2,
-      "source": [
-        "user_request:critique_revision",
-        "repo_memory:/memories/repo/threaded-migration-baseline.md",
-        "workspace:client/AGENTS.md",
-        "workspace:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml",
-        "workspace:docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml"
-      ]
-    },
-    "scope": {
-      "purpose": [
-        "Reusable implementation context for HC-105 client-side real chat send/receive integration.",
-        "Helps future agents avoid re-discovery of the reducer gap, transport seam, and validation boundaries."
-      ],
-      "applies_to": [
-        "client/update.odin",
-        "client/view.odin",
-        "client/main.odin",
-        "client/transport.odin",
-        "client/main_test.odin",
-        "common/protocol.odin"
-      ],
-      "non_goals": [
-        "Changing startup auth ownership or handshake behavior from HC-103.",
-        "Adding direct-message backend protocol or delivery semantics.",
-        "Expanding scope into room membership, persistence, or presence state."
-      ]
-    },
-    "tech_stack": [
-      {
-        "name": "Odin",
-        "version": "workspace-managed",
-        "usage_context": "Primary language for client state, transport, and tests.",
-        "config_files": [
-          "AGENTS.md",
-          "client/AGENTS.md"
-        ]
-      },
-      {
-        "name": "shared:skald",
-        "version": "workspace-managed",
-        "usage_context": "UI and reducer event framework for chat input, state updates, and rendering.",
-        "config_files": [
-          "client/main.odin",
-          "client/view.odin"
-        ]
-      },
-      {
-        "name": "ENet",
-        "version": "vendor:ENet",
-        "usage_context": "Established client/server transport that must gain explicit steady-state chat ownership after auth.",
-        "config_files": [
-          "client/transport.odin"
-        ]
-      },
-      {
-        "name": "CBOR packet protocol",
-        "version": "core:encoding/cbor",
-        "usage_context": "Encodes shared room-chat payload structs and encrypted outer packets.",
-        "config_files": [
-          "common/protocol.odin",
-          "client/transport.odin"
-        ]
-      }
-    ],
-    "conventions": [
-      "Use tabs, OTBS braces, and descriptive camelCase names with ID, URL, API, and HTTP uppercase conventions.",
-      "Client validation commands from client/AGENTS.md are odin check client, odin test client, odin build client, and odin run client.",
-      "Prefer additive changes over architectural rewrite; HC-105 is a focused client/runtime slice.",
-      "Prefer existing encrypted transport helpers and existing rich-text span rendering over new abstractions."
-    ],
-    "constraints": {
-      "hard": [
-        "Real server-backed room chat is the source of truth for visible room history.",
-        "HC-105 must now treat steady-state ENet poll and dispatch ownership as a first-class implementation slice.",
-        "Inbound room-chat events must carry enough metadata for selected-server, room, and self-versus-other behavior.",
-        "DM send is unsupported in HC-105 and must stop faking success.",
-        "Startup auth lifecycle remains owned by client/main.odin.",
-        "Validation stays narrow: client-focused Odin checks and tests."
-      ],
-      "soft": [
-        "Keep implementation centered on client/main.odin, client/transport.odin, client/update.odin, client/view.odin, and client/main_test.odin unless a minimal protocol touch is required.",
-        "Reuse an existing error surface for failed send if possible before adding a new narrow chat-specific status field.",
-        "Preserve the current UI layout and focus only on behavioral correctness."
-      ],
-      "compatibility": [
-        "HC-104 already handles ClientChatMessage on the server and emits ServerChatMessage for shared-room chat.",
-        "client/transport.odin already opens EncryptedPacket payloads after auth success and can seal encrypted packets through ClientServerTransport_buildEncryptedPacketBytes.",
-        "client/main.odin already tracks the selected server transport via selected_transport_index and owns startup auth via State_attemptSelectedServerStartup."
-      ],
-      "security_requirements": [
-        "Only established authenticated transports may send or receive room-chat packets.",
-        "Do not bypass existing transport-state encryption helpers for app-level packets.",
-        "Protocol errors or failed sends must be surfaced narrowly without looking like delivered chat."
-      ]
-    },
-    "architecture_snapshot": {
-      "key_dirs": {
-        "path": [
-          "client/",
-          "common/",
-          "docs/plan/"
-        ]
-      },
-      "patterns": [
-        "client/view.odin emits reducer messages only; direct network side effects do not originate in UI callbacks.",
-        "client/update.odin currently performs local fake send and uses placeholder receive handling, so reducer semantics are not yet authoritative.",
-        "client/main.odin is the lifecycle owner for selected-server startup auth and is the likeliest steady-state runtime owner candidate.",
-        "client/transport.odin has generic encrypted packet build/open primitives but no explicit post-auth room-chat poll or dispatch owner."
-      ],
-      "key_components": [
-        {
-          "name": "State_attemptSelectedServerStartup",
-          "location": "client/main.odin",
-          "responsibility": [
-            "Owns selected-server startup auth and must remain stable while HC-105 adds post-auth chat behavior."
-          ],
-          "confidence": 0.99
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260702-hc-105-real-chat-send-receive",
+            "created_at": "2026-07-02T10:22:52-05:00",
+            "last_updated": "2026-07-02T10:22:52-05:00",
+            "version": 2,
+            "source": [
+                "user_request:critique_revision",
+                "repo_memory:/memories/repo/threaded-migration-baseline.md",
+                "workspace:client/AGENTS.md",
+                "workspace:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml",
+                "workspace:docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml"
+            ]
         },
-        {
-          "name": "MsgKind send and receive chat variants",
-          "location": "client/main.odin",
-          "responsibility": [
-            "Defines the reducer seam that likely needs more metadata for authoritative inbound chat."
-          ],
-          "confidence": 0.98
+        "scope": {
+            "purpose": [
+                "Reusable implementation context for HC-105 client-side real chat send/receive integration.",
+                "Helps future agents avoid re-discovery of the reducer gap, transport seam, and validation boundaries."
+            ],
+            "applies_to": [
+                "client/update.odin",
+                "client/view.odin",
+                "client/main.odin",
+                "client/transport.odin",
+                "client/main_test.odin",
+                "common/protocol.odin"
+            ],
+            "non_goals": [
+                "Changing startup auth ownership or handshake behavior from HC-103.",
+                "Adding direct-message backend protocol or delivery semantics.",
+                "Expanding scope into room membership, persistence, or presence state."
+            ]
         },
-        {
-          "name": "ClientServerTransport_handleIncomingPacket",
-          "location": "client/transport.odin",
-          "responsibility": [
-            "Decodes outer packets and opens encrypted packets after auth, making it the likely inbound foundation for HC-105."
-          ],
-          "confidence": 0.99
-        },
-        {
-          "name": "ClientServerTransport_buildEncryptedPacketBytes",
-          "location": "client/transport.odin",
-          "responsibility": [
-            "Seals app-level packets for an established authenticated session and should remain the outbound foundation."
-          ],
-          "confidence": 0.98
-        },
-        {
-          "name": "update send and receive branches",
-          "location": "client/update.odin",
-          "responsibility": [
-            "Currently fake success on submit and therefore must be converted to authoritative receive-driven behavior."
-          ],
-          "confidence": 0.99
-        }
-      ]
-    },
-    "research_digest": {
-      "relevant_files": [
-        {
-          "path": "client/main.odin",
-          "purpose": [
-            "Lifecycle boundary for selected transport, startup auth ownership, and future steady-state chat runtime ownership."
-          ],
-          "why_relevant": [
-            "The critique says missing steady-state owner is blocking.",
-            "This file already owns selected-server startup behavior and should be extended narrowly rather than bypassed."
-          ],
-          "key_elements": [
+        "tech_stack": [
             {
-              "element": "State_attemptSelectedServerStartup",
-              "type": "function",
-              "location": "client/main.odin",
-              "description": "Anchor for preserving HC-103 ownership while adding post-auth behavior."
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Primary language for client state, transport, and tests.",
+                "config_files": [
+                    "AGENTS.md",
+                    "client/AGENTS.md"
+                ]
             },
             {
-              "element": "selected_transport_index",
-              "type": "variable",
-              "location": "client/main.odin",
-              "description": "Existing selection state that inbound events likely need to gate against."
-            }
-          ],
-          "security_sensitivity": "internal",
-          "contains_secrets": false,
-          "reliability": "codebase",
-          "confidence": 0.98
-        },
-        {
-          "path": "client/transport.odin",
-          "purpose": [
-            "Established encrypted transport helper surface for send, receive, and ENet service integration."
-          ],
-          "why_relevant": [
-            "The critique says explicit runtime owner is missing.",
-            "This file already contains the lowest-level encrypted packet primitives that the new owner should reuse."
-          ],
-          "key_elements": [
-            {
-              "element": "ClientServerTransport_handleIncomingPacket",
-              "type": "function",
-              "location": "client/transport.odin",
-              "description": "Likely inbound decode foundation for steady-state chat."
+                "name": "shared:skald",
+                "version": "workspace-managed",
+                "usage_context": "UI and reducer event framework for chat input, state updates, and rendering.",
+                "config_files": [
+                    "client/main.odin",
+                    "client/view.odin"
+                ]
             },
             {
-              "element": "ClientServerTransport_buildEncryptedPacketBytes",
-              "type": "function",
-              "location": "client/transport.odin",
-              "description": "Likely outbound room-chat send foundation."
-            }
-          ],
-          "security_sensitivity": "internal",
-          "contains_secrets": false,
-          "reliability": "codebase",
-          "confidence": 0.98
-        },
-        {
-          "path": "client/update.odin",
-          "purpose": [
-            "Reducer source for local fake send and placeholder authoritative receive behavior."
-          ],
-          "why_relevant": [
-            "The critique says missing metadata is blocking and no-local-append-on-submit needs explicit coverage.",
-            "This file is the current source of false local success."
-          ],
-          "key_elements": [
-            {
-              "element": "SendChannelChatMessage branch",
-              "type": "function",
-              "location": "client/update.odin",
-              "description": "Currently appends visible room chat on submit and must stop doing that."
+                "name": "ENet",
+                "version": "vendor:ENet",
+                "usage_context": "Established client/server transport that must gain explicit steady-state chat ownership after auth.",
+                "config_files": [
+                    "client/transport.odin"
+                ]
             },
             {
-              "element": "RecieveChannelChatMessage branch",
-              "type": "function",
-              "location": "client/update.odin",
-              "description": "Likely authoritative append path once inbound metadata is explicit."
+                "name": "CBOR packet protocol",
+                "version": "core:encoding/cbor",
+                "usage_context": "Encodes shared room-chat payload structs and encrypted outer packets.",
+                "config_files": [
+                    "common/protocol.odin",
+                    "client/transport.odin"
+                ]
             }
-          ],
-          "security_sensitivity": "internal",
-          "contains_secrets": false,
-          "reliability": "codebase",
-          "confidence": 0.99
+        ],
+        "conventions": [
+            "Use tabs, OTBS braces, and descriptive camelCase names with ID, URL, API, and HTTP uppercase conventions.",
+            "Client validation commands from client/AGENTS.md are odin check client, odin test client, odin build client, and odin run client.",
+            "Prefer additive changes over architectural rewrite; HC-105 is a focused client/runtime slice.",
+            "Prefer existing encrypted transport helpers and existing rich-text span rendering over new abstractions."
+        ],
+        "constraints": {
+            "hard": [
+                "Real server-backed room chat is the source of truth for visible room history.",
+                "HC-105 must now treat steady-state ENet poll and dispatch ownership as a first-class implementation slice.",
+                "Inbound room-chat events must carry enough metadata for selected-server, room, and self-versus-other behavior.",
+                "DM send is unsupported in HC-105 and must stop faking success.",
+                "Startup auth lifecycle remains owned by client/main.odin.",
+                "Validation stays narrow: client-focused Odin checks and tests."
+            ],
+            "soft": [
+                "Keep implementation centered on client/main.odin, client/transport.odin, client/update.odin, client/view.odin, and client/main_test.odin unless a minimal protocol touch is required.",
+                "Reuse an existing error surface for failed send if possible before adding a new narrow chat-specific status field.",
+                "Preserve the current UI layout and focus only on behavioral correctness."
+            ],
+            "compatibility": [
+                "HC-104 already handles ClientChatMessage on the server and emits ServerChatMessage for shared-room chat.",
+                "client/transport.odin already opens EncryptedPacket payloads after auth success and can seal encrypted packets through ClientServerTransport_buildEncryptedPacketBytes.",
+                "client/main.odin already tracks the selected server transport via selected_transport_index and owns startup auth via State_attemptSelectedServerStartup."
+            ],
+            "security_requirements": [
+                "Only established authenticated transports may send or receive room-chat packets.",
+                "Do not bypass existing transport-state encryption helpers for app-level packets.",
+                "Protocol errors or failed sends must be surfaced narrowly without looking like delivered chat."
+            ]
         },
-        {
-          "path": "client/view.odin",
-          "purpose": [
-            "Current submit callbacks and rendering surface for self-versus-other display."
-          ],
-          "why_relevant": [
-            "The critique requires self-versus-other rendering without widening UI scope."
-          ],
-          "key_elements": [
+        "architecture_snapshot": {
+            "key_dirs": {
+                "path": [
+                    "client/",
+                    "common/",
+                    "docs/plan/"
+                ]
+            },
+            "patterns": [
+                "client/view.odin emits reducer messages only; direct network side effects do not originate in UI callbacks.",
+                "client/update.odin currently performs local fake send and uses placeholder receive handling, so reducer semantics are not yet authoritative.",
+                "client/main.odin is the lifecycle owner for selected-server startup auth and is the likeliest steady-state runtime owner candidate.",
+                "client/transport.odin has generic encrypted packet build/open primitives but no explicit post-auth room-chat poll or dispatch owner."
+            ],
+            "key_components": [
+                {
+                    "name": "State_attemptSelectedServerStartup",
+                    "location": "client/main.odin",
+                    "responsibility": [
+                        "Owns selected-server startup auth and must remain stable while HC-105 adds post-auth chat behavior."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "MsgKind send and receive chat variants",
+                    "location": "client/main.odin",
+                    "responsibility": [
+                        "Defines the reducer seam that likely needs more metadata for authoritative inbound chat."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "name": "ClientServerTransport_handleIncomingPacket",
+                    "location": "client/transport.odin",
+                    "responsibility": [
+                        "Decodes outer packets and opens encrypted packets after auth, making it the likely inbound foundation for HC-105."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "ClientServerTransport_buildEncryptedPacketBytes",
+                    "location": "client/transport.odin",
+                    "responsibility": [
+                        "Seals app-level packets for an established authenticated session and should remain the outbound foundation."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "name": "update send and receive branches",
+                    "location": "client/update.odin",
+                    "responsibility": [
+                        "Currently fake success on submit and therefore must be converted to authoritative receive-driven behavior."
+                    ],
+                    "confidence": 0.99
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "client/main.odin",
+                    "purpose": [
+                        "Lifecycle boundary for selected transport, startup auth ownership, and future steady-state chat runtime ownership."
+                    ],
+                    "why_relevant": [
+                        "The critique says missing steady-state owner is blocking.",
+                        "This file already owns selected-server startup behavior and should be extended narrowly rather than bypassed."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "State_attemptSelectedServerStartup",
+                            "type": "function",
+                            "location": "client/main.odin",
+                            "description": "Anchor for preserving HC-103 ownership while adding post-auth behavior."
+                        },
+                        {
+                            "element": "selected_transport_index",
+                            "type": "variable",
+                            "location": "client/main.odin",
+                            "description": "Existing selection state that inbound events likely need to gate against."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                },
+                {
+                    "path": "client/transport.odin",
+                    "purpose": [
+                        "Established encrypted transport helper surface for send, receive, and ENet service integration."
+                    ],
+                    "why_relevant": [
+                        "The critique says explicit runtime owner is missing.",
+                        "This file already contains the lowest-level encrypted packet primitives that the new owner should reuse."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "ClientServerTransport_handleIncomingPacket",
+                            "type": "function",
+                            "location": "client/transport.odin",
+                            "description": "Likely inbound decode foundation for steady-state chat."
+                        },
+                        {
+                            "element": "ClientServerTransport_buildEncryptedPacketBytes",
+                            "type": "function",
+                            "location": "client/transport.odin",
+                            "description": "Likely outbound room-chat send foundation."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                },
+                {
+                    "path": "client/update.odin",
+                    "purpose": [
+                        "Reducer source for local fake send and placeholder authoritative receive behavior."
+                    ],
+                    "why_relevant": [
+                        "The critique says missing metadata is blocking and no-local-append-on-submit needs explicit coverage.",
+                        "This file is the current source of false local success."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "SendChannelChatMessage branch",
+                            "type": "function",
+                            "location": "client/update.odin",
+                            "description": "Currently appends visible room chat on submit and must stop doing that."
+                        },
+                        {
+                            "element": "RecieveChannelChatMessage branch",
+                            "type": "function",
+                            "location": "client/update.odin",
+                            "description": "Likely authoritative append path once inbound metadata is explicit."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "client/view.odin",
+                    "purpose": [
+                        "Current submit callbacks and rendering surface for self-versus-other display."
+                    ],
+                    "why_relevant": [
+                        "The critique requires self-versus-other rendering without widening UI scope."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "Send_Channel_Pressed and Send_DM_Pressed",
+                            "type": "function",
+                            "location": "client/view.odin",
+                            "description": "Submit entry points that should remain reducer-only while transport side effects move to the explicit runtime owner."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.95
+                },
+                {
+                    "path": "common/protocol.odin",
+                    "purpose": [
+                        "Shared room-chat payload contract already supported by HC-104."
+                    ],
+                    "why_relevant": [
+                        "HC-105 should reuse the existing room-chat payloads and avoid protocol expansion unless absolutely necessary."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "ClientChatMessagePayload and ServerChatMessagePayload",
+                            "type": "pattern",
+                            "location": "common/protocol.odin",
+                            "description": "Existing room-chat contract that should remain the transport source of truth."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "Reducer-only UI callbacks",
+                    "category": "client architecture",
+                    "confidence": 0.97,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "client/view.odin"
+                    ]
+                },
+                {
+                    "name": "Auth-owned transport lifecycle",
+                    "category": "runtime ownership",
+                    "confidence": 0.96,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "client/main.odin",
+                        "client/transport.odin"
+                    ]
+                },
+                {
+                    "name": "Optimistic local chat append",
+                    "category": "behavior gap",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "client/update.odin"
+                    ]
+                }
+            ],
+            "dependencies": {
+                "internal": [
+                    "HC-103 selected-server startup auth ownership",
+                    "HC-104 shared room-chat dispatch contract"
+                ],
+                "external": [
+                    "shared:skald",
+                    "vendor:ENet",
+                    "core:encoding/cbor"
+                ]
+            },
+            "gotchas": [
+                {
+                    "text": "Steady-state post-auth ENet ownership is not yet explicit anywhere in the current HC-105 plan and must be implemented before authoritative receive behavior is possible.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "Reducer or state metadata is currently too weak for authoritative selected-server, room, and self-versus-other gating.",
+                    "confidence": 0.97
+                },
+                {
+                    "text": "DM compose UI exists, but the server contract in scope is shared room chat only, so unsupported DM must fail narrowly instead of appearing successful.",
+                    "confidence": 0.99
+                }
+            ],
+            "domain_context": {
+                "security_considerations": [
+                    {
+                        "area": "transport encryption",
+                        "location": "client/transport.odin",
+                        "concern": "Room-chat packets must continue to use established encrypted transport helpers and authenticated session state."
+                    },
+                    {
+                        "area": "protocol scope",
+                        "location": "common/protocol.odin",
+                        "concern": "Do not add DM protocol or broaden room semantics while revising HC-105."
+                    }
+                ],
+                "testing_patterns": {
+                    "framework": "core:testing",
+                    "coverage_areas": [
+                        "no-local-append-on-submit",
+                        "authoritative inbound append",
+                        "unsupported DM send",
+                        "failed room send"
+                    ],
+                    "test_organization": "Client-focused tests belong in client/main_test.odin and should be run with odin test client.",
+                    "mock_patterns": [
+                        "Reuse the HC-103 test-friendly startupAuthBridge default where possible.",
+                        "Prefer focused reducer or runtime seam assertions over end-to-end multi-process automation."
+                    ]
+                },
+                "error_handling": "Prefer an existing narrow error surface when possible; failed or unsupported send must not look like delivered chat.",
+                "data_flow": "view callback -> reducer message -> explicit steady-state runtime owner -> encrypted transport send or receive -> structured inbound event with metadata -> authoritative reducer append -> render"
+            },
+            "open_questions": [
+                {
+                    "question": "What is the smallest inbound event shape that can represent transport source, room identity, and self-versus-other state without widening protocol scope?",
+                    "context": "Needed to convert the reducer seam from placeholder receive behavior to authoritative append behavior.",
+                    "type": "research",
+                    "affects": [
+                        "T1-debug-client-chat-runtime-gap",
+                        "T3-implement-authoritative-chat-state-and-tests"
+                    ]
+                },
+                {
+                    "question": "Should failed send reuse an existing error surface or add one narrow chat-specific status field?",
+                    "context": "Needed to provide failure-path UX without scope creep.",
+                    "type": "decision_blocker",
+                    "affects": [
+                        "T1-debug-client-chat-runtime-gap",
+                        "T3-implement-authoritative-chat-state-and-tests"
+                    ]
+                }
+            ]
+        },
+        "prior_decisions": [
             {
-              "element": "Send_Channel_Pressed and Send_DM_Pressed",
-              "type": "function",
-              "location": "client/view.odin",
-              "description": "Submit entry points that should remain reducer-only while transport side effects move to the explicit runtime owner."
-            }
-          ],
-          "security_sensitivity": "internal",
-          "contains_secrets": false,
-          "reliability": "codebase",
-          "confidence": 0.95
-        },
-        {
-          "path": "common/protocol.odin",
-          "purpose": [
-            "Shared room-chat payload contract already supported by HC-104."
-          ],
-          "why_relevant": [
-            "HC-105 should reuse the existing room-chat payloads and avoid protocol expansion unless absolutely necessary."
-          ],
-          "key_elements": [
+                "decision": "Steady-state post-auth ENet poll and dispatch ownership is a first-class HC-105 implementation slice.",
+                "rationale": [
+                    "The critique identifies the missing runtime owner as blocking.",
+                    "Authoritative receive behavior cannot exist without a real runtime owner."
+                ],
+                "evidence": [
+                    "path:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "HC-105 must now treat steady-state ENet poll and dispatch ownership as a first-class implementation slice."
+                ],
+                "linked_patterns": [
+                    "Auth-owned transport lifecycle"
+                ]
+            },
             {
-              "element": "ClientChatMessagePayload and ServerChatMessagePayload",
-              "type": "pattern",
-              "location": "common/protocol.odin",
-              "description": "Existing room-chat contract that should remain the transport source of truth."
+                "decision": "Room chat echoed from the server is the visible source of truth.",
+                "rationale": [
+                    "Avoids optimistic local append drift.",
+                    "Aligns the client with HC-104 server broadcast behavior."
+                ],
+                "evidence": [
+                    "path:docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml",
+                    "path:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Real server-backed room chat is the source of truth for visible room history."
+                ],
+                "linked_patterns": [
+                    "Optimistic local chat append"
+                ]
+            },
+            {
+                "decision": "Startup auth ownership remains in client/main.odin.",
+                "rationale": [
+                    "HC-103 already established a selected-server startup owner.",
+                    "HC-105 only needs steady-state post-auth extensions."
+                ],
+                "evidence": [
+                    "path:/memories/repo/threaded-migration-baseline.md"
+                ],
+                "confidence": 0.98,
+                "linked_constraints": [
+                    "Startup auth lifecycle remains owned by client/main.odin."
+                ],
+                "linked_patterns": [
+                    "Auth-owned transport lifecycle"
+                ]
             }
-          ],
-          "security_sensitivity": "internal",
-          "contains_secrets": false,
-          "reliability": "codebase",
-          "confidence": 0.99
-        }
-      ],
-      "patterns_found": [
-        {
-          "name": "Reducer-only UI callbacks",
-          "category": "client architecture",
-          "confidence": 0.97,
-          "source": "codebase_analysis",
-          "example_location": [
-            "client/view.odin"
-          ]
-        },
-        {
-          "name": "Auth-owned transport lifecycle",
-          "category": "runtime ownership",
-          "confidence": 0.96,
-          "source": "codebase_analysis",
-          "example_location": [
-            "client/main.odin",
-            "client/transport.odin"
-          ]
-        },
-        {
-          "name": "Optimistic local chat append",
-          "category": "behavior gap",
-          "confidence": 0.99,
-          "source": "codebase_analysis",
-          "example_location": [
-            "client/update.odin"
-          ]
-        }
-      ],
-      "dependencies": {
-        "internal": [
-          "HC-103 selected-server startup auth ownership",
-          "HC-104 shared room-chat dispatch contract"
         ],
-        "external": [
-          "shared:skald",
-          "vendor:ENet",
-          "core:encoding/cbor"
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/threaded-migration-baseline.md",
+                "trust": "high"
+            },
+            {
+                "path": "docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml",
+                "trust": "high"
+            }
         ]
-      },
-      "gotchas": [
-        {
-          "text": "Steady-state post-auth ENet ownership is not yet explicit anywhere in the current HC-105 plan and must be implemented before authoritative receive behavior is possible.",
-          "confidence": 0.99
-        },
-        {
-          "text": "Reducer or state metadata is currently too weak for authoritative selected-server, room, and self-versus-other gating.",
-          "confidence": 0.97
-        },
-        {
-          "text": "DM compose UI exists, but the server contract in scope is shared room chat only, so unsupported DM must fail narrowly instead of appearing successful.",
-          "confidence": 0.99
-        }
-      ],
-      "domain_context": {
-        "security_considerations": [
-          {
-            "area": "transport encryption",
-            "location": "client/transport.odin",
-            "concern": "Room-chat packets must continue to use established encrypted transport helpers and authenticated session state."
-          },
-          {
-            "area": "protocol scope",
-            "location": "common/protocol.odin",
-            "concern": "Do not add DM protocol or broaden room semantics while revising HC-105."
-          }
-        ],
-        "testing_patterns": {
-          "framework": "core:testing",
-          "coverage_areas": [
-            "no-local-append-on-submit",
-            "authoritative inbound append",
-            "unsupported DM send",
-            "failed room send"
-          ],
-          "test_organization": "Client-focused tests belong in client/main_test.odin and should be run with odin test client.",
-          "mock_patterns": [
-            "Reuse the HC-103 test-friendly startupAuthBridge default where possible.",
-            "Prefer focused reducer or runtime seam assertions over end-to-end multi-process automation."
-          ]
-        },
-        "error_handling": "Prefer an existing narrow error surface when possible; failed or unsupported send must not look like delivered chat.",
-        "data_flow": "view callback -> reducer message -> explicit steady-state runtime owner -> encrypted transport send or receive -> structured inbound event with metadata -> authoritative reducer append -> render"
-      },
-      "open_questions": [
-        {
-          "question": "What is the smallest inbound event shape that can represent transport source, room identity, and self-versus-other state without widening protocol scope?",
-          "context": "Needed to convert the reducer seam from placeholder receive behavior to authoritative append behavior.",
-          "type": "research",
-          "affects": [
-            "T1-debug-client-chat-runtime-gap",
-            "T3-implement-authoritative-chat-state-and-tests"
-          ]
-        },
-        {
-          "question": "Should failed send reuse an existing error surface or add one narrow chat-specific status field?",
-          "context": "Needed to provide failure-path UX without scope creep.",
-          "type": "decision_blocker",
-          "affects": [
-            "T1-debug-client-chat-runtime-gap",
-            "T3-implement-authoritative-chat-state-and-tests"
-          ]
-        }
-      ]
-    },
-    "prior_decisions": [
-      {
-        "decision": "Steady-state post-auth ENet poll and dispatch ownership is a first-class HC-105 implementation slice.",
-        "rationale": [
-          "The critique identifies the missing runtime owner as blocking.",
-          "Authoritative receive behavior cannot exist without a real runtime owner."
-        ],
-        "evidence": [
-          "path:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml"
-        ],
-        "confidence": 0.99,
-        "linked_constraints": [
-          "HC-105 must now treat steady-state ENet poll and dispatch ownership as a first-class implementation slice."
-        ],
-        "linked_patterns": [
-          "Auth-owned transport lifecycle"
-        ]
-      },
-      {
-        "decision": "Room chat echoed from the server is the visible source of truth.",
-        "rationale": [
-          "Avoids optimistic local append drift.",
-          "Aligns the client with HC-104 server broadcast behavior."
-        ],
-        "evidence": [
-          "path:docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml",
-          "path:docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml"
-        ],
-        "confidence": 0.99,
-        "linked_constraints": [
-          "Real server-backed room chat is the source of truth for visible room history."
-        ],
-        "linked_patterns": [
-          "Optimistic local chat append"
-        ]
-      },
-      {
-        "decision": "Startup auth ownership remains in client/main.odin.",
-        "rationale": [
-          "HC-103 already established a selected-server startup owner.",
-          "HC-105 only needs steady-state post-auth extensions."
-        ],
-        "evidence": [
-          "path:/memories/repo/threaded-migration-baseline.md"
-        ],
-        "confidence": 0.98,
-        "linked_constraints": [
-          "Startup auth lifecycle remains owned by client/main.odin."
-        ],
-        "linked_patterns": [
-          "Auth-owned transport lifecycle"
-        ]
-      }
-    ],
-    "reuse_notes": [
-      {
-        "path": "/memories/repo/threaded-migration-baseline.md",
-        "trust": "high"
-      },
-      {
-        "path": "docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml",
-        "trust": "high"
-      }
-    ]
-  }
+    }
 }

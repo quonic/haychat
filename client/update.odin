@@ -35,8 +35,8 @@ State_appendChannelChatMessage :: proc(state: ^State, senderID: int, message: st
 	senderLabel := fmt.tprintf("User %d", senderID)
 	senderColor := th.color.fg
 
-	if transport, ok := State_selectedTransport(state); ok &&
-	   senderID != 0 && transport.authenticatedUserID == senderID {
+	if transport, ok := State_selectedTransport(state);
+	   ok && senderID != 0 && transport.authenticatedUserID == senderID {
 		senderLabel = "You"
 		senderColor = th.color.primary
 	}
