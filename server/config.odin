@@ -68,8 +68,12 @@ ServerIdentityFile :: struct {
 	public_key:  string,
 }
 
+DEFAULT_LOG_PATH :: "logs"
+DEFAULT_FILE_STORAGE_PATH :: "storage"
+DEFAULT_SERVER_IDENTITY_FILE_NAME :: "server_identity.json"
+
 loadConfig :: proc() -> (ServerConfig, string) {
-	logDir := getEnvOr("HAYCHAT_LOG_DIR", "/var/log/haychat")
+	logDir := getEnvOr("HAYCHAT_LOG_DIR", DEFAULT_LOG_PATH)
 
 	config := ServerConfig {
 		webAdminHost           = net.IP4_Loopback,
@@ -88,7 +92,7 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		),
 		logLevel               = getEnvOr("HAYCHAT_LOG_LEVEL", "info"),
 		logPath                = logDir,
-		fileStoragePath        = getEnvOr("HAYCHAT_FILE_STORAGE_PATH", "/var/lib/haychat/files"),
+		fileStoragePath        = getEnvOr("HAYCHAT_FILE_STORAGE_PATH", DEFAULT_FILE_STORAGE_PATH),
 		maxFileSize            = parseOr("HAYCHAT_MAX_FILE_SIZE", i64(10 * mem.Megabyte)),
 		maxStorageCapacity     = parseOr("HAYCHAT_MAX_STORAGE_CAPACITY", i64(1 * mem.Gigabyte)),
 		listenAddr             = getEnvOr("HAYCHAT_LISTEN_ADDR", "0.0.0.0"),
@@ -99,8 +103,9 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		serverIdentityFilePath = getEnvOr(
 			"HAYCHAT_SERVER_IDENTITY_FILE",
 			fmt.aprintf(
-				"%s/server_identity.json",
-				getEnvOr("HAYCHAT_FILE_STORAGE_PATH", "/var/lib/haychat/files"),
+				"%s/%s",
+				getEnvOr("HAYCHAT_FILE_STORAGE_PATH", DEFAULT_FILE_STORAGE_PATH),
+				DEFAULT_SERVER_IDENTITY_FILE_NAME,
 			),
 		),
 		serverPrivateKey       = getEnvOr("HAYCHAT_SERVER_PRIVATE_KEY", ""),
@@ -143,15 +148,16 @@ validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
 		config.restartBackoffMax = config.restartBackoffMin
 	}
 	if len(config.logPath) == 0 {
-		config.logPath = "/var/log/haychat"
+		config.logPath = DEFAULT_LOG_PATH
 	}
 	if len(config.fileStoragePath) == 0 {
-		config.fileStoragePath = "/var/lib/haychat/files"
+		config.fileStoragePath = DEFAULT_FILE_STORAGE_PATH
 	}
 	if len(config.serverIdentityFilePath) == 0 {
 		config.serverIdentityFilePath = fmt.aprintf(
-			"%s/server_identity.json",
+			"%s/%s",
 			config.fileStoragePath,
+			DEFAULT_SERVER_IDENTITY_FILE_NAME,
 		)
 	}
 

@@ -37,6 +37,8 @@ The repository now includes one supported bootstrap path for the MVP auth flow. 
 2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
 3. Run `./run-test-server.sh start` to launch the server, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
 
+Running `odin run server` directly now uses tester-safe local runtime paths by default, resolved relative to the server process working directory: logs in `./logs`, file storage in `./storage`, and the server identity file at `./storage/server_identity.json`. `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, and `HAYCHAT_SERVER_IDENTITY_FILE` still override those defaults.
+
 Seeded test identities:
 
 - `hayseed` resolves to user ID `1`

@@ -1003,6 +1003,46 @@ testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^test
 }
 
 @(test)
+testValidateAndNormalizeConfigUsesTesterSafeLocalRuntimeDefaults :: proc(t: ^testing.T) {
+	_ = t
+
+	config := ServerConfig {}
+	validateAndNormalizeConfig(&config)
+	defer delete(config.serverIdentityFilePath)
+
+	assert(
+		config.logPath == "logs",
+		"expected empty log path to normalize to a local logs directory",
+	)
+	assert(
+		config.fileStoragePath == "storage",
+		"expected empty file storage path to normalize to a local storage directory",
+	)
+	assert(
+		config.serverIdentityFilePath == "storage/server_identity.json",
+		"expected empty server identity path to default under local storage",
+	)
+}
+
+@(test)
+testValidateAndNormalizeConfigUsesConfiguredStorageForDefaultIdentityPath :: proc(
+	t: ^testing.T,
+) {
+	_ = t
+
+	config := ServerConfig {
+		fileStoragePath = "custom-storage",
+	}
+	validateAndNormalizeConfig(&config)
+	defer delete(config.serverIdentityFilePath)
+
+	assert(
+		config.serverIdentityFilePath == "custom-storage/server_identity.json",
+		"expected default identity path to follow the configured storage path",
+	)
+}
+
+@(test)
 testConfigStartupPreflightSkipsIdentityWriteGateWhenConfigAlreadyHasValidIdentity :: proc(
 	t: ^testing.T,
 ) {
