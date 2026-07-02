@@ -1006,7 +1006,7 @@ testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^test
 testValidateAndNormalizeConfigUsesTesterSafeLocalRuntimeDefaults :: proc(t: ^testing.T) {
 	_ = t
 
-	config := ServerConfig {}
+	config := ServerConfig{}
 	validateAndNormalizeConfig(&config)
 	defer delete(config.serverIdentityFilePath)
 
@@ -1025,9 +1025,7 @@ testValidateAndNormalizeConfigUsesTesterSafeLocalRuntimeDefaults :: proc(t: ^tes
 }
 
 @(test)
-testValidateAndNormalizeConfigUsesConfiguredStorageForDefaultIdentityPath :: proc(
-	t: ^testing.T,
-) {
+testValidateAndNormalizeConfigUsesConfiguredStorageForDefaultIdentityPath :: proc(t: ^testing.T) {
 	_ = t
 
 	config := ServerConfig {
