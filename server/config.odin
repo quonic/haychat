@@ -68,23 +68,17 @@ ServerIdentityFile :: struct {
 	public_key:  string,
 }
 
-// Load configuration from environment variables and defaults
-loadConfig :: proc() -> ServerConfig {
+loadConfig :: proc() -> (ServerConfig, string) {
 	logDir := getEnvOr("HAYCHAT_LOG_DIR", "/var/log/haychat")
 
 	config := ServerConfig {
-		// Web admin (localhost only)
 		webAdminHost           = net.IP4_Loopback,
 		webAdminPort           = parseOr("HAYCHAT_WEB_ADMIN_PORT", int(8080)),
-
-		// Database
 		databaseURL            = getEnvOr("HAYCHAT_DATABASE_URL", "localhost"),
 		databaseUser           = getEnvOr("HAYCHAT_DATABASE_USER", "haychat"),
 		databasePass           = getEnvOr("HAYCHAT_DATABASE_PASS", ""),
 		databaseName           = getEnvOr("HAYCHAT_DATABASE_NAME", "haychat"),
 		databasePort           = parseOr("HAYCHAT_DATABASE_PORT", int(5432)),
-
-		// Process management
 		maxRestarts            = parseOr("HAYCHAT_MAX_RESTARTS", int(5)),
 		restartBackoffMin      = time.Duration(
 			parseOr("HAYCHAT_RESTART_BACKOFF_MIN", f64(0.1)) * f64(time.Second),
@@ -92,24 +86,16 @@ loadConfig :: proc() -> ServerConfig {
 		restartBackoffMax      = time.Duration(
 			parseOr("HAYCHAT_RESTART_BACKOFF_MAX", f64(10.0)) * f64(time.Second),
 		),
-
-		// Logging
 		logLevel               = getEnvOr("HAYCHAT_LOG_LEVEL", "info"),
 		logPath                = logDir,
-
-		// File storage
 		fileStoragePath        = getEnvOr("HAYCHAT_FILE_STORAGE_PATH", "/var/lib/haychat/files"),
 		maxFileSize            = parseOr("HAYCHAT_MAX_FILE_SIZE", i64(10 * mem.Megabyte)),
 		maxStorageCapacity     = parseOr("HAYCHAT_MAX_STORAGE_CAPACITY", i64(1 * mem.Gigabyte)),
-
-		// Network server
 		listenAddr             = getEnvOr("HAYCHAT_LISTEN_ADDR", "0.0.0.0"),
 		listenPort             = u16(
 			parseOr("HAYCHAT_LISTEN_PORT", uint(common.DEFAULT_SERVER_PORT)),
 		),
 		maxNetworkThreads      = parseOr("HAYCHAT_MAX_NETWORK_THREADS", int(4)),
-
-		// Server identity
 		serverIdentityFilePath = getEnvOr(
 			"HAYCHAT_SERVER_IDENTITY_FILE",
 			fmt.aprintf(
@@ -122,8 +108,13 @@ loadConfig :: proc() -> ServerConfig {
 	}
 
 	validateAndNormalizeConfig(&config)
-	ensureServerIdentityKeys(&config)
-	return config
+	if preflightErr := startupPreflightError(config); len(preflightErr) > 0 {
+		return config, preflightErr
+	}
+	if identityErr := ensureServerIdentityKeys(&config); len(identityErr) > 0 {
+		return config, identityErr
+	}
+	return config, ""
 }
 
 validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
@@ -227,6 +218,59 @@ ensureDirectoryPathExists :: proc(path: string) -> bool {
 	return true
 }
 
+startupProbeWriteError :: proc(path: string, label: string) -> string {
+	probePath := fmt.aprintf(
+		"%s/.haychat_startup_probe_%d",
+		path,
+		time.time_to_unix_nano(time.now()),
+	)
+	defer delete(probePath)
+
+	writeErr := os.write_entire_file_from_bytes(probePath, []u8{'o', 'k'})
+	if writeErr != nil {
+		return fmt.aprintf("startup preflight failed: %s is not writable at %q: %v", label, path, writeErr)
+	}
+
+	_ = os.remove(probePath)
+	return ""
+}
+
+startupPreflightError :: proc(config: ServerConfig) -> string {
+	if len(config.fileStoragePath) == 0 {
+		return "startup preflight failed: file storage path is empty"
+	}
+	if storageErr := startupProbeWriteError(config.fileStoragePath, "file storage path"); len(storageErr) > 0 {
+		return storageErr
+	}
+
+	if hasValidServerIdentity(config) {
+		return ""
+	}
+
+	identityConfig := ServerConfig{serverIdentityFilePath = config.serverIdentityFilePath}
+	if loadServerIdentityFile(&identityConfig) {
+		delete(identityConfig.serverPrivateKey)
+		delete(identityConfig.serverPublicKey)
+		return ""
+	}
+	delete(identityConfig.serverPrivateKey)
+	delete(identityConfig.serverPublicKey)
+
+	identityDir := pathDirname(config.serverIdentityFilePath)
+	if len(identityDir) == 0 {
+		return fmt.aprintf(
+			"startup preflight failed: server identity file path %q has no writable parent directory",
+			config.serverIdentityFilePath,
+		)
+	}
+
+	if identityErr := startupProbeWriteError(identityDir, "server identity directory"); len(identityErr) > 0 {
+		return identityErr
+	}
+
+	return ""
+}
+
 // Helper procedures for environment variable parsing
 getEnvOr :: proc(key: string, default_value: string) -> string {
 	value := os.get_env(key, context.allocator)
@@ -279,24 +323,23 @@ parseF64Or :: proc(key: string, default_value: f64) -> f64 {
 	return f64(value)
 }
 
-ensureServerIdentityKeys :: proc(config: ^ServerConfig) {
+ensureServerIdentityKeys :: proc(config: ^ServerConfig) -> string {
 	if hasValidServerIdentity(config^) {
-		return
+		return ""
 	}
 
 	if loadServerIdentityFile(config) {
-		return
+		return ""
 	}
 
 	privateKeyBytes, publicKeyBytes, ok := common.generateIdentityKeyPair()
 	if !ok {
-		fmt.println("[Error] Failed to generate server identity key pair")
-		return
+		return "startup preflight failed: could not generate server identity key pair"
 	}
 
 	config.serverPrivateKey = common.identityPrivateKeyToHex(privateKeyBytes)
 	config.serverPublicKey = common.identityPublicKeyToHex(publicKeyBytes)
-	saveServerIdentityFile(config^)
+	return saveServerIdentityFile(config^)
 }
 
 hasValidServerIdentity :: proc(config: ServerConfig) -> bool {
@@ -327,9 +370,9 @@ loadServerIdentityFile :: proc(config: ^ServerConfig) -> bool {
 	return hasValidServerIdentity(config^)
 }
 
-saveServerIdentityFile :: proc(config: ServerConfig) {
+saveServerIdentityFile :: proc(config: ServerConfig) -> string {
 	if len(config.serverIdentityFilePath) == 0 || !hasValidServerIdentity(config) {
-		return
+		return ""
 	}
 
 	identityFile := ServerIdentityFile {
@@ -338,13 +381,22 @@ saveServerIdentityFile :: proc(config: ServerConfig) {
 	}
 	jsonData, err := json.marshal(identityFile)
 	if err != nil {
-		fmt.println("[Error] Failed to marshal server identity file: ", err)
-		return
+		return fmt.aprintf(
+			"startup preflight failed: could not encode server identity for %q: %v",
+			config.serverIdentityFilePath,
+			err,
+		)
 	}
 	defer delete(jsonData)
 
 	writeErr := os.write_entire_file_from_bytes(config.serverIdentityFilePath, jsonData)
 	if writeErr != nil {
-		fmt.println("[Warning] Failed to persist server identity file: ", writeErr)
+		return fmt.aprintf(
+			"startup preflight failed: could not persist server identity file at %q: %v",
+			config.serverIdentityFilePath,
+			writeErr,
+		)
 	}
+
+	return ""
 }

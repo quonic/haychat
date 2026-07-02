@@ -1,0 +1,439 @@
+{
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260702-hc-107-startup-preflight-checks",
+            "created_at": "2026-07-02T14:36:37-05:00",
+            "last_updated": "2026-07-02T14:36:37-05:00",
+            "version": 1,
+            "source": [
+                "user_request:implementation_and_validation_plan",
+                "repo_memory:/memories/repo/threaded-migration-baseline.md",
+                "workspace:AGENTS.md",
+                "workspace:server/AGENTS.md",
+                "workspace:server/main.odin",
+                "workspace:server/process_manager.odin",
+                "workspace:server/config.odin",
+                "workspace:server/database.odin",
+                "workspace:run-test-server.sh"
+            ]
+        },
+        "scope": {
+            "purpose": [
+                "Reusable implementation context for HC-107 startup preflight and failure messaging.",
+                "Helps future agents avoid re-discovery of the current false startup health contract and the minimal server-side fix surface."
+            ],
+            "applies_to": [
+                "server/main.odin",
+                "server/config.odin",
+                "server/database.odin",
+                "server/process_manager.odin",
+                "server/router_test.odin"
+            ],
+            "non_goals": [
+                "Auto-bootstrapping schema or seed data.",
+                "Changing auth behavior beyond proving startup-time database reachability.",
+                "Redesigning process supervision or restart policy.",
+                "Widening scope into client startup, network protocol changes, or general environment setup tooling."
+            ]
+        },
+        "tech_stack": [
+            {
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Primary language for server startup, config, database helpers, and focused tests.",
+                "config_files": [
+                    "AGENTS.md",
+                    "server/AGENTS.md"
+                ]
+            },
+            {
+                "name": "PostgreSQL",
+                "version": "external service",
+                "usage_context": "Required startup dependency for auth lookup and database query handling.",
+                "config_files": [
+                    "server/config.odin",
+                    "run-test-server.sh"
+                ]
+            },
+            {
+                "name": "shared:pg",
+                "version": "workspace-managed",
+                "usage_context": "Database connection and query execution library used in server/database.odin.",
+                "config_files": [
+                    "server/database.odin"
+                ]
+            }
+        ],
+        "conventions": [
+            "Use tabs, OTBS braces, descriptive camelCase, and Odin naming conventions from AGENTS.md.",
+            "Server validation commands are odin check server and odin test server from server/AGENTS.md.",
+            "Keep blast radius small and server-side only for HC-107.",
+            "Prefer focused unit or slice tests over broad integration changes."
+        ],
+        "constraints": {
+            "hard": [
+                "Broken environments must fail fast with actionable startup messages.",
+                "Startup success must imply the MVP environment is usable.",
+                "Database reachability and writable runtime paths are required health gates.",
+                "Do not auto-bootstrap schema or widen auth behavior.",
+                "Keep the implementation minimal and server-side only."
+            ],
+            "soft": [
+                "Prefer synchronous preflight in existing startup owners over introducing a new readiness protocol.",
+                "Reuse config and database helper surfaces instead of spreading startup checks across unrelated files.",
+                "Favor test seams that can run without a live environment dependency when practical."
+            ],
+            "compatibility": [
+                "server/main.odin currently prints server running after spawnProcess succeeds for Network, WebAdmin, and Database.",
+                "server/process_manager.odin spawnProcess only proves thread creation and marks isRunning eagerly.",
+                "server/config.odin already creates log, storage, and identity directories best effort during normalization.",
+                "server/database.odin already owns PostgreSQL connection details and query error mapping."
+            ],
+            "security_requirements": [
+                "Do not commit secrets or API keys.",
+                "Use environment variables for sensitive database connection inputs.",
+                "Keep operator-facing failures informative without exposing unnecessary secret values.",
+                "Validate runtime path usability before normal operation to avoid deferred write failures."
+            ]
+        },
+        "architecture_snapshot": {
+            "key_dirs": {
+                "path": [
+                    "server/",
+                    "common/",
+                    "docs/plan/"
+                ]
+            },
+            "patterns": [
+                "server/main.odin is the top-level startup owner and the only current place where service health is declared to the operator.",
+                "server/process_manager.odin treats spawned threads as running immediately and does not represent readiness beyond thread creation.",
+                "server/config.odin normalizes environment-derived paths and currently logs directory or identity persistence failures as warnings.",
+                "server/database.odin owns the single PostgreSQL connection and translates query-level errors into structured responses."
+            ],
+            "key_components": [
+                {
+                    "name": "main startup sequence",
+                    "location": "server/main.odin:1033",
+                    "responsibility": [
+                        "Spawns Network, WebAdmin, and Database service threads and currently prints server running immediately afterward."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "spawnProcess",
+                    "location": "server/process_manager.odin:151",
+                    "responsibility": [
+                        "Creates service threads and marks them running, but does not prove the underlying service is usable."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "name": "validateAndNormalizeConfig",
+                    "location": "server/config.odin:120",
+                    "responsibility": [
+                        "Normalizes config defaults and ensures log, storage, and identity directories exist on a best-effort basis."
+                    ],
+                    "confidence": 0.97
+                },
+                {
+                    "name": "ensureServerIdentityKeys",
+                    "location": "server/config.odin:285",
+                    "responsibility": [
+                        "Loads, generates, and persists server identity material, currently without making persistence failure startup-fatal."
+                    ],
+                    "confidence": 0.96
+                },
+                {
+                    "name": "databaseServerLoop",
+                    "location": "server/database.odin:120",
+                    "responsibility": [
+                        "Opens the PostgreSQL connection and serves database IPC requests, but does not currently fail startup before the main thread announces success."
+                    ],
+                    "confidence": 0.99
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "server/main.odin",
+                    "purpose": [
+                        "Current startup sequencing and success logging."
+                    ],
+                    "why_relevant": [
+                        "HC-107's false health contract is emitted here.",
+                        "This is the narrowest place to gate success on preflight completion."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "startup spawn and success logging",
+                            "type": "pattern",
+                            "location": "server/main.odin:1033",
+                            "description": "Prints server running after spawnProcess succeeds for all three service threads."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "server/process_manager.odin",
+                    "purpose": [
+                        "Clarifies what spawnProcess does and does not guarantee."
+                    ],
+                    "why_relevant": [
+                        "Confirms current startup health is only thread-creation health.",
+                        "Helps avoid over-scoping the fix into supervision redesign."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "spawnProcess",
+                            "type": "function",
+                            "location": "server/process_manager.odin:151",
+                            "description": "Returns true after starting a thread handle and marking process state running."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                },
+                {
+                    "path": "server/config.odin",
+                    "purpose": [
+                        "Runtime path normalization and identity persistence behavior."
+                    ],
+                    "why_relevant": [
+                        "The issue explicitly requires writable runtime paths to be startup health gates.",
+                        "Current behavior downgrades important filesystem failures to warnings."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "ensureDirectoryPathExists",
+                            "type": "function",
+                            "location": "server/config.odin:178",
+                            "description": "Creates directories best effort and logs warning text on failure."
+                        },
+                        {
+                            "element": "ensureServerIdentityKeys",
+                            "type": "function",
+                            "location": "server/config.odin:285",
+                            "description": "Generates or loads server identity material and persists it when missing."
+                        },
+                        {
+                            "element": "saveServerIdentityFile",
+                            "type": "function",
+                            "location": "server/config.odin:330",
+                            "description": "Persists the server identity file and currently warns rather than failing startup on write problems."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.98
+                },
+                {
+                    "path": "server/database.odin",
+                    "purpose": [
+                        "Database reachability and query execution behavior."
+                    ],
+                    "why_relevant": [
+                        "The issue requires database reachability as a startup gate.",
+                        "This file is the smallest existing owner of database connection details and error strings."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "databaseServerLoop",
+                            "type": "function",
+                            "location": "server/database.odin:120",
+                            "description": "Creates the PostgreSQL connection with pg.connectdb before serving IPC requests."
+                        },
+                        {
+                            "element": "databaseErrorResponse",
+                            "type": "function",
+                            "location": "server/database.odin:17",
+                            "description": "Existing helper for mapping database failures into actionable response messages."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "server/router_test.odin",
+                    "purpose": [
+                        "Existing server-side focused test style."
+                    ],
+                    "why_relevant": [
+                        "Gives a model for slice tests that assert failure behavior directly without large integration setup."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "testMainRouterPrepareForDatabaseRestartFailsPendingRequest",
+                            "type": "function",
+                            "location": "server/router_test.odin:741",
+                            "description": "Pins operator-visible failure messaging and structured failure behavior in a focused server-side test."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.93
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "startup health declared after thread spawn",
+                    "category": "startup sequencing",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/main.odin:1033"
+                    ]
+                },
+                {
+                    "name": "filesystem setup uses warning-oriented best effort",
+                    "category": "config/runtime paths",
+                    "confidence": 0.98,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/config.odin:178",
+                        "server/config.odin:330"
+                    ]
+                },
+                {
+                    "name": "database ownership centralized in one worker file",
+                    "category": "data access",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "server/database.odin:120"
+                    ]
+                }
+            ],
+            "dependencies": {
+                "internal": [
+                    "server/main.odin -> server/process_manager.odin",
+                    "server/main.odin -> server/config.odin",
+                    "server/process_manager.odin -> server/database.odin"
+                ],
+                "external": [
+                    "PostgreSQL availability via shared:pg",
+                    "Writable filesystem for configured log, storage, and identity paths"
+                ]
+            },
+            "gotchas": [
+                {
+                    "text": "spawnProcess returning true does not mean the underlying service can accept real work.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "Directory existence is weaker than path writability; HC-107 specifically needs usable runtime paths.",
+                    "confidence": 0.97
+                },
+                {
+                    "text": "The exact shared:pg immediate connection-status API still needs one local confirmation before implementation.",
+                    "confidence": 0.88
+                }
+            ],
+            "domain_context": {
+                "security_considerations": [
+                    {
+                        "area": "database startup failures",
+                        "location": "server/database.odin",
+                        "concern": "Failure text should help the operator without leaking unnecessary credential content."
+                    },
+                    {
+                        "area": "identity persistence",
+                        "location": "server/config.odin",
+                        "concern": "Startup should not continue if the configured identity path cannot support stable key persistence."
+                    }
+                ],
+                "testing_patterns": {
+                    "framework": "core:testing",
+                    "coverage_areas": [
+                        "Focused server-side slice tests",
+                        "Operator-visible failure behavior",
+                        "Restart and IPC edge cases"
+                    ],
+                    "test_organization": "server/*_test.odin alongside runtime package code",
+                    "mock_patterns": [
+                        "In-process harnesses and direct helper assertions rather than full external integration"
+                    ]
+                },
+                "error_handling": "Current code often logs warnings for startup-time path failures and defers DB failure visibility until runtime operations. HC-107 needs these failures promoted into startup-fatal results with actionable text.",
+                "data_flow": "loadConfig and identity setup run before process manager startup; main spawns worker threads; databaseServerLoop creates the PG connection inside the worker and later serves database IPC requests."
+            },
+            "open_questions": [
+                {
+                    "question": "Which shared:pg API best exposes immediate connection failure after pg.connectdb?",
+                    "context": "Implementation needs a precise fail-fast DB gate instead of relying on deferred query errors.",
+                    "type": "decision_blocker",
+                    "affects": [
+                        "T1-debug-preflight-contract-and-seams",
+                        "T2-implement-startup-preflight-and-failure-messaging"
+                    ]
+                },
+                {
+                    "question": "What is the smallest way to prove server identity path writability without widening startup side effects?",
+                    "context": "Current identity generation and save path is best effort, but startup success must imply the configured path is usable.",
+                    "type": "research",
+                    "affects": [
+                        "T1-debug-preflight-contract-and-seams",
+                        "T2-implement-startup-preflight-and-failure-messaging",
+                        "T3-add-focused-preflight-tests-and-validation"
+                    ]
+                }
+            ]
+        },
+        "prior_decisions": [
+            {
+                "decision": "Treat startup readiness as an MVP usability contract, not just a thread-spawn contract.",
+                "rationale": [
+                    "User-supplied acceptance explicitly requires usable startup, not merely spawned workers.",
+                    "Current server running log is emitted too early to satisfy that requirement."
+                ],
+                "evidence": [
+                    "server/main.odin:1033",
+                    "server/process_manager.odin:151"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Broken environments must fail fast with actionable messages.",
+                    "Startup success must imply the MVP environment is usable."
+                ],
+                "linked_patterns": [
+                    "startup health declared after thread spawn"
+                ]
+            },
+            {
+                "decision": "Keep the HC-107 implementation in existing server startup owners unless a blocker forces a broader protocol.",
+                "rationale": [
+                    "The supplied scope demands minimal blast radius.",
+                    "main, config, and database already own the relevant startup responsibilities."
+                ],
+                "evidence": [
+                    "server/main.odin:1033",
+                    "server/config.odin:120",
+                    "server/database.odin:120"
+                ],
+                "confidence": 0.97,
+                "linked_constraints": [
+                    "Keep the implementation minimal and server-side only."
+                ],
+                "linked_patterns": [
+                    "database ownership centralized in one worker file",
+                    "filesystem setup uses warning-oriented best effort"
+                ]
+            }
+        ],
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/threaded-migration-baseline.md",
+                "trust": "high"
+            }
+        ]
+    }
+}

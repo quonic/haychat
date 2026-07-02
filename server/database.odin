@@ -7,6 +7,13 @@ import "core:strings"
 import "core:time"
 import "shared:pg"
 
+DATABASE_CONNECT_TIMEOUT_SECONDS :: 5
+
+DatabaseConnectDBProc :: #type proc "cdecl" (conninfo: cstring) -> pg.Conn
+DatabaseConnectionStatusProc :: #type proc "cdecl" (conn: pg.Conn) -> pg.Connection_Status
+DatabaseConnectionErrorProc :: #type proc "cdecl" (conn: pg.Conn) -> cstring
+DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
+
 cloneCStringOrEmpty :: proc(value: cstring) -> string {
 	if value == nil {
 		return ""
@@ -115,23 +122,68 @@ databaseExecuteRequest :: proc(
 	}
 }
 
+databaseRuntimeConninfo :: proc(config: ServerConfig) -> cstring {
+	return fmt.caprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s connect_timeout=%d",
+		config.databaseURL,
+		config.databasePort,
+		config.databaseUser,
+		config.databasePass,
+		config.databaseName,
+		DATABASE_CONNECT_TIMEOUT_SECONDS,
+	)
+}
+
+databaseOpenRuntimeConnectionWithHooks :: proc(
+	config: ServerConfig,
+	connectdbProc: DatabaseConnectDBProc,
+	statusProc: DatabaseConnectionStatusProc,
+	errorMessageProc: DatabaseConnectionErrorProc,
+	finishProc: DatabaseConnectionFinishProc,
+) -> (pg.Conn, string) {
+	conninfo := databaseRuntimeConninfo(config)
+	defer delete(conninfo)
+
+	conn := connectdbProc(conninfo)
+	if conn != nil && statusProc(conn) == .Ok {
+		return conn, ""
+	}
+
+	detail := ""
+	if conn != nil {
+		detail = cloneCStringOrEmpty(errorMessageProc(conn))
+		finishProc(conn)
+	}
+	if len(detail) == 0 {
+		detail = strings.clone("unknown PostgreSQL connection error")
+	}
+
+	err := fmt.aprintf(
+		"database connection failed for %s@%s:%d/%s: %s",
+		config.databaseUser,
+		config.databaseURL,
+		config.databasePort,
+		config.databaseName,
+		detail,
+	)
+	delete(detail)
+	return nil, err
+}
+
+databaseOpenRuntimeConnection :: proc(config: ServerConfig) -> (pg.Conn, string) {
+	return databaseOpenRuntimeConnectionWithHooks(
+		config,
+		pg.connectdb,
+		pg.status,
+		pg.error_message,
+		pg.finish,
+	)
+}
+
 // Database process entry point
 // Manages PostgreSQL connection pool and handles database queries from main process
 databaseServerLoop :: proc(pm: ^ProcessManager) {
 	fmt.printfln("[Database] Database server loop started (PID: %d)", os.get_pid())
-	// Connect to PostgreSQL database using shared:pg
-	db_connection := pg.connectdb(
-		fmt.caprintf(
-			"host=%s port=%d user=%s password=%s dbname=%s",
-			pm.config.databaseURL,
-			pm.config.databasePort,
-			pm.config.databaseUser,
-			pm.config.databasePass,
-			pm.config.databaseName,
-		),
-	)
-	defer pg.finish(db_connection)
-
 	databaseFd, ipcInitErr := IPC_Client_init(&pm.config.databaseSocket)
 	if ipcInitErr != nil {
 		fmt.eprintfln("[Database] Failed to initialize coordinator endpoint: %s", ipcInitErr)
@@ -139,6 +191,23 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	}
 	pm.config.databaseFd = databaseFd
 	defer IPC_Client_deinit(&pm.config.databaseSocket)
+
+	dbConnection, startupErr := databaseOpenRuntimeConnection(pm.config^)
+	if len(startupErr) > 0 {
+		sendErr := IPC_Client_send(pm.config.databaseFd, DatabaseStartupFailed{error = startupErr})
+		if sendErr != nil {
+			fmt.eprintfln("[Database] %s", startupErr)
+			delete(startupErr)
+		}
+		return
+	}
+	defer pg.finish(dbConnection)
+
+	readyErr := IPC_Client_send(pm.config.databaseFd, DatabaseStartupReady{})
+	if readyErr != nil {
+		fmt.eprintfln("[Database] Failed to report startup readiness")
+		return
+	}
 
 	running := true
 	for running {
@@ -150,7 +219,7 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 
 		#partial switch msg in message {
 		case DatabaseQuery:
-			response := databaseExecuteRequest(db_connection, msg.request)
+			response := databaseExecuteRequest(dbConnection, msg.request)
 			IPC_Client_send(
 				pm.config.databaseFd,
 				DatabaseQueryResult{request_id = msg.request_id, response = response},

@@ -1,11 +1,17 @@
 package server
 
 import "../common"
+import "core:fmt"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
+import "core:os"
+import "core:path/filepath"
+import "core:strings"
 import "core:sync"
 import "core:sys/linux"
 import "core:testing"
+import "core:time"
+import "shared:pg"
 
 RouterTestHarness :: struct {
 	config:     ^ServerConfig,
@@ -16,6 +22,59 @@ RouterTestHarness :: struct {
 }
 
 routerTestMutex: sync.Mutex
+routerTestDatabaseConnectMessage: cstring
+
+routerTestCreateTempDir :: proc(prefix: string) -> string {
+	tempRoot, tempRootErr := os.temp_directory(context.allocator)
+	assert(tempRootErr == nil, "expected temp directory lookup to succeed")
+
+	tempPath, tempPathErr := filepath.join(
+		{tempRoot, fmt.aprintf("%s_%d", prefix, time.time_to_unix_nano(time.now()))},
+	)
+	assert(tempPathErr == nil, "expected temp directory path join to succeed")
+
+	makeErr := os.make_directory(tempPath)
+	assert(makeErr == nil, "expected temp directory creation to succeed")
+	return tempPath
+}
+
+routerTestRemovePathIfExists :: proc(path: string) {
+	if len(path) == 0 || !os.exists(path) {
+		return
+	}
+	_ = os.remove(path)
+}
+
+routerTestGenerateValidIdentityConfig :: proc(config: ^ServerConfig) {
+	privateKey, publicKey, identityOK := common.generateIdentityKeyPair()
+	assert(identityOK, "expected test identity key generation to succeed")
+	config.serverPrivateKey = common.identityPrivateKeyToHex(privateKey)
+	config.serverPublicKey = common.identityPublicKeyToHex(publicKey)
+}
+
+routerTestDatabaseConnectHook :: proc "cdecl" (conninfo: cstring) -> pg.Conn {
+	_ = conninfo
+	return transmute(pg.Conn)uintptr(1)
+}
+
+routerTestDatabaseStatusOKHook :: proc "cdecl" (conn: pg.Conn) -> pg.Connection_Status {
+	_ = conn
+	return .Ok
+}
+
+routerTestDatabaseStatusBadHook :: proc "cdecl" (conn: pg.Conn) -> pg.Connection_Status {
+	_ = conn
+	return .Bad
+}
+
+routerTestDatabaseErrorMessageHook :: proc "cdecl" (conn: pg.Conn) -> cstring {
+	_ = conn
+	return routerTestDatabaseConnectMessage
+}
+
+routerTestDatabaseFinishHook :: proc "cdecl" (conn: pg.Conn) {
+	_ = conn
+}
 
 routerResetIPCState :: proc() {
 	sync.mutex_lock(&ipcState.state_mutex)
@@ -907,4 +966,245 @@ testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
 		responsePayload.message == "invalid payload",
 		"expected invalid file-store request to explain payload validation failure",
 	)
+}
+
+@(test)
+testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	tempDir := routerTestCreateTempDir("hc107_storage_not_writable")
+	defer routerTestRemovePathIfExists(tempDir)
+
+	fileStoragePath, joinErr := filepath.join({tempDir, "not_a_directory"})
+	assert(joinErr == nil, "expected file storage test path join to succeed")
+
+	writeErr := os.write_entire_file_from_bytes(fileStoragePath, []u8{1, 2, 3})
+	assert(writeErr == nil, "expected file storage test file creation to succeed")
+	defer routerTestRemovePathIfExists(fileStoragePath)
+
+	config := ServerConfig{
+		fileStoragePath = fileStoragePath,
+	}
+	routerTestGenerateValidIdentityConfig(&config)
+
+	preflightErr := startupPreflightError(config)
+	assert(len(preflightErr) > 0, "expected startup preflight to fail for a non-directory file storage path")
+	assert(
+		strings.contains(preflightErr, "file storage path"),
+		"expected startup preflight error to mention the file storage path",
+	)
+	delete(preflightErr)
+}
+
+@(test)
+testConfigStartupPreflightSkipsIdentityWriteGateWhenConfigAlreadyHasValidIdentity :: proc(
+	t: ^testing.T,
+) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	tempDir := routerTestCreateTempDir("hc107_identity_skip")
+	defer routerTestRemovePathIfExists(tempDir)
+
+	storageDir, storageDirErr := filepath.join({tempDir, "storage"})
+	assert(storageDirErr == nil, "expected storage path join to succeed")
+	storageDirMakeErr := os.make_directory(storageDir)
+	assert(storageDirMakeErr == nil, "expected storage directory creation to succeed")
+	defer routerTestRemovePathIfExists(storageDir)
+
+	blockingParentPath, blockingParentErr := filepath.join({tempDir, "identity_parent_blocker"})
+	assert(blockingParentErr == nil, "expected identity blocker path join to succeed")
+	blockingParentWriteErr := os.write_entire_file_from_bytes(blockingParentPath, []u8{9})
+	assert(blockingParentWriteErr == nil, "expected identity blocker file creation to succeed")
+	defer routerTestRemovePathIfExists(blockingParentPath)
+
+	identityPath, identityPathErr := filepath.join({blockingParentPath, "server_identity.json"})
+	assert(identityPathErr == nil, "expected identity path join to succeed")
+
+	config := ServerConfig{
+		fileStoragePath = storageDir,
+		serverIdentityFilePath = identityPath,
+	}
+	routerTestGenerateValidIdentityConfig(&config)
+
+	preflightErr := startupPreflightError(config)
+	assert(len(preflightErr) == 0, "expected valid configured identity to skip identity path write preflight")
+}
+
+@(test)
+testDatabaseOpenRuntimeConnectionWithHooksReturnsActionableFailure :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	connectMessage, connectMessageErr := strings.clone_to_cstring(
+		"dial tcp 127.0.0.1:5432: connection refused",
+	)
+	assert(connectMessageErr == nil, "expected test cstring allocation to succeed")
+	routerTestDatabaseConnectMessage = connectMessage
+
+	config := ServerConfig{
+		databaseURL = "127.0.0.1",
+		databasePort = 5432,
+		databaseUser = "haychat",
+		databasePass = "",
+		databaseName = "haychat",
+	}
+
+	conn, openErr := databaseOpenRuntimeConnectionWithHooks(
+		config,
+		routerTestDatabaseConnectHook,
+		routerTestDatabaseStatusBadHook,
+		routerTestDatabaseErrorMessageHook,
+		routerTestDatabaseFinishHook,
+	)
+
+	assert(conn == pg.Conn(nil), "expected failed database startup connection to return nil connection")
+	assert(len(openErr) > 0, "expected failed database startup connection to return an error")
+	assert(
+		strings.contains(openErr, "connection refused"),
+		"expected failed database startup connection to preserve the libpq failure detail",
+	)
+	delete(openErr)
+}
+
+@(test)
+testDatabaseRuntimeConninfoAddsConnectTimeout :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	config := ServerConfig{
+		databaseURL = "10.0.0.99",
+		databasePort = 5432,
+		databaseUser = "haychat",
+		databasePass = "secret",
+		databaseName = "haychat",
+	}
+
+	conninfo := databaseRuntimeConninfo(config)
+	defer delete(conninfo)
+	conninfoText := cloneCStringOrEmpty(conninfo)
+	defer delete(conninfoText)
+
+	assert(
+		strings.contains(conninfoText, "connect_timeout="),
+		"expected runtime database conninfo to set a bounded connect timeout",
+	)
+}
+
+@(test)
+testWaitForDatabaseStartupAckReturnsFailureMessage :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	routerResetIPCState()
+	config := new(ServerConfig)
+	config.networkSocketName = "startup_ack_network"
+	config.webAdminSocketName = "startup_ack_webadmin"
+	config.databaseSocketName = "startup_ack_database"
+	pm := initProcessManager(config)
+	defer free(config)
+
+	IPC_Server_send(
+		&config.databaseSocket,
+		config.mainFd,
+		DatabaseStartupFailed{error = strings.clone("database unavailable")},
+	)
+
+	startupErr := waitForDatabaseStartupAck(&pm)
+	assert(
+		startupErr == "database unavailable",
+		"expected database startup ack wait to return the startup failure message",
+	)
+	delete(startupErr)
+
+	sync.mutex_lock(&ipcState.state_mutex)
+	IPC__state_deinit()
+	ipcState.next_fd = linux.Fd(10)
+	sync.mutex_unlock(&ipcState.state_mutex)
+}
+
+@(test)
+testWaitForDatabaseStartupAckTimesOutWhenWorkerNeverResponds :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	routerResetIPCState()
+	config := new(ServerConfig)
+	config.networkSocketName = "startup_ack_timeout_network"
+	config.webAdminSocketName = "startup_ack_timeout_webadmin"
+	config.databaseSocketName = "startup_ack_timeout_database"
+	config.databaseURL = "127.0.0.1"
+	config.databasePort = 5432
+	config.databaseUser = "haychat"
+	config.databaseName = "haychat"
+	pm := initProcessManager(config)
+	pm.databaseProcess.isRunning = true
+	defer free(config)
+
+	startupErr := waitForDatabaseStartupAckWithTimeout(&pm, 5 * time.Millisecond)
+	assert(len(startupErr) > 0, "expected database startup ack wait to time out")
+	assert(
+		strings.contains(startupErr, "timed out"),
+		"expected database startup ack timeout to mention the timeout",
+	)
+	assert(
+		strings.contains(startupErr, "haychat@"),
+		"expected database startup ack timeout to identify the database target",
+	)
+	delete(startupErr)
+
+	sync.mutex_lock(&ipcState.state_mutex)
+	IPC__state_deinit()
+	ipcState.next_fd = linux.Fd(10)
+	sync.mutex_unlock(&ipcState.state_mutex)
+}
+
+@(test)
+testWaitForDatabaseStartupAckReturnsActionableExitFailure :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	routerResetIPCState()
+	config := new(ServerConfig)
+	config.networkSocketName = "startup_ack_exit_network"
+	config.webAdminSocketName = "startup_ack_exit_webadmin"
+	config.databaseSocketName = "startup_ack_exit_database"
+	config.databaseURL = "127.0.0.1"
+	config.databasePort = 5432
+	config.databaseUser = "haychat"
+	config.databaseName = "haychat"
+	pm := initProcessManager(config)
+	defer free(config)
+
+	startupErr := waitForDatabaseStartupAckWithTimeout(&pm, 5 * time.Millisecond)
+	assert(len(startupErr) > 0, "expected database startup ack wait to fail when worker exits")
+	assert(
+		strings.contains(startupErr, "exited before reporting readiness"),
+		"expected database startup exit failure to explain the missing readiness report",
+	)
+	assert(
+		strings.contains(startupErr, "haychat@"),
+		"expected database startup exit failure to identify the database target",
+	)
+	delete(startupErr)
+
+	sync.mutex_lock(&ipcState.state_mutex)
+	IPC__state_deinit()
+	ipcState.next_fd = linux.Fd(10)
+	sync.mutex_unlock(&ipcState.state_mutex)
 }

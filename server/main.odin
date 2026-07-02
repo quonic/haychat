@@ -70,6 +70,8 @@ queueMainInterruptShutdown :: proc(pm: ^ProcessManager) {
 	IPC_Server_send(&mainContext, pm.config.mainFd, ProcessShutdown{})
 }
 
+DATABASE_STARTUP_ACK_TIMEOUT :: 6 * time.Second
+
 RouterPeerSession_init :: proc() -> RouterPeerSession {
 	return RouterPeerSession {
 		transport = common.TransportState_init(.Server),
@@ -1002,7 +1004,12 @@ main :: proc() {
 
 	fmt.println("=== HayChat Server - Threaded Architecture ===")
 
-	config := loadConfig()
+	config, configErr := loadConfig()
+	if len(configErr) > 0 {
+		fmt.eprintfln("[Startup] %s", configErr)
+		delete(configErr)
+		return
+	}
 	fmt.println("Configuration loaded:")
 	fmt.printfln("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
 	fmt.printfln(
@@ -1030,6 +1037,19 @@ main :: proc() {
 	registerMainInterruptHandler()
 
 	fmt.println("=== Starting Service Threads ===")
+	if !spawnProcess(&pm, .Database) {
+		fmt.println("[Database] Failed to start database service thread")
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
+		return
+	}
+	if databaseStartupErr := waitForDatabaseStartupAck(&pm); len(databaseStartupErr) > 0 {
+		fmt.eprintfln("[Startup] %s", databaseStartupErr)
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
+		delete(databaseStartupErr)
+		return
+	}
 	if !spawnProcess(&pm, .Network) {
 		fmt.println("[Network] Failed to start network service thread")
 		pm.shouldShutdown = true
@@ -1042,12 +1062,6 @@ main :: proc() {
 		shutdownAllProcesses(&pm)
 		return
 	}
-	if !spawnProcess(&pm, .Database) {
-		fmt.println("[Database] Failed to start database service thread")
-		pm.shouldShutdown = true
-		shutdownAllProcesses(&pm)
-		return
-	}
 
 	fmt.println("=== Server Running ===")
 	fmt.println("Main thread is supervising network, web admin, and database threads")
@@ -1055,6 +1069,60 @@ main :: proc() {
 	mainLoop(&pm)
 
 	fmt.println("=== Server Shutdown Complete ===")
+}
+
+waitForDatabaseStartupAck :: proc(pm: ^ProcessManager) -> string {
+	return waitForDatabaseStartupAckWithTimeout(pm, DATABASE_STARTUP_ACK_TIMEOUT)
+}
+
+waitForDatabaseStartupAckWithTimeout :: proc(pm: ^ProcessManager, timeout: time.Duration) -> string {
+	start := time.now()
+	for time.since(start) < timeout {
+		if mainInterruptRequested {
+			return strings.clone("startup interrupted before database became ready")
+		}
+
+		msg, err := IPC_Client_poll(pm.config.mainFd)
+		if err != nil {
+			sync.mutex_lock(&pm.processMutex)
+			databaseRunning := pm.databaseProcess.isRunning
+			sync.mutex_unlock(&pm.processMutex)
+			if !databaseRunning {
+				return fmt.aprintf(
+					"database startup failed: worker exited before reporting readiness for %s@%s:%d/%s",
+					pm.config.databaseUser,
+					pm.config.databaseURL,
+					pm.config.databasePort,
+					pm.config.databaseName,
+				)
+			}
+
+			time.sleep(1 * time.Millisecond)
+			continue
+		}
+
+		#partial switch m in msg {
+		case DatabaseStartupReady:
+			return ""
+		case DatabaseStartupFailed:
+			return m.error
+		case ProcessError:
+			return m.error
+		case ProcessShutdown:
+			return strings.clone("database startup interrupted by shutdown")
+		case Wake:
+		case:
+		}
+	}
+
+	return fmt.aprintf(
+		"database startup timed out after %v waiting for readiness from %s@%s:%d/%s",
+		timeout,
+		pm.config.databaseUser,
+		pm.config.databaseURL,
+		pm.config.databasePort,
+		pm.config.databaseName,
+	)
 }
 
 @(private)
@@ -1168,6 +1236,8 @@ mainLoop :: proc(pm: ^ProcessManager) {
 					m.request_id,
 					common.DatabaseQueryResponse{success = false, message = m.error, result = ""},
 				)
+			case DatabaseStartupReady, DatabaseStartupFailed:
+				// Startup-only coordination messages are consumed before the main loop starts.
 			case ProcessShutdown:
 				sync.mutex_lock(&pm.processMutex)
 				pm.shouldShutdown = true

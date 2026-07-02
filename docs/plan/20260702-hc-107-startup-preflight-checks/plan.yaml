@@ -1,0 +1,282 @@
+plan_id: 20260702-hc-107-startup-preflight-checks
+objective: "Implement HC-107 by adding startup preflight checks and actionable server failure messages."
+created_at: 2026-07-02T14:36:37-05:00
+created_by: gem-planner
+status: completed
+tldr: |
+  Tighten server startup so it only reports success after the MVP runtime is actually usable.
+  Add explicit preflight gates for required writable runtime paths and database reachability,
+  then surface failure messages that tell the operator what broke and what path or dependency
+  needs attention. Keep the change server-side and minimal: no schema bootstrap, no auth
+  behavior expansion, and no broader readiness framework.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 2
+  risk_score: medium
+
+quality_warnings:
+  - Current startup health is declared in server/main.odin immediately after thread spawn, so the implementation must avoid preserving that false-positive contract through helper wrappers.
+  - server/config.odin currently treats directory and identity persistence failures as warnings, so promoting selected path failures to startup-fatal behavior must stay limited to required MVP runtime paths.
+  - shared:pg connection failure handling is currently implicit in databaseServerLoop, so the exact immediate connection-status API still needs one local confirmation before implementation.
+
+reviewer_focus:
+  - Confirm startup success is emitted only after all required preflight gates pass.
+  - Confirm database failures and unwritable path failures are actionable and identify the failing dependency or path.
+  - Confirm the implementation does not auto-bootstrap schema, widen auth semantics, or change steady-state request handling.
+  - Confirm focused tests cover the extracted preflight contract without relying on brittle live environment setup.
+
+prd_update_recommended: false
+
+suggested_plan_files:
+  - docs/plan/20260702-hc-107-startup-preflight-checks/plan.yaml
+  - docs/plan/20260702-hc-107-startup-preflight-checks/context_envelope.json
+
+resolved_decisions:
+  - decision: Scope readiness to explicit health gates the MVP actually needs at startup.
+    context: The issue and supplied context call out database reachability and writable runtime paths as required. Network and web admin thread spawn alone are not enough, but broader service liveness or auth redesign is out of scope.
+    affects:
+      - T1-debug-preflight-contract-and-seams
+      - T2-implement-startup-preflight-and-failure-messaging
+      - T3-add-focused-preflight-tests-and-validation
+  - decision: Prefer synchronous startup preflight over a new cross-thread readiness protocol unless diagnosis proves a hard blocker.
+    context: server/main.odin already owns startup sequencing, server/config.odin already normalizes runtime paths, and server/database.odin already owns PostgreSQL connection details. A pre-spawn or startup-time helper path is the smallest likely fix.
+    affects:
+      - T1-debug-preflight-contract-and-seams
+      - T2-implement-startup-preflight-and-failure-messaging
+  - decision: Failure messaging is part of the feature, not incidental logging.
+    context: Acceptance requires broken environments to fail fast with actionable messages, so success conditions and operator-facing error text must be designed together.
+    affects:
+      - T2-implement-startup-preflight-and-failure-messaging
+      - T3-add-focused-preflight-tests-and-validation
+
+open_questions:
+  - question: What is the correct shared:pg API for immediate connection-status verification after pg.connectdb?
+    context: databaseServerLoop currently connects but does not clearly convert bad connection state into startup-fatal behavior.
+    type: decision_blocker
+    affects:
+      - T1-debug-preflight-contract-and-seams
+      - T2-implement-startup-preflight-and-failure-messaging
+  - question: Should identity-file writability be proven by validating parent-directory write access only, or by exercising the existing identity persistence path directly during preflight?
+    context: server/config.odin currently generates or loads identity material as best effort, but HC-107 requires startup success to imply the configured runtime paths are actually usable.
+    type: research
+    affects:
+      - T1-debug-preflight-contract-and-seams
+      - T2-implement-startup-preflight-and-failure-messaging
+      - T3-add-focused-preflight-tests-and-validation
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Startup still prints success before the database or required filesystem paths are proven usable.
+      likelihood: medium
+      impact: critical
+      mitigation: Centralize preflight in the startup path and make success logging contingent on explicit preflight completion.
+    - scenario: Path validation is too weak and only checks existence, so the server still fails on first identity or file write.
+      likelihood: medium
+      impact: high
+      mitigation: Validate writability, not just path presence, for the configured runtime paths that the MVP touches at startup or first normal use.
+    - scenario: The fix introduces a new readiness abstraction or IPC contract larger than the issue requires.
+      likelihood: low
+      impact: medium
+      mitigation: Bias toward synchronous helpers in existing startup owners and treat new message types or worker protocols as a last resort.
+    - scenario: Failure logs are technically accurate but not actionable for local operators or testers.
+      likelihood: medium
+      impact: high
+      mitigation: Require messages to name the failing path or database target and the failed operation, then lock examples in focused tests.
+  assumptions:
+    - HC-106 provides any schema or seed state needed for auth, so HC-107 should only prove reachability rather than bootstrap it.
+    - The narrowest acceptable implementation can stay in server/main.odin, server/config.odin, and server/database.odin unless test extraction requires one new helper file or test file.
+    - Existing startup supervision behavior after successful boot remains acceptable; this issue is about startup gating and error reporting, not restart policy redesign.
+
+tasks:
+  - id: T1-debug-preflight-contract-and-seams
+    title: Diagnose the exact startup health contract and smallest implementation seam
+    description: Confirm the minimal readiness contract for HC-107, identify the exact shared:pg connection-status check needed for fail-fast startup, and choose the smallest existing startup seam for filesystem and identity-path writability validation.
+    wave: 1
+    agent: gem-debugger
+    status: completed
+    covers:
+      - Current false-positive startup path in server/main.odin
+      - Database reachability detection in server/database.odin
+      - Required writable runtime path contract in server/config.odin
+      - Lowest-cost test seam for preflight helpers and error text
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: server/main.odin
+        description: Owns top-level startup sequencing and currently prints server running after thread spawn only.
+      - path: server/database.odin
+        description: Owns PostgreSQL connection creation and must supply the exact fail-fast DB reachability check.
+      - path: server/config.odin
+        description: Owns path normalization, directory creation, and server identity handling that currently logs warnings instead of failing startup.
+      - path: server/process_manager.odin
+        description: Confirms spawnProcess only proves thread creation and should not be treated as full readiness.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Broken environments fail fast with actionable messages.
+      - Startup success implies the MVP environment is actually usable.
+      - Database reachability and writable runtime paths are required health gates.
+    success_criteria:
+      - Names the exact startup gate ordering and which checks must complete before success is logged.
+      - Identifies the shared:pg connection-status API or equivalent immediate failure test.
+      - Defines the minimal writable-path contract for file storage and server identity persistence.
+      - Recommends the narrowest automated validation seam for the implementation wave.
+    outcome: |
+      Use pg.connectdb(conninfo) followed immediately by pg.status(conn) != .Ok and
+      cloneCStringOrEmpty(pg.error_message(conn)) for actionable DB failure reporting.
+      Extract the runtime DB connection opener from databaseServerLoop and reuse it for
+      startup gating to avoid drift. Gate server success logging on a narrow database
+      worker ready-or-fail acknowledgment after that exact connection path succeeds.
+      Keep runtime path checks in a separate startup preflight helper: fileStoragePath
+      must be writable, while serverIdentityFilePath is a write gate only when startup
+      must generate or persist a new identity because no valid existing identity is
+      available from config or a readable identity file.
+
+  - id: T2-implement-startup-preflight-and-failure-messaging
+    title: Implement server startup preflight gates and actionable operator errors
+    description: Add explicit startup preflight checks so the server exits before declaring success when the database is unreachable or required runtime paths are not writable, and make the emitted failure text actionable for local operators and testers.
+    wave: 2
+    agent: gem-implementer
+    status: completed
+    covers:
+      - Database reachability preflight
+      - Writable runtime path preflight for storage and identity usage
+      - Startup sequencing changes so success logging occurs only after preflight passes
+      - Actionable failure messages naming the failed dependency, path, or operation
+    dependencies:
+      - T1-debug-preflight-contract-and-seams
+    conflicts_with: []
+    context_files:
+      - path: server/main.odin
+        description: Startup owner that currently logs running too early and should gate success on preflight completion.
+      - path: server/database.odin
+        description: Smallest likely home for a reusable database reachability check built from existing connection logic.
+      - path: server/config.odin
+        description: Smallest likely home for promoting required runtime path failures from warnings into explicit startup-fatal results.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: Startup health is declared after process spawn rather than after MVP prerequisites are proven, while filesystem and database failures are currently warning-oriented or deferred until later use.
+      target_files:
+        - server/main.odin
+        - server/database.odin
+        - server/config.odin
+      fix_recommendations: Extract a synchronous preflight path that checks database connectivity and required path writability before printing success, then return or log operator-facing failure text that identifies what failed and where.
+      injected_at: 2026-07-02T14:36:37-05:00
+    acceptance_criteria:
+      - Broken environments fail fast with actionable messages.
+      - Startup success implies the MVP environment is actually usable.
+      - Do not auto-bootstrap schema or widen auth behavior.
+      - Keep scope server-side and minimal.
+    success_criteria:
+      - Normal startup prints success only after all required preflight checks pass.
+      - Database connection failure exits startup with a message that names the failing database target or operation.
+      - Runtime path failure exits startup with a message that names the failing configured path and required capability.
+      - No schema bootstrap, auth flow expansion, or unrelated restart-policy changes are introduced.
+    outcome: |
+      Startup now gates success on database worker readiness instead of worker thread spawn.
+      The database worker reuses an extracted runtime connection helper that builds the libpq
+      conninfo, applies connect_timeout, checks pg.status immediately, and reports actionable
+      errors back to main before the server announces health. Runtime path preflight now fails
+      startup when fileStoragePath is not writable, while identity persistence is only treated
+      as required when startup cannot rely on a valid existing identity from config or disk.
+    tech_stack:
+      - Odin
+      - PostgreSQL via shared:pg
+    test_coverage: Prefer extracted helper tests or slice tests over broad live-process integration.
+    diag:
+      paired_debugger_task: T1-debug-preflight-contract-and-seams
+      current_false_health_point: server/main.odin logs server running after spawnProcess returns for Network, WebAdmin, and Database
+      required_health_gates:
+        - database reachability
+        - writable file storage path
+        - writable server identity path
+    handoff:
+      do_not_reinvestigate:
+        - server/process_manager.odin only proves thread creation, not service usability.
+        - server/config.odin already creates directories best effort, so the missing behavior is startup-fatal validation for required paths.
+        - HC-107 must not auto-bootstrap schema or widen auth behavior; HC-106 owns bootstrap concerns.
+      required_test_first: odin check server
+      target_files:
+        - server/main.odin
+        - server/database.odin
+        - server/config.odin
+      minimal_change: Reuse existing startup owners and helpers where possible; avoid introducing a new readiness framework unless diagnosis proves it is necessary.
+      acceptance_checks:
+        - odin check server
+        - odin test server
+
+  - id: T3-add-focused-preflight-tests-and-validation
+    title: Lock the preflight contract with focused tests and executable validation
+    description: Add focused automated coverage for the new startup preflight contract and run the narrow server validation commands so failure modes stay fast, actionable, and regression-resistant.
+    wave: 3
+    agent: gem-implementer
+    status: completed
+    covers:
+      - Focused tests for database reachability failure handling
+      - Focused tests for unwritable runtime path handling
+      - Validation that success logging is gated on preflight completion
+      - Command-based verification for the touched server slice
+    dependencies:
+      - T2-implement-startup-preflight-and-failure-messaging
+    conflicts_with: []
+    context_files:
+      - path: server/router_test.odin
+        description: Shows the project’s current focused Odin test style for server-side slices and failure assertions.
+      - path: server/config.odin
+        description: Likely host for path-validation helpers that can be exercised directly in tests.
+      - path: server/database.odin
+        description: Likely host for database preflight helpers or error mapping that need direct test coverage.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: Without focused automated coverage, the new startup contract could regress back to warning-only behavior or early success logging.
+      target_files:
+        - server/config.odin
+        - server/database.odin
+        - server/router_test.odin
+      fix_recommendations: Test the extracted preflight helpers and representative failure text directly, then validate the touched server package with the standard check and test commands.
+      injected_at: 2026-07-02T14:36:37-05:00
+    acceptance_criteria:
+      - Broken environments fail fast with actionable messages.
+      - Startup success implies the MVP environment is actually usable.
+    success_criteria:
+      - Automated coverage proves database reachability failures are surfaced as startup-fatal and actionable.
+      - Automated coverage proves required unwritable runtime paths fail startup with path-specific error text.
+      - Validation passes with odin check server and odin test server.
+      - Tests stay server-side and do not rely on schema bootstrap or broad end-to-end setup.
+    outcome: |
+      Added focused tests for runtime path preflight, database connection failure messaging,
+      and database startup acknowledgement handling. Validation passed with odin check server
+      and odin test server after adding the bounded database startup timeout path.
+    tech_stack:
+      - Odin
+    test_coverage: Focus on helper-level or slice-level preflight tests rather than full process supervision integration.
+    diag:
+      paired_debugger_task: T1-debug-preflight-contract-and-seams
+      validation_priority: startup failure semantics before runtime feature behavior
+      expected_failure_examples:
+        - unreachable database
+        - unwritable file storage path
+        - unwritable server identity path
+    handoff:
+      do_not_reinvestigate:
+        - The issue is specifically about startup contract quality, not runtime chat or auth flow behavior.
+        - Existing tests already show the preferred pattern of focused Odin unit or slice checks over heavy integration rigs.
+      required_test_first: odin test server
+      target_files:
+        - server/router_test.odin
+        - server/config.odin
+        - server/database.odin
+      minimal_change: Add the smallest tests that pin the new preflight behavior and operator-facing messages.
+      acceptance_checks:
+        - odin check server
+        - odin test server

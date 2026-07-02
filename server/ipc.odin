@@ -28,6 +28,8 @@ Message :: union {
 	DatabaseQuery,
 	DatabaseQueryResult,
 	DatabaseError,
+	DatabaseStartupReady,
+	DatabaseStartupFailed,
 	// System messages
 	ProcessShutdown,
 	ProcessRestart,
@@ -118,6 +120,12 @@ DatabaseQueryResult :: struct {
 DatabaseError :: struct {
 	request_id: u64,
 	error:      string,
+}
+
+DatabaseStartupReady :: struct {}
+
+DatabaseStartupFailed :: struct {
+	error: string,
 }
 
 ProcessShutdown :: struct {}
@@ -215,6 +223,8 @@ IPC__message_deinit :: proc(msg: ^Message) {
 	case DatabaseQueryResult:
 		IPC__database_query_response_deinit(m.response)
 	case DatabaseError:
+		delete(m.error)
+	case DatabaseStartupFailed:
 		delete(m.error)
 	case ProcessError:
 		delete(m.error)
