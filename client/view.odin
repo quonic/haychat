@@ -70,21 +70,58 @@ view_inner_body :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 
 view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
-	server_list: [dynamic]skald.View
-	for server in s.config.servers {
-		if server.id == s.selected_server_id {
-			append(&server_list, skald.text(server.name, th.color.fg))
-			append(
-				&server_list,
-				skald.text(
-					fmt.tprintf("Host: %s:%d", server.host, server.port),
-					th.color.fg_muted,
+
+	channel_buttons: [dynamic]skald.View
+	append(
+		&channel_buttons,
+		skald.button(
+			ctx,
+			"General",
+			Msg{kind = .SwitchToServer, id = s.selected_server_id},
+			padding = button_padding,
+		),
+	)
+
+	chat_area := skald.col(
+		skald.scroll(
+			ctx, // Chat messages area
+			{s.window_width - friends_list_width - server_width, s.window_height - 45},
+			skald.rich_text_selectable(ctx, s.current_chat_messages[:], th.color.fg),
+		),
+		skald.flex(1, skald.spacer(0)),
+		skald.divider(ctx),
+		// Chat input area
+		skald.chat_input(
+			ctx,
+			s.chat_input_draft,
+			Draft_Channel_Changed,
+			Send_Channel_Pressed,
+			placeholder = "Message… (Enter to send, Shift+Enter for newline)",
+			width = s.window_width - friends_list_width - server_width,
+		),
+		main_align = skald.Main_Align.Start,
+		cross_align = skald.Cross_Align.Stretch,
+	)
+
+	return skald.row(
+		skald.row(
+			skald.col(
+				skald.text("Channels", th.color.fg),
+				skald.divider(ctx),
+				// Channels list area
+				skald.scroll(
+					ctx,
+					size = {server_width + friends_list_width, s.window_height - 35},
+					content = skald.col(..channel_buttons[:], spacing = general_spacing),
 				),
-			)
-		}
-	}
-	append(&server_list, view_selected_transport_status(s, ctx))
-	return skald.col(..server_list[:], spacing = general_spacing)
+			),
+			skald.flex(1, skald.spacer(0)),
+			chat_area,
+			cross_align = skald.Cross_Align.Stretch,
+			spacing = general_spacing,
+		),
+	)
+
 }
 
 view_selected_transport_status :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
@@ -208,8 +245,8 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		skald.chat_input(
 			ctx,
 			s.dm_chat_draft,
-			Draft_Changed,
-			Send_Pressed,
+			Draft_DM_Changed,
+			Send_DM_Pressed,
 			placeholder = "Message… (Enter to send, Shift+Enter for newline)",
 			width = s.window_width - server_width - friends_list_width,
 		),
@@ -218,9 +255,16 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	)
 }
 
-Draft_Changed :: proc(new_value: string) -> Msg {
+Draft_DM_Changed :: proc(new_value: string) -> Msg {
 	return Msg{kind = .UpdateChatInputValue, new_value = new_value}
 }
-Send_Pressed :: proc(value: string) -> Msg {
+Send_DM_Pressed :: proc(value: string) -> Msg {
 	return Msg{kind = .SendChatMessage, new_value = value}
+}
+
+Draft_Channel_Changed :: proc(new_value: string) -> Msg {
+	return Msg{kind = .UpdateChannelChatInputValue, new_value = new_value}
+}
+Send_Channel_Pressed :: proc(value: string) -> Msg {
+	return Msg{kind = .SendChannelChatMessage, new_value = value}
 }

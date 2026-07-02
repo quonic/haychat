@@ -23,6 +23,8 @@ State :: struct {
 	window_height:                  f32, // Current height of the application window, used for responsive UI layout
 	current_dm_chat:                [dynamic]skald.Text_Span,
 	dm_chat_draft:                  string,
+	chat_input_draft:               string, // Current draft text in the chat input field, used for sending messages
+	current_chat_messages:          [dynamic]skald.Text_Span, // List of chat messages currently displayed in the chat area, used for rendering the chat history
 }
 
 Vector2 :: [2]f32
@@ -43,8 +45,11 @@ MsgKind :: enum {
 	SwitchToFriendsList,
 	UpdateWindowSize,
 	UpdateChatInputValue,
+	UpdateChannelChatInputValue,
 	SendChatMessage,
+	SendChannelChatMessage,
 	RecieveChatMessage,
+	RecieveChannelChatMessage,
 	New_Conversation,
 	AddFriend,
 }
