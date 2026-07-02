@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:fmt"
 import "core:strings"
 import "shared:skald"
@@ -77,7 +78,12 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		skald.button(
 			ctx,
 			"General",
-			Msg{kind = .SwitchToChannel, id = s.selected_server_id, new_value = "general"},
+			Msg {
+				kind = .SwitchToChannel,
+				id = s.selected_server_id,
+				channel_id = common.GENERAL_ROOM_ID,
+				new_value = "general",
+			},
 			padding = button_padding,
 		),
 	)
@@ -89,6 +95,7 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 			skald.rich_text_selectable(ctx, s.current_chat_messages[:], th.color.fg),
 		),
 		skald.flex(1, skald.spacer(0)),
+		view_chat_status(s, ctx),
 		skald.divider(ctx),
 		// Chat input area
 		skald.chat_input(
@@ -122,6 +129,14 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		),
 	)
 
+}
+
+view_chat_status :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
+	if len(s.chat_status_message) == 0 {
+		return skald.spacer(0)
+	}
+
+	return skald.text(s.chat_status_message, ctx.theme.color.danger)
 }
 
 view_selected_transport_status :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
@@ -241,6 +256,7 @@ dm_chat :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 			skald.rich_text_selectable(ctx, s.current_dm_chat[:], th.color.fg), // Chat messages area
 		),
 		skald.flex(1, skald.spacer(0)),
+		view_chat_status(s, ctx),
 		skald.divider(ctx),
 		skald.chat_input(
 			ctx,

@@ -9,6 +9,9 @@ import "core:os"
 import "core:strings"
 import "shared:skald"
 
+CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 4
+DIRECT_MESSAGES_UNSUPPORTED_STATUS :: "Direct messages are not supported yet"
+
 StartupAuthBridge :: proc(
 	transport: ^ClientServerTransport,
 	server: ^Server,
@@ -16,7 +19,14 @@ StartupAuthBridge :: proc(
 	clientHelloPacketBytes: []u8,
 ) -> ClientStartupAuthSession
 
+RoomChatSendBridge :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	content: string,
+) -> bool
+
 startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
+roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
 
 startupAuthBridge_noop :: proc(
 	transport: ^ClientServerTransport,
@@ -60,6 +70,7 @@ State :: struct {
 	current_dm_chat:                [dynamic]skald.Text_Span,
 	dm_chat_draft:                  string,
 	chat_input_draft:               string, // Current draft text in the chat input field, used for sending messages
+	chat_status_message:            string,
 	current_chat_messages:          [dynamic]skald.Text_Span, // List of chat messages currently displayed in the chat area, used for rendering the chat history
 	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
 }
@@ -71,6 +82,7 @@ Msg :: struct {
 	kind:          MsgKind,
 	id:            int, // Generic ID field
 	channel_id:    int, // ID of the channel, used for switching to a specific channel
+	sender_id:     int,
 	vector:        Vector2, // Generic Vector2 field for passing position or size data in messages, such as for window resize events
 	window_vector: iVector2, // Generic iVector2 field for passing integer vector data in messages if needed
 	new_value:     string, // Generic string field for passing new values in messages, such as for updating the chat input value
@@ -89,8 +101,64 @@ MsgKind :: enum {
 	SendChannelChatMessage,
 	RecieveChatMessage,
 	RecieveChannelChatMessage,
+	TransportProtocolError,
 	New_Conversation,
 	AddFriend,
+}
+
+ClientTransportRuntimeEvent_toMsg :: proc(event: ClientTransportRuntimeEvent) -> (Msg, bool) {
+	switch event.kind {
+	case .RoomChatReceived:
+		return Msg {
+			kind = .RecieveChannelChatMessage,
+			id = event.serverID,
+			channel_id = event.roomID,
+			sender_id = event.senderID,
+			new_value = event.message,
+		}, true
+
+	case .ProtocolError:
+		return Msg {
+			kind = .TransportProtocolError,
+			id = event.serverID,
+			new_value = event.message,
+		}, true
+
+	case .Disconnected, .None:
+		return {}, false
+	}
+	return {}, false
+}
+
+State_serviceSelectedTransportRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)) {
+	if state.selected_transport_index < 0 ||
+	   state.selected_transport_index >= len(state.serverTransports) {
+		return
+	}
+
+	transport := &state.serverTransports[state.selected_transport_index]
+	if transport.transport.phase != .Established || !ClientServerTransport_hasLiveENetSession(transport) {
+		return
+	}
+
+	for _ in 0 ..< CHAT_RUNTIME_MAX_EVENTS_PER_FRAME {
+		runtimeEvent, hasEvent := ClientServerTransport_serviceRuntime(transport)
+		if !hasEvent {
+			return
+		}
+
+		msg, hasMsg := ClientTransportRuntimeEvent_toMsg(runtimeEvent)
+		if hasMsg {
+			runtimeEvent.message = ""
+			skald.send(ctx, msg)
+		}
+		ClientTransportRuntimeEvent_deinit(&runtimeEvent)
+	}
+}
+
+viewWithRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
+	State_serviceSelectedTransportRuntime(state, ctx)
+	return view(state, ctx)
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -178,6 +246,7 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	init_state.view_dms = true
 	init_state.view_friends_list = false
 	init_state.selected_transport_index = -1
+	init_state.selected_channel_id = common.GENERAL_ROOM_ID
 	if len(init_state.config.servers) > 0 {
 		init_state.selected_server_id = init_state.config.servers[0].id
 		init_state.selected_transport_index = State_selectedTransportIndexForServerID(
@@ -221,9 +290,10 @@ main :: proc() {
 			title = "HayChat",
 			size = {1920, 1080},
 			theme = skald.theme_dark(),
+			always_redraw = true,
 			init = init,
 			update = update,
-			view = view,
+			view = viewWithRuntime,
 			on_window_state_change = changeWindowState,
 		},
 	)

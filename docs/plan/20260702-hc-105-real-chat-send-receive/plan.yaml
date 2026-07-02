@@ -1,0 +1,327 @@
+plan_id: 20260702-hc-105-real-chat-send-receive
+objective: "Revise HC-105 so implementation explicitly adds steady-state client chat transport ownership, authoritative inbound metadata, and focused no-fake-success coverage."
+created_at: 2026-07-02T10:22:52-05:00
+created_by: gem-planner
+status: completed
+tldr: |
+  Revise HC-105 around the critique findings instead of treating them as implicit implementation detail.
+  The first implementation wave after diagnosis now owns steady-state post-auth ENet polling and dispatch as a
+  first-class slice. A follow-on implementation wave updates the state or reducer seam so inbound room chat carries
+  enough source metadata to gate by selected server and room, distinguish self from other senders, stop optimistic
+  local append on submit, and cover unsupported or failed send paths with focused tests.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 3
+  risk_score: medium
+
+quality_warnings:
+  - The original HC-105 plan buried steady-state ENet ownership inside a broader transport task; that ownership gap is now an explicit implementation slice because receive behavior cannot be authoritative without it.
+  - Current client chat state appears too shallow for selected-server, room, and self-versus-other gating, so the metadata carrier must be identified before reducer changes are implemented.
+  - DM compose UI remains in scope only as an unsupported path that must stop faking success; do not invent a new backend DM protocol.
+
+reviewer_focus:
+  - Confirm the first executable wave after diagnosis is the steady-state ENet owner and not reducer cleanup.
+  - Confirm send actions no longer mutate visible chat history before a server echo or broadcast is received.
+  - Confirm inbound events carry enough metadata to reject stale or off-context messages and to render self versus other senders distinctly.
+  - Confirm unsupported or failed send paths remain narrow and do not destabilize startup auth or widen protocol scope.
+
+prd_update_recommended: false
+
+suggested_plan_files:
+  - docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml
+  - docs/plan/20260702-hc-105-real-chat-send-receive/context_envelope.json
+
+resolved_decisions:
+  - decision: Steady-state post-auth ENet polling and dispatch is a first-class HC-105 task, not hidden glue.
+    context: Real server-backed room chat cannot become authoritative until one explicit runtime owner services ENet after startup auth and converts inbound packets into reducer-consumable events.
+    affects:
+      - T1-debug-client-chat-runtime-gap
+      - T2-implement-steady-state-chat-runtime-owner
+      - T4-critic-validate-hc-105-slice
+  - decision: Shared room chat echoed from the server is the only source of truth for visible channel history.
+    context: Submit actions may trigger transport work, but visible success must come from received ServerChatMessage handling rather than optimistic local append.
+    affects:
+      - T2-implement-steady-state-chat-runtime-owner
+      - T3-implement-authoritative-chat-state-and-tests
+      - T4-critic-validate-hc-105-slice
+  - decision: Inbound room-chat events must carry enough metadata to gate by selected server and room and distinguish self versus other senders.
+    context: The current reducer seam is too ambiguous for authoritative receive behavior unless the implementation names a minimal metadata carrier before rendering changes.
+    affects:
+      - T1-debug-client-chat-runtime-gap
+      - T3-implement-authoritative-chat-state-and-tests
+      - T4-critic-validate-hc-105-slice
+  - decision: Unsupported DM send must stop faking success without adding new backend protocol.
+    context: The DM UI may remain visible, but HC-105 should no-op or surface a narrow failure state instead of appending local fake success.
+    affects:
+      - T1-debug-client-chat-runtime-gap
+      - T3-implement-authoritative-chat-state-and-tests
+      - T4-critic-validate-hc-105-slice
+
+open_questions:
+  - question: What is the smallest inbound event shape that can represent transport source, room identity, and self-versus-other sender state without widening protocol scope?
+    context: The critique identifies missing metadata as blocking, but the exact carrier may be a new reducer payload, a small state struct, or a translation layer from transport helpers.
+    type: research
+    affects:
+      - T1-debug-client-chat-runtime-gap
+      - T3-implement-authoritative-chat-state-and-tests
+  - question: Should unsupported or failed send reuse an existing error surface in client state or add one narrow chat-specific status field?
+    context: HC-105 needs failure-path UX coverage, but the plan should prefer the smallest existing error surface that preserves clarity.
+    type: decision_blocker
+    affects:
+      - T1-debug-client-chat-runtime-gap
+      - T3-implement-authoritative-chat-state-and-tests
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Receive decoding exists, but no steady-state owner ever services ENet after auth, so inbound server chat never reaches the reducer during normal runtime.
+      likelihood: medium
+      impact: high
+      mitigation: Make runtime ownership its own implementation task, diagnose the exact hook first, and require focused validation on the chosen poll or dispatch seam.
+    - scenario: Reducer changes remove optimistic append but still cannot tell selected server, room, or self-versus-other context, so inbound messages render incorrectly or leak across contexts.
+      likelihood: medium
+      impact: high
+      mitigation: Lock a minimal metadata contract in diagnosis, then implement state or reducer changes only after the runtime owner task exposes that contract.
+    - scenario: Unsupported or failed sends no longer append locally but also provide no narrow status feedback, leaving the UI looking broken.
+      likelihood: medium
+      impact: medium
+      mitigation: Reuse an existing error surface when possible and require focused tests for unsupported DM send and failed room send behavior.
+    - scenario: New app-packet helpers mutate transport session state incorrectly and break subsequent encrypted traffic.
+      likelihood: low
+      impact: critical
+      mitigation: Reuse ClientServerTransport_buildEncryptedPacketBytes and ClientServerTransport_handleIncomingPacket patterns instead of introducing parallel crypto handling.
+  assumptions:
+    - Startup auth ownership from HC-103 remains in client/main.odin and should not be reworked.
+    - HC-104 server routing already accepts ClientChatMessage and emits ServerChatMessage for the shared room contract.
+    - The minimum acceptable scope is room chat only; DM send is unsupported for this slice.
+    - Narrow validation consists of client-focused Odin checks and tests rather than full end-to-end multi-process chat automation.
+
+tasks:
+  - id: T1-debug-client-chat-runtime-gap
+    title: Diagnose the exact steady-state chat runtime and metadata gap
+    description: Confirm the smallest control path that turns submit events into encrypted room-chat packets and inbound encrypted packets into reducer messages, while also naming the minimal metadata carrier needed for selected-server, room, and self-versus-other rendering.
+    wave: 1
+    agent: gem-debugger
+    status: completed
+    covers:
+      - Reducer branches that currently fake send success
+      - Explicit runtime owner for post-auth send and receive work
+      - Existing transport helpers that can be reused for encrypted app-packet IO
+      - Minimal inbound metadata required for authoritative room-chat append
+      - DM and failed-send behavior under the current server contract
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: client/update.odin
+        description: Contains optimistic SendChatMessage and SendChannelChatMessage append logic plus placeholder receive branches.
+      - path: client/main.odin
+        description: Owns startup auth lifecycle, selected transport state, and any runtime hook candidate.
+      - path: client/transport.odin
+        description: Owns ENet session state, encrypted packet sealing, and packet opening.
+      - path: client/view.odin
+        description: Emits reducer messages for DM and channel input submission.
+      - path: common/protocol.odin
+        description: Defines ClientChatMessagePayload and ServerChatMessagePayload.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Add an explicit first-class task for steady-state ENet poll and dispatch ownership.
+      - Add or adjust the state or reducer seam so inbound messages carry enough metadata for authoritative rendering.
+      - Keep unsupported DM path from faking success.
+    success_criteria:
+      - Names the exact function or hook where post-auth ENet polling and dispatch should live.
+      - Names the smallest outbound send trigger that should replace optimistic local append.
+      - Names the exact metadata fields required for server, room, and self-versus-other gating.
+      - Confirms whether unsupported or failed send should reuse an existing error surface or add one narrow chat-specific status field.
+      - Produces a minimal file list for implementation without expanding beyond the client/runtime slice.
+
+  - id: T2-implement-steady-state-chat-runtime-owner
+    title: Implement steady-state ENet poll and dispatch ownership for chat
+    description: Reuse the established encrypted transport to add one explicit post-auth runtime owner that services ENet, emits encrypted ClientChatMessage packets for the selected server and room, and translates inbound ServerChatMessage or protocol-error packets into app-level events.
+    wave: 2
+    agent: gem-implementer
+    status: completed
+    covers:
+      - First-class post-auth ENet service hook
+      - Client-side encrypted room-chat send helper
+      - Inbound packet decode and translation into reducer-consumable events
+      - Narrow error handling for unsupported or failed chat delivery
+    dependencies:
+      - T1-debug-client-chat-runtime-gap
+    conflicts_with: []
+    context_files:
+      - path: client/transport.odin
+        description: Existing encrypted packet seal/open helpers and live ENet session state.
+      - path: client/main.odin
+        description: Runtime owner for selected transport state and startup auth lifecycle.
+      - path: common/protocol.odin
+        description: Shared room-chat payload definitions and message types.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: The client UI only emits reducer messages, update.odin fakes successful send by mutating visible chat state directly, and client/transport.odin stops at generic encrypted packet build/open helpers without an explicit app-level post-auth send or poll owner.
+      target_files:
+        - client/transport.odin
+        - client/main.odin
+        - common/protocol.odin
+      fix_recommendations: Add the smallest established-session helper set needed to seal ClientChatMessagePayload, service ENet for inbound packets after auth, decode ServerChatMessagePayload or ServerProtocolError, and translate those results into structured reducer events without altering startup auth flow.
+      injected_at: 2026-07-02T10:22:52-05:00
+    acceptance_criteria:
+      - Add an explicit first-class task for steady-state ENet poll and dispatch ownership.
+      - Real server-backed room chat remains the source of truth.
+      - Failure paths stay narrow and do not fake visible delivery.
+    success_criteria:
+      - A selected established transport can emit encrypted ClientChatMessage packets using the existing protocol types.
+      - Normal runtime execution has one defined path that services ENet receive events after auth and surfaces structured app-level chat or error events.
+      - The implementation exposes enough inbound event data for downstream server, room, and sender gating.
+      - Protocol errors or disconnected transport states fail narrowly without silently appending chat.
+      - Startup auth behavior from HC-103 remains unchanged.
+    tech_stack:
+      - Odin
+      - ENet
+      - shared:skald commands/runtime callbacks
+      - Shared CBOR packet protocol
+    test_coverage: Add focused client tests around the runtime dispatch seam or transport helpers only as needed to lock the ownership contract.
+    diag:
+      paired_debugger_task: T1-debug-client-chat-runtime-gap
+      likely_send_surface: ClientServerTransport_buildEncryptedPacketBytes
+      likely_receive_surface: ClientServerTransport_handleIncomingPacket plus a new narrow ENet service helper
+      room_contract: Use the HC-104 shared room contract and existing ClientChatMessagePayload or ServerChatMessagePayload.
+    handoff:
+      do_not_reinvestigate:
+        - client/main.odin already owns selected-server startup auth and should remain the lifecycle owner.
+        - client/transport.odin already knows how to open EncryptedPacket and seal outbound encrypted packets once auth is established.
+        - common/protocol.odin already contains room-chat payload structs, so new protocol types should not be introduced unless strictly required.
+      required_test_first: odin check client -target:linux_amd64
+      target_files:
+        - client/transport.odin
+        - client/main.odin
+        - common/protocol.odin
+      minimal_change: Add only the helper and runtime glue needed for post-auth room-chat send and receive ownership; do not redesign startup auth or global app architecture.
+      acceptance_checks:
+        - odin check client -target:linux_amd64
+        - odin test client
+
+  - id: T3-implement-authoritative-chat-state-and-tests
+    title: Implement authoritative chat state, rendering metadata, and focused tests
+    description: Update the state or reducer seam so submit actions trigger transport work instead of optimistic local append, inbound room chat carries enough metadata for selected-server and room gating plus self-versus-other rendering, and focused tests lock in unsupported or failed send behavior.
+    wave: 3
+    agent: gem-implementer
+    status: completed
+    covers:
+      - Reducer send and receive state transitions
+      - Authoritative inbound metadata carrier for room-chat rendering
+      - Channel chat rendering sourced only from received server messages
+      - DM unsupported-path and failed-send behavior within existing UI
+      - Focused tests for no-local-append-on-submit and inbound authoritative append
+    dependencies:
+      - T2-implement-steady-state-chat-runtime-owner
+    conflicts_with: []
+    context_files:
+      - path: client/update.odin
+        description: Current optimistic append and placeholder receive behavior.
+      - path: client/view.odin
+        description: Channel and DM chat rendering plus submit callbacks.
+      - path: client/main.odin
+        description: State fields available for transport error, selected server, and receive dispatch.
+      - path: client/main_test.odin
+        description: Existing client test pattern for state and transport behavior.
+      - path: common/protocol.odin
+        description: Shared payload contract that informs the metadata translation layer.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: Submit handlers in client/view.odin only emit reducer messages, update.odin treats both DM and channel sends as local render operations rather than transport-backed actions, and the current receive seam does not clearly carry selected-server, room, or sender identity.
+      target_files:
+        - client/update.odin
+        - client/view.odin
+        - client/main.odin
+        - client/main_test.odin
+      fix_recommendations: Convert send branches into transport-triggering state transitions, keep receive branches as the sole chat-append path, introduce only the minimum metadata carrier needed for authoritative gating and styling, and use focused tests to lock in the no-optimistic-append and failure-path contracts.
+      injected_at: 2026-07-02T10:22:52-05:00
+    acceptance_criteria:
+      - Add or adjust the state or reducer seam so inbound messages carry enough metadata for room, source, and self-versus-other rendering.
+      - Include focused tests for no-local-append-on-submit and inbound authoritative append.
+      - Keep unsupported DM path from faking success and cover failed send behavior.
+    success_criteria:
+      - SendChannelChatMessage no longer mutates visible room chat directly on submit.
+      - Received room-chat events become the authoritative append path for visible channel history.
+      - Inbound events are gated by the selected server and target room before rendering.
+      - Rendering can distinguish self versus other senders without inventing new backend protocol.
+      - Unsupported DM send does not append locally and surfaces the chosen narrow failure behavior.
+      - Focused client tests prove no local append on submit, authoritative append on inbound receive, and unsupported or failed send handling.
+    tech_stack:
+      - Odin
+      - shared:skald
+      - core:testing
+    test_coverage: Extend existing client tests with reducer or runtime assertions for channel send, channel receive, unsupported DM send, and one failed-send path.
+    diag:
+      paired_debugger_task: T1-debug-client-chat-runtime-gap
+      ui_surface: channel and DM chat submit callbacks in client/view.odin
+      state_surface: current_chat_messages, current_dm_chat, chat_input_draft, dm_chat_draft, selected_transport_index
+    handoff:
+      do_not_reinvestigate:
+        - The server-backed source of truth for room chat is the echoed or broadcast ServerChatMessage.
+        - Distinct rendering should remain within existing rich-text span styling instead of introducing a new widget type.
+        - HC-105 does not require redesigning the DM panel; it only needs to stop faking delivery.
+      required_test_first: odin test client
+      target_files:
+        - client/update.odin
+        - client/view.odin
+        - client/main.odin
+        - client/main_test.odin
+        - common/protocol.odin
+      minimal_change: Keep visible UI changes limited to chat state transitions, metadata plumbing, and existing rendering patterns.
+      acceptance_checks:
+        - odin check client -target:linux_amd64
+        - odin test client
+
+  - id: T4-critic-validate-hc-105-slice
+    title: Critique the final HC-105 slice against the blocking findings
+    description: Run the narrow client validation commands and review the touched slice against the critique checklist so the final implementation preserves HC-103 startup auth ownership, HC-104 room-chat scope, and the new no-fake-success contract.
+    wave: 4
+    agent: gem-critic
+    status: completed
+    covers:
+      - Targeted client compile and test validation
+      - Regression review of steady-state ENet ownership and runtime hook placement
+      - Regression review of authoritative receive metadata and rendering behavior
+      - Confirmation that unsupported or failed sends no longer present false success
+    dependencies:
+      - T3-implement-authoritative-chat-state-and-tests
+    conflicts_with: []
+    context_files:
+      - path: client/main.odin
+        description: Runtime ownership boundary that must remain stable.
+      - path: client/transport.odin
+        description: Encrypted send and receive helper surface.
+      - path: client/update.odin
+        description: Final reducer behavior for send and receive.
+      - path: client/view.odin
+        description: Final submit and render behavior.
+      - path: client/main_test.odin
+        description: Focused validation coverage for the client slice.
+      - path: docs/plan/20260702-hc-104-server-chat-dispatch/plan.yaml
+        description: Prior server-side contract assumption for shared room chat.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Real server-backed room chat remains the source of truth.
+      - Focused tests prove no local fake success and authoritative inbound append.
+      - Unsupported or failed sends remain narrow and do not widen protocol scope.
+    success_criteria:
+      - odin check client -target:linux_amd64 passes.
+      - odin test client passes, including focused HC-105 coverage.
+      - Critique review confirms the first implementation wave after diagnosis established a real steady-state ENet owner.
+      - Critique review confirms visible room-chat history is receive-driven rather than optimistic-send-driven.
+      - Critique review confirms inbound events carry enough metadata for selected-server, room, and self-versus-other behavior.
+      - Critique review confirms unsupported or failed send behavior does not fake success or introduce DM backend semantics.

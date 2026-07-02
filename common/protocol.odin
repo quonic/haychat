@@ -8,6 +8,7 @@ import "core:time/datetime"
 
 ProtocolVersion :: u32
 protocolVersion: ProtocolVersion = 2
+GENERAL_ROOM_ID :: int(1)
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.

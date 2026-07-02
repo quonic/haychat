@@ -20,6 +20,21 @@ ClientTransportResult :: struct {
 	hasOpenedPacket:     bool,
 }
 
+ClientTransportRuntimeEventKind :: enum {
+	None,
+	RoomChatReceived,
+	ProtocolError,
+	Disconnected,
+}
+
+ClientTransportRuntimeEvent :: struct {
+	kind:     ClientTransportRuntimeEventKind,
+	serverID: int,
+	senderID: int,
+	roomID:   int,
+	message:  string,
+}
+
 ClientStartupAuthSession :: struct {
 	enetHost:        ^ENet.Host,
 	enetPeer:        ^ENet.Peer,
@@ -105,12 +120,49 @@ ClientServerTransport_fail :: proc(transport: ^ClientServerTransport, message: s
 	transport.transport.phase = .Failed
 }
 
+ClientServerTransport_runtimeProtocolError :: proc(
+	transport: ^ClientServerTransport,
+	message: string,
+) {
+	ClientServerTransport_setLastError(transport, message)
+}
+
 ClientServerTransport_handleDisconnect :: proc(transport: ^ClientServerTransport) {
 	wasFailed := transport.transport.phase == .Failed
 	ClientServerTransport_clearSessionRuntimeState(transport)
 	if wasFailed {
 		transport.transport.phase = .Failed
 	}
+}
+
+ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) {
+	if len(event.message) > 0 {
+		delete(event.message)
+	}
+	event^ = {}
+}
+
+ClientServerTransport_makeRuntimeEvent :: proc(
+	transport: ^ClientServerTransport,
+	kind: ClientTransportRuntimeEventKind,
+	message: string,
+	roomID: int = 0,
+	senderID: int = 0,
+) -> ClientTransportRuntimeEvent {
+	return ClientTransportRuntimeEvent {
+		kind = kind,
+		serverID = transport.serverID,
+		senderID = senderID,
+		roomID = roomID,
+		message = strings.clone(message),
+	}
+}
+
+ClientServerTransport_runtimeRoomID :: proc(roomID: int) -> int {
+	if roomID == 0 {
+		return common.GENERAL_ROOM_ID
+	}
+	return roomID
 }
 
 ClientServerTransport_initFailed :: proc(
@@ -588,4 +640,219 @@ ClientServerTransport_buildEncryptedPacketBytes :: proc(
 		return nil, false
 	}
 	return packetBytes, true
+}
+
+ClientServerTransport_buildRoomChatPacketBytes :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	content: string,
+) -> (
+	[]u8,
+	bool,
+) {
+	return ClientServerTransport_buildEncryptedPacketBytes(
+		transport,
+		.ClientChatMessage,
+		common.ClientChatMessagePayload {
+			roomId = ClientServerTransport_runtimeRoomID(roomID),
+			content = content,
+		},
+	)
+}
+
+ClientServerTransport_sendRoomChatMessage :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	content: string,
+) -> bool {
+	if !ClientServerTransport_hasLiveENetSession(transport) {
+		ClientServerTransport_fail(transport, "live ENet session is unavailable")
+		return false
+	}
+
+	packetBytes, ok := ClientServerTransport_buildRoomChatPacketBytes(
+		transport,
+		roomID,
+		content,
+	)
+	if !ok {
+		return false
+	}
+	defer delete(packetBytes)
+
+	if !ClientServerTransport_sendENetPacket(
+		transport.enetHost,
+		transport.enetPeer,
+		STARTUP_AUTH_CHANNEL_CHAT,
+		packetBytes,
+	) {
+		ClientServerTransport_fail(transport, "failed to send room chat packet")
+		return false
+	}
+
+	return true
+}
+
+ClientServerTransport_translateRuntimeOpenedPacket :: proc(
+	transport: ^ClientServerTransport,
+	innerPacket: common.Packet,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	#partial switch innerPacket.messageType {
+	case .ServerChatMessage:
+		chatPayload: common.ServerChatMessagePayload
+		if cbor.unmarshal(innerPacket.payload, &chatPayload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid server chat payload")
+			return ClientServerTransport_makeRuntimeEvent(
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			), true
+		}
+		defer delete(chatPayload.content)
+
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.RoomChatReceived,
+			chatPayload.content,
+			chatPayload.roomId,
+			chatPayload.senderId,
+		), true
+
+	case .ServerProtocolError:
+		protocolError: common.ProtocolErrorResponse
+		if cbor.unmarshal(innerPacket.payload, &protocolError) == nil {
+			defer delete(protocolError.message)
+			ClientServerTransport_runtimeProtocolError(transport, protocolError.message)
+		} else {
+			ClientServerTransport_runtimeProtocolError(transport, "server protocol error")
+		}
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.ProtocolError,
+			transport.lastError,
+		), true
+
+	case:
+		ClientServerTransport_runtimeProtocolError(
+			transport,
+			fmt.aprintf("unexpected runtime message type: %v", innerPacket.messageType),
+		)
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.ProtocolError,
+			transport.lastError,
+		), true
+	}
+	return {}, false
+}
+
+ClientServerTransport_handleRuntimePacketBytes :: proc(
+	transport: ^ClientServerTransport,
+	packetBytes: []u8,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	outerPacket: common.Packet
+	if cbor.unmarshal(packetBytes, &outerPacket) != nil {
+		ClientServerTransport_fail(transport, "invalid outer packet")
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.ProtocolError,
+			transport.lastError,
+		), true
+	}
+	defer delete(outerPacket.payload)
+
+	#partial switch outerPacket.messageType {
+	case .EncryptedPacket:
+		if !common.TransportState_canEncrypt(&transport.transport) {
+			ClientServerTransport_fail(transport, "encrypted packet received before auth success")
+			return ClientServerTransport_makeRuntimeEvent(
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			), true
+		}
+
+		innerPacket, openOK := common.openPacketForSession(&transport.transport, outerPacket)
+		if !openOK {
+			ClientServerTransport_fail(transport, "failed to open encrypted packet")
+			return ClientServerTransport_makeRuntimeEvent(
+				transport,
+				.ProtocolError,
+				transport.lastError,
+			), true
+		}
+		defer delete(innerPacket.payload)
+
+		return ClientServerTransport_translateRuntimeOpenedPacket(transport, innerPacket)
+
+	case .ServerProtocolError:
+		protocolError: common.ProtocolErrorResponse
+		if cbor.unmarshal(outerPacket.payload, &protocolError) == nil {
+			defer delete(protocolError.message)
+			ClientServerTransport_runtimeProtocolError(transport, protocolError.message)
+		} else {
+			ClientServerTransport_runtimeProtocolError(transport, "server protocol error")
+		}
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.ProtocolError,
+			transport.lastError,
+		), true
+
+	case:
+		ClientServerTransport_fail(
+			transport,
+			fmt.aprintf("unexpected runtime outer message type: %v", outerPacket.messageType),
+		)
+		return ClientServerTransport_makeRuntimeEvent(
+			transport,
+			.ProtocolError,
+			transport.lastError,
+		), true
+	}
+	return {}, false
+}
+
+ClientServerTransport_serviceRuntime :: proc(
+	transport: ^ClientServerTransport,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	if transport.transport.phase != .Established || !ClientServerTransport_hasLiveENetSession(transport) {
+		return {}, false
+	}
+
+	event: ENet.Event
+	eventResult := ENet.host_service(transport.enetHost, &event, 0)
+	if eventResult <= 0 {
+		return {}, false
+	}
+
+	switch event.type {
+	case .RECEIVE:
+		packetData := event.packet.data[:event.packet.dataLength]
+		packetCopy := make([dynamic]u8, 0, len(packetData))
+		for b in packetData {
+			append(&packetCopy, b)
+		}
+		ENet.packet_destroy(event.packet)
+		defer delete(packetCopy)
+
+		return ClientServerTransport_handleRuntimePacketBytes(transport, packetCopy[:])
+
+	case .DISCONNECT:
+		ClientServerTransport_handleDisconnect(transport)
+		return ClientServerTransport_makeRuntimeEvent(transport, .Disconnected, ""), true
+
+	case .CONNECT, .NONE:
+		return {}, false
+	}
+	return {}, false
 }
