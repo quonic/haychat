@@ -156,8 +156,11 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 				// Log messages not for network process
 				fmt.eprintfln("[Network] Received log message, ignoring")
 
-			case DatabaseQuery, DatabaseQueryResult, DatabaseError,
-			     DatabaseStartupReady, DatabaseStartupFailed:
+			case DatabaseQuery,
+			     DatabaseQueryResult,
+			     DatabaseError,
+			     DatabaseStartupReady,
+			     DatabaseStartupFailed:
 				// Database messages not for network process
 				fmt.eprintfln("[Network] Received database message, ignoring")
 

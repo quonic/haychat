@@ -1075,7 +1075,10 @@ waitForDatabaseStartupAck :: proc(pm: ^ProcessManager) -> string {
 	return waitForDatabaseStartupAckWithTimeout(pm, DATABASE_STARTUP_ACK_TIMEOUT)
 }
 
-waitForDatabaseStartupAckWithTimeout :: proc(pm: ^ProcessManager, timeout: time.Duration) -> string {
+waitForDatabaseStartupAckWithTimeout :: proc(
+	pm: ^ProcessManager,
+	timeout: time.Duration,
+) -> string {
 	start := time.now()
 	for time.since(start) < timeout {
 		if mainInterruptRequested {
@@ -1237,7 +1240,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 					common.DatabaseQueryResponse{success = false, message = m.error, result = ""},
 				)
 			case DatabaseStartupReady, DatabaseStartupFailed:
-				// Startup-only coordination messages are consumed before the main loop starts.
+			// Startup-only coordination messages are consumed before the main loop starts.
 			case ProcessShutdown:
 				sync.mutex_lock(&pm.processMutex)
 				pm.shouldShutdown = true

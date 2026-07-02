@@ -1,9 +1,9 @@
 package server
 
 import "../common"
-import "core:fmt"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
+import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -985,13 +985,16 @@ testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^test
 	assert(writeErr == nil, "expected file storage test file creation to succeed")
 	defer routerTestRemovePathIfExists(fileStoragePath)
 
-	config := ServerConfig{
+	config := ServerConfig {
 		fileStoragePath = fileStoragePath,
 	}
 	routerTestGenerateValidIdentityConfig(&config)
 
 	preflightErr := startupPreflightError(config)
-	assert(len(preflightErr) > 0, "expected startup preflight to fail for a non-directory file storage path")
+	assert(
+		len(preflightErr) > 0,
+		"expected startup preflight to fail for a non-directory file storage path",
+	)
 	assert(
 		strings.contains(preflightErr, "file storage path"),
 		"expected startup preflight error to mention the file storage path",
@@ -1026,14 +1029,17 @@ testConfigStartupPreflightSkipsIdentityWriteGateWhenConfigAlreadyHasValidIdentit
 	identityPath, identityPathErr := filepath.join({blockingParentPath, "server_identity.json"})
 	assert(identityPathErr == nil, "expected identity path join to succeed")
 
-	config := ServerConfig{
-		fileStoragePath = storageDir,
+	config := ServerConfig {
+		fileStoragePath        = storageDir,
 		serverIdentityFilePath = identityPath,
 	}
 	routerTestGenerateValidIdentityConfig(&config)
 
 	preflightErr := startupPreflightError(config)
-	assert(len(preflightErr) == 0, "expected valid configured identity to skip identity path write preflight")
+	assert(
+		len(preflightErr) == 0,
+		"expected valid configured identity to skip identity path write preflight",
+	)
 }
 
 @(test)
@@ -1049,8 +1055,8 @@ testDatabaseOpenRuntimeConnectionWithHooksReturnsActionableFailure :: proc(t: ^t
 	assert(connectMessageErr == nil, "expected test cstring allocation to succeed")
 	routerTestDatabaseConnectMessage = connectMessage
 
-	config := ServerConfig{
-		databaseURL = "127.0.0.1",
+	config := ServerConfig {
+		databaseURL  = "127.0.0.1",
 		databasePort = 5432,
 		databaseUser = "haychat",
 		databasePass = "",
@@ -1065,7 +1071,10 @@ testDatabaseOpenRuntimeConnectionWithHooksReturnsActionableFailure :: proc(t: ^t
 		routerTestDatabaseFinishHook,
 	)
 
-	assert(conn == pg.Conn(nil), "expected failed database startup connection to return nil connection")
+	assert(
+		conn == pg.Conn(nil),
+		"expected failed database startup connection to return nil connection",
+	)
 	assert(len(openErr) > 0, "expected failed database startup connection to return an error")
 	assert(
 		strings.contains(openErr, "connection refused"),
@@ -1081,8 +1090,8 @@ testDatabaseRuntimeConninfoAddsConnectTimeout :: proc(t: ^testing.T) {
 	sync.mutex_lock(&routerTestMutex)
 	defer sync.mutex_unlock(&routerTestMutex)
 
-	config := ServerConfig{
-		databaseURL = "10.0.0.99",
+	config := ServerConfig {
+		databaseURL  = "10.0.0.99",
 		databasePort = 5432,
 		databaseUser = "haychat",
 		databasePass = "secret",

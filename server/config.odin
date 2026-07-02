@@ -228,7 +228,12 @@ startupProbeWriteError :: proc(path: string, label: string) -> string {
 
 	writeErr := os.write_entire_file_from_bytes(probePath, []u8{'o', 'k'})
 	if writeErr != nil {
-		return fmt.aprintf("startup preflight failed: %s is not writable at %q: %v", label, path, writeErr)
+		return fmt.aprintf(
+			"startup preflight failed: %s is not writable at %q: %v",
+			label,
+			path,
+			writeErr,
+		)
 	}
 
 	_ = os.remove(probePath)
@@ -239,7 +244,8 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 	if len(config.fileStoragePath) == 0 {
 		return "startup preflight failed: file storage path is empty"
 	}
-	if storageErr := startupProbeWriteError(config.fileStoragePath, "file storage path"); len(storageErr) > 0 {
+	if storageErr := startupProbeWriteError(config.fileStoragePath, "file storage path");
+	   len(storageErr) > 0 {
 		return storageErr
 	}
 
@@ -247,7 +253,9 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 		return ""
 	}
 
-	identityConfig := ServerConfig{serverIdentityFilePath = config.serverIdentityFilePath}
+	identityConfig := ServerConfig {
+		serverIdentityFilePath = config.serverIdentityFilePath,
+	}
 	if loadServerIdentityFile(&identityConfig) {
 		delete(identityConfig.serverPrivateKey)
 		delete(identityConfig.serverPublicKey)
@@ -264,7 +272,8 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 		)
 	}
 
-	if identityErr := startupProbeWriteError(identityDir, "server identity directory"); len(identityErr) > 0 {
+	if identityErr := startupProbeWriteError(identityDir, "server identity directory");
+	   len(identityErr) > 0 {
 		return identityErr
 	}
 

@@ -140,7 +140,10 @@ databaseOpenRuntimeConnectionWithHooks :: proc(
 	statusProc: DatabaseConnectionStatusProc,
 	errorMessageProc: DatabaseConnectionErrorProc,
 	finishProc: DatabaseConnectionFinishProc,
-) -> (pg.Conn, string) {
+) -> (
+	pg.Conn,
+	string,
+) {
 	conninfo := databaseRuntimeConninfo(config)
 	defer delete(conninfo)
 
