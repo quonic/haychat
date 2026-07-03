@@ -31,6 +31,10 @@ Clone the repository and follow the instructions in the `client/` and `server/` 
 
 On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`, defaulting to `$HOME/.config/haychat/config.json` when `XDG_CONFIG_HOME` is unset. Startup also migrates the original historical malformed path formula `$HOME$XDG_CONFIG_HOME/haychat/config.json`, which means older installs are recovered from either the default `$HOME$HOME/.config/haychat/config.json` shape or a custom `XDG_CONFIG_HOME` variant if that file still exists.
 
+### Development Environment Setup
+
+Run the `setup-dev-env.sh` script to set up the development environment. This script checks for required dependencies, clones necessary repositories, and builds the Odin language.
+
 ### Local Test Server Bootstrap
 
 The repository now includes one supported bootstrap path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
