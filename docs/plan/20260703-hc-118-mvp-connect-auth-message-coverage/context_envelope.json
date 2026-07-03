@@ -1,0 +1,444 @@
+{
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260703-hc-118-mvp-connect-auth-message-coverage",
+            "created_at": "2026-07-03T15:48:21-05:00",
+            "last_updated": "2026-07-03T21:20:00-05:00",
+            "version": 3,
+            "source": [
+                "user_request:hc118_plan_revision",
+                "repo_memory:/memories/repo/threaded-migration-baseline.md",
+                "repo_memory:/memories/repo/server-network-channel-routing.md",
+                "workspace:docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml",
+                "workspace:client/main_test.odin",
+                "workspace:client/transport.odin",
+                "workspace:run-test-server.sh",
+                "workspace:server/main.odin",
+                "workspace:server/config.odin"
+            ]
+        },
+        "scope": {
+            "purpose": [
+                "Reusable implementation context for the revised HC-118 MVP startup/connect/auth/message gate.",
+                "Helps future agents avoid re-discovery of the chosen file placement, orchestration seam, and Linux-first scope boundary."
+            ],
+            "applies_to": [
+                "client/main_test.odin",
+                "client/transport.odin",
+                "client/main.odin",
+                "run-test-server.sh",
+                "plans/04-test-coverage.md",
+                "README.md"
+            ],
+            "non_goals": [
+                "Adding a new dedicated live test file unless implementation proves client/main_test.odin cannot stay coherent.",
+                "Adding GUI automation, container orchestration, or a broader cross-platform release matrix.",
+                "Revalidating protocol slices already covered by existing common/server/client tests.",
+                "Using PostgreSQL bootstrap identities as the auth-semantic source of truth."
+            ]
+        },
+        "tech_stack": [
+            {
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Primary language for client, server, package tests, and the planned live MVP proof.",
+                "config_files": [
+                    "AGENTS.md",
+                    "client/AGENTS.md",
+                    "server/AGENTS.md"
+                ]
+            },
+            {
+                "name": "ENet",
+                "version": "vendor:ENet",
+                "usage_context": "Real connect/auth session retention plus room-chat send and receive for the live proof.",
+                "config_files": [
+                    "client/transport.odin",
+                    "server/network.odin"
+                ]
+            },
+            {
+                "name": "PostgreSQL",
+                "version": "external service",
+                "usage_context": "Required for local server startup and bootstrap in the Linux-first HC-118 gate.",
+                "config_files": [
+                    "run-test-server.sh",
+                    "server/sql/auth_bootstrap.sql",
+                    "server/config.odin"
+                ]
+            },
+            {
+                "name": "Bash helper workflow",
+                "version": "workspace script",
+                "usage_context": "run-test-server.sh remains the owning bootstrap/start/readiness/lifecycle seam for the gate.",
+                "config_files": [
+                    "run-test-server.sh"
+                ]
+            }
+        ],
+        "conventions": [
+            "Prefer one bounded live proof plus existing baselines over a monolithic integration suite.",
+            "Use client/main_test.odin as the live-proof anchor unless a concrete blocker emerges during implementation.",
+            "Keep failures attributable to startup, connect, auth, or message exchange.",
+            "Treat Linux-first support as a local developer confidence gate statement, not a release-wide platform claim."
+        ],
+        "constraints": {
+            "hard": [
+                "Scope stays limited to automated startup/auth/one-message MVP coverage.",
+                "Baseline odin test common, odin test server, and odin test client remain part of the gate.",
+                "Prefer focused headless harnesses over GUI or broad infrastructure work.",
+                "Failures must map cleanly to startup, connect, auth, or message exchange.",
+                "Do not rely on PostgreSQL bootstrap identities for auth semantics."
+            ],
+            "soft": [
+                "Extend client/main_test.odin rather than adding a new live test file.",
+                "Reuse ClientServerTransport_sendRoomChatMessage and ClientServerTransport_serviceRuntime.",
+                "Keep Windows scope out of slice for HC-118 unless a trivial supported path already exists."
+            ],
+            "compatibility": [
+                "The existing live seam is testClientServerTransportCanEstablishLiveStartupAuthOverENet in client/main_test.odin.",
+                "run-test-server.sh currently owns bootstrap/start but lacks readiness waiting, background lifecycle control, and guaranteed cleanup.",
+                "HC-107 startup behavior already ties successful startup to database-ready/preflighted usability.",
+                "Current server routing remains chat-only and ignores non-chat channels for MVP traffic."
+            ],
+            "security_requirements": [
+                "Reuse encrypted transport helpers instead of bypassing auth or packet sealing.",
+                "Keep helper credentials environment-driven and local-only in scope.",
+                "Do not expose secrets in failure output."
+            ]
+        },
+        "architecture_snapshot": {
+            "key_dirs": {
+                "path": [
+                    "client/",
+                    "server/",
+                    "common/",
+                    "docs/plan/",
+                    "plans/"
+                ]
+            },
+            "patterns": [
+                "Client tests already mix reducer-only coverage with an opt-in live ENet seam in one file.",
+                "Server-side live orchestration is script-owned rather than embedded in test code.",
+                "Startup usability is already treated as a readiness contract, not just a spawned process."
+            ],
+            "key_components": [
+                {
+                    "name": "testClientServerTransportCanEstablishLiveStartupAuthOverENet",
+                    "location": "client/main_test.odin:1052",
+                    "responsibility": [
+                        "Existing opt-in live startup-auth proof that retains an authenticated ENet session."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "ClientServerTransport_sendRoomChatMessage",
+                    "location": "client/transport.odin:663",
+                    "responsibility": [
+                        "Builds and sends encrypted room-chat packets over the established ENet session."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "ClientServerTransport_serviceRuntime",
+                    "location": "client/transport.odin:827",
+                    "responsibility": [
+                        "Polls the live ENet session and translates authoritative runtime packets into events."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "name": "run-test-server bootstrap/start commands",
+                    "location": "run-test-server.sh",
+                    "responsibility": [
+                        "Owns the bootstrap/start seam that must absorb readiness waiting, background lifecycle control, and cleanup for HC-118."
+                    ],
+                    "confidence": 0.99
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "client/main_test.odin",
+                    "purpose": [
+                        "Chosen implementation home for the live MVP proof."
+                    ],
+                    "why_relevant": [
+                        "Already contains the opt-in live startup-auth seam and adjacent transport-focused tests, making it the smallest implementation surface."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "testClientServerTransportCanEstablishLiveStartupAuthOverENet",
+                            "type": "function",
+                            "location": "client/main_test.odin:1052",
+                            "description": "Existing live startup-auth proof to extend rather than duplicate."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "client/transport.odin",
+                    "purpose": [
+                        "Provides the live send and service helpers the proof must reuse."
+                    ],
+                    "why_relevant": [
+                        "Avoids creating a parallel transport harness surface."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "ClientServerTransport_sendRoomChatMessage",
+                            "type": "function",
+                            "location": "client/transport.odin:663",
+                            "description": "Required live sender for the one-message MVP proof."
+                        },
+                        {
+                            "element": "ClientServerTransport_serviceRuntime",
+                            "type": "function",
+                            "location": "client/transport.odin:827",
+                            "description": "Required runtime poll path for authoritative receive assertions."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                },
+                {
+                    "path": "run-test-server.sh",
+                    "purpose": [
+                        "Owns the supported local bootstrap/start seam for HC-118 orchestration."
+                    ],
+                    "why_relevant": [
+                        "Critic findings require readiness, background lifecycle, and cleanup work to be explicit plan scope."
+                    ],
+                    "key_elements": [
+                        {
+                            "element": "bootstrap, start, bootstrap-start commands",
+                            "type": "pattern",
+                            "location": "run-test-server.sh",
+                            "description": "Current helper commands that must become deterministic enough for the HC-118 gate."
+                        }
+                    ],
+                    "security_sensitivity": "internal",
+                    "contains_secrets": false,
+                    "reliability": "codebase",
+                    "confidence": 0.99
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "Opt-in live client seam in existing test file",
+                    "category": "testing",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "client/main_test.odin:1052"
+                    ]
+                },
+                {
+                    "name": "Script-owned local server orchestration",
+                    "category": "runtime",
+                    "confidence": 0.99,
+                    "source": "codebase_analysis",
+                    "example_location": [
+                        "run-test-server.sh"
+                    ]
+                },
+                {
+                    "name": "Baseline-package-plus-live-proof gate",
+                    "category": "validation",
+                    "confidence": 0.95,
+                    "source": "assumption",
+                    "example_location": [
+                        "docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml"
+                    ]
+                }
+            ],
+            "dependencies": {
+                "internal": [
+                    "HC-103 startup-auth bridge behavior in client/main.odin",
+                    "HC-105 runtime polling ownership in client/transport.odin",
+                    "HC-107 startup readiness/preflight contract",
+                    "Existing baseline package tests"
+                ],
+                "external": [
+                    "Odin toolchain",
+                    "Linux developer environment",
+                    "Local PostgreSQL reachable with helper defaults or env overrides"
+                ]
+            },
+            "gotchas": [
+                {
+                    "text": "The current helper has no explicit readiness wait or guaranteed background cleanup, so naively composing it into a gate will produce timing and orphan-process failures.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "The live seam is opt-in through HAYCHAT_LIVE_STARTUP_AUTH=1, so the gate must deliberately enable and isolate that path.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "Linux-first support must be documented as local confidence only; otherwise reviewers may infer cross-platform coverage that the slice does not provide.",
+                    "confidence": 0.95
+                },
+                {
+                    "text": "HC-118 is complete at the documented code-and-docs scope even if a given local machine still fails the gate because the configured PostgreSQL user lacks permission on schema public during bootstrap.",
+                    "confidence": 0.99
+                }
+            ],
+            "domain_context": {
+                "security_considerations": [
+                    {
+                        "area": "Transport encryption",
+                        "location": "client/transport.odin",
+                        "concern": "Live tests must reuse the real encrypted packet helpers instead of shortcutting auth or packet sealing."
+                    },
+                    {
+                        "area": "Local credentials",
+                        "location": "run-test-server.sh",
+                        "concern": "Defaults are acceptable for local Linux gating only and should remain environment-overridable."
+                    }
+                ],
+                "testing_patterns": {
+                    "framework": "Odin built-in testing",
+                    "coverage_areas": [
+                        "client startup-auth live seam",
+                        "client runtime translation",
+                        "server startup preflight",
+                        "shared auth and packet crypto"
+                    ],
+                    "test_organization": "Package-local _test.odin files with one opt-in live client seam and broad slice coverage elsewhere.",
+                    "mock_patterns": [
+                        "Bridge substitution in client tests",
+                        "Runtime helper reuse instead of GUI driving"
+                    ]
+                },
+                "error_handling": "HC-118 acceptance requires distinct startup, connect, auth, and message failure attribution rather than one opaque integration error.",
+                "data_flow": "local bootstrap/start helper -> ready server -> client A startup auth -> client B startup auth -> client A encrypted room-chat send -> server routes chat-only message -> client B runtime service receives authoritative event"
+            },
+            "open_questions": []
+        },
+        "prior_decisions": [
+            {
+                "decision": "Use client/main_test.odin as the live-proof anchor.",
+                "rationale": [
+                    "The existing opt-in live startup-auth seam already lives there.",
+                    "The user asked to resolve the placement question now and to prefer extending the existing file."
+                ],
+                "evidence": [
+                    "path:client/main_test.odin",
+                    "path:docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Extend client/main_test.odin rather than adding a new live test file"
+                ],
+                "linked_patterns": [
+                    "Opt-in live client seam in existing test file"
+                ]
+            },
+            {
+                "decision": "Make readiness/lifecycle explicit HC-118 scope in run-test-server.sh.",
+                "rationale": [
+                    "The current helper owns bootstrap/start already but lacks deterministic readiness and cleanup semantics.",
+                    "Critic findings specifically called for readiness/lifecycle to become a real task."
+                ],
+                "evidence": [
+                    "path:run-test-server.sh",
+                    "path:docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml"
+                ],
+                "confidence": 0.99,
+                "linked_constraints": [
+                    "Add explicit orchestration and readiness lifecycle work for the gate"
+                ],
+                "linked_patterns": [
+                    "Script-owned local server orchestration"
+                ]
+            },
+            {
+                "decision": "Treat Linux-first as the supported HC-118 local gate boundary.",
+                "rationale": [
+                    "Current helper and live seam are Linux-centered.",
+                    "Widening to Windows would add infrastructure work outside the bounded MVP scope."
+                ],
+                "evidence": [
+                    "path:run-test-server.sh",
+                    "path:/memories/repo/threaded-migration-baseline.md"
+                ],
+                "confidence": 0.95,
+                "linked_constraints": [
+                    "Keep Windows scope out of slice for HC-118 unless a trivial supported path already exists"
+                ],
+                "linked_patterns": [
+                    "Baseline-package-plus-live-proof gate"
+                ]
+            }
+        ],
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/threaded-migration-baseline.md",
+                "trust": "high"
+            },
+            {
+                "path": "/memories/repo/server-network-channel-routing.md",
+                "trust": "high"
+            }
+        ]
+    }
+}
+					"Keep automation lightweight and local"
+],
+"linked_patterns": [
+"Workspace-local tester defaults"
+]
+},
+{
+"decision": "Phase-specific failure reporting is mandatory, not optional polish.",
+"rationale": [
+"The issue outcome and user constraints both demand attribution to startup, connect, auth, or message exchange.",
+"A single opaque integration failure would not satisfy the requested release-gate behavior."
+],
+"evidence": [
+"path:plans/backlog/M1-mvp-chat-flow.md",
+"path:plans/04-test-coverage.md"
+],
+"confidence": 1.0,
+"linked_constraints": [
+"Failures must clearly indicate whether connect, auth, startup, or message exchange regressed"
+],
+"linked_patterns": [
+"Focused Odin assertions with explicit failure strings"
+]
+}
+],
+"reuse_notes": [
+{
+"path": "/memories/repo/threaded-migration-baseline.md",
+"trust": "high"
+},
+{
+"path": "/memories/repo/server-runtime-defaults.md",
+"trust": "high"
+},
+{
+"path": "/memories/repo/server-network-channel-routing.md",
+"trust": "high"
+},
+{
+"path": "docs/plan/20260702-hc-105-real-chat-send-receive/plan.yaml",
+"trust": "high"
+},
+{
+"path": "docs/plan/20260702-hc-106-database-bootstrap-test-identity/plan.yaml",
+"trust": "high"
+},
+{
+"path": "docs/plan/20260702-hc-107-startup-preflight-checks/plan.yaml",
+"trust": "high"
+}
+]
+}
+}

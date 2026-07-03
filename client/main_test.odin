@@ -3,9 +3,11 @@ package client
 
 import "../common"
 import "core:encoding/cbor"
+import "core:fmt"
 import "core:os"
 import "core:sync"
 import "core:testing"
+import "core:time"
 import "shared:skald"
 
 startupAuthBridgeTestMutex: sync.Mutex
@@ -163,6 +165,63 @@ testRoomChatAreaView :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> (skald.View_Stac
 	}
 
 	return chatArea, true
+}
+
+liveTestTransportStatus :: proc(transport: ^ClientServerTransport) -> string {
+	return fmt.aprintf("phase=%v lastError=%q", transport.transport.phase, transport.lastError)
+}
+
+liveTestExpectEstablishedTransport :: proc(
+	t: ^testing.T,
+	transport: ^ClientServerTransport,
+	label: string,
+) {
+	status := liveTestTransportStatus(transport)
+	defer delete(status)
+
+	testing.expect(
+		t,
+		transport.transport.phase == .Established,
+		fmt.aprintf("expected %s to complete live connect/auth, got %s", label, status),
+	)
+	testing.expect(
+		t,
+		transport.authenticatedUserID != 0,
+		fmt.aprintf(
+			"expected %s to report a non-zero authenticated user ID, got %s",
+			label,
+			status,
+		),
+	)
+	testing.expect(
+		t,
+		len(transport.lastError) == 0,
+		fmt.aprintf("expected %s to finish live auth without an error, got %s", label, status),
+	)
+	testing.expect(
+		t,
+		ClientServerTransport_hasLiveENetSession(transport),
+		fmt.aprintf("expected %s to retain a live ENet session, got %s", label, status),
+	)
+}
+
+liveTestWaitForRoomChatEvent :: proc(
+	transport: ^ClientServerTransport,
+	timeout: time.Duration,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	start := time.now()
+	for time.since(start) < timeout {
+		runtimeEvent, hasEvent := ClientServerTransport_serviceRuntime(transport)
+		if hasEvent {
+			return runtimeEvent, true
+		}
+		time.sleep(1 * time.Millisecond)
+	}
+
+	return {}, false
 }
 
 @(test)
@@ -1108,5 +1167,118 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 		t,
 		postAuthProbeSent,
 		"expected retained ENet session to allow a post-auth outbound send",
+	)
+}
+
+@(test)
+testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: proc(t: ^testing.T) {
+	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.allocator) != "1" {
+		return
+	}
+
+	sync.mutex_lock(&startupAuthBridgeTestMutex)
+	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
+
+	configA := testConfigWithServers(
+		{
+			Server {
+				id = 67,
+				name = "Live Chat Server",
+				short_name = getShortServerName("Live Chat Server"),
+				host = "127.0.0.1",
+				port = 12345,
+			},
+		},
+	)
+	configB := testConfigWithServers(
+		{
+			Server {
+				id = 67,
+				name = "Live Chat Server",
+				short_name = getShortServerName("Live Chat Server"),
+				host = "127.0.0.1",
+				port = 12345,
+			},
+		},
+	)
+
+	originalBridge := startupAuthBridge
+	startupAuthBridge = startupAuthBridge_real
+	defer startupAuthBridge = originalBridge
+
+	stateA := State_initFromConfig(configA)
+	stateB := State_initFromConfig(configB)
+	transportA := &stateA.serverTransports[0]
+	transportB := &stateB.serverTransports[0]
+	defer ClientServerTransport_handleDisconnect(transportA)
+	defer ClientServerTransport_handleDisconnect(transportB)
+
+	liveTestExpectEstablishedTransport(t, transportA, "client A")
+	liveTestExpectEstablishedTransport(t, transportB, "client B")
+
+	messageContent := "live two-client room chat proof"
+	sendOK := ClientServerTransport_sendRoomChatMessage(
+		transportA,
+		common.GENERAL_ROOM_ID,
+		messageContent,
+	)
+	sendStatus := liveTestTransportStatus(transportA)
+	defer delete(sendStatus)
+	testing.expect(
+		t,
+		sendOK,
+		fmt.aprintf("expected client A to send a live room chat message, got %s", sendStatus),
+	)
+
+	runtimeEvent, hasEvent := liveTestWaitForRoomChatEvent(transportB, 2 * time.Second)
+	defer if hasEvent do ClientTransportRuntimeEvent_deinit(&runtimeEvent)
+	receiverStatus := liveTestTransportStatus(transportB)
+	defer delete(receiverStatus)
+	testing.expect(
+		t,
+		hasEvent,
+		fmt.aprintf(
+			"expected client B to receive a live room chat message before timeout, got %s",
+			receiverStatus,
+		),
+	)
+	if !hasEvent {
+		return
+	}
+
+	testing.expect(
+		t,
+		runtimeEvent.kind == .RoomChatReceived,
+		fmt.aprintf(
+			"expected client B runtime event to be room chat, got kind=%v message=%q",
+			runtimeEvent.kind,
+			runtimeEvent.message,
+		),
+	)
+	testing.expect(
+		t,
+		runtimeEvent.roomID == common.GENERAL_ROOM_ID,
+		fmt.aprintf(
+			"expected client B runtime event to preserve the General room ID, got %v",
+			runtimeEvent.roomID,
+		),
+	)
+	testing.expect(
+		t,
+		runtimeEvent.senderID == transportA.authenticatedUserID,
+		fmt.aprintf(
+			"expected client B runtime event sender to match client A authenticated user ID, got sender=%v auth=%v",
+			runtimeEvent.senderID,
+			transportA.authenticatedUserID,
+		),
+	)
+	testing.expect(
+		t,
+		runtimeEvent.message == messageContent,
+		fmt.aprintf(
+			"expected client B runtime event to preserve chat content %q, got %q",
+			messageContent,
+			runtimeEvent.message,
+		),
 	)
 }

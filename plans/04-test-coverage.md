@@ -9,7 +9,7 @@ Turn the current build and test baseline into release confidence for a tester-fa
 - `odin test server` passes with router, restart scheduling, queue, auth lookup, and file-store validation coverage.
 - `odin test common` passes with crypto, key encoding, and replay-protection coverage.
 - `client/main_test.odin` covers selected/default startup-attempt kickoff and visible selected-server init failure surfacing.
-- There are no end-to-end tests that start a server, connect clients, and exchange user-visible messages.
+- The supported Linux-first HC-118 gate entrypoint is `./run-test-server.sh hc118-gate`, which composes the baseline package tests with the live startup/connect/auth/message proof.
 - There is no documented manual smoke checklist for release candidates.
 
 ## Assumptions
@@ -50,7 +50,7 @@ Turn the current build and test baseline into release confidence for a tester-fa
 
 - Automated tests cover the agreed MVP connect/auth/message flow.
 - A documented smoke checklist exists and is used before every tester handoff.
-- The project has a single release validation entry point that team members can run consistently.
+- The project has a single Linux-first local validation entry point that team members can run consistently: `./run-test-server.sh hc118-gate`.
 - Known gaps in coverage are listed and accepted explicitly.
 
 ## Recommended Execution Order

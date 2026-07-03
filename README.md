@@ -41,7 +41,10 @@ The repository now includes one supported bootstrap path for the MVP auth flow. 
 
 1. Ensure PostgreSQL has a local database and user that match the helper and server defaults: host `localhost`, port `5432`, user `haychat`, database `haychat`, and password `haychat`. If your local setup differs, export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
 2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
-3. Run `./run-test-server.sh start` to launch the server, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
+3. Run `./run-test-server.sh start` to launch the server in the foreground, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
+4. For the Linux-first local developer confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
+5. `./run-test-server.sh bootstrap-start-background` performs bootstrap, background startup, readiness waiting, and cleanup-safe lifecycle ownership through the same helper seam.
+6. `./run-test-server.sh hc118-gate` is the supported Linux-first HC-118 validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The gate bootstraps the local database before starting the server, so the configured database user must have permission to create and seed the `users` table in the target database.
 
 Running `odin run server` directly now uses tester-safe local runtime paths by default, resolved relative to the server process working directory: logs in `./logs`, file storage in `./storage`, and the server identity file at `./storage/server_identity.json`. `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, and `HAYCHAT_SERVER_IDENTITY_FILE` still override those defaults.
 

@@ -1,0 +1,319 @@
+plan_id: 20260703-hc-118-mvp-connect-auth-message-coverage
+objective: "Revise HC-118 so the MVP connect/auth/message gate stays minimal, phase-labeled, and implementable."
+created_at: 2026-07-03T15:48:21-05:00
+created_by: gem-planner
+status: completed
+tldr: |
+  Revise HC-118 in place around one bounded local-developer confidence gate: baseline package tests plus
+  one headless live proof that a real server can start, two authenticated clients can connect, and one
+  room-chat message can traverse authoritatively. The plan now resolves the file-placement question in
+  favor of extending client/main_test.odin, makes run-test-server.sh readiness/lifecycle work a first-
+  class task instead of an implied detail, and explicitly frames Linux-first execution as the supported
+  HC-118 local gate rather than a broader release matrix commitment.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 3
+  risk_score: medium
+
+quality_warnings:
+  - HC-118 stays scoped to startup, connect, auth, and one authoritative message exchange; it should not expand into GUI coverage or broad protocol validation.
+  - The existing live auth seam is opt-in and the current server helper lacks readiness waiting, background lifecycle control, and guaranteed cleanup, so orchestration must be explicit work.
+  - File placement is now resolved to client/main_test.odin; adding a separate live test file is out of plan unless implementation proves the existing file cannot stay coherent.
+  - Linux-first is acceptable only as the documented local developer confidence gate for HC-118, not as a statement that Windows automation is done.
+
+reviewer_focus:
+  - Confirm wave 1 delivers real readiness, background lifecycle ownership, and cleanup in the existing helper seam instead of leaving them implicit.
+  - Confirm the live proof extends client/main_test.odin and reuses ClientServerTransport_sendRoomChatMessage plus ClientServerTransport_serviceRuntime rather than inventing a second harness stack.
+  - Confirm the gate labels startup, connect, auth, and message phases distinctly in test or wrapper output.
+  - Confirm the final gate still includes odin test common, odin test server, and odin test client as baseline checks.
+
+prd_update_recommended: false
+
+suggested_plan_files:
+  - docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml
+  - docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/context_envelope.json
+
+resolved_decisions:
+  - decision: Extend client/main_test.odin for the live MVP proof.
+    context: The repo already has the opt-in live startup-auth seam there, and the user explicitly asked to resolve the file-placement question now rather than leave it open.
+    affects:
+      - T2-extend-live-mvp-proof-in-client-main-test
+      - T3-compose-linux-first-hc118-gate
+  - decision: Promote readiness, background lifecycle, and cleanup in run-test-server.sh into explicit implementation work.
+    context: The current helper owns bootstrap/start but does not yet provide deterministic readiness waiting, background process ownership, or guaranteed cleanup; critic findings require this to be a real task.
+    affects:
+      - T1-add-readiness-and-lifecycle-to-server-helper
+      - T3-compose-linux-first-hc118-gate
+  - decision: Keep HC-118 Linux-first as a local developer confidence gate.
+    context: Current helper assumptions and the existing live seam are Linux-centered, and widening to Windows in the same slice would add orchestration work outside the MVP objective.
+    affects:
+      - T1-add-readiness-and-lifecycle-to-server-helper
+      - T3-compose-linux-first-hc118-gate
+      - T4-document-supported-hc118-path
+  - decision: Preserve the smallest trustworthy gate by composing existing baselines with one live proof.
+    context: Existing common/server/client tests already cover most slice behavior; HC-118 should add only the missing startup-auth-message traversal proof and phase-labeled execution path.
+    affects:
+      - T2-extend-live-mvp-proof-in-client-main-test
+      - T3-compose-linux-first-hc118-gate
+      - T4-document-supported-hc118-path
+
+open_questions: []
+
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: The helper still starts the server without deterministic readiness waiting, causing the live test to fail as a timing race instead of a real startup or auth regression.
+      likelihood: medium
+      impact: critical
+      mitigation: Make readiness waiting, bounded startup failure surfacing, and cleanup explicit acceptance criteria for wave 1.
+    - scenario: The live proof silently broadens into a separate harness file or larger framework, increasing maintenance cost and delaying execution.
+      likelihood: medium
+      impact: high
+      mitigation: Pin the implementation anchor to client/main_test.odin and allow only tiny local helpers there unless implementation proves otherwise.
+    - scenario: The final gate output collapses multiple failure modes into one opaque failure.
+      likelihood: medium
+      impact: high
+      mitigation: Require labeled startup, connect, auth, and message phases in test names, assertions, or wrapper output.
+    - scenario: Reviewers assume Linux-first means release-wide platform coverage is complete.
+      likelihood: low
+      impact: medium
+      mitigation: Document Linux-first explicitly as the supported HC-118 local gate and keep Windows out of slice.
+  assumptions:
+    - client/main_test.odin remains the implementation home for the live proof unless the implementer finds a concrete coherence or tooling blocker.
+    - run-test-server.sh remains the owning bootstrap/start seam and can absorb minimal readiness/lifecycle responsibilities without a broader infrastructure rewrite.
+    - Existing baseline suites in common, server, and client remain mandatory parts of the gate.
+    - The supported HC-118 execution target is a Linux developer environment with local PostgreSQL and Odin available.
+
+tasks:
+  - id: T1-add-readiness-and-lifecycle-to-server-helper
+    title: Add readiness and lifecycle ownership to the existing server helper seam
+    description: Extend the current bootstrap/start helper path so HC-118 has one deterministic Linux-first local seam for background server startup, readiness waiting, bounded failure surfacing, and cleanup.
+    wave: 1
+    agent: gem-devops
+    status: pending
+    covers:
+      - Explicit background lifecycle ownership for the local server process
+      - Readiness waiting tied to startup usability rather than blind sleeps
+      - Guaranteed cleanup on success and failure
+      - Linux-first framing for the supported HC-118 gate
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Current bootstrap/start seam that lacks readiness wait, background lifecycle control, and guaranteed cleanup.
+      - path: server/main.odin
+        description: Startup behavior already waits for database readiness before reporting success and should define the readiness contract the helper watches.
+      - path: server/config.odin
+        description: Startup preflight behavior constrains what constitutes a usable ready server.
+      - path: docs/plan/20260702-hc-107-startup-preflight-checks/plan.yaml
+        description: Prior plan captures the intended startup-preflight contract that HC-118 should reuse rather than redesign.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Add explicit orchestration and readiness lifecycle work for the gate.
+      - Failures must map cleanly to startup, connect, auth, or message exchange.
+      - Linux-first is acceptable only when framed as the local developer confidence gate.
+    success_criteria:
+      - One repo-supported helper path can bootstrap, start in the background, wait for readiness, and tear down deterministically.
+      - Startup failures surface before the live client proof runs and are attributable to startup rather than a generic timeout.
+      - Cleanup semantics are defined for both success and failure so later waves do not leave orphaned servers bound to the default port.
+      - The task output explicitly states Linux-first local support and keeps Windows out of slice.
+    environment: development
+    requires_approval: false
+    devops_security_sensitive: false
+    handoff:
+      do_not_reinvestigate:
+        - run-test-server.sh is already the narrow tester-facing seam and should stay the owner.
+        - HC-107 already established startup usability around database readiness and preflight success.
+        - This task is orchestration-only and should not redesign server startup internals.
+      required_test_first: odin test server
+      target_files:
+        - run-test-server.sh
+        - server/main.odin
+        - server/config.odin
+      minimal_change: Add only the lifecycle and readiness plumbing required to support the HC-118 gate deterministically.
+      acceptance_checks:
+        - odin test server
+        - helper path can start and stop the local server deterministically on Linux
+
+  - id: T2-extend-live-mvp-proof-in-client-main-test
+    title: Extend client/main_test.odin with the live two-client MVP proof
+    description: Add one focused headless live test in client/main_test.odin, plus only tiny local helpers there if needed, to authenticate two clients against the real server and verify one authoritative room-chat delivery.
+    wave: 2
+    agent: gem-implementer
+    status: pending
+    covers:
+      - Reuse of the existing opt-in live startup-auth seam in client/main_test.odin
+      - Reuse of ClientServerTransport_sendRoomChatMessage and ClientServerTransport_serviceRuntime
+      - One send from client A and one authoritative receive on client B
+      - Phase-specific assertion text for connect, auth, and message delivery
+    dependencies:
+      - T1-add-readiness-and-lifecycle-to-server-helper
+    conflicts_with: []
+    context_files:
+      - path: client/main_test.odin
+        description: Explicitly chosen home for the live MVP proof and any tiny local helpers.
+      - path: client/transport.odin
+        description: Owns the send and runtime polling helpers the live proof must reuse.
+      - path: client/main.odin
+        description: Startup auth bridge ownership and selected transport startup behavior remain relevant context.
+      - path: common/auth_test.odin
+        description: Existing crypto/auth baselines remain baseline coverage rather than being duplicated in the live proof.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Keep scope to automated startup/auth/one-message MVP coverage.
+      - Prefer focused headless harnesses over GUI or broad infrastructure work.
+      - Failures must map cleanly to startup, connect, auth, or message exchange.
+    success_criteria:
+      - client/main_test.odin contains one environment-gated live proof for two authenticated clients and one room-chat round trip.
+      - The implementation reuses existing transport send/service helpers instead of inventing a second transport surface.
+      - Assertion names or failure text distinguish connect failure, auth failure, and missing authoritative message delivery.
+      - No separate live test file is introduced unless a concrete blocker is documented during implementation.
+    tech_stack:
+      - Odin
+      - ENet
+      - Existing client startup-auth bridge and transport helpers
+    test_coverage: Add one environment-gated live test and only tiny local helpers in client/main_test.odin if they materially improve determinism or readability.
+    diag:
+      implementation_anchor: client/main_test.odin
+      current_live_seam: testClientServerTransportCanEstablishLiveStartupAuthOverENet
+      required_runtime_helpers: ClientServerTransport_sendRoomChatMessage and ClientServerTransport_serviceRuntime
+      scope_guard: one room-chat round trip only
+    handoff:
+      do_not_reinvestigate:
+        - The file-placement question is already resolved in favor of client/main_test.odin.
+        - Existing common/server/client slice tests remain baseline and should not be duplicated.
+        - The user already rejected reliance on PostgreSQL bootstrap identities for auth semantics.
+      required_test_first: odin test client
+      target_files:
+        - client/main_test.odin
+        - client/transport.odin
+        - client/main.odin
+      minimal_change: Keep the change local to client/main_test.odin plus the smallest adjacent helper reuse required for the live proof.
+      acceptance_checks:
+        - odin test client
+        - HAYCHAT_LIVE_STARTUP_AUTH=1 odin test client -define:ODIN_TEST_NAMES=client.testClientServerTransportCanEstablishLiveStartupAuthOverENet,client.testMvpConnectAuthMessageRoundTripLive
+
+  - id: T3-compose-linux-first-hc118-gate
+    title: Compose the Linux-first HC-118 validation gate
+    description: Add one repeatable local validation entrypoint that runs baseline package tests plus the live MVP proof in an ordered, phase-labeled flow using the upgraded helper seam.
+    wave: 3
+    agent: gem-devops
+    status: pending
+    covers:
+      - Ordered baseline checks for common, server, and client
+      - Invocation of the live MVP proof through the supported local helper path
+      - Phase-labeled gate output for startup, connect, auth, and message exchange
+      - Reuse of wave 1 lifecycle semantics rather than ad hoc process handling
+    dependencies:
+      - T1-add-readiness-and-lifecycle-to-server-helper
+      - T2-extend-live-mvp-proof-in-client-main-test
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Owns the server lifecycle seam the gate should compose.
+      - path: client/main_test.odin
+        description: Provides the live proof that the gate will target explicitly.
+      - path: plans/04-test-coverage.md
+        description: Requires one small trustworthy release gate instead of broad infrastructure.
+      - path: AGENTS.md
+        description: Documents baseline validation commands and project testing conventions.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Baseline tests stay part of the gate.
+      - Failures must map cleanly to startup, connect, auth, or message exchange.
+      - Linux-first is acceptable only if explicitly framed as the local developer confidence gate.
+    success_criteria:
+      - One repo-supported command or script runs odin test common, odin test server, odin test client, and the live MVP proof in a stable order.
+      - Output labels or steps make startup, connect, auth, and message phases visible to the operator.
+      - The gate delegates server lifecycle work to the upgraded helper seam rather than duplicating process management.
+      - The gate remains local and lightweight with no GUI driver, container stack, or broader cross-platform matrix.
+    environment: development
+    requires_approval: false
+    devops_security_sensitive: false
+    handoff:
+      do_not_reinvestigate:
+        - The gate composes existing baselines plus one live proof; it should not replace package tests.
+        - Linux-first wording is part of the acceptance, not incidental documentation.
+        - Startup, connect, auth, and message labels can be emitted by wrapper output, test names, or both.
+      required_test_first: odin test common
+      target_files:
+        - run-test-server.sh
+        - client/main_test.odin
+        - plans/04-test-coverage.md
+        - README.md
+      minimal_change: Add only the wrapper semantics needed to make HC-118 one supported local command.
+      acceptance_checks:
+        - odin test common
+        - odin test server
+        - odin test client
+        - single HC-118 gate command succeeds on a Linux developer setup
+
+  - id: T4-document-supported-hc118-path
+    title: Document the supported HC-118 validation path
+    description: Update developer-facing documentation so maintainers can run the Linux-first HC-118 gate, understand its prerequisites, and interpret phase-labeled failures without tribal knowledge.
+    wave: 4
+    agent: gem-documentation-writer
+    status: completed
+    covers:
+      - Supported local gate command
+      - Linux-first scope statement and out-of-slice Windows note
+      - Prerequisites for local PostgreSQL, Odin, and bootstrap/start usage
+      - Meaning of startup, connect, auth, and message failure labels
+    dependencies:
+      - T3-compose-linux-first-hc118-gate
+    conflicts_with: []
+    context_files:
+      - path: plans/04-test-coverage.md
+        description: Should reflect that HC-118 is now a bounded automated MVP gate.
+      - path: README.md
+        description: Likely home for the supported local validation entrypoint and prerequisites.
+      - path: run-test-server.sh
+        description: Defines the lifecycle semantics and usage the docs must describe accurately.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - The automated MVP validation path is explicit and repeatable.
+      - Linux-first is acceptable only when explicitly framed as the local developer confidence gate.
+      - Known prerequisites and phase failures are explained without tribal knowledge.
+    success_criteria:
+      - Maintainers can find one supported HC-118 gate command from the docs.
+      - Docs name Linux-first local support explicitly and keep Windows out of the HC-118 slice.
+      - Docs explain prerequisites plus startup, connect, auth, and message-exchange failure interpretation.
+    outcome: |
+      README.md and plans/04-test-coverage.md now document the supported Linux-first
+      HC-118 validation path, its PostgreSQL and Odin prerequisites, the phase-labeled
+      startup/connect/auth/message gate flow, and the scope boundary that keeps Windows
+      automation out of this slice. HC-118 is complete at the code-and-docs scope, while
+      local execution in the current environment remains blocked by PostgreSQL permissions
+      on schema public during bootstrap.
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - plans/04-test-coverage.md reflects the bounded Linux-first MVP gate.
+      - README.md documents the supported local validation entrypoint and prerequisites.
+      - Any helper usage text matches the implemented lifecycle and phase-label behavior.
+    handoff:
+      do_not_reinvestigate:
+        - Document the implemented command, not speculative future CI work.
+        - Keep the docs focused on startup, auth, and one message round trip only.
+        - Windows support is intentionally out of slice for HC-118 unless a trivial supported path already exists.
+      required_test_first: single HC-118 gate command
+      target_files:
+        - plans/04-test-coverage.md
+        - README.md
+        - run-test-server.sh
+      minimal_change: Update only the docs needed to make the gate discoverable, scoped, and interpretable.
+      acceptance_checks:
+        - documented command matches the implemented HC-118 gate
