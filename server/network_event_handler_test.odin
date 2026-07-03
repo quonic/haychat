@@ -1,6 +1,85 @@
 package server
 
+import "core:sync"
+import "core:sys/linux"
 import "core:testing"
+import "vendor:ENet"
+
+networkTestResetIPCState :: proc() {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	IPC__state_deinit()
+	ipcState.next_fd = linux.Fd(10)
+}
+
+networkTestInitNetworkIPC :: proc(socketName: string) -> (linux.Fd, linux.Fd) {
+	networkTestResetIPCState()
+
+	mainFd := IPC_Main_init()
+	ctx := IPC_Server_Context{}
+	serverErr := IPC_Server_init(&ctx, socketName)
+	assert(serverErr == nil, "expected IPC server init to succeed")
+
+	networkFd, clientErr := IPC_Client_init(&ctx)
+	assert(clientErr == nil, "expected IPC client init to succeed")
+
+	return mainFd, networkFd
+}
+
+networkTestCreatePacket :: proc(data: []u8) -> ^ENet.Packet {
+	dataPtr: rawptr = nil
+	if len(data) > 0 {
+		dataPtr = rawptr(&data[0])
+	}
+
+	packet := ENet.packet_create(dataPtr, uint(len(data)), {})
+	assert(packet != nil, "expected ENet packet allocation to succeed")
+	return packet
+}
+
+@(test)
+testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
+	_ = t
+
+	mainFd, networkFd := networkTestInitNetworkIPC("network_event_handler_test_network")
+	defer networkTestResetIPCState()
+
+	peerManager := PeerManager_init()
+	defer PeerManager_deinit(&peerManager)
+
+	threadPool := NetworkThreadPool_init(0, &peerManager, int(mainFd))
+	defer delete(threadPool.threads)
+
+	packetBytes := []u8{1, 2, 3, 4}
+	packet := networkTestCreatePacket(packetBytes)
+
+	enetPeer := ENet.Peer{}
+	enetPeer.data = rawptr(uintptr(42))
+
+	handlePeerData(
+		&peerManager,
+		&threadPool,
+		&enetPeer,
+		packet,
+		u8(NetworkChannel.Voice),
+		int(networkFd),
+	)
+
+	msg, err := IPC_Client_poll(mainFd)
+	assert(err == nil, "expected main IPC queue to receive a network data message")
+
+	#partial switch m in msg {
+	case NetworkDataReceived:
+		assert(m.peerId == 42, "expected peer ID to be forwarded")
+		assert(m.channel == .Voice, "expected inbound ENet channel to be forwarded")
+		assert(len(m.data) == 4, "expected packet data to be copied")
+		delete(m.data)
+	case:
+		assert(false, "expected NetworkDataReceived IPC message")
+	}
+	_ = networkFd
+}
 
 // Test WorkerEventQueue enqueue/dequeue
 @(test)

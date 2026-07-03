@@ -101,6 +101,7 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 					&threadPool,
 					enetEvent.peer,
 					enetEvent.packet,
+					enetEvent.channelID,
 					int(pm.config.networkFd),
 				)
 
@@ -222,6 +223,7 @@ handlePeerData :: proc(
 	threadPool: ^NetworkThreadPool,
 	enetPeer: ^ENet.Peer,
 	packet: ^ENet.Packet,
+	channelID: u8,
 	ipcFd: int,
 ) {
 	peerId := u32(uintptr(enetPeer.data))
@@ -232,9 +234,7 @@ handlePeerData :: proc(
 		return
 	}
 
-	// Extract channel from packet or use default (Chat)
-	// TODO: Extract actual channel from packet header/metadata
-	channel := NetworkChannel.Chat
+	channel := NetworkChannel(channelID)
 
 	// Send data to main process via IPC
 	packetData := packet.data[:packet.dataLength]
