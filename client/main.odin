@@ -238,7 +238,7 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	}
 
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
-	init_state.view_dms = true
+	init_state.view_dms = false
 	init_state.view_friends_list = false
 	init_state.selected_transport_index = -1
 	init_state.selected_channel_id = common.GENERAL_ROOM_ID

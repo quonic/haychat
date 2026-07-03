@@ -12,7 +12,7 @@ HayChat is an alternative to Discord. It features end-to-end encryption, a respo
 - End-to-end encryption for secure communication
 - Real-time messaging with low latency
 - User-friendly interface with customizable themes
-- Support for group chats and direct messages
+- Support for server chat in shared rooms, with direct messages planned for a later release
 - Cross-platform compatibility (Windows, Linux, macOS(planned))
 - Modular architecture for easy addition of new features
 - Comprehensive testing suite for reliability

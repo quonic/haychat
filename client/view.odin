@@ -27,19 +27,7 @@ button_padding: f32 = 0
 general_spacing: f32 = 2
 
 view_server_selection :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
-	th := ctx.theme
 	list: [dynamic]skald.View
-
-	append(
-		&list,
-		skald.button(
-			ctx,
-			"DMs",
-			Msg{kind = .SwitchToDMs},
-			width = server_width,
-			padding = button_padding,
-		),
-	)
 	for server in s.config.servers {
 		append(
 			&list,

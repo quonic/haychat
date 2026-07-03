@@ -166,6 +166,36 @@ testRoomChatAreaView :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> (skald.View_Stac
 }
 
 @(test)
+testStateInitFromConfigStartsInServerChatForFirstRelease :: proc(t: ^testing.T) {
+	server := Server {
+		id         = 500,
+		name       = "First Release Server",
+		short_name = getShortServerName("First Release Server"),
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
+	}
+	state := State_initFromConfig(testConfigWithServers({server}))
+
+	testing.expect(
+		t,
+		!state.view_dms,
+		"expected first-release startup to open the selected server chat instead of DMs",
+	)
+	testing.expect(
+		t,
+		state.selected_server_id == server.id,
+		"expected first-release startup to select the first configured server",
+	)
+	testing.expect(
+		t,
+		state.selected_channel_id == common.GENERAL_ROOM_ID,
+		"expected first-release startup to select the General room",
+	)
+
+	_ = t
+}
+
+@(test)
 testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^testing.T) {
 	sync.mutex_lock(&roomChatSendBridgeTestMutex)
 	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
