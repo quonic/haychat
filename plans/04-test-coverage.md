@@ -53,6 +53,25 @@ Turn the current build and test baseline into release confidence for a tester-fa
 - The project has a single Linux-first local validation entry point that team members can run consistently: `./run-test-server.sh hc118-gate`.
 - Known gaps in coverage are listed and accepted explicitly.
 
+## HC-119 Manual Smoke Checklist
+
+Use this as the manual companion to `./run-test-server.sh hc118-gate`, not as a replacement for the automated gate.
+
+1. Start from the Linux-first local default runtime layout unless overrides are set: `logs/`, `storage/`, and `storage/server_identity.json`.
+2. Before starting the helper, ensure local PostgreSQL is already available or matching `HAYCHAT_DATABASE_*` overrides are set, and that the configured database/user can create and seed what bootstrap requires.
+3. Start the supported helper-managed server path with `./run-test-server.sh bootstrap-start-background`.
+4. Confirm the admin surface is live with `GET http://localhost:8080/status`.
+5. Launch two local clients explicitly, for example with `odin run client` in two terminals.
+6. For the default smoke path, do not manually edit client config. Auto-seeding and local startup attempt are only guaranteed when no servers are already configured; existing non-default client server settings are preserved.
+7. Authenticate one client as `hayseed` and the other as `haypeer`.
+8. Send one chat message from `hayseed` and verify it is received by `haypeer`.
+9. Send one reply from `haypeer` and verify it is received by `hayseed`.
+10. Verify restart behavior conservatively with `POST http://localhost:8080/restart`. After restart, relaunch the clients or reconnect explicitly, then confirm the pair can sign in again and exchange one more message.
+11. If bootstrap or readiness fails before web admin is live, capture `.haychat-test-server/server.log` first. Otherwise capture server diagnostics with `GET http://localhost:8080/logs` and attach that output together with the relevant files from `logs/` if the run fails or looks suspicious.
+12. Stop the helper-managed server with `./run-test-server.sh stop` when the smoke run completes.
+
+Failure bucketing for triage should be obvious from the attached artifacts: startup or readiness failure, connect or auth failure, message send or receive failure, restart or reconnect failure, or missing runtime artifacts under `logs/` and `storage/`.
+
 ## Recommended Execution Order
 
 - Start as soon as the MVP flow is chosen.
