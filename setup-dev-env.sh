@@ -1,60 +1,175 @@
-#!/var/bin/env bash
+#!/usr/bin/env bash
+set -euo pipefail
 
+# Bootstraps the supported Linux-first HayChat development environment.
+# Supported host flow: Ubuntu/Debian with apt and systemd.
 
-# This script sets up a development environment for the HayChat project
+repo_dir=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
+odin_root=${HAYCHAT_ODIN_ROOT:-$HOME/Odin}
+skald_root=${HAYCHAT_SKALD_ROOT:-$HOME/Skald}
+local_bin_dir=${HAYCHAT_LOCAL_BIN_DIR:-$HOME/.local/bin}
+default_db_user=${HAYCHAT_DATABASE_USER:-haychat}
+default_db_pass=${HAYCHAT_DATABASE_PASS:-haychat}
+default_db_name=${HAYCHAT_DATABASE_NAME:-haychat}
+default_db_host=${HAYCHAT_DATABASE_URL:-localhost}
+default_db_port=${HAYCHAT_DATABASE_PORT:-5432}
 
-# Check that llvm, clang, git, and llvm-config are installed
-if ! command -v llvm &> /dev/null || ! command -v clang &> /dev/null || ! command -v git &> /dev/null || ! command -v llvm-config &> /dev/null; then
-    echo "Error: llvm, clang, git, and llvm-config are required but not installed. Please install them and try again."
-    echo "On apt systems, you can install them with: sudo apt install llvm llvm-dev clang git"
-    echo "On dnf systems, you can install them with: sudo dnf install llvm llvm-devel clang git"
-    exit 1
-fi
+required_packages=(
+	build-essential
+	git
+	clang
+	llvm
+	llvm-dev
+	lld
+	pkg-config
+	libpq-dev
+	postgresql
+	postgresql-client
+	libx11-dev
+	libxcursor-dev
+	libxrandr-dev
+	libxi-dev
+	libgl1-mesa-dev
+	libasound2-dev
+	libdbus-1-dev
+)
 
-# Change to the home directory
-cd ~ || exit 1
+log_step() {
+	echo
+	echo "==> $1"
+}
 
-# Check if odin command exists, if not, clone the Odin repository and build it
+require_linux() {
+	if [[ "$(uname -s)" != "Linux" ]]; then
+		echo "This bootstrap path is supported only on Linux." >&2
+		exit 1
+	fi
+}
 
-if ! command -v odin &> /dev/null || ! [ -d "Odin" ]; then
-    echo "Odin not found, cloning and building Odin..."
-    git clone https://github.com/odin-lang/Odin.git Odin || exit 1
-    cd Odin || exit 1
-    ./build_odin.sh || exit 1
-    cd .. || exit 1
-else
-    echo "Odin found, skipping clone. Building Odin..."
-    cd Odin || exit 1
-    ./build_odin.sh || exit 1
-    cd .. || exit 1
-fi
+require_apt() {
+	if ! command -v apt-get >/dev/null 2>&1; then
+		echo "Unsupported package manager for the supported bootstrap path." >&2
+		echo "Use Ubuntu or Debian with apt-get for reproducible local setup." >&2
+		exit 1
+	fi
+}
 
-# Change to the shared directory and clone the Skald and Odin PostgreSQL repositories
-cd Odin/shared/ || exit 1
-if [ -d "skald" ]; then
-    echo "Skald repository already exists, updating..."
-    cd skald || exit 1
-    git pull || failed=1
-    cd .. || exit 1
-else
-    echo "Cloning Skald repository..."
-    cd ~ || exit 1
-    git clone https://github.com/BuLEEto/Skald.git Skald || failed=1
-    # Create a symbolic link to the Skald directory in the Odin/shared directory
-    ln -s ~/Skald/skald ~/Odin/shared/skald || failed=1
-    cd Odin/shared || exit 1
-fi
-if [ -d "pg" ]; then
-    echo "Odin PostgreSQL repository already exists, updating..."
-    cd pg || exit 1
-    git pull || failed=1
-    cd .. || exit 1
-else
-    echo "Cloning Odin PostgreSQL repository..."
-    git clone https://github.com/laytan/odin-postgresql.git pg || failed=1
-fi
+require_sudo() {
+	if ! command -v sudo >/dev/null 2>&1; then
+		echo "sudo is required for package and PostgreSQL provisioning." >&2
+		exit 1
+	fi
+}
 
-if [ -n "$failed" ]; then
-    echo "Error: Failed to clone one or more repositories."
-    exit 1
-fi
+clone_or_update_repo() {
+	local repo_url=$1
+	local dest_dir=$2
+	local branch=${3:-}
+
+	if [[ -d "$dest_dir/.git" ]]; then
+		echo "Updating $dest_dir"
+		git -C "$dest_dir" pull --ff-only
+		return
+	fi
+
+	mkdir -p "$(dirname -- "$dest_dir")"
+	echo "Cloning $repo_url into $dest_dir"
+	git clone "$repo_url" "$dest_dir"
+
+	if [[ -n "$branch" ]]; then
+		git -C "$dest_dir" checkout "$branch"
+	fi
+}
+
+install_packages() {
+	log_step "Installing OS packages for the supported Linux-first flow"
+	sudo apt-get update
+	sudo apt-get install -y "${required_packages[@]}"
+}
+
+bootstrap_odin() {
+	log_step "Cloning and building Odin"
+	clone_or_update_repo "https://github.com/odin-lang/Odin.git" "$odin_root"
+
+	(
+		cd "$odin_root"
+		./build_odin.sh
+	)
+
+	mkdir -p "$local_bin_dir"
+	ln -sf "$odin_root/odin" "$local_bin_dir/odin"
+
+	echo "Odin binary linked to $local_bin_dir/odin"
+	case ":$PATH:" in
+		*":$local_bin_dir:"*)
+			;;
+		*)
+			echo "Add $local_bin_dir to PATH before running HayChat commands." >&2
+			;;
+	esac
+}
+
+bootstrap_shared_libraries() {
+	log_step "Preparing Odin shared libraries used by HayChat"
+	clone_or_update_repo "https://github.com/laytan/odin-postgresql.git" "$odin_root/shared/pg"
+	clone_or_update_repo "https://github.com/laytan/odin-http.git" "$odin_root/shared/odin-http"
+	clone_or_update_repo "https://github.com/BuLEEto/Skald.git" "$skald_root"
+
+	mkdir -p "$odin_root/shared"
+	ln -sfn "$skald_root/skald" "$odin_root/shared/skald"
+}
+
+bootstrap_postgres() {
+	log_step "Starting PostgreSQL and provisioning the default HayChat database"
+
+	if command -v systemctl >/dev/null 2>&1; then
+		sudo systemctl enable --now postgresql
+	fi
+
+	sudo -u postgres psql -v ON_ERROR_STOP=1 postgres <<SQL
+DO \
+\$\$
+BEGIN
+	IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${default_db_user}') THEN
+		CREATE ROLE ${default_db_user} LOGIN PASSWORD '${default_db_pass}';
+	ELSE
+		ALTER ROLE ${default_db_user} WITH LOGIN PASSWORD '${default_db_pass}';
+	END IF;
+END
+\$\$;
+SELECT 'CREATE DATABASE ${default_db_name} OWNER ${default_db_user}'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${default_db_name}')
+\gexec
+ALTER DATABASE ${default_db_name} OWNER TO ${default_db_user};
+GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};
+SQL
+}
+
+print_summary() {
+	log_step "Bootstrap complete"
+	echo "Supported handoff model: source-based, internal-only tester flow"
+	echo "Supported bootstrap host: Ubuntu/Debian Linux"
+	echo "Default database target: ${default_db_user}@${default_db_host}:${default_db_port}/${default_db_name}"
+	echo
+	echo "Recommended next commands:"
+	echo "  odin check server"
+	echo "  odin check client -target:linux_amd64"
+	echo "  odin check client -target:windows_amd64"
+	echo "  ./run-test-server.sh bootstrap-start-background"
+	echo
+	echo "Repository root: $repo_dir"
+	echo "Odin root: $odin_root"
+}
+
+main() {
+	require_linux
+	require_apt
+	require_sudo
+	install_packages
+	bootstrap_odin
+	bootstrap_shared_libraries
+	bootstrap_postgres
+	print_summary
+}
+
+main "$@"

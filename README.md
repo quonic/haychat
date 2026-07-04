@@ -33,18 +33,44 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 
 ### Development Environment Setup
 
-Run the `setup-dev-env.sh` script to set up the development environment. This script checks for required dependencies, clones necessary repositories, and builds the Odin language.
+The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Ubuntu/Debian hosts with `apt`. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
+
+1. Run `./setup-dev-env.sh` on a clean Ubuntu/Debian machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
+2. Ensure `odin` is on your `PATH`. The bootstrap script links it into `$HOME/.local/bin/odin`; if your shell does not already include `$HOME/.local/bin`, add that directory before continuing.
+3. Validate the supported source-build environment with `odin check server`, `odin check client -target:linux_amd64`, and `odin check client -target:windows_amd64`.
+4. Use the server helper seam below to seed auth data and launch the local MVP runtime.
+
+The supported bootstrap script assumes these defaults unless you override them before running it:
+
+- PostgreSQL host: `localhost`
+- PostgreSQL port: `5432`
+- PostgreSQL user: `haychat`
+- PostgreSQL password: `haychat`
+- PostgreSQL database: `haychat`
+- Odin root: `$HOME/Odin`
+- Skald checkout: `$HOME/Skald`
+
+Supported environment overrides for the bootstrap script:
+
+- `HAYCHAT_DATABASE_URL`
+- `HAYCHAT_DATABASE_PORT`
+- `HAYCHAT_DATABASE_USER`
+- `HAYCHAT_DATABASE_PASS`
+- `HAYCHAT_DATABASE_NAME`
+- `HAYCHAT_ODIN_ROOT`
+- `HAYCHAT_SKALD_ROOT`
+- `HAYCHAT_LOCAL_BIN_DIR`
 
 ### Local Test Server Bootstrap
 
-The repository now includes one supported bootstrap path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
+The repository includes one supported helper path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
 
-1. Ensure PostgreSQL has a local database and user that match the helper and server defaults: host `localhost`, port `5432`, user `haychat`, database `haychat`, and password `haychat`. If your local setup differs, export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
+1. If your PostgreSQL setup differs from the supported defaults, export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
 2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
 3. Run `./run-test-server.sh start` to launch the server in the foreground, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
-4. For the Linux-first local developer confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
+4. For the Linux-first local confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
 5. `./run-test-server.sh bootstrap-start-background` performs bootstrap, background startup, readiness waiting, and cleanup-safe lifecycle ownership through the same helper seam.
-6. `./run-test-server.sh hc118-gate` is the supported Linux-first HC-118 validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The gate bootstraps the local database before starting the server, so the configured database user must have permission to create and seed the `users` table in the target database.
+6. `./run-test-server.sh hc118-gate` is the supported Linux-first validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The gate bootstraps the local database before starting the server, so the configured database user must have permission to create and seed the `users` table in the target database.
 
 Running `odin run server` directly now uses tester-safe local runtime paths by default, resolved relative to the server process working directory: logs in `./logs`, file storage in `./storage`, and the server identity file at `./storage/server_identity.json`. `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, and `HAYCHAT_SERVER_IDENTITY_FILE` still override those defaults.
 
