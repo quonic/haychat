@@ -65,7 +65,41 @@ Supported environment overrides for the bootstrap script:
 
 The repository includes one supported helper path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
 
-1. If your PostgreSQL setup differs from the supported defaults, export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
+### Server Environment Configuration
+
+A checked-in example server environment file is provided at `.env.example` for local tester runs.
+
+1. Copy the example file with `cp .env.example .env`.
+2. Load it into your shell with `set -a && . ./.env && set +a`.
+3. Adjust values only if your local PostgreSQL or runtime layout differs from the supported defaults.
+
+Required baseline values for the supported local MVP flow:
+
+- `HAYCHAT_DATABASE_URL`
+- `HAYCHAT_DATABASE_PORT`
+- `HAYCHAT_DATABASE_USER`
+- `HAYCHAT_DATABASE_PASS`
+- `HAYCHAT_DATABASE_NAME`
+
+Optional server/runtime values documented in the example file:
+
+- `HAYCHAT_WEB_ADMIN_PORT`
+- `HAYCHAT_LISTEN_ADDR`
+- `HAYCHAT_LISTEN_PORT`
+- `HAYCHAT_LOG_LEVEL`
+- `HAYCHAT_LOG_DIR`
+- `HAYCHAT_FILE_STORAGE_PATH`
+- `HAYCHAT_SERVER_IDENTITY_FILE`
+- `HAYCHAT_MAX_RESTARTS`
+- `HAYCHAT_RESTART_BACKOFF_MIN`
+- `HAYCHAT_RESTART_BACKOFF_MAX`
+- `HAYCHAT_MAX_NETWORK_THREADS`
+- `HAYCHAT_MAX_FILE_SIZE`
+- `HAYCHAT_MAX_STORAGE_CAPACITY`
+- `HAYCHAT_SERVER_PRIVATE_KEY`
+- `HAYCHAT_SERVER_PUBLIC_KEY`
+
+1. If your PostgreSQL setup differs from the supported defaults, load `.env` or export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
 2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
 3. Run `./run-test-server.sh start` to launch the server in the foreground, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
 4. For the Linux-first local confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
