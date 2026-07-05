@@ -143,6 +143,11 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${default_db_name}'
 ALTER DATABASE ${default_db_name} OWNER TO ${default_db_user};
 GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};
 SQL
+
+	sudo -u postgres psql -v ON_ERROR_STOP=1 "$default_db_name" <<SQL
+ALTER SCHEMA public OWNER TO ${default_db_user};
+GRANT USAGE, CREATE ON SCHEMA public TO ${default_db_user};
+SQL
 }
 
 print_summary() {

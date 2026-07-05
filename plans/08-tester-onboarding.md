@@ -38,17 +38,20 @@ Give testers a complete, low-friction path to install HayChat, exercise the inte
 
 This is the exact Linux-first local MVP tester path. It complements the automated gate in [04-test-coverage.md](04-test-coverage.md) and should be used for tester-facing smoke validation, not as a substitute for the scripted gate.
 
+The supported helper command set is `bootstrap`, `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, `bootstrap-start`, `bootstrap-start-background`, and `hc118-gate`.
+
 1. Prepare the default local runtime layout unless your environment overrides it: server logs in `logs/`, runtime storage in `storage/`, and the server identity file at `storage/server_identity.json`.
-2. Before using `./run-test-server.sh bootstrap-start-background`, ensure local PostgreSQL is already available or matching `HAYCHAT_DATABASE_*` overrides are set, and that the configured database/user can create and seed what bootstrap requires.
-3. Start the supported helper seam with `./run-test-server.sh bootstrap-start-background`.
-4. Confirm readiness with `GET http://localhost:8080/status`.
-5. Launch two local clients explicitly, for example with `odin run client` in two terminals.
-6. For the default smoke path, do not hand-edit client config. Localhost seeding and auto-attempt are only guaranteed when no servers are already configured; existing non-default client server settings are preserved.
-7. Sign in with the seeded identities `hayseed` and `haypeer`.
-8. Verify the MVP chat path by sending a message from `hayseed` to `haypeer`, then a reply from `haypeer` back to `hayseed`.
-9. Exercise restart with `POST http://localhost:8080/restart`. Do not assume automatic reconnect after restart; relaunch the clients or reconnect explicitly, then verify login and one more message exchange.
-10. If bootstrap or readiness fails before web admin is live, capture `.haychat-test-server/server.log` first. Otherwise capture diagnostics with `GET http://localhost:8080/logs` and keep the relevant contents of `logs/` plus any runtime artifacts under `storage/` when filing a report.
-11. Clean up the helper-managed server with `./run-test-server.sh stop`.
+2. Load the supported local env with `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`.
+3. Before using `./run-test-server.sh bootstrap-start-background`, ensure local PostgreSQL is already available or matching `HAYCHAT_DATABASE_*` overrides are set. If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
+4. Start the supported helper seam with `./run-test-server.sh bootstrap-start-background`.
+5. Confirm readiness with `GET http://localhost:8080/status`.
+6. Launch two local clients explicitly with `odin run client` in two terminals. Helper ownership stops at the server lifecycle.
+7. For the default smoke path, do not hand-edit client config. Localhost seeding and auto-attempt are only guaranteed when no servers are already configured; existing non-default client server settings are preserved.
+8. Sign in with the seeded identities `hayseed` and `haypeer`.
+9. Verify the MVP chat path by sending a message from `hayseed` to `haypeer`, then a reply from `haypeer` back to `hayseed`.
+10. Exercise restart with `POST http://localhost:8080/restart`. Do not assume automatic reconnect after restart; relaunch the clients or reconnect explicitly, then verify login and one more message exchange.
+11. If bootstrap or readiness fails before web admin is live, capture `.haychat-test-server/server.log` first. Otherwise capture diagnostics with `GET http://localhost:8080/logs` and keep the relevant contents of `logs/` plus any runtime artifacts under `storage/` when filing a report.
+12. Clean up the helper-managed server with `./run-test-server.sh stop`.
 
 Use simple failure buckets in tester reports so triage starts in the right place: startup, connect, auth, send, receive, restart, or artifact/log capture.
 

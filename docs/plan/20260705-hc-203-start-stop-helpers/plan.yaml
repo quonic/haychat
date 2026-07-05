@@ -1,0 +1,291 @@
+plan_id: 20260705-hc-203-start-stop-helpers
+objective: "Add standard start and stop helper commands for the MVP environment per HC-203."
+created_at: 2026-07-05T09:30:00Z
+created_by: gem-planner
+status: pending
+tldr: |
+  Standardize the already-emerging MVP helper seam around one documented Linux workspace flow.
+  Keep run-test-server.sh as the owning lifecycle surface, consume the existing bootstrap and env
+  prerequisites from HC-201, HC-202, and HC-106, and close any remaining drift between helper
+  commands, startup or shutdown guidance, and executable validation. Do not take ownership of the
+  system PostgreSQL service lifecycle; treat PostgreSQL availability as a prerequisite and keep the
+  slice focused on the fixed helper command contract, documented .env loading, manual client launch
+  guidance, and a parity check across README.md, client/AGENTS.md, server/AGENTS.md, and tester
+  onboarding guidance.
+
+plan_metrics:
+  wave_1_task_count: 1
+  total_dependencies: 4
+  risk_score: medium
+
+quality_warnings:
+  - The repo already contains HC-203-adjacent behavior in run-test-server.sh and README.md, so the main risk is duplicating or renaming surfaces instead of standardizing them.
+  - HC-203 backlog wording mentions starting PostgreSQL and one or more clients, but task clarifications narrow scope away from global PostgreSQL lifecycle control; the implementation must preserve that boundary explicitly.
+  - Current helper automation is server-centric while client launch is still documented manually, so the plan must allow docs-only client guidance unless execution proves a separate client helper is required for acceptance.
+
+open_questions: []
+
+assumptions:
+  - HC-201 is materially present through setup-dev-env.sh and the README bootstrap path, even if later polish remains possible.
+  - HC-202 is materially present through .env.example and README environment guidance, so HC-203 should reuse that contract rather than invent a second configuration surface.
+  - HC-106 already established the supported auth bootstrap seam through server/sql/auth_bootstrap.sql and run-test-server.sh bootstrap commands.
+  - The supported MVP workflow may continue to launch clients with explicit odin run client commands if documentation and helper sequencing remove startup-order guesswork.
+  - PostgreSQL is already installed and may host unrelated databases, so HC-203 must not assume start or stop ownership over the system service.
+
+tasks:
+  - id: T1-debug-helper-scope-and-supported-workflow
+    title: Diagnose the minimal supported HC-203 workflow and command surface
+    description: Confirm which current helper commands, env prerequisites, and doc steps already satisfy HC-203, identify the remaining gaps, and lock the supported scope so execution does not widen into PostgreSQL service management or unrelated reset and packaging work.
+    wave: 1
+    agent: gem-debugger
+    status: pending
+    covers:
+      - Existing helper behavior in run-test-server.sh
+      - Supported environment prerequisites from HC-201 and HC-202 artifacts
+      - PostgreSQL lifecycle boundary for HayChat-specific usage only
+      - Whether client launch needs helper automation or only explicit documented commands
+      - Smallest executable validation path for startup and shutdown
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Current repository-supported helper seam with bootstrap, start, background, wait, and stop commands.
+      - path: README.md
+        description: Current supported workflow documentation already advertises HC-203-adjacent commands and shutdown guidance.
+      - path: .env.example
+        description: Existing checked-in environment contract that HC-203 depends on and must not duplicate.
+      - path: setup-dev-env.sh
+        description: Existing HC-201 bootstrap artifact that frames PostgreSQL as a prerequisite rather than a runtime lifecycle owned by HC-203.
+      - path: plans/backlog/M2-reproducible-release-candidate.md
+        description: Source issue wording for HC-201, HC-202, and HC-203 acceptance boundaries.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Team members can launch the MVP environment without reconstructing steps manually.
+      - Commands match the supported workflow in the docs.
+      - Scope stays on HayChat helper workflow rather than global PostgreSQL installation or service control.
+    success_criteria:
+      - Names the exact supported helper command set as `bootstrap`, `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, `bootstrap-start`, `bootstrap-start-background`, and `hc118-gate`.
+      - States the exact client-launch stance: helper ownership stops at server lifecycle, and clients are launched explicitly with `odin run client` in separate terminals unless a direct blocker is proven.
+      - States the PostgreSQL boundary clearly: availability is required, but service lifecycle is not owned here.
+      - Produces a minimal implementation file list plus the exact validation sequence `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`, `./run-test-server.sh bootstrap-start-background`, readiness confirmation, explicit `odin run client`, and `./run-test-server.sh stop` without widening into HC-204 or HC-206.
+    verification_checks:
+      - Diagnosis output enumerates the supported helper command set exactly as `bootstrap`, `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, `bootstrap-start`, `bootstrap-start-background`, and `hc118-gate`.
+      - Diagnosis output explicitly states that client launch remains manual via `odin run client` unless a blocker is proven.
+      - Diagnosis output explicitly states that PostgreSQL availability is a prerequisite and that HC-203 does not own the host service lifecycle.
+      - Diagnosis output includes the exact validation sequence `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`, `./run-test-server.sh bootstrap-start-background`, readiness confirmation, explicit `odin run client`, and `./run-test-server.sh stop`.
+
+  - id: T2-standardize-mvp-start-stop-helper-surface
+    title: Standardize the MVP start and stop helper surface in the owning script seam
+    description: Adjust the existing helper surface so the repository exposes one stable startup and shutdown workflow for the local MVP scenario, reusing current bootstrap and readiness behavior where possible and adding only the minimal command or usage changes required for consistency.
+    wave: 2
+    agent: gem-implementer
+    status: pending
+    covers:
+      - Stable helper command names and usage text
+      - Foreground and background server startup flow for the supported MVP path
+      - Deterministic helper-managed stop behavior
+      - Clear relationship between bootstrap, readiness, and start or stop operations
+      - Explicit handling of PostgreSQL as prerequisite rather than managed service
+    dependencies:
+      - T1-debug-helper-scope-and-supported-workflow
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Primary implementation seam for lifecycle helpers.
+      - path: README.md
+        description: Current command contract that implementation should either honor or update in lockstep.
+      - path: .env.example
+        description: Existing env contract that may need command-level references but should remain the only example env artifact.
+      - path: client/AGENTS.md
+        description: Existing client command reference that may need a minimal supported launch note if client startup remains manual.
+      - path: server/AGENTS.md
+        description: Existing server command reference that may need alignment with helper-managed startup expectations.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    debugger_diagnosis:
+      root_cause: HC-203 is partly implemented already, but the supported command surface is split across helper behavior, backlog wording, and docs, which risks drift and startup-order guesswork.
+      target_files:
+        - run-test-server.sh
+        - README.md
+        - client/AGENTS.md
+        - server/AGENTS.md
+      fix_recommendations: Keep run-test-server.sh as the single lifecycle owner, preserve existing bootstrap and readiness behavior where valid, and make only the smallest command-surface changes needed to express one supported start or stop workflow.
+      injected_at: 2026-07-05T09:30:00Z
+    acceptance_criteria:
+      - Team members can launch the MVP environment without reconstructing steps manually.
+      - Commands work against the agreed MVP setup.
+      - The workflow does not assume ownership of the host PostgreSQL service lifecycle.
+    success_criteria:
+      - One repo-supported helper surface defines how to bootstrap, start, wait for readiness if applicable, and stop the MVP server workflow.
+      - Command usage text and behavior are internally consistent and do not require ad hoc knowledge.
+      - Any client launch responsibility is made explicit, either through helper support or through clearly bounded companion commands.
+      - No reset workflow, packaging workflow, or database schema redesign is introduced.
+    verification_checks:
+      - "`./run-test-server.sh --help` or default usage output names the final supported helper command set and matches the documented contract."
+      - "`cp ./.env.example ./.env && source ./.env >/dev/null 2>&1 && ./run-test-server.sh bootstrap-start-background` starts the helper-managed server without requiring undocumented setup steps."
+      - "`./run-test-server.sh wait-ready` succeeds after helper-managed background startup when readiness waiting remains part of the supported flow."
+      - "`./run-test-server.sh stop` cleanly terminates the helper-managed background server."
+      - No new helper behavior starts, stops, installs, or reconfigures the host PostgreSQL service.
+    tech_stack:
+      - Bash
+      - Odin
+      - PostgreSQL environment variables
+    test_coverage: Prefer command-level validation of the helper seam over new Odin tests unless implementation moves lifecycle logic into code.
+    diag:
+      paired_debugger_task: T1-debug-helper-scope-and-supported-workflow
+      current_helper_anchor: run-test-server.sh
+      existing_prerequisites:
+        - setup-dev-env.sh for HC-201 bootstrap
+        - .env.example for HC-202 env defaults
+        - server/sql/auth_bootstrap.sql via run-test-server.sh bootstrap for HC-106
+    handoff:
+      do_not_reinvestigate:
+        - setup-dev-env.sh already covers the supported dependency bootstrap path and is not the place to add runtime start or stop behavior for HC-203.
+        - .env.example already provides the checked-in server environment contract and should remain the single example env surface.
+        - run-test-server.sh already owns bootstrap, background start, readiness wait, and stop semantics in the current repo state.
+      required_test_first: ./run-test-server.sh --help || ./run-test-server.sh
+      target_files:
+        - run-test-server.sh
+        - client/AGENTS.md
+        - server/AGENTS.md
+        - README.md
+      minimal_change: Keep the lifecycle surface centered on the existing helper script and update adjacent references only when needed to keep one supported contract.
+      acceptance_checks:
+        - helper usage text reflects the final supported command set
+        - supported start command works in the documented Linux workspace flow
+        - supported stop command cleanly terminates a helper-managed background server
+
+  - id: T3-align-supported-startup-and-shutdown-docs
+    title: Align startup and shutdown guidance with the finalized helper workflow
+    description: Update the user-facing and maintainer-facing docs so startup order, environment loading, readiness waiting, client launch, and shutdown guidance all match the finalized HC-203 helper surface without promising unsupported PostgreSQL lifecycle automation.
+    wave: 3
+    agent: gem-documentation-writer
+    status: pending
+    covers:
+      - README helper workflow instructions
+      - AGENTS command references for maintainers
+      - Explicit PostgreSQL prerequisite wording
+      - Startup and shutdown guidance for the MVP scenario
+      - Any doc references that currently drift from the final helper command set
+    dependencies:
+      - T2-standardize-mvp-start-stop-helper-surface
+    conflicts_with: []
+    context_files:
+      - path: README.md
+        description: Primary supported workflow doc for maintainers and internal testers.
+      - path: client/AGENTS.md
+        description: Client command reference that should reflect the final MVP launch guidance.
+      - path: server/AGENTS.md
+        description: Server command reference that should reflect the final helper-managed workflow.
+      - path: plans/05-developer-experience.md
+        description: Higher-level developer experience plan that should stay consistent with the documented helper workflow.
+      - path: plans/08-tester-onboarding.md
+        description: Existing smoke-path guidance that depends on accurate start and stop instructions.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Commands match the supported workflow in the docs.
+      - Startup and shutdown guidance are basic but sufficient for the MVP environment.
+      - Docs do not imply control of the system PostgreSQL service lifecycle.
+    success_criteria:
+      - README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md are the explicit alignment set for HC-203 doc parity.
+      - The docs name one supported start path, one supported stop path, and one explicit manual client-launch stance for the MVP environment.
+      - Environment loading and PostgreSQL prerequisites are explicit and match HC-201 and HC-202 artifacts.
+      - Client launch guidance is explicit enough that team members do not reconstruct startup order manually and uses `odin run client` as the maintained command reference unless implementation changes the contract.
+      - The parity checklist explicitly covers helper command names, .env loading, PostgreSQL prerequisite wording, server-then-client order, shutdown command, and hc118-gate references across all aligned docs.
+    verification_checks:
+      - "`README.md`, `client/AGENTS.md`, `server/AGENTS.md`, and `plans/08-tester-onboarding.md` all name the same supported start path, stop path, and client-launch stance."
+      - The aligned docs all reference copying `.env.example` to `.env` before running the helper workflow or clearly defer to a single canonical doc that does.
+      - The aligned docs all state that PostgreSQL is a prerequisite and do not claim that HC-203 starts or stops the host service.
+      - The aligned docs all preserve the documented server-then-client sequence and include `./run-test-server.sh stop` as the shutdown command.
+    task_type: update
+    audience: developers
+    coverage_matrix:
+      - README.md helper command set
+      - client/AGENTS.md client launch stance
+      - server/AGENTS.md server helper and direct-run stance
+      - plans/08-tester-onboarding.md smoke-path sequence
+      - .env loading and PostgreSQL prerequisite wording
+      - hc118-gate and shutdown parity checklist
+
+  - id: T4-verify-helper-workflow-and-doc-parity
+    title: Validate the helper workflow end to end against the documented MVP contract
+    description: Execute the narrow Linux workspace validation needed to prove that the finalized helper commands and the updated guidance describe the same supported flow, including documented .env loading, clean helper-managed startup, explicit client launch sequencing, optional readiness waiting, and shutdown.
+    wave: 4
+    agent: gem-devops
+    status: pending
+    covers:
+      - Command-level validation of the finalized helper surface
+      - Confirmation that startup and shutdown docs match actual behavior
+      - Validation that the documented .env flow is the path used during acceptance
+      - Proof that one or more clients can be launched in the documented order without reconstructing missing steps
+      - Verification that PostgreSQL is treated as an external prerequisite rather than controlled service
+      - Regression check that the helper still works with the current bootstrap and readiness path
+    dependencies:
+      - T2-standardize-mvp-start-stop-helper-surface
+      - T3-align-supported-startup-and-shutdown-docs
+    conflicts_with: []
+    context_files:
+      - path: run-test-server.sh
+        description: Final helper behavior under validation.
+      - path: README.md
+        description: Supported command and guidance contract to validate against.
+      - path: client/AGENTS.md
+        description: Client command reference that must match the final manual client-launch stance.
+      - path: server/AGENTS.md
+        description: Server command reference that must match the final helper-owned lifecycle contract.
+      - path: .env.example
+        description: Example env source that must be copied into the documented .env path before validation.
+      - path: plans/08-tester-onboarding.md
+        description: Secondary workflow doc that must stay aligned with the validated commands.
+    flags:
+      flaky: false
+      retries_used: 0
+      requires_design_validation: false
+    acceptance_criteria:
+      - Team members can launch the MVP environment without reconstructing steps manually.
+      - Commands match the supported workflow in the docs.
+    success_criteria:
+      - The documented helper start and stop flow runs successfully in the supported Linux workspace setup using the same .env path described in README.md.
+      - Validation confirms run-test-server.sh usage text, README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md agree on command names, prerequisites, environment loading, and sequencing.
+      - Validation explicitly proves the documented server-then-client startup order, including at least one manual client launch command when client orchestration remains outside the helper.
+      - Shutdown leaves no helper-managed server process running.
+      - Any residual gaps are reported as concrete follow-up defects rather than implicit knowledge.
+    verification_checks:
+      - "`cp ./.env.example ./.env && source ./.env >/dev/null 2>&1` completes before running helper validation."
+      - "`./run-test-server.sh bootstrap-start-background` succeeds in the supported Linux workspace flow."
+      - "`./run-test-server.sh wait-ready` succeeds, or the validation record explicitly states that readiness waiting is not part of the finalized command contract."
+      - "At least one `odin run client` launch is executed after server readiness using the documented startup order."
+      - "`./run-test-server.sh stop` completes and leaves no helper-managed server process running."
+      - "Validation records an explicit parity check across `run-test-server.sh`, `README.md`, `client/AGENTS.md`, `server/AGENTS.md`, and `plans/08-tester-onboarding.md`."
+    environment: development
+    requires_approval: false
+    devops_security_sensitive: false
+    handoff:
+      do_not_reinvestigate:
+        - HC-203 is not responsible for installing PostgreSQL globally or stopping other databases on the host.
+        - HC-201, HC-202, and HC-106 artifacts are upstream prerequisites and should be consumed as-is unless validation proves a direct mismatch.
+      required_test_first: cp ./.env.example ./.env && source ./.env >/dev/null 2>&1
+      target_files:
+        - run-test-server.sh
+        - README.md
+        - .env.example
+        - .env
+        - client/AGENTS.md
+        - server/AGENTS.md
+        - plans/08-tester-onboarding.md
+      minimal_change: Prefer validation and defect reporting over additional helper expansion once the supported command surface is coherent.
+      acceptance_checks:
+        - cp ./.env.example ./.env && source ./.env >/dev/null 2>&1
+        - ./run-test-server.sh bootstrap-start-background
+        - ./run-test-server.sh wait-ready
+        - documented `odin run client` launch starts after server readiness using the README-supported order
+        - ./run-test-server.sh stop
+        - README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md match observed startup, client launch, hc118-gate, and shutdown behavior

@@ -133,6 +133,49 @@ wait_for_server_ready() {
 	return 1
 }
 
+require_bootstrap_schema_create_privilege() {
+	local privilege_state
+	local can_usage can_create
+	local psql_status=0
+	local psql_stderr_path
+	psql_stderr_path=$(mktemp "$runtime_dir/hc-203-psql-stderr.XXXXXX")
+	privilege_state=$(PGPASSWORD="$HAYCHAT_DATABASE_PASS" \
+		psql \
+			-Atq \
+			-h "$HAYCHAT_DATABASE_URL" \
+			-p "$HAYCHAT_DATABASE_PORT" \
+			-U "$HAYCHAT_DATABASE_USER" \
+			-d "$HAYCHAT_DATABASE_NAME" \
+			-c "SELECT has_schema_privilege(current_user, 'public', 'USAGE')::text || ',' || has_schema_privilege(current_user, 'public', 'CREATE')::text;" \
+			2>"$psql_stderr_path") || psql_status=$?
+
+	if (( psql_status != 0 )); then
+		if [[ -s "$psql_stderr_path" ]]; then
+			sed 's/^/[HC-203][prereq][psql] /' "$psql_stderr_path" >&2
+		fi
+		rm -f "$psql_stderr_path"
+		echo "[HC-203][prereq] could not query schema privileges for database '$HAYCHAT_DATABASE_NAME' with role '$HAYCHAT_DATABASE_USER'" >&2
+		echo "[HC-203][prereq] check database URL, port, name, and credentials before retrying bootstrap" >&2
+		return 1
+	fi
+
+	rm -f "$psql_stderr_path"
+	IFS=',' read -r can_usage can_create <<<"$privilege_state"
+
+	if [[ "$can_usage" != "t" || "$can_create" != "t" ]]; then
+		local missing_privileges=()
+		if [[ "$can_usage" != "t" ]]; then
+			missing_privileges+=("USAGE")
+		fi
+		if [[ "$can_create" != "t" ]]; then
+			missing_privileges+=("CREATE")
+		fi
+		echo "[HC-203][prereq] configured database role '$HAYCHAT_DATABASE_USER' lacks ${missing_privileges[*]} on schema public in database '$HAYCHAT_DATABASE_NAME'" >&2
+		echo "[HC-203][prereq] rerun ./setup-dev-env.sh for the default local database, or repair the reused database so the configured role owns it or has USAGE, CREATE on schema public" >&2
+		return 1
+	fi
+}
+
 run_bootstrap() {
 	if ! command -v psql >/dev/null 2>&1; then
 		echo "psql is required for database bootstrap" >&2
@@ -143,6 +186,8 @@ run_bootstrap() {
 		echo "bootstrap SQL not found: $bootstrap_sql_path" >&2
 		exit 1
 	fi
+
+	require_bootstrap_schema_create_privilege
 
 	echo "Bootstrapping auth database state from $bootstrap_sql_path"
 	if ! PGPASSWORD="$HAYCHAT_DATABASE_PASS" \
