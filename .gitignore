@@ -134,3 +134,4 @@ Temporary Items
 
 # APM dependencies
 apm_modules/
+.vscode/settings.json
