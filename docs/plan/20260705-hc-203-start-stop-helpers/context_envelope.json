@@ -1,321 +1,321 @@
 {
-  "context_envelope": {
-    "meta": {
-      "plan_id": "20260705-hc-203-start-stop-helpers",
-      "created_at": "2026-07-05T09:30:00Z",
-      "last_updated": "2026-07-05T10:35:00Z",
-      "version": 3,
-      "source": [
-        "user_request:agent_input_reference",
-        "repo_memory:/memories/repo/server-runtime-defaults.md",
-        "workspace:AGENTS.md",
-        "workspace:client/AGENTS.md",
-        "workspace:server/AGENTS.md",
-        "workspace:README.md",
-        "workspace:run-test-server.sh",
-        "workspace:setup-dev-env.sh",
-        "workspace:.env.example",
-        "workspace:plans/05-developer-experience.md",
-        "workspace:plans/07-documentation.md",
-        "workspace:plans/08-tester-onboarding.md",
-        "workspace:plans/backlog/M2-reproducible-release-candidate.md",
-        "workspace:plans/backlog/github-issues/M2-reproducible-release-candidate.md",
-        "workspace:docs/plan/20260702-hc-106-database-bootstrap-test-identity/plan.yaml",
-        "workspace:docs/plan/20260702-hc-107-startup-preflight-checks/plan.yaml",
-        "workspace:docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml"
-      ]
-    },
-    "tech_stack": [
-      {
-        "name": "Bash",
-        "version": "system",
-        "usage_context": "Owns the current helper seam for bootstrap, start, readiness wait, and stop operations.",
-        "config_files": [
-          "run-test-server.sh",
-          "setup-dev-env.sh"
+    "context_envelope": {
+        "meta": {
+            "plan_id": "20260705-hc-203-start-stop-helpers",
+            "created_at": "2026-07-05T09:30:00Z",
+            "last_updated": "2026-07-05T10:35:00Z",
+            "version": 3,
+            "source": [
+                "user_request:agent_input_reference",
+                "repo_memory:/memories/repo/server-runtime-defaults.md",
+                "workspace:AGENTS.md",
+                "workspace:client/AGENTS.md",
+                "workspace:server/AGENTS.md",
+                "workspace:README.md",
+                "workspace:run-test-server.sh",
+                "workspace:setup-dev-env.sh",
+                "workspace:.env.example",
+                "workspace:plans/05-developer-experience.md",
+                "workspace:plans/07-documentation.md",
+                "workspace:plans/08-tester-onboarding.md",
+                "workspace:plans/backlog/M2-reproducible-release-candidate.md",
+                "workspace:plans/backlog/github-issues/M2-reproducible-release-candidate.md",
+                "workspace:docs/plan/20260702-hc-106-database-bootstrap-test-identity/plan.yaml",
+                "workspace:docs/plan/20260702-hc-107-startup-preflight-checks/plan.yaml",
+                "workspace:docs/plan/20260703-hc-118-mvp-connect-auth-message-coverage/plan.yaml"
+            ]
+        },
+        "tech_stack": [
+            {
+                "name": "Bash",
+                "version": "system",
+                "usage_context": "Owns the current helper seam for bootstrap, start, readiness wait, and stop operations.",
+                "config_files": [
+                    "run-test-server.sh",
+                    "setup-dev-env.sh"
+                ]
+            },
+            {
+                "name": "Odin",
+                "version": "workspace-managed",
+                "usage_context": "Builds and runs the HayChat server and clients for the supported MVP workflow.",
+                "config_files": [
+                    "AGENTS.md",
+                    "client/AGENTS.md",
+                    "server/AGENTS.md"
+                ]
+            },
+            {
+                "name": "PostgreSQL",
+                "version": "external service",
+                "usage_context": "Required MVP dependency for auth bootstrap and server startup, but not a service lifecycle owned by HC-203.",
+                "config_files": [
+                    ".env.example",
+                    "setup-dev-env.sh",
+                    "run-test-server.sh"
+                ]
+            }
+        ],
+        "conventions": [
+            "Keep changes minimal and aligned with the existing repo helper seam instead of creating parallel orchestration surfaces.",
+            "Use the Linux-first workspace flow already documented in README.md as the supported HC-203 target.",
+            "Acceptance validation must follow the documented .env path instead of sourcing .env.example directly.",
+            "Server defaults remain workspace-local: logs/, storage/, and storage/server_identity.json unless env overrides are set.",
+            "Maintain command references consistently across README.md, client/AGENTS.md, server/AGENTS.md, and tester-facing guidance.",
+            "Treat README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md as the explicit HC-203 parity checklist set."
+        ],
+        "constraints": {
+            "hard": [
+                "Scope is standardizing the HayChat MVP start and stop workflow, not installing PostgreSQL globally.",
+                "Acceptance requires commands or helpers plus basic startup and shutdown guidance matching supported docs.",
+                "Do not assume control of the system PostgreSQL service lifecycle beyond HayChat-specific usage.",
+                "Keep the implementation minimal and consistent with the existing repo style.",
+                "Prefer helper scripts or task commands that work on Linux in this workspace."
+            ],
+            "soft": [
+                "Prefer extending or tightening run-test-server.sh over adding a second orchestration entrypoint.",
+                "Reuse HC-201, HC-202, and HC-106 artifacts as prerequisites rather than recreating them.",
+                "Keep the current manual client launch stance if explicit `odin run client` guidance is sufficient to remove startup-order guesswork.",
+                "Treat explicit client-launch proof as part of acceptance even if the helper remains server-centric."
+            ],
+            "compatibility": [
+                "README.md already documents bootstrap, start, bootstrap-start, start-background, wait-ready, stop, bootstrap-start-background, and hc118-gate commands.",
+                "run-test-server.sh already implements bootstrap, foreground start, background start, readiness waiting, and stop behavior.",
+                "client/AGENTS.md currently exposes `odin run client` as the direct client launch command, while server/AGENTS.md exposes `odin run server` as the direct server run command.",
+                ".env.example already defines the supported local server environment baseline for HC-202.",
+                "setup-dev-env.sh provisions PostgreSQL and default HayChat DB credentials during supported clean-machine bootstrap, but that script is not a runtime lifecycle manager."
+            ],
+            "security_requirements": [
+                "Do not commit secrets or API keys.",
+                "Keep database credentials env-driven through .env.example and shell exports.",
+                "Do not stop or modify unrelated host databases while standardizing the HayChat workflow.",
+                "Preserve workspace-local runtime paths unless explicit env overrides are set."
+            ]
+        },
+        "architecture_snapshot": {
+            "key_dirs": [
+                "client/",
+                "server/",
+                "docs/plan/",
+                "plans/"
+            ],
+            "patterns": [
+                "run-test-server.sh is the owning seam for repo-supported MVP server bootstrap and lifecycle commands.",
+                "README.md is already the effective source of truth for the local MVP workflow, even where backlog issue text lags behind current implementation.",
+                "setup-dev-env.sh owns supported dependency bootstrap for Linux-first clean-machine setup, not day-to-day environment start or stop.",
+                "Client startup is currently documented as explicit odin run client commands rather than helper-managed orchestration."
+            ],
+            "key_components": [
+                {
+                    "name": "MVP lifecycle helper",
+                    "location": "run-test-server.sh",
+                    "responsibility": [
+                        "Bootstrap auth data",
+                        "Run server in foreground or background",
+                        "Wait for readiness",
+                        "Stop helper-managed background server"
+                    ]
+                },
+                {
+                    "name": "Supported bootstrap path",
+                    "location": "setup-dev-env.sh",
+                    "responsibility": [
+                        "Install supported OS packages",
+                        "Build Odin",
+                        "Prepare shared libraries",
+                        "Provision default local PostgreSQL role and database"
+                    ]
+                },
+                {
+                    "name": "Example local server env",
+                    "location": ".env.example",
+                    "responsibility": [
+                        "Define required database env vars",
+                        "Expose tester-safe runtime defaults",
+                        "Prevent local startup guesswork"
+                    ]
+                },
+                {
+                    "name": "Supported MVP workflow docs",
+                    "location": "README.md",
+                    "responsibility": [
+                        "Describe bootstrap prerequisites",
+                        "Name supported helper commands",
+                        "Explain documented .env loading, startup, readiness, client launch, and shutdown flow"
+                    ]
+                },
+                {
+                    "name": "Maintainer command references",
+                    "location": "client/AGENTS.md and server/AGENTS.md",
+                    "responsibility": [
+                        "Expose the explicit manual client launch stance",
+                        "Expose the direct server run stance alongside helper-owned lifecycle guidance",
+                        "Stay in parity with README.md and tester onboarding references"
+                    ]
+                }
+            ]
+        },
+        "research_digest": {
+            "relevant_files": [
+                {
+                    "path": "run-test-server.sh",
+                    "purpose": [
+                        "Current helper implementation surface for HC-203."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "path": "README.md",
+                    "purpose": [
+                        "Current documented MVP workflow including startup and shutdown commands."
+                    ],
+                    "confidence": 0.99
+                },
+                {
+                    "path": ".env.example",
+                    "purpose": [
+                        "Existing HC-202 env artifact that seeds the documented .env path used by the helper flow."
+                    ],
+                    "confidence": 0.98
+                },
+                {
+                    "path": "setup-dev-env.sh",
+                    "purpose": [
+                        "Existing HC-201 bootstrap artifact that frames system prerequisites and DB provisioning."
+                    ],
+                    "confidence": 0.97
+                },
+                {
+                    "path": "plans/backlog/M2-reproducible-release-candidate.md",
+                    "purpose": [
+                        "Issue-level acceptance boundaries for HC-201, HC-202, and HC-203."
+                    ],
+                    "confidence": 0.95
+                },
+                {
+                    "path": "plans/08-tester-onboarding.md",
+                    "purpose": [
+                        "Current smoke-path guidance that depends on accurate helper commands."
+                    ],
+                    "confidence": 0.93
+                },
+                {
+                    "path": "client/AGENTS.md",
+                    "purpose": [
+                        "Current explicit client launch reference that fixes the supported manual client stance."
+                    ],
+                    "confidence": 0.97
+                },
+                {
+                    "path": "server/AGENTS.md",
+                    "purpose": [
+                        "Current direct server run reference that must remain aligned with helper-owned lifecycle guidance."
+                    ],
+                    "confidence": 0.97
+                }
+            ],
+            "patterns_found": [
+                {
+                    "name": "Single helper owner",
+                    "category": "workflow",
+                    "confidence": 0.99,
+                    "example_location": [
+                        "run-test-server.sh",
+                        "README.md"
+                    ]
+                },
+                {
+                    "name": "Docs-first workflow contract",
+                    "category": "documentation",
+                    "confidence": 0.97,
+                    "example_location": [
+                        "README.md",
+                        "client/AGENTS.md",
+                        "server/AGENTS.md",
+                        "plans/08-tester-onboarding.md"
+                    ]
+                },
+                {
+                    "name": "Workspace-local runtime defaults",
+                    "category": "runtime",
+                    "confidence": 0.96,
+                    "example_location": [
+                        "run-test-server.sh",
+                        ".env.example",
+                        "/memories/repo/server-runtime-defaults.md"
+                    ]
+                }
+            ],
+            "gotchas": [
+                {
+                    "text": "HC-203 backlog wording still implies broader orchestration than the current clarified scope allows, especially around PostgreSQL service control.",
+                    "confidence": 0.98
+                },
+                {
+                    "text": "README.md and run-test-server.sh already advertise more helper functionality than plans/05-developer-experience.md currently summarizes.",
+                    "confidence": 0.96
+                },
+                {
+                    "text": "Client launch remains manual in the documented flow, so acceptance may be satisfied by explicit guidance rather than new automation if sequencing is unambiguous.",
+                    "confidence": 0.92
+                },
+                {
+                    "text": "Reviewer follow-up requires T4 validation to prove both the documented .env workflow and the documented server-then-client launch order, not just helper-managed server startup.",
+                    "confidence": 0.99
+                },
+                {
+                    "text": "Reviewer follow-up also requires server/AGENTS.md to be inside the explicit parity set, and requires T1 and T3 outputs to name exact commands and exact aligned files instead of qualitative summaries.",
+                    "confidence": 0.99
+                }
+            ]
+        },
+        "prior_decisions": [
+            {
+                "decision": "Keep run-test-server.sh as the owning lifecycle seam for HC-203.",
+                "rationale": [
+                    "The script already implements the relevant start, readiness, and stop behavior.",
+                    "Adding another orchestration surface would create drift without improving acceptance coverage."
+                ],
+                "confidence": 0.99
+            },
+            {
+                "decision": "Treat PostgreSQL availability as a prerequisite, not a lifecycle to be started and stopped by HC-203 helpers.",
+                "rationale": [
+                    "User clarifications explicitly narrow scope away from global PostgreSQL service control.",
+                    "The host may be running unrelated databases, so aggressive lifecycle commands would be unsafe."
+                ],
+                "confidence": 0.99
+            },
+            {
+                "decision": "Reuse HC-201, HC-202, and HC-106 artifacts instead of recreating prerequisite setup paths.",
+                "rationale": [
+                    "setup-dev-env.sh, .env.example, and auth_bootstrap.sql already form the upstream contract for the local MVP workflow.",
+                    "HC-203 acceptance is about standardizing run guidance and helper commands around that contract."
+                ],
+                "confidence": 0.98
+            },
+            {
+                "decision": "Treat the README .env path and documented client launch order as acceptance-critical validation inputs for HC-203.",
+                "rationale": [
+                    "Reviewer findings show that validating only the server helper leaves the startup workflow incomplete.",
+                    "Doc-parity proof is incomplete when validation bypasses the documented .env path by sourcing .env.example directly."
+                ],
+                "confidence": 0.99
+            },
+            {
+                "decision": "Use README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md as the final HC-203 parity checklist set.",
+                "rationale": [
+                    "Reviewer follow-up explicitly adds server/AGENTS.md to the acceptance-facing validation scope.",
+                    "These four docs are the visible workflow contract surfaces for helper commands, client launch stance, and shutdown guidance."
+                ],
+                "confidence": 0.99
+            }
+        ],
+        "reuse_notes": [
+            {
+                "path": "/memories/repo/server-runtime-defaults.md",
+                "trust": "high"
+            }
         ]
-      },
-      {
-        "name": "Odin",
-        "version": "workspace-managed",
-        "usage_context": "Builds and runs the HayChat server and clients for the supported MVP workflow.",
-        "config_files": [
-          "AGENTS.md",
-          "client/AGENTS.md",
-          "server/AGENTS.md"
-        ]
-      },
-      {
-        "name": "PostgreSQL",
-        "version": "external service",
-        "usage_context": "Required MVP dependency for auth bootstrap and server startup, but not a service lifecycle owned by HC-203.",
-        "config_files": [
-          ".env.example",
-          "setup-dev-env.sh",
-          "run-test-server.sh"
-        ]
-      }
-    ],
-    "conventions": [
-      "Keep changes minimal and aligned with the existing repo helper seam instead of creating parallel orchestration surfaces.",
-      "Use the Linux-first workspace flow already documented in README.md as the supported HC-203 target.",
-      "Acceptance validation must follow the documented .env path instead of sourcing .env.example directly.",
-      "Server defaults remain workspace-local: logs/, storage/, and storage/server_identity.json unless env overrides are set.",
-      "Maintain command references consistently across README.md, client/AGENTS.md, server/AGENTS.md, and tester-facing guidance.",
-      "Treat README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md as the explicit HC-203 parity checklist set."
-    ],
-    "constraints": {
-      "hard": [
-        "Scope is standardizing the HayChat MVP start and stop workflow, not installing PostgreSQL globally.",
-        "Acceptance requires commands or helpers plus basic startup and shutdown guidance matching supported docs.",
-        "Do not assume control of the system PostgreSQL service lifecycle beyond HayChat-specific usage.",
-        "Keep the implementation minimal and consistent with the existing repo style.",
-        "Prefer helper scripts or task commands that work on Linux in this workspace."
-      ],
-      "soft": [
-        "Prefer extending or tightening run-test-server.sh over adding a second orchestration entrypoint.",
-        "Reuse HC-201, HC-202, and HC-106 artifacts as prerequisites rather than recreating them.",
-        "Keep the current manual client launch stance if explicit `odin run client` guidance is sufficient to remove startup-order guesswork.",
-        "Treat explicit client-launch proof as part of acceptance even if the helper remains server-centric."
-      ],
-      "compatibility": [
-        "README.md already documents bootstrap, start, bootstrap-start, start-background, wait-ready, stop, bootstrap-start-background, and hc118-gate commands.",
-        "run-test-server.sh already implements bootstrap, foreground start, background start, readiness waiting, and stop behavior.",
-        "client/AGENTS.md currently exposes `odin run client` as the direct client launch command, while server/AGENTS.md exposes `odin run server` as the direct server run command.",
-        ".env.example already defines the supported local server environment baseline for HC-202.",
-        "setup-dev-env.sh provisions PostgreSQL and default HayChat DB credentials during supported clean-machine bootstrap, but that script is not a runtime lifecycle manager."
-      ],
-      "security_requirements": [
-        "Do not commit secrets or API keys.",
-        "Keep database credentials env-driven through .env.example and shell exports.",
-        "Do not stop or modify unrelated host databases while standardizing the HayChat workflow.",
-        "Preserve workspace-local runtime paths unless explicit env overrides are set."
-      ]
-    },
-    "architecture_snapshot": {
-      "key_dirs": [
-        "client/",
-        "server/",
-        "docs/plan/",
-        "plans/"
-      ],
-      "patterns": [
-        "run-test-server.sh is the owning seam for repo-supported MVP server bootstrap and lifecycle commands.",
-        "README.md is already the effective source of truth for the local MVP workflow, even where backlog issue text lags behind current implementation.",
-        "setup-dev-env.sh owns supported dependency bootstrap for Linux-first clean-machine setup, not day-to-day environment start or stop.",
-        "Client startup is currently documented as explicit odin run client commands rather than helper-managed orchestration."
-      ],
-      "key_components": [
-        {
-          "name": "MVP lifecycle helper",
-          "location": "run-test-server.sh",
-          "responsibility": [
-            "Bootstrap auth data",
-            "Run server in foreground or background",
-            "Wait for readiness",
-            "Stop helper-managed background server"
-          ]
-        },
-        {
-          "name": "Supported bootstrap path",
-          "location": "setup-dev-env.sh",
-          "responsibility": [
-            "Install supported OS packages",
-            "Build Odin",
-            "Prepare shared libraries",
-            "Provision default local PostgreSQL role and database"
-          ]
-        },
-        {
-          "name": "Example local server env",
-          "location": ".env.example",
-          "responsibility": [
-            "Define required database env vars",
-            "Expose tester-safe runtime defaults",
-            "Prevent local startup guesswork"
-          ]
-        },
-        {
-          "name": "Supported MVP workflow docs",
-          "location": "README.md",
-          "responsibility": [
-            "Describe bootstrap prerequisites",
-            "Name supported helper commands",
-            "Explain documented .env loading, startup, readiness, client launch, and shutdown flow"
-          ]
-        },
-        {
-          "name": "Maintainer command references",
-          "location": "client/AGENTS.md and server/AGENTS.md",
-          "responsibility": [
-            "Expose the explicit manual client launch stance",
-            "Expose the direct server run stance alongside helper-owned lifecycle guidance",
-            "Stay in parity with README.md and tester onboarding references"
-          ]
-        }
-      ]
-    },
-    "research_digest": {
-      "relevant_files": [
-        {
-          "path": "run-test-server.sh",
-          "purpose": [
-            "Current helper implementation surface for HC-203."
-          ],
-          "confidence": 0.99
-        },
-        {
-          "path": "README.md",
-          "purpose": [
-            "Current documented MVP workflow including startup and shutdown commands."
-          ],
-          "confidence": 0.99
-        },
-        {
-          "path": ".env.example",
-          "purpose": [
-            "Existing HC-202 env artifact that seeds the documented .env path used by the helper flow."
-          ],
-          "confidence": 0.98
-        },
-        {
-          "path": "setup-dev-env.sh",
-          "purpose": [
-            "Existing HC-201 bootstrap artifact that frames system prerequisites and DB provisioning."
-          ],
-          "confidence": 0.97
-        },
-        {
-          "path": "plans/backlog/M2-reproducible-release-candidate.md",
-          "purpose": [
-            "Issue-level acceptance boundaries for HC-201, HC-202, and HC-203."
-          ],
-          "confidence": 0.95
-        },
-        {
-          "path": "plans/08-tester-onboarding.md",
-          "purpose": [
-            "Current smoke-path guidance that depends on accurate helper commands."
-          ],
-          "confidence": 0.93
-        },
-        {
-          "path": "client/AGENTS.md",
-          "purpose": [
-            "Current explicit client launch reference that fixes the supported manual client stance."
-          ],
-          "confidence": 0.97
-        },
-        {
-          "path": "server/AGENTS.md",
-          "purpose": [
-            "Current direct server run reference that must remain aligned with helper-owned lifecycle guidance."
-          ],
-          "confidence": 0.97
-        }
-      ],
-      "patterns_found": [
-        {
-          "name": "Single helper owner",
-          "category": "workflow",
-          "confidence": 0.99,
-          "example_location": [
-            "run-test-server.sh",
-            "README.md"
-          ]
-        },
-        {
-          "name": "Docs-first workflow contract",
-          "category": "documentation",
-          "confidence": 0.97,
-          "example_location": [
-            "README.md",
-            "client/AGENTS.md",
-            "server/AGENTS.md",
-            "plans/08-tester-onboarding.md"
-          ]
-        },
-        {
-          "name": "Workspace-local runtime defaults",
-          "category": "runtime",
-          "confidence": 0.96,
-          "example_location": [
-            "run-test-server.sh",
-            ".env.example",
-            "/memories/repo/server-runtime-defaults.md"
-          ]
-        }
-      ],
-      "gotchas": [
-        {
-          "text": "HC-203 backlog wording still implies broader orchestration than the current clarified scope allows, especially around PostgreSQL service control.",
-          "confidence": 0.98
-        },
-        {
-          "text": "README.md and run-test-server.sh already advertise more helper functionality than plans/05-developer-experience.md currently summarizes.",
-          "confidence": 0.96
-        },
-        {
-          "text": "Client launch remains manual in the documented flow, so acceptance may be satisfied by explicit guidance rather than new automation if sequencing is unambiguous.",
-          "confidence": 0.92
-        },
-        {
-          "text": "Reviewer follow-up requires T4 validation to prove both the documented .env workflow and the documented server-then-client launch order, not just helper-managed server startup.",
-          "confidence": 0.99
-        },
-        {
-          "text": "Reviewer follow-up also requires server/AGENTS.md to be inside the explicit parity set, and requires T1 and T3 outputs to name exact commands and exact aligned files instead of qualitative summaries.",
-          "confidence": 0.99
-        }
-      ]
-    },
-    "prior_decisions": [
-      {
-        "decision": "Keep run-test-server.sh as the owning lifecycle seam for HC-203.",
-        "rationale": [
-          "The script already implements the relevant start, readiness, and stop behavior.",
-          "Adding another orchestration surface would create drift without improving acceptance coverage."
-        ],
-        "confidence": 0.99
-      },
-      {
-        "decision": "Treat PostgreSQL availability as a prerequisite, not a lifecycle to be started and stopped by HC-203 helpers.",
-        "rationale": [
-          "User clarifications explicitly narrow scope away from global PostgreSQL service control.",
-          "The host may be running unrelated databases, so aggressive lifecycle commands would be unsafe."
-        ],
-        "confidence": 0.99
-      },
-      {
-        "decision": "Reuse HC-201, HC-202, and HC-106 artifacts instead of recreating prerequisite setup paths.",
-        "rationale": [
-          "setup-dev-env.sh, .env.example, and auth_bootstrap.sql already form the upstream contract for the local MVP workflow.",
-          "HC-203 acceptance is about standardizing run guidance and helper commands around that contract."
-        ],
-        "confidence": 0.98
-      },
-      {
-        "decision": "Treat the README .env path and documented client launch order as acceptance-critical validation inputs for HC-203.",
-        "rationale": [
-          "Reviewer findings show that validating only the server helper leaves the startup workflow incomplete.",
-          "Doc-parity proof is incomplete when validation bypasses the documented .env path by sourcing .env.example directly."
-        ],
-        "confidence": 0.99
-      },
-      {
-        "decision": "Use README.md, client/AGENTS.md, server/AGENTS.md, and plans/08-tester-onboarding.md as the final HC-203 parity checklist set.",
-        "rationale": [
-          "Reviewer follow-up explicitly adds server/AGENTS.md to the acceptance-facing validation scope.",
-          "These four docs are the visible workflow contract surfaces for helper commands, client launch stance, and shutdown guidance."
-        ],
-        "confidence": 0.99
-      }
-    ],
-    "reuse_notes": [
-      {
-        "path": "/memories/repo/server-runtime-defaults.md",
-        "trust": "high"
-      }
-    ]
-  }
+    }
 }
