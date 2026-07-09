@@ -79,9 +79,9 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		webAdminHost           = net.IP4_Loopback,
 		webAdminPort           = parseOr("HAYCHAT_WEB_ADMIN_PORT", int(8080)),
 		databaseURL            = getEnvOr("HAYCHAT_DATABASE_URL", "localhost"),
-		databaseUser           = getEnvOr("HAYCHAT_DATABASE_USER", "haychat"),
-		databasePass           = getEnvOr("HAYCHAT_DATABASE_PASS", ""),
-		databaseName           = getEnvOr("HAYCHAT_DATABASE_NAME", "haychat"),
+		databaseUser           = getEnvOr("HAYCHAT_DATABASE_USER", "haychat"), // Default user for local development
+		databasePass           = getEnvOr("HAYCHAT_DATABASE_PASS", "haychat"), // Default password for local development
+		databaseName           = getEnvOr("HAYCHAT_DATABASE_NAME", "haychat"), // Default database name for local development
 		databasePort           = parseOr("HAYCHAT_DATABASE_PORT", int(5432)),
 		maxRestarts            = parseOr("HAYCHAT_MAX_RESTARTS", int(5)),
 		restartBackoffMin      = time.Duration(
