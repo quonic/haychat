@@ -165,18 +165,26 @@ bootstrap_postgres() {
 		sudo systemctl enable --now postgresql
 	fi
 
-	create_role="CREATE ROLE ${default_db_user} LOGIN PASSWORD '${default_db_pass}';"
-	alter_role="ALTER ROLE ${default_db_user} WITH LOGIN PASSWORD '${default_db_pass}';"
-	create_db="CREATE DATABASE ${default_db_name} OWNER ${default_db_user};"
-	grant_privileges="GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};"
-
-	(
-		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$create_role" || \
+	role_exists=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='${default_db_user}'")
+	if [[ "$role_exists" == "1" ]]; then
+		alter_role="ALTER ROLE ${default_db_user} WITH LOGIN PASSWORD '${default_db_pass}';"
 		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$alter_role"
-	) && \
-	sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$create_db" && \
-	sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$grant_privileges" || \
-	echo "Failed to set up PostgreSQL database and user." >&2
+	else
+		create_role="CREATE ROLE ${default_db_user} LOGIN PASSWORD '${default_db_pass}';"
+		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$create_role"
+	fi
+
+	db_exists=$(sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${default_db_name}'")
+	if [[ "$db_exists" == "1" ]]; then
+		create_db=""
+		grant_privileges="GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};"
+		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$grant_privileges"
+	else
+		create_db="CREATE DATABASE ${default_db_name} OWNER ${default_db_user};"
+		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$create_db"
+		grant_privileges="GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};"
+		sudo -u postgres psql -v ON_ERROR_STOP=1 postgres -c "$grant_privileges"
+	fi
 }
 
 print_summary() {
