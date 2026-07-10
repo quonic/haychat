@@ -177,8 +177,8 @@ BEGIN
 END
 \$\$;
 SELECT 'CREATE DATABASE ${default_db_name} OWNER ${default_db_user}'
-WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${default_db_name}')
-\gexec
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = '${default_db_name}');
+
 ALTER DATABASE ${default_db_name} OWNER TO ${default_db_user};
 GRANT ALL PRIVILEGES ON DATABASE ${default_db_name} TO ${default_db_user};
 SQL
