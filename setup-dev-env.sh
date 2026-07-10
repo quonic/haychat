@@ -15,7 +15,6 @@ default_db_host=${HAYCHAT_DATABASE_URL:-localhost}
 default_db_port=${HAYCHAT_DATABASE_PORT:-5432}
 
 required_packages_dnf=(
-	build-essential
 	git
 	clang
 	llvm
@@ -23,6 +22,7 @@ required_packages_dnf=(
 	lld
 	pkg-config
 	libpq-devel
+	enet-devel
 	postgresql
 	postgresql-server
 	libX11-devel
@@ -42,6 +42,7 @@ required_packages_apt=(
 	lld
 	pkg-config
 	libpq-dev
+	enet-dev
 	postgresql
 	postgresql-client
 	libx11-dev
