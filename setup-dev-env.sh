@@ -24,6 +24,8 @@ required_packages_dnf=(
 	libpq-devel
 	enet-devel
 	postgresql
+	postgresql-contrib
+	postgresql-devel
 	postgresql-server
 	libX11-devel
 	libXcursor-devel
