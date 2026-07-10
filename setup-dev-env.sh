@@ -14,8 +14,27 @@ default_db_name=${HAYCHAT_DATABASE_NAME:-haychat}
 default_db_host=${HAYCHAT_DATABASE_URL:-localhost}
 default_db_port=${HAYCHAT_DATABASE_PORT:-5432}
 
-required_packages=(
+required_packages_dnf=(
 	build-essential
+	git
+	clang
+	llvm
+	llvm-devel
+	lld
+	pkg-config
+	libpq-devel
+	postgresql
+	postgresql-server
+	libX11-devel
+	libXcursor-devel
+	libXrandr-devel
+	libXi-devel
+	mesa-libGL-devel
+	alsa-lib-devel
+	dbus-devel
+)
+
+required_packages_apt=(
 	git
 	clang
 	llvm
@@ -50,8 +69,18 @@ require_apt() {
 	if ! command -v apt-get >/dev/null 2>&1; then
 		echo "Unsupported package manager for the supported bootstrap path." >&2
 		echo "Use Ubuntu or Debian with apt-get for reproducible local setup." >&2
-		exit 1
+		return 1
 	fi
+	return 0
+}
+
+require_dnf() {
+	if ! command -v dnf >/dev/null 2>&1; then
+		echo "Unsupported package manager for the supported bootstrap path." >&2
+		echo "Use Fedora or RHEL with dnf for reproducible local setup." >&2
+		return 1
+	fi
+	return 0
 }
 
 require_sudo() {
@@ -83,8 +112,15 @@ clone_or_update_repo() {
 
 install_packages() {
 	log_step "Installing OS packages for the supported Linux-first flow"
-	sudo apt-get update
-	sudo apt-get install -y "${required_packages[@]}"
+	if command -v apt-get >/dev/null 2>&1; then
+		sudo apt-get update
+		sudo apt-get install -y "${required_packages_apt[@]}"
+	elif command -v dnf >/dev/null 2>&1; then
+		sudo dnf install -y "${required_packages_dnf[@]}"
+	else
+		echo "Unsupported package manager. Use apt or dnf." >&2
+		exit 1
+	fi
 }
 
 bootstrap_odin() {
@@ -168,7 +204,7 @@ print_summary() {
 
 main() {
 	require_linux
-	require_apt
+	require_apt || require_dnf || { echo "Unsupported package manager. Use apt or dnf." >&2; exit 1; }
 	require_sudo
 	install_packages
 	bootstrap_odin
