@@ -16,6 +16,7 @@ default_db_port=${HAYCHAT_DATABASE_PORT:-5432}
 
 required_packages_dnf=(
 	git
+	git-lfs
 	clang
 	llvm
 	llvm-devel
@@ -38,6 +39,7 @@ required_packages_dnf=(
 
 required_packages_apt=(
 	git
+	git-lfs
 	clang
 	llvm
 	llvm-dev
@@ -107,6 +109,8 @@ clone_or_update_repo() {
 	mkdir -p "$(dirname -- "$dest_dir")"
 	echo "Cloning $repo_url into $dest_dir"
 	git clone "$repo_url" "$dest_dir"
+	git lfs install
+	git lfs pull
 
 	if [[ -n "$branch" ]]; then
 		git -C "$dest_dir" checkout "$branch"
