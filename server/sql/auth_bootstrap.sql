@@ -1,3 +1,5 @@
+-- HC-205: seed test identities
+
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS users (
