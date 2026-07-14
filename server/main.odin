@@ -15,12 +15,23 @@ import "core:time"
 PendingDBRequestType :: enum {
 	AuthLookup,
 	Generic,
+	ListRooms,
+	CheckChatMembership,
+	ListChatRecipients,
+	StoreChatMessage,
+	CheckHistoryMembership,
+	GetRoomHistory,
 }
 
 PendingDBRequest :: struct {
-	requestID:   u64,
-	peerID:      u32,
-	requestType: PendingDBRequestType,
+	requestID:        u64,
+	peerID:           u32,
+	requestType:      PendingDBRequestType,
+	roomID:           int,
+	beforeMessageID:  int,
+	limit:            int,
+	content:          string,
+	recipientUserIDs: [dynamic]int,
 }
 
 RouterPeerSession :: struct {
@@ -45,8 +56,6 @@ mainInterruptRequested := false
 
 @(private)
 mainInterruptShutdownQueued := false
-
-MVPChatRoomID :: 1
 
 registerMainInterruptHandler :: proc() {
 	mainInterruptContext = context
@@ -110,6 +119,10 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 }
 
 MainRouterState_deinit :: proc(state: ^MainRouterState) {
+	for _, request in state.pendingDatabaseRequests {
+		delete(request.content)
+		delete(request.recipientUserIDs)
+	}
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
@@ -169,6 +182,9 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 	}
 
 	for requestID in requestIDs {
+		request := state.pendingDatabaseRequests[requestID]
+		delete(request.content)
+		delete(request.recipientUserIDs)
 		delete_key(&state.pendingDatabaseRequests, requestID)
 	}
 }
@@ -319,6 +335,24 @@ MainRouterState_enqueueDatabaseRequest :: proc(
 	}
 }
 
+MainRouterState_enqueueChannelDatabaseRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	request: common.DatabaseQueryRequest,
+	pending: PendingDBRequest,
+) {
+	pendingRequest := pending
+	pendingRequest.requestID = MainRouterState_generateRequestID(state)
+	pendingRequest.peerID = peerID
+	state.pendingDatabaseRequests[pendingRequest.requestID] = pendingRequest
+	IPC_Server_send(
+		&pm.config.databaseSocket,
+		pm.config.databaseFd,
+		DatabaseQuery{request_id = pendingRequest.requestID, request = request},
+	)
+}
+
 MainRouterState_getDatabaseRequest :: proc(
 	state: ^MainRouterState,
 	requestID: u64,
@@ -334,6 +368,10 @@ MainRouterState_getDatabaseRequest :: proc(
 }
 
 MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
+	for _, request in state.pendingDatabaseRequests {
+		delete(request.content)
+		delete(request.recipientUserIDs)
+	}
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
@@ -377,8 +415,17 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 				common.MessageType.ServerDatabaseQueryResponse,
 				common.ServerDatabaseQueryResult{success = false, message = message, result = ""},
 			)
+		case .ListRooms,
+		     .CheckChatMembership,
+		     .ListChatRecipients,
+		     .StoreChatMessage,
+		     .CheckHistoryMembership,
+		     .GetRoomHistory:
+			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case:
 		}
+		delete(request.content)
+		delete(request.recipientUserIDs)
 	}
 }
 
@@ -764,8 +811,8 @@ MainRouterState_handleClientChatMessage :: proc(
 		return
 	}
 
-	if req.roomId != MVPChatRoomID {
-		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported roomId")
+	if req.roomId <= 0 || len(req.content) == 0 || len(req.content) > 4000 {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room chat message")
 		return
 	}
 
@@ -775,31 +822,99 @@ MainRouterState_handleClientChatMessage :: proc(
 		return
 	}
 
-	chatPayload := common.ServerChatMessagePayload {
-		senderId = session.authenticatedUserID,
-		roomId   = req.roomId,
-		content  = req.content,
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		common.DatabaseQueryRequest {
+			queryType = .CheckRoomMembership,
+			membership = {roomId = req.roomId, userId = session.authenticatedUserID},
+		},
+		PendingDBRequest {
+			requestType = .CheckChatMembership,
+			roomID = req.roomId,
+			content = strings.clone(req.content),
+		},
+	)
+}
+
+MainRouterState_handleClientListRooms :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientListRoomsPayload
+	if cbor.unmarshal(payload, &req) != nil {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientListRooms payload")
+		return
 	}
-
-	authenticatedRecipientPeerIDs := make([dynamic]u32, 0, len(state.peerSessions))
-	defer delete(authenticatedRecipientPeerIDs)
-
-	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated {
-			append(&authenticatedRecipientPeerIDs, recipientPeerID)
-		}
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated room list request")
+		return
 	}
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		common.DatabaseQueryRequest {
+			queryType = .ListRoomsForUser,
+			roomList = {userId = session.authenticatedUserID},
+		},
+		PendingDBRequest{requestType = .ListRooms},
+	)
+}
 
-	for recipientPeerID in authenticatedRecipientPeerIDs {
-
-		MainRouterState_sendPeerMessage(
+MainRouterState_handleClientFetchRoomHistory :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientFetchRoomHistoryPayload
+	if cbor.unmarshal(payload, &req) != nil ||
+	   req.roomId <= 0 ||
+	   req.beforeMessageID < 0 ||
+	   req.limit < 1 ||
+	   req.limit > 50 {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room history request")
+		return
+	}
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(
 			pm,
 			state,
-			recipientPeerID,
-			common.MessageType.ServerChatMessage,
-			chatPayload,
+			peerID,
+			"Unauthenticated room history request",
 		)
+		return
 	}
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		common.DatabaseQueryRequest {
+			queryType = .CheckRoomMembership,
+			membership = {roomId = req.roomId, userId = session.authenticatedUserID},
+		},
+		PendingDBRequest {
+			requestType = .CheckHistoryMembership,
+			roomID = req.roomId,
+			beforeMessageID = req.beforeMessageID,
+			limit = req.limit,
+		},
+	)
+}
+
+MainRouterState_hasRecipientUserID :: proc(userIDs: []int, userID: int) -> bool {
+	for candidateUserID in userIDs {
+		if candidateUserID == userID {
+			return true
+		}
+	}
+	return false
 }
 
 MainRouterState_dispatchApplicationPacket :: proc(
@@ -811,6 +926,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 	#partial switch packet.messageType {
 	case .ClientChatMessage:
 		MainRouterState_handleClientChatMessage(pm, state, peerID, packet.payload)
+	case .ClientListRooms:
+		MainRouterState_handleClientListRooms(pm, state, peerID, packet.payload)
+	case .ClientFetchRoomHistory:
+		MainRouterState_handleClientFetchRoomHistory(pm, state, peerID, packet.payload)
 	case .ClientAuthLookup:
 		MainRouterState_handleClientAuthLookupPacket(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
@@ -970,6 +1089,9 @@ MainRouterState_handleDatabaseResult :: proc(
 		fmt.printfln("[Main] Received database response for unknown request ID %d\n", requestID)
 		return
 	}
+	defer delete(request.content)
+	defer delete(request.recipientUserIDs)
+	defer IPC__database_query_response_deinit(response)
 
 	switch request.requestType {
 	case .AuthLookup:
@@ -994,6 +1116,134 @@ MainRouterState_handleDatabaseResult :: proc(
 				success = response.success,
 				message = response.message,
 				result = response.result,
+			},
+		)
+	case .ListRooms:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerListRooms,
+			common.ServerListRoomsPayload{rooms = response.roomSummaries},
+		)
+	case .CheckChatMembership:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		if !response.isRoomMember {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .ListRoomMemberUserIDs,
+				memberList = {roomId = request.roomID},
+			},
+			PendingDBRequest {
+				requestType = .ListChatRecipients,
+				roomID = request.roomID,
+				content = strings.clone(request.content),
+			},
+		)
+	case .ListChatRecipients:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		recipientUserIDs := make([dynamic]int, 0, len(response.memberUserIDs))
+		for userID in response.memberUserIDs {
+			append(&recipientUserIDs, userID)
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .StoreRoomChatMessage,
+				storeChat = {
+					roomId = request.roomID,
+					senderId = MainRouterState_ensurePeerSession(state, request.peerID).authenticatedUserID,
+					content = strings.clone(request.content),
+				},
+			},
+			PendingDBRequest {
+				requestType = .StoreChatMessage,
+				roomID = request.roomID,
+				recipientUserIDs = recipientUserIDs,
+			},
+		)
+	case .StoreChatMessage:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		chatPayload := common.ServerChatMessagePayload {
+			id        = response.storedChatMessage.id,
+			senderId  = response.storedChatMessage.senderId,
+			roomId    = response.storedChatMessage.roomId,
+			timestamp = response.storedChatMessage.timestamp,
+			content   = response.storedChatMessage.content,
+		}
+		for recipientPeerID, recipientSession in state.peerSessions {
+			if recipientSession.isAuthenticated &&
+			   MainRouterState_hasRecipientUserID(
+				   request.recipientUserIDs[:],
+				   recipientSession.authenticatedUserID,
+			   ) {
+				MainRouterState_sendPeerMessage(
+					pm,
+					state,
+					recipientPeerID,
+					.ServerChatMessage,
+					chatPayload,
+				)
+			}
+		}
+	case .CheckHistoryMembership:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		if !response.isRoomMember {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .GetRoomHistory,
+				history = {
+					roomId = request.roomID,
+					beforeMessageID = request.beforeMessageID,
+					limit = request.limit,
+				},
+			},
+			PendingDBRequest{requestType = .GetRoomHistory, roomID = request.roomID},
+		)
+	case .GetRoomHistory:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerRoomHistory,
+			common.ServerRoomHistoryPayload {
+				roomId = request.roomID,
+				messages = response.historyMessages,
+				hasOlder = response.hasOlderHistory,
 			},
 		)
 	case:

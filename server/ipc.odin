@@ -194,6 +194,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(request.authLookup.nickname)
 	case .RawSQL:
 		delete(request.rawSQL.query)
+	case .StoreRoomChatMessage:
+		delete(request.storeChat.content)
 	case:
 	}
 }
@@ -201,6 +203,19 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryResponse) {
 	delete(response.message)
 	delete(response.result)
+	for room in response.roomSummaries {
+		delete(room.name)
+		delete(room.description)
+	}
+	delete(response.roomSummaries)
+	delete(response.memberUserIDs)
+	delete(response.storedChatMessage.timestamp)
+	delete(response.storedChatMessage.content)
+	for message in response.historyMessages {
+		delete(message.timestamp)
+		delete(message.content)
+	}
+	delete(response.historyMessages)
 }
 
 IPC__message_deinit :: proc(msg: ^Message) {

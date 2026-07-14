@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 import "shared:pg"
@@ -106,6 +107,302 @@ databaseExecuteAuthLookup :: proc(
 	}
 }
 
+databaseResultError :: proc(
+	queryType: common.DatabaseQueryType,
+	result: ^pg.Result,
+) -> common.DatabaseQueryResponse {
+	return databaseErrorResponse(queryType, cloneCStringOrEmpty(pg.result_error_message(result^)))
+}
+
+databaseExecuteListRoomsForUser :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRoomListRequest,
+) -> common.DatabaseQueryResponse {
+	userIDText := fmt.aprintf("%d", request.userId)
+	defer delete(userIDText)
+	userIDCString, _ := strings.clone_to_cstring(userIDText)
+	defer delete(userIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)userIDCString}
+	result := pg.exec_params(
+		conn,
+		"SELECT r.id::text, r.name, r.description FROM rooms r " +
+		"JOIN room_members rm ON rm.room_id = r.id " +
+		"WHERE rm.user_id = $1 ORDER BY r.name",
+		1,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.ListRoomsForUser,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.ListRoomsForUser, &result)
+	}
+
+	response := common.DatabaseQueryResponse {
+		queryType = .ListRoomsForUser,
+		success   = true,
+		message   = "ok",
+	}
+	for row in 0 ..< pg.n_tuples(result) {
+		roomIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 0)))
+		roomID, roomIDOK := strconv.parse_int(roomIDText)
+		delete(roomIDText)
+		if !roomIDOK {
+			continue
+		}
+		append(
+			&response.roomSummaries,
+			common.RoomSummary {
+				id = int(roomID),
+				name = cloneCStringOrEmpty(cstring(pg.get_value(result, row, 1))),
+				description = cloneCStringOrEmpty(cstring(pg.get_value(result, row, 2))),
+			},
+		)
+	}
+	return response
+}
+
+databaseExecuteCheckRoomMembership :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRoomMembershipRequest,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	userIDText := fmt.aprintf("%d", request.userId)
+	defer delete(userIDText)
+	userIDCString, _ := strings.clone_to_cstring(userIDText)
+	defer delete(userIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)roomIDCString, transmute([^]byte)userIDCString}
+	result := pg.exec_params(
+		conn,
+		"SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2)",
+		2,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.CheckRoomMembership,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.CheckRoomMembership, &result)
+	}
+
+	isMember := false
+	if pg.n_tuples(result) == 1 {
+		value := cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
+		isMember = value == "t"
+		delete(value)
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .CheckRoomMembership,
+		success = true,
+		message = "ok",
+		isRoomMember = isMember,
+	}
+}
+
+databaseExecuteListRoomMemberUserIDs :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRoomMemberListRequest,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)roomIDCString}
+	result := pg.exec_params(
+		conn,
+		"SELECT user_id::text FROM room_members WHERE room_id = $1",
+		1,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.ListRoomMemberUserIDs,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.ListRoomMemberUserIDs, &result)
+	}
+
+	response := common.DatabaseQueryResponse {
+		queryType = .ListRoomMemberUserIDs,
+		success   = true,
+		message   = "ok",
+	}
+	for row in 0 ..< pg.n_tuples(result) {
+		userIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 0)))
+		userID, userIDOK := strconv.parse_int(userIDText)
+		delete(userIDText)
+		if userIDOK {
+			append(&response.memberUserIDs, int(userID))
+		}
+	}
+	return response
+}
+
+databaseExecuteStoreRoomChatMessage :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseStoreRoomChatMessageRequest,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	senderIDText := fmt.aprintf("%d", request.senderId)
+	defer delete(senderIDText)
+	senderIDCString, _ := strings.clone_to_cstring(senderIDText)
+	defer delete(senderIDCString)
+	contentCString, _ := strings.clone_to_cstring(request.content)
+	defer delete(contentCString)
+	paramValues := [?][^]byte {
+		transmute([^]byte)roomIDCString,
+		transmute([^]byte)senderIDCString,
+		transmute([^]byte)contentCString,
+	}
+	result := pg.exec_params(
+		conn,
+		"INSERT INTO chat_messages (room_id, sender_user_id, content) VALUES ($1, $2, $3) " +
+		"RETURNING id::text, created_at::text",
+		3,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.StoreRoomChatMessage,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
+		return databaseResultError(.StoreRoomChatMessage, &result)
+	}
+
+	messageIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
+	messageID, messageIDOK := strconv.parse_int(messageIDText)
+	delete(messageIDText)
+	if !messageIDOK {
+		return databaseErrorResponse(.StoreRoomChatMessage, "database returned invalid message ID")
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .StoreRoomChatMessage,
+		success = true,
+		message = "ok",
+		storedChatMessage = {
+			id = int(messageID),
+			senderId = request.senderId,
+			roomId = request.roomId,
+			timestamp = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 1))),
+			content = strings.clone(request.content),
+		},
+	}
+}
+
+databaseExecuteGetRoomHistory :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRoomHistoryRequest,
+) -> common.DatabaseQueryResponse {
+	limit := request.limit
+	if limit < 1 || limit > 50 {
+		limit = 50
+	}
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	beforeMessageIDText := fmt.aprintf("%d", request.beforeMessageID)
+	defer delete(beforeMessageIDText)
+	beforeMessageIDCString, _ := strings.clone_to_cstring(beforeMessageIDText)
+	defer delete(beforeMessageIDCString)
+	limitText := fmt.aprintf("%d", limit + 1)
+	defer delete(limitText)
+	limitCString, _ := strings.clone_to_cstring(limitText)
+	defer delete(limitCString)
+	paramValues := [?][^]byte {
+		transmute([^]byte)roomIDCString,
+		transmute([^]byte)beforeMessageIDCString,
+		transmute([^]byte)limitCString,
+	}
+	result := pg.exec_params(
+		conn,
+		"SELECT id::text, sender_user_id::text, created_at::text, content FROM chat_messages " +
+		"WHERE room_id = $1 AND ($2::bigint = 0 OR id < $2::bigint) " +
+		"ORDER BY id DESC LIMIT $3",
+		3,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(.GetRoomHistory, cloneCStringOrEmpty(pg.error_message(conn)))
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.GetRoomHistory, &result)
+	}
+
+	rowCount := int(pg.n_tuples(result))
+	response := common.DatabaseQueryResponse {
+		queryType       = .GetRoomHistory,
+		success         = true,
+		message         = "ok",
+		hasOlderHistory = rowCount > limit,
+	}
+	messageCount := min(rowCount, limit)
+	for offset in 0 ..< messageCount {
+		row := i32(messageCount - offset - 1)
+		messageIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 0)))
+		messageID, messageIDOK := strconv.parse_int(messageIDText)
+		delete(messageIDText)
+		senderIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 1)))
+		senderID, senderIDOK := strconv.parse_int(senderIDText)
+		delete(senderIDText)
+		if !messageIDOK || !senderIDOK {
+			continue
+		}
+		append(
+			&response.historyMessages,
+			common.StoredChatMessage {
+				id = int(messageID),
+				senderId = int(senderID),
+				roomId = request.roomId,
+				timestamp = cloneCStringOrEmpty(cstring(pg.get_value(result, row, 2))),
+				content = cloneCStringOrEmpty(cstring(pg.get_value(result, row, 3))),
+			},
+		)
+	}
+	return response
+}
+
 databaseExecuteRequest :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseQueryRequest,
@@ -115,6 +412,16 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteAuthLookup(conn, request.authLookup)
 	case .RawSQL:
 		return databaseExecuteRawQuery(conn, request.rawSQL)
+	case .ListRoomsForUser:
+		return databaseExecuteListRoomsForUser(conn, request.roomList)
+	case .CheckRoomMembership:
+		return databaseExecuteCheckRoomMembership(conn, request.membership)
+	case .ListRoomMemberUserIDs:
+		return databaseExecuteListRoomMemberUserIDs(conn, request.memberList)
+	case .StoreRoomChatMessage:
+		return databaseExecuteStoreRoomChatMessage(conn, request.storeChat)
+	case .GetRoomHistory:
+		return databaseExecuteGetRoomHistory(conn, request.history)
 	case .None:
 		return databaseErrorResponse(.None, "missing database query type")
 	case:

@@ -444,6 +444,70 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 		&h.state,
 		NetworkDataReceived{peerId = senderPeerID, channel = .Chat, data = sealedPacketBytes},
 	)
+	membershipQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(membershipQuery.request)
+	assert(
+		membershipQuery.request.queryType == .CheckRoomMembership,
+		"expected chat send to check sender room membership first",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		membershipQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .CheckRoomMembership,
+			success = true,
+			message = strings.clone("ok"),
+			isRoomMember = true,
+		},
+	)
+
+	recipientQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(recipientQuery.request)
+	assert(
+		recipientQuery.request.queryType == .ListRoomMemberUserIDs,
+		"expected member sender to resolve room recipients",
+	)
+	recipientUserIDs := make([dynamic]int)
+	append(&recipientUserIDs, senderSession.authenticatedUserID)
+	recipientSession, recipientOK := MainRouterState_getPeerSession(&h.state, recipientPeerID)
+	assert(recipientOK, "expected recipient router peer session to exist")
+	append(&recipientUserIDs, recipientSession.authenticatedUserID)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		recipientQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .ListRoomMemberUserIDs,
+			success = true,
+			message = strings.clone("ok"),
+			memberUserIDs = recipientUserIDs,
+		},
+	)
+
+	storeQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(storeQuery.request)
+	assert(
+		storeQuery.request.queryType == .StoreRoomChatMessage,
+		"expected recipient snapshot to be followed by persisted chat storage",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		storeQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .StoreRoomChatMessage,
+			success = true,
+			message = strings.clone("ok"),
+			storedChatMessage = {
+				id = 17,
+				senderId = senderSession.authenticatedUserID,
+				roomId = 1,
+				timestamp = strings.clone("2026-07-14T00:00:00Z"),
+				content = strings.clone("hello haychat"),
+			},
+		},
+	)
 
 	seenSender := false
 	seenRecipient := false
@@ -476,7 +540,9 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 		chatPayload: common.ServerChatMessagePayload
 		chatPayloadErr := cbor.unmarshal(broadcastInnerPacket.payload, &chatPayload)
 		assert(chatPayloadErr == nil, "expected chat broadcast payload decode to succeed")
+		defer delete(chatPayload.timestamp)
 		defer delete(chatPayload.content)
+		assert(chatPayload.id == 17, "expected persisted chat message ID to be broadcast")
 		assert(chatPayload.roomId == 1, "expected chat broadcast roomId to remain the MVP room")
 		assert(
 			chatPayload.senderId == senderSession.authenticatedUserID,
@@ -503,7 +569,7 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 }
 
 @(test)
-testMainRouterRejectsUnsupportedChatRoomID :: proc(t: ^testing.T) {
+testMainRouterRejectsChatFromNonMember :: proc(t: ^testing.T) {
 	_ = t
 
 	sync.mutex_lock(&routerTestMutex)
@@ -531,6 +597,23 @@ testMainRouterRejectsUnsupportedChatRoomID :: proc(t: ^testing.T) {
 		&h.state,
 		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
 	)
+	membershipQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(membershipQuery.request)
+	assert(
+		membershipQuery.request.queryType == .CheckRoomMembership,
+		"expected chat send to check membership before rejecting a non-member",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		membershipQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .CheckRoomMembership,
+			success = true,
+			message = strings.clone("ok"),
+			isRoomMember = false,
+		},
+	)
 
 	responseSend := routerPollNetworkSend(&h)
 	defer delete(responseSend.data)
@@ -549,24 +632,27 @@ testMainRouterRejectsUnsupportedChatRoomID :: proc(t: ^testing.T) {
 	defer delete(responseInnerPacket.payload)
 	assert(
 		responseInnerPacket.messageType == .ServerProtocolError,
-		"expected unsupported roomId to return ServerProtocolError",
+		"expected non-member chat to return ServerProtocolError",
 	)
 
 	responsePayload: common.ProtocolErrorResponse
 	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
-	assert(responsePayloadErr == nil, "expected unsupported roomId payload decode to succeed")
+	assert(responsePayloadErr == nil, "expected non-member payload decode to succeed")
 	defer delete(responsePayload.message)
 	assert(
-		responsePayload.message == "Unsupported roomId",
-		"expected unsupported roomId error message to match MVP contract",
+		responsePayload.message == "Not a room member",
+		"expected non-member error message to match membership contract",
 	)
 
 	_, networkErr := IPC_Client_poll(h.networkFd)
-	assert(networkErr != nil, "expected unsupported roomId to avoid extra network messages")
+	assert(networkErr != nil, "expected non-member chat to avoid extra network messages")
 
 	session, ok := MainRouterState_getPeerSession(&h.state, peerID)
-	assert(ok, "expected peer session to remain available after unsupported roomId")
-	assert(session.isAuthenticated, "expected unsupported roomId to preserve authentication state")
+	assert(ok, "expected peer session to remain available after membership rejection")
+	assert(
+		session.isAuthenticated,
+		"expected membership rejection to preserve authentication state",
+	)
 }
 
 @(test)

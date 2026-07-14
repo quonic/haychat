@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 2
+protocolVersion: ProtocolVersion = 3
 GENERAL_ROOM_ID :: int(1)
 
 // Packet is the logical application packet format.
@@ -165,6 +165,8 @@ MessageType :: enum {
 	ServerRoomDetails, // Response to ClientGetRoomDetails, includes room details such as room name, list of participants, etc.
 	ClientListRooms, // Request a list of available chat rooms
 	ServerListRooms, // Response to ClientListRooms, includes list of rooms and their details (e.g. name, type, number of participants, etc.)
+	ClientFetchRoomHistory, // Request a cursor-paginated page of persisted room messages
+	ServerRoomHistory, // Response containing a cursor-paginated page of persisted room messages
 	ClientChangeRoomPermissions, // Request to change a room's permissions (e.g. who can join, who can post, etc.), includes room name and new permissions
 	ServerRoomPermissions, // Response to ClientChangeRoomPermissions, includes room name and new permissions
 	ServerRoomPermissionsChange, // Notification of a room's permissions changing, includes room name and new permissions
@@ -174,6 +176,9 @@ MessageType :: enum {
 	ServerDeleteRoom, // Notification of a room being deleted, includes room name
 	ClientEditRoom, // Request to edit a room's details (only allowed for certain admin users), includes room name and new details (e.g. new name, new type, etc.)
 	ServerEditRoom, // Notification of a room's details being edited, includes room name and new details (e.g. new name, new type, etc.)
+	ClientAddRoomMember, // Request to add a member to a room (only allowed for certain admin users)
+	ClientRemoveRoomMember, // Request to remove a member from a room (only allowed for certain admin users)
+	ServerRoomMembershipChanged, // Notification that the authenticated user's room membership changed
 
 	// Messaging
 	ClientChatMessage, // Chat message sent from client to server
@@ -332,9 +337,68 @@ ClientChatMessagePayload :: struct {
 }
 
 ServerChatMessagePayload :: struct {
-	senderId: int,
+	id:        int,
+	senderId:  int,
+	roomId:    int,
+	timestamp: string,
+	content:   string,
+}
+
+RoomSummary :: struct {
+	id:          int,
+	name:        string,
+	description: string,
+}
+
+ClientListRoomsPayload :: struct {}
+
+ServerListRoomsPayload :: struct {
+	rooms: [dynamic]RoomSummary,
+}
+
+ClientFetchRoomHistoryPayload :: struct {
+	roomId:          int,
+	beforeMessageID: int,
+	limit:           int,
+}
+
+StoredChatMessage :: struct {
+	id:        int,
+	senderId:  int,
+	roomId:    int,
+	timestamp: string,
+	content:   string,
+}
+
+ServerRoomHistoryPayload :: struct {
 	roomId:   int,
-	content:  string,
+	messages: [dynamic]StoredChatMessage,
+	hasOlder: bool,
+}
+
+ClientCreateRoomPayload :: struct {
+	name:        string,
+	description: string,
+}
+
+ClientEditRoomPayload :: struct {
+	roomId:      int,
+	name:        string,
+	description: string,
+}
+
+ClientDeleteRoomPayload :: struct {
+	roomId: int,
+}
+
+ClientRoomMembershipPayload :: struct {
+	roomId: int,
+	userId: int,
+}
+
+ServerRoomMembershipChangedPayload :: struct {
+	roomId: int,
+	joined: bool,
 }
 
 VoiceData :: struct {
@@ -386,6 +450,11 @@ DatabaseQueryType :: enum u8 {
 	None = 0,
 	AuthLookupByNickname,
 	RawSQL,
+	ListRoomsForUser,
+	CheckRoomMembership,
+	ListRoomMemberUserIDs,
+	StoreRoomChatMessage,
+	GetRoomHistory,
 }
 
 DatabaseAuthLookupRequest :: struct {
@@ -396,17 +465,53 @@ DatabaseRawQueryRequest :: struct {
 	query: string,
 }
 
+DatabaseRoomListRequest :: struct {
+	userId: int,
+}
+
+DatabaseRoomMembershipRequest :: struct {
+	roomId: int,
+	userId: int,
+}
+
+DatabaseRoomMemberListRequest :: struct {
+	roomId: int,
+}
+
+DatabaseStoreRoomChatMessageRequest :: struct {
+	roomId:   int,
+	senderId: int,
+	content:  string,
+}
+
+DatabaseRoomHistoryRequest :: struct {
+	roomId:          int,
+	beforeMessageID: int,
+	limit:           int,
+}
+
 DatabaseQueryRequest :: struct {
 	queryType:  DatabaseQueryType,
 	authLookup: DatabaseAuthLookupRequest,
 	rawSQL:     DatabaseRawQueryRequest,
+	roomList:   DatabaseRoomListRequest,
+	membership: DatabaseRoomMembershipRequest,
+	memberList: DatabaseRoomMemberListRequest,
+	storeChat:  DatabaseStoreRoomChatMessageRequest,
+	history:    DatabaseRoomHistoryRequest,
 }
 
 DatabaseQueryResponse :: struct {
-	queryType: DatabaseQueryType,
-	success:   bool,
-	message:   string,
-	result:    string,
+	queryType:         DatabaseQueryType,
+	success:           bool,
+	message:           string,
+	result:            string,
+	isRoomMember:      bool,
+	roomSummaries:     [dynamic]RoomSummary,
+	memberUserIDs:     [dynamic]int,
+	storedChatMessage: StoredChatMessage,
+	historyMessages:   [dynamic]StoredChatMessage,
+	hasOlderHistory:   bool,
 }
 
 ProtocolErrorResponse :: struct {
