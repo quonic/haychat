@@ -204,6 +204,7 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 
 	clientHello := common.ClientHello {
 			version                  = common.protocolVersion,
+			nickname                 = "router-tester",
 			clientIdentityPublicKey  = clientPublicKey,
 			clientEphemeralPublicKey = clientEphemeralPublicKey,
 		}
@@ -250,6 +251,7 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 	clientAuthProof := common.buildClientAuthProof(
 		authChallenge.sessionID,
 		authChallenge.challenge,
+		clientHello.nickname,
 		clientPublicKey,
 		clientEphemeralPublicKey,
 		serverHello.serverIdentityPublicKey,
@@ -274,6 +276,28 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 		NetworkDataReceived{peerId = peerID, channel = .Chat, data = clientAuthBytes},
 	)
 
+	identityQuery := routerPollDatabaseQuery(h)
+	defer IPC__database_query_request_deinit(identityQuery.request)
+	assert(
+		identityQuery.request.queryType == .ResolveUserIdentity,
+		"expected auth to resolve the durable user identity before succeeding",
+	)
+	assert(
+		identityQuery.request.userIdentity.nickname == clientHello.nickname,
+		"expected identity resolution to use the client nickname",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		identityQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .ResolveUserIdentity,
+			success = true,
+			message = strings.clone("ok"),
+			result = strings.clone("42"),
+		},
+	)
+
 	authSuccessSend := routerPollNetworkSend(h)
 	defer delete(authSuccessSend.data)
 	authSuccessPacket := routerDecodePacketBytes(authSuccessSend.data)
@@ -287,7 +311,7 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 	authSuccessErr := cbor.unmarshal(authSuccessPacket.payload, &authSuccess)
 	assert(authSuccessErr == nil, "expected auth success payload decode to succeed")
 	defer delete(authSuccess.message)
-	assert(authSuccess.userId != 0, "expected authenticated user ID to be non-zero")
+	assert(authSuccess.userId == 42, "expected authenticated user ID from database resolution")
 
 	sharedSecret, sharedSecretOK := common.deriveSharedSecret(
 		&clientEphemeralPrivateKey,
@@ -297,6 +321,7 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 
 	serverHelloProof := common.buildServerHelloProof(
 		authChallenge.sessionID,
+		clientHello.nickname,
 		clientPublicKey,
 		clientEphemeralPublicKey,
 		serverHello.serverIdentityPublicKey,
@@ -405,6 +430,64 @@ testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
 	assert(
 		databaseQuery.request.authLookup.nickname == "hayseed",
 		"expected auth lookup nickname to be forwarded in structured request",
+	)
+}
+
+@(test)
+testMainRouterRejectsFailedUserIdentityResolution :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	MainRouterState_sendDatabaseRequest(
+		&h.pm,
+		&h.state,
+		peerID,
+		.ResolveUserIdentity,
+		common.DatabaseQueryRequest {
+			queryType = .ResolveUserIdentity,
+			userIdentity = {nickname = strings.clone("taken-name")},
+		},
+	)
+	identityQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(identityQuery.request)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		identityQuery.request_id,
+		common.DatabaseQueryResponse {
+			queryType = .ResolveUserIdentity,
+			success = true,
+			message = strings.clone("ok"),
+			result = "",
+		},
+	)
+
+	failureSend := routerPollNetworkSend(&h)
+	defer delete(failureSend.data)
+	failurePacket := routerDecodePacketBytes(failureSend.data)
+	defer delete(failurePacket.payload)
+	assert(
+		failurePacket.messageType == .ServerAuthFailure,
+		"expected unresolved user identity to fail authentication",
+	)
+	disconnect := routerPollDisconnect(&h)
+	assert(disconnect.peerId == peerID, "expected failed identity resolution to disconnect peer")
+
+	session, sessionOK := MainRouterState_getPeerSession(&h.state, peerID)
+	assert(sessionOK, "expected peer session to remain available until disconnect event")
+	assert(
+		!session.isAuthenticated,
+		"expected failed identity resolution to leave peer unauthenticated",
+	)
+	assert(
+		session.transport.phase == .Failed,
+		"expected failed identity resolution to fail transport",
 	)
 }
 

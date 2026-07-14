@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 3
+protocolVersion: ProtocolVersion = 4
 GENERAL_ROOM_ID :: int(1)
 
 // Packet is the logical application packet format.
@@ -29,6 +29,7 @@ EncryptedPacket :: struct {
 
 ClientHello :: struct {
 	version:                  ProtocolVersion,
+	nickname:                 string,
 	clientIdentityPublicKey:  IdentityPublicKeyBytes,
 	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
 }
@@ -36,6 +37,7 @@ ClientHello :: struct {
 ServerHelloProof :: struct {
 	version:                  ProtocolVersion,
 	sessionID:                SessionID,
+	nickname:                 string,
 	clientIdentityPublicKey:  IdentityPublicKeyBytes,
 	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
 	serverIdentityPublicKey:  IdentityPublicKeyBytes,
@@ -63,6 +65,7 @@ ServerRegisterResponsePayload :: struct {
 ClientAuthProof :: struct {
 	sessionID:                SessionID,
 	challenge:                AuthChallengeBytes,
+	nickname:                 string,
 	clientIdentityPublicKey:  IdentityPublicKeyBytes,
 	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
 	serverIdentityPublicKey:  IdentityPublicKeyBytes,
@@ -458,6 +461,7 @@ ServerDatabaseQueryResult :: struct {
 DatabaseQueryType :: enum u8 {
 	None = 0,
 	AuthLookupByNickname,
+	ResolveUserIdentity,
 	RawSQL,
 	ListRoomsForUser,
 	CheckRoomMembership,
@@ -474,6 +478,11 @@ DatabaseQueryType :: enum u8 {
 
 DatabaseAuthLookupRequest :: struct {
 	nickname: string,
+}
+
+DatabaseUserIdentityRequest :: struct {
+	nickname:  string,
+	publicKey: IdentityPublicKeyBytes,
 }
 
 DatabaseRawQueryRequest :: struct {
@@ -533,6 +542,7 @@ DatabaseRoomMemberMutationRequest :: struct {
 DatabaseQueryRequest :: struct {
 	queryType:    DatabaseQueryType,
 	authLookup:   DatabaseAuthLookupRequest,
+	userIdentity: DatabaseUserIdentityRequest,
 	rawSQL:       DatabaseRawQueryRequest,
 	roomList:     DatabaseRoomListRequest,
 	membership:   DatabaseRoomMembershipRequest,

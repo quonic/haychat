@@ -58,6 +58,7 @@ ClientServerTransport :: struct {
 	serverName:                string,
 	serverHost:                string,
 	serverPort:                i32,
+	nickname:                  string,
 	clientIdentityPrivateKey:  common.IdentityPrivateKeyBytes,
 	clientIdentityPublicKey:   common.IdentityPublicKeyBytes,
 	clientEphemeralPrivateKey: ecdh.Private_Key,
@@ -211,6 +212,10 @@ ClientServerTransport_init :: proc(
 	string,
 	bool,
 ) {
+	if len(config.display_name) < 3 || len(config.display_name) > 32 {
+		return {}, "client display name must be between 3 and 32 characters", false
+	}
+
 	clientPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(config.private_key)
 	clientPublicKey, publicKeyOK := common.identityPublicKeyFromHex(config.public_key)
 	if !privateKeyOK || !publicKeyOK {
@@ -228,6 +233,7 @@ ClientServerTransport_init :: proc(
 			serverName                = strings.clone(server.name),
 			serverHost                = strings.clone(server.host),
 			serverPort                = server.port,
+			nickname                  = strings.clone(config.display_name),
 			clientIdentityPrivateKey  = clientPrivateKey,
 			clientIdentityPublicKey   = clientPublicKey,
 			clientEphemeralPrivateKey = clientEphemeralPrivateKey,
@@ -428,6 +434,7 @@ ClientServerTransport_beginHandshake :: proc(transport: ^ClientServerTransport) 
 
 	clientHello := common.ClientHello {
 		version                  = common.protocolVersion,
+		nickname                 = transport.nickname,
 		clientIdentityPublicKey  = transport.clientIdentityPublicKey,
 		clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
 	}
@@ -467,6 +474,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 
 		clientHello := common.ClientHello {
 			version                  = common.protocolVersion,
+			nickname                 = transport.nickname,
 			clientIdentityPublicKey  = transport.clientIdentityPublicKey,
 			clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
 		}
@@ -509,6 +517,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		clientAuthProof := common.buildClientAuthProof(
 			transport.sessionID,
 			transport.authChallenge,
+			transport.nickname,
 			transport.clientIdentityPublicKey,
 			transport.clientEphemeralPublicKey,
 			transport.serverIdentityPublicKey,
@@ -534,6 +543,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 
 		serverHelloProof := common.buildServerHelloProof(
 			transport.sessionID,
+			transport.nickname,
 			transport.clientIdentityPublicKey,
 			transport.clientEphemeralPublicKey,
 			transport.serverIdentityPublicKey,

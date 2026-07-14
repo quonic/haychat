@@ -192,6 +192,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	#partial switch request.queryType {
 	case .AuthLookupByNickname:
 		delete(request.authLookup.nickname)
+	case .ResolveUserIdentity:
+		delete(request.userIdentity.nickname)
 	case .RawSQL:
 		delete(request.rawSQL.query)
 	case .StoreRoomChatMessage:

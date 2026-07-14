@@ -8,7 +8,7 @@ set -euo pipefail
 #   2. File storage  — contents of storage/
 #   3. Server identity keys — storage/server_identity.json
 #   4. Test runtime dir — .haychat-test-server/
-#   5. Database seed  — re-runs server/sql/auth_bootstrap.sql (hayseed/id=1, haypeer/id=2)
+#   5. Database seed  — re-runs server/sql/auth_bootstrap.sql (admin/id=1, haypeer/id=2)
 #   6. Client config  — ~/.config/haychat/config.json (or $XDG_CONFIG_HOME/haychat/config.json)
 #
 # Does NOT reset:

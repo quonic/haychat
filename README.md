@@ -125,7 +125,7 @@ Running `odin run server` directly now uses tester-safe local runtime paths by d
 
 Seeded test identities:
 
-- `hayseed` resolves to user ID `1`
+- `admin` resolves to user ID `1`
 - `haypeer` resolves to user ID `2`
 
 The bootstrap SQL lives in `server/sql/auth_bootstrap.sql` and is safe to rerun. It keeps those seeded nickname-to-user-ID mappings deterministic without requiring testers to write SQL by hand.

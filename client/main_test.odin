@@ -41,11 +41,13 @@ buildServerHelloPacketBytes :: proc(
 ) {
 	clientHello := common.ClientHello {
 		version                  = common.protocolVersion,
+		nickname                 = transport.nickname,
 		clientIdentityPublicKey  = transport.clientIdentityPublicKey,
 		clientEphemeralPublicKey = transport.clientEphemeralPublicKey,
 	}
 	serverHelloProof := common.buildServerHelloProof(
 		sessionID,
+		clientHello.nickname,
 		clientHello.clientIdentityPublicKey,
 		clientHello.clientEphemeralPublicKey,
 		serverIdentityPublicKey,

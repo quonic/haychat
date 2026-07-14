@@ -40,6 +40,45 @@ testIdentityKeyEncodingAndSignatures :: proc(t: ^testing.T) {
 }
 
 @(test)
+testClientAuthProofBindsNickname :: proc(t: ^testing.T) {
+	_ = t
+
+	privateKey, publicKey, identityOK := generateIdentityKeyPair()
+	assert(identityOK, "expected client identity key generation to succeed")
+	sessionID, sessionIDOK := generateSessionID()
+	assert(sessionIDOK, "expected session ID generation to succeed")
+	challenge, challengeOK := generateAuthChallenge()
+	assert(challengeOK, "expected auth challenge generation to succeed")
+	_, ephemeralPublicKey, ephemeralOK := generateKeyExchangeKeyPair()
+	assert(ephemeralOK, "expected client ephemeral key generation to succeed")
+	_, serverEphemeralPublicKey, serverEphemeralOK := generateKeyExchangeKeyPair()
+	assert(serverEphemeralOK, "expected server ephemeral key generation to succeed")
+
+	proof := buildClientAuthProof(
+		sessionID,
+		challenge,
+		"hayseed",
+		publicKey,
+		ephemeralPublicKey,
+		{},
+		serverEphemeralPublicKey,
+	)
+	request, requestOK := signClientAuthRequest(privateKey, proof)
+	assert(requestOK, "expected client auth request signing to succeed")
+	assert(
+		verifyClientAuthRequestSignature(publicKey, proof, request),
+		"expected original nickname proof to verify",
+	)
+
+	tamperedProof := proof
+	tamperedProof.nickname = "other-user"
+	assert(
+		!verifyClientAuthRequestSignature(publicKey, tamperedProof, request),
+		"expected changed nickname to invalidate client auth signature",
+	)
+}
+
+@(test)
 testSharedSecretDerivationMatches :: proc(t: ^testing.T) {
 	_ = t
 

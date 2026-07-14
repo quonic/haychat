@@ -107,6 +107,60 @@ databaseExecuteAuthLookup :: proc(
 	}
 }
 
+databaseExecuteUserIdentityResolution :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseUserIdentityRequest,
+) -> common.DatabaseQueryResponse {
+	nicknameCString, _ := strings.clone_to_cstring(request.nickname)
+	defer delete(nicknameCString)
+	publicKeyHex := common.identityPublicKeyToHex(request.publicKey)
+	defer delete(publicKeyHex)
+	publicKeyHexCString, _ := strings.clone_to_cstring(publicKeyHex)
+	defer delete(publicKeyHexCString)
+	paramValues := [?][^]byte {
+		transmute([^]byte)nicknameCString,
+		transmute([^]byte)publicKeyHexCString,
+	}
+	result := pg.exec_params(
+		conn,
+		"INSERT INTO users (nickname, public_key) VALUES ($1, decode($2, 'hex')) " +
+		"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
+		"WHERE users.public_key IS NULL OR users.public_key = EXCLUDED.public_key " +
+		"RETURNING id::text",
+		2,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.ResolveUserIdentity,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseErrorResponse(
+			.ResolveUserIdentity,
+			cloneCStringOrEmpty(pg.result_error_message(result)),
+		)
+	}
+
+	userID := ""
+	if pg.n_tuples(result) == 1 && !pg.get_is_null(result, 0, 0) {
+		userID = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .ResolveUserIdentity,
+		success = true,
+		message = "ok",
+		result = userID,
+	}
+}
+
 databaseResultError :: proc(
 	queryType: common.DatabaseQueryType,
 	result: ^pg.Result,
@@ -639,6 +693,8 @@ databaseExecuteRequest :: proc(
 	switch request.queryType {
 	case .AuthLookupByNickname:
 		return databaseExecuteAuthLookup(conn, request.authLookup)
+	case .ResolveUserIdentity:
+		return databaseExecuteUserIdentityResolution(conn, request.userIdentity)
 	case .RawSQL:
 		return databaseExecuteRawQuery(conn, request.rawSQL)
 	case .ListRoomsForUser:

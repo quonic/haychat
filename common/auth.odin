@@ -273,6 +273,7 @@ hashCborValue :: proc(value: any) -> (FingerprintBytes, bool) {
 
 buildServerHelloProof :: proc(
 	sessionID: SessionID,
+	nickname: string,
 	clientIdentityPublicKey: IdentityPublicKeyBytes,
 	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
 	serverIdentityPublicKey: IdentityPublicKeyBytes,
@@ -281,6 +282,7 @@ buildServerHelloProof :: proc(
 	return ServerHelloProof {
 		version = protocolVersion,
 		sessionID = sessionID,
+		nickname = nickname,
 		clientIdentityPublicKey = clientIdentityPublicKey,
 		clientEphemeralPublicKey = clientEphemeralPublicKey,
 		serverIdentityPublicKey = serverIdentityPublicKey,
@@ -318,6 +320,7 @@ signServerHello :: proc(
 verifyServerHello :: proc(serverHello: ServerHello, clientHello: ClientHello) -> bool {
 	proof := buildServerHelloProof(
 		serverHello.sessionID,
+		clientHello.nickname,
 		clientHello.clientIdentityPublicKey,
 		clientHello.clientEphemeralPublicKey,
 		serverHello.serverIdentityPublicKey,
@@ -340,6 +343,7 @@ verifyServerHello :: proc(serverHello: ServerHello, clientHello: ClientHello) ->
 buildClientAuthProof :: proc(
 	sessionID: SessionID,
 	challenge: AuthChallengeBytes,
+	nickname: string,
 	clientIdentityPublicKey: IdentityPublicKeyBytes,
 	clientEphemeralPublicKey: KeyExchangePublicKeyBytes,
 	serverIdentityPublicKey: IdentityPublicKeyBytes,
@@ -348,6 +352,7 @@ buildClientAuthProof :: proc(
 	return ClientAuthProof {
 		sessionID = sessionID,
 		challenge = challenge,
+		nickname = nickname,
 		clientIdentityPublicKey = clientIdentityPublicKey,
 		clientEphemeralPublicKey = clientEphemeralPublicKey,
 		serverIdentityPublicKey = serverIdentityPublicKey,
