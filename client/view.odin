@@ -61,34 +61,90 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 	th := ctx.theme
 
 	channel_buttons: [dynamic]skald.View
-	append(
-		&channel_buttons,
-		skald.button(
-			ctx,
-			"General",
-			Msg {
-				kind = .SwitchToChannel,
-				id = s.selected_server_id,
-				channel_id = common.GENERAL_ROOM_ID,
-				new_value = "general",
-			},
-			padding = button_padding,
-		),
-	)
+	roomCacheIndex := State_serverRoomCacheIndex(s, s.selected_server_id)
+	if roomCacheIndex >= 0 {
+		serverCache := s.server_room_caches[roomCacheIndex]
+		for room in serverCache.rooms {
+			append(
+				&channel_buttons,
+				skald.button(
+					ctx,
+					room.name,
+					Msg {
+						kind = .SwitchToChannel,
+						id = s.selected_server_id,
+						channel_id = room.id,
+					},
+					padding = button_padding,
+				),
+			)
+		}
+	}
+
+	chatMessages: [dynamic]skald.Text_Span
+	roomDraft := ""
+	hasSelectedRoom := false
+	hasOlder := false
+	isLoadingHistory := false
+	if roomCacheIndex >= 0 {
+		serverCache := s.server_room_caches[roomCacheIndex]
+		selectedRoomCacheIndex := ServerRoomCache_roomCacheIndex(
+			serverCache,
+			s.selected_channel_id,
+		)
+		if selectedRoomCacheIndex >= 0 {
+			selectedRoomCache := serverCache.roomCaches[selectedRoomCacheIndex]
+			hasSelectedRoom = ServerRoomCache_roomIsJoined(&serverCache, s.selected_channel_id)
+			roomDraft = selectedRoomCache.draft
+			hasOlder = selectedRoomCache.hasOlder
+			isLoadingHistory = selectedRoomCache.isLoadingHistory
+			for messageIndex in 0 ..< len(selectedRoomCache.messages) {
+				message := selectedRoomCache.messages[messageIndex]
+				if messageIndex > 0 {
+					append(&chatMessages, skald.span("\n", th.color.fg))
+				}
+				senderLabel := fmt.tprintf("User %d", message.senderId)
+				senderColor := th.color.fg
+				if s.selected_transport_index >= 0 &&
+				   s.selected_transport_index < len(s.serverTransports) &&
+				   s.serverTransports[s.selected_transport_index].authenticatedUserID == message.senderId {
+					senderLabel = "You"
+					senderColor = th.color.primary
+				}
+				append(&chatMessages, skald.span_bold(strings.concatenate({senderLabel, ": "}), senderColor))
+				append(&chatMessages, skald.span(message.content, th.color.fg))
+			}
+		}
+	}
+
+	transcript := skald.rich_text_selectable(ctx, chatMessages[:], th.color.fg)
+	if !hasSelectedRoom {
+		transcript = skald.text("No joined channels", th.color.fg_muted)
+	} else if len(chatMessages) == 0 && isLoadingHistory {
+		transcript = skald.text("Loading messages...", th.color.fg_muted)
+	}
+
+	historyControl := skald.spacer(0)
+	if hasOlder && !isLoadingHistory {
+		historyControl = skald.button(ctx, "Load older", Msg{kind = .LoadOlderRoomHistory})
+	} else if isLoadingHistory {
+		historyControl = skald.text("Loading messages...", th.color.fg_muted)
+	}
 
 	chat_area := skald.col(
+		historyControl,
 		skald.scroll(
 			ctx, // Chat messages area
 			{s.window_width - friends_list_width - server_width, s.window_height - 45},
-			skald.rich_text_selectable(ctx, s.current_chat_messages[:], th.color.fg),
+			transcript,
 		),
 		skald.flex(1, skald.spacer(0)),
 		view_chat_status(s, ctx),
 		skald.divider(ctx),
 		// Chat input area
-		skald.chat_input(
+			skald.chat_input(
 			ctx,
-			s.chat_input_draft,
+			roomDraft,
 			Draft_Channel_Changed,
 			Send_Channel_Pressed,
 			placeholder = "Message… (Enter to send, Shift+Enter for newline)",

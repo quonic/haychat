@@ -23,6 +23,11 @@ ClientTransportResult :: struct {
 ClientTransportRuntimeEventKind :: enum {
 	None,
 	RoomChatReceived,
+	RoomListReceived,
+	RoomHistoryReceived,
+	RoomMembershipChanged,
+	RoomEdited,
+	RoomDeleted,
 	ProtocolError,
 	Disconnected,
 }
@@ -32,7 +37,14 @@ ClientTransportRuntimeEvent :: struct {
 	serverID: int,
 	senderID: int,
 	roomID:   int,
+	messageID: int,
+	timestamp: string,
 	message:  string,
+	rooms:    [dynamic]common.RoomSummary,
+	messages: [dynamic]common.StoredChatMessage,
+	hasOlder: bool,
+	joined:   bool,
+	room:     common.RoomSummary,
 }
 
 ClientStartupAuthSession :: struct {
@@ -136,9 +148,20 @@ ClientServerTransport_handleDisconnect :: proc(transport: ^ClientServerTransport
 }
 
 ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) {
-	if len(event.message) > 0 {
-		delete(event.message)
+	delete(event.timestamp)
+	delete(event.message)
+	for room in event.rooms {
+		delete(room.name)
+		delete(room.description)
 	}
+	delete(event.rooms)
+	for message in event.messages {
+		delete(message.timestamp)
+		delete(message.content)
+	}
+	delete(event.messages)
+	delete(event.room.name)
+	delete(event.room.description)
 	event^ = {}
 }
 
@@ -689,6 +712,61 @@ ClientServerTransport_sendRoomChatMessage :: proc(
 	return true
 }
 
+ClientServerTransport_sendEncryptedRuntimeMessage :: proc(
+	transport: ^ClientServerTransport,
+	messageType: common.MessageType,
+	payload: any,
+) -> bool {
+	if !ClientServerTransport_hasLiveENetSession(transport) {
+		ClientServerTransport_fail(transport, "live ENet session is unavailable")
+		return false
+	}
+	packetBytes, ok := ClientServerTransport_buildEncryptedPacketBytes(
+		transport,
+		messageType,
+		payload,
+	)
+	if !ok {
+		return false
+	}
+	defer delete(packetBytes)
+	if !ClientServerTransport_sendENetPacket(
+		transport.enetHost,
+		transport.enetPeer,
+		STARTUP_AUTH_CHANNEL_CHAT,
+		packetBytes,
+	) {
+		ClientServerTransport_fail(transport, "failed to send encrypted runtime packet")
+		return false
+	}
+	return true
+}
+
+ClientServerTransport_requestRoomList :: proc(transport: ^ClientServerTransport) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientListRooms,
+		common.ClientListRoomsPayload{},
+	)
+}
+
+ClientServerTransport_requestRoomHistory :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	beforeMessageID: int,
+	limit: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientFetchRoomHistory,
+		common.ClientFetchRoomHistoryPayload {
+			roomId = ClientServerTransport_runtimeRoomID(roomID),
+			beforeMessageID = beforeMessageID,
+			limit = limit,
+		},
+	)
+}
+
 ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	transport: ^ClientServerTransport,
 	innerPacket: common.Packet,
@@ -708,16 +786,81 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				),
 				true
 		}
-		defer delete(chatPayload.content)
+		return ClientTransportRuntimeEvent {
+			kind = .RoomChatReceived,
+			serverID = transport.serverID,
+			senderID = chatPayload.senderId,
+			roomID = chatPayload.roomId,
+			messageID = chatPayload.id,
+			timestamp = chatPayload.timestamp,
+			message = chatPayload.content,
+		}, true
 
-		return ClientServerTransport_makeRuntimeEvent(
-				transport,
-				.RoomChatReceived,
-				chatPayload.content,
-				chatPayload.roomId,
-				chatPayload.senderId,
-			),
-			true
+	case .ServerListRooms:
+		payload: common.ServerListRoomsPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid room list payload")
+			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+		}
+		return ClientTransportRuntimeEvent {
+			kind = .RoomListReceived,
+			serverID = transport.serverID,
+			rooms = payload.rooms,
+		}, true
+
+	case .ServerRoomHistory:
+		payload: common.ServerRoomHistoryPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid room history payload")
+			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+		}
+		return ClientTransportRuntimeEvent {
+			kind = .RoomHistoryReceived,
+			serverID = transport.serverID,
+			roomID = payload.roomId,
+			messages = payload.messages,
+			hasOlder = payload.hasOlder,
+		}, true
+
+	case .ServerRoomMembershipChanged:
+		payload: common.ServerRoomMembershipChangedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid room membership payload")
+			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+		}
+		return ClientTransportRuntimeEvent {
+			kind = .RoomMembershipChanged,
+			serverID = transport.serverID,
+			roomID = payload.roomId,
+			joined = payload.joined,
+		}, true
+
+	case .ServerEditRoom:
+		payload: common.ServerRoomMutationPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid room edit payload")
+			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+		}
+		return ClientTransportRuntimeEvent {
+			kind = .RoomEdited,
+			serverID = transport.serverID,
+			roomID = payload.roomId,
+			room = payload.room,
+		}, true
+
+	case .ServerDeleteRoom:
+		payload: common.ServerRoomMutationPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			ClientServerTransport_runtimeProtocolError(transport, "invalid room delete payload")
+			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+		}
+		defer delete(payload.room.name)
+		defer delete(payload.room.description)
+		return ClientTransportRuntimeEvent {
+			kind = .RoomDeleted,
+			serverID = transport.serverID,
+			roomID = payload.roomId,
+		}, true
 
 	case .ServerProtocolError:
 		protocolError: common.ProtocolErrorResponse

@@ -24,6 +24,24 @@ RoomChatSendBridge :: proc(transport: ^ClientServerTransport, roomID: int, conte
 startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
 roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
 
+RoomCache :: struct {
+	roomID:                int,
+	messages:              [dynamic]common.StoredChatMessage,
+	draft:                 string,
+	initialHistoryLoaded:  bool,
+	isLoadingHistory:      bool,
+	oldestMessageID:       int,
+	hasOlder:              bool,
+}
+
+ServerRoomCache :: struct {
+	serverID:      int,
+	rooms:         [dynamic]common.RoomSummary,
+	roomCaches:    [dynamic]RoomCache,
+	roomsLoaded:   bool,
+	roomsLoading:  bool,
+}
+
 startupAuthBridge_noop :: proc(
 	transport: ^ClientServerTransport,
 	server: ^Server,
@@ -69,6 +87,7 @@ State :: struct {
 	chat_status_message:            string,
 	current_chat_messages:          [dynamic]skald.Text_Span, // List of chat messages currently displayed in the chat area, used for rendering the chat history
 	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
+	server_room_caches:             [dynamic]ServerRoomCache,
 }
 
 Vector2 :: [2]f32
@@ -79,6 +98,13 @@ Msg :: struct {
 	id:            int, // Generic ID field
 	channel_id:    int, // ID of the channel, used for switching to a specific channel
 	sender_id:     int,
+	message_id:    int,
+	timestamp:     string,
+	rooms:         [dynamic]common.RoomSummary,
+	messages:      [dynamic]common.StoredChatMessage,
+	has_older:     bool,
+	joined:        bool,
+	room:          common.RoomSummary,
 	vector:        Vector2, // Generic Vector2 field for passing position or size data in messages, such as for window resize events
 	window_vector: iVector2, // Generic iVector2 field for passing integer vector data in messages if needed
 	new_value:     string, // Generic string field for passing new values in messages, such as for updating the chat input value
@@ -97,6 +123,12 @@ MsgKind :: enum {
 	SendChannelChatMessage,
 	RecieveChatMessage,
 	RecieveChannelChatMessage,
+	RecieveRoomList,
+	RecieveRoomHistory,
+	RoomMembershipChanged,
+	RoomEdited,
+	RoomDeleted,
+	LoadOlderRoomHistory,
 	TransportProtocolError,
 	New_Conversation,
 	AddFriend,
@@ -110,9 +142,37 @@ ClientTransportRuntimeEvent_toMsg :: proc(event: ClientTransportRuntimeEvent) ->
 				id = event.serverID,
 				channel_id = event.roomID,
 				sender_id = event.senderID,
+				message_id = event.messageID,
+				timestamp = event.timestamp,
 				new_value = event.message,
 			},
 			true
+	case .RoomListReceived:
+		return Msg{kind = .RecieveRoomList, id = event.serverID, rooms = event.rooms}, true
+	case .RoomHistoryReceived:
+		return Msg {
+				kind = .RecieveRoomHistory,
+				id = event.serverID,
+				channel_id = event.roomID,
+				messages = event.messages,
+				has_older = event.hasOlder,
+			}, true
+	case .RoomMembershipChanged:
+		return Msg {
+				kind = .RoomMembershipChanged,
+				id = event.serverID,
+				channel_id = event.roomID,
+				joined = event.joined,
+			}, true
+	case .RoomEdited:
+		return Msg {
+				kind = .RoomEdited,
+				id = event.serverID,
+				channel_id = event.roomID,
+				room = event.room,
+			}, true
+	case .RoomDeleted:
+		return Msg{kind = .RoomDeleted, id = event.serverID, channel_id = event.roomID}, true
 
 	case .ProtocolError:
 		return Msg{kind = .TransportProtocolError, id = event.serverID, new_value = event.message},
@@ -144,7 +204,11 @@ State_serviceSelectedTransportRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)
 
 		msg, hasMsg := ClientTransportRuntimeEvent_toMsg(runtimeEvent)
 		if hasMsg {
+			runtimeEvent.timestamp = ""
 			runtimeEvent.message = ""
+			runtimeEvent.rooms = {}
+			runtimeEvent.messages = {}
+			runtimeEvent.room = {}
 			skald.send(ctx, msg)
 		}
 		ClientTransportRuntimeEvent_deinit(&runtimeEvent)
@@ -210,6 +274,9 @@ State_attemptSelectedServerStartup :: proc(state: ^State) {
 	session := startupAuthBridge(transport, server, &state.config, packetBytes)
 	if transport.transport.phase == .Established {
 		ClientServerTransport_adoptStartupAuthSession(transport, session)
+		if ClientServerTransport_hasLiveENetSession(transport) {
+			State_requestRoomList(state, transport.serverID)
+		}
 	}
 	delete(packetBytes)
 }
