@@ -178,6 +178,8 @@ MessageType :: enum {
 	ServerEditRoom, // Notification of a room's details being edited, includes room name and new details (e.g. new name, new type, etc.)
 	ClientAddRoomMember, // Request to add a member to a room (only allowed for certain admin users)
 	ClientRemoveRoomMember, // Request to remove a member from a room (only allowed for certain admin users)
+	ServerRoomMemberAdded, // Result of an admin request to add a room member
+	ServerRoomMemberRemoved, // Result of an admin request to remove a room member
 	ServerRoomMembershipChanged, // Notification that the authenticated user's room membership changed
 
 	// Messaging
@@ -401,6 +403,13 @@ ServerRoomMembershipChangedPayload :: struct {
 	joined: bool,
 }
 
+ServerRoomMutationPayload :: struct {
+	room:    RoomSummary,
+	roomId:  int,
+	userId:  int,
+	changed: bool,
+}
+
 VoiceData :: struct {
 	senderId:  int,
 	roomId:    int,
@@ -455,6 +464,12 @@ DatabaseQueryType :: enum u8 {
 	ListRoomMemberUserIDs,
 	StoreRoomChatMessage,
 	GetRoomHistory,
+	CheckUserServerAdmin,
+	CreateRoom,
+	EditRoom,
+	DeleteRoom,
+	AddRoomMember,
+	RemoveRoomMember,
 }
 
 DatabaseAuthLookupRequest :: struct {
@@ -490,15 +505,46 @@ DatabaseRoomHistoryRequest :: struct {
 	limit:           int,
 }
 
+DatabaseUserServerAdminRequest :: struct {
+	userId: int,
+}
+
+DatabaseCreateRoomRequest :: struct {
+	creatorUserId: int,
+	name:          string,
+	description:   string,
+}
+
+DatabaseEditRoomRequest :: struct {
+	roomId:      int,
+	name:        string,
+	description: string,
+}
+
+DatabaseDeleteRoomRequest :: struct {
+	roomId: int,
+}
+
+DatabaseRoomMemberMutationRequest :: struct {
+	roomId: int,
+	userId: int,
+}
+
 DatabaseQueryRequest :: struct {
-	queryType:  DatabaseQueryType,
-	authLookup: DatabaseAuthLookupRequest,
-	rawSQL:     DatabaseRawQueryRequest,
-	roomList:   DatabaseRoomListRequest,
-	membership: DatabaseRoomMembershipRequest,
-	memberList: DatabaseRoomMemberListRequest,
-	storeChat:  DatabaseStoreRoomChatMessageRequest,
-	history:    DatabaseRoomHistoryRequest,
+	queryType:    DatabaseQueryType,
+	authLookup:   DatabaseAuthLookupRequest,
+	rawSQL:       DatabaseRawQueryRequest,
+	roomList:     DatabaseRoomListRequest,
+	membership:   DatabaseRoomMembershipRequest,
+	memberList:   DatabaseRoomMemberListRequest,
+	storeChat:    DatabaseStoreRoomChatMessageRequest,
+	history:      DatabaseRoomHistoryRequest,
+	adminCheck:   DatabaseUserServerAdminRequest,
+	createRoom:   DatabaseCreateRoomRequest,
+	editRoom:     DatabaseEditRoomRequest,
+	deleteRoom:   DatabaseDeleteRoomRequest,
+	addMember:    DatabaseRoomMemberMutationRequest,
+	removeMember: DatabaseRoomMemberMutationRequest,
 }
 
 DatabaseQueryResponse :: struct {
@@ -512,6 +558,9 @@ DatabaseQueryResponse :: struct {
 	storedChatMessage: StoredChatMessage,
 	historyMessages:   [dynamic]StoredChatMessage,
 	hasOlderHistory:   bool,
+	isServerAdmin:     bool,
+	mutationRoom:      RoomSummary,
+	mutationChanged:   bool,
 }
 
 ProtocolErrorResponse :: struct {

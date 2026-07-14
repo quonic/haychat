@@ -21,6 +21,18 @@ PendingDBRequestType :: enum {
 	StoreChatMessage,
 	CheckHistoryMembership,
 	GetRoomHistory,
+	CheckAdminCreateRoom,
+	CreateRoom,
+	CheckAdminEditRoom,
+	EditRoom,
+	ListEditRoomRecipients,
+	CheckAdminDeleteRoom,
+	ListDeleteRoomRecipients,
+	DeleteRoom,
+	CheckAdminAddRoomMember,
+	AddRoomMember,
+	CheckAdminRemoveRoomMember,
+	RemoveRoomMember,
 }
 
 PendingDBRequest :: struct {
@@ -31,6 +43,9 @@ PendingDBRequest :: struct {
 	beforeMessageID:  int,
 	limit:            int,
 	content:          string,
+	name:             string,
+	description:      string,
+	targetUserID:     int,
 	recipientUserIDs: [dynamic]int,
 }
 
@@ -121,6 +136,8 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	for _, request in state.pendingDatabaseRequests {
 		delete(request.content)
+		delete(request.name)
+		delete(request.description)
 		delete(request.recipientUserIDs)
 	}
 	delete(state.connectedPeers)
@@ -184,6 +201,8 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 	for requestID in requestIDs {
 		request := state.pendingDatabaseRequests[requestID]
 		delete(request.content)
+		delete(request.name)
+		delete(request.description)
 		delete(request.recipientUserIDs)
 		delete_key(&state.pendingDatabaseRequests, requestID)
 	}
@@ -370,6 +389,8 @@ MainRouterState_getDatabaseRequest :: proc(
 MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
 	for _, request in state.pendingDatabaseRequests {
 		delete(request.content)
+		delete(request.name)
+		delete(request.description)
 		delete(request.recipientUserIDs)
 	}
 	delete(state.connectedPeers)
@@ -420,11 +441,25 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .ListChatRecipients,
 		     .StoreChatMessage,
 		     .CheckHistoryMembership,
-		     .GetRoomHistory:
+		     .GetRoomHistory,
+		     .CheckAdminCreateRoom,
+		     .CreateRoom,
+		     .CheckAdminEditRoom,
+		     .EditRoom,
+		     .ListEditRoomRecipients,
+		     .CheckAdminDeleteRoom,
+		     .ListDeleteRoomRecipients,
+		     .DeleteRoom,
+		     .CheckAdminAddRoomMember,
+		     .AddRoomMember,
+		     .CheckAdminRemoveRoomMember,
+		     .RemoveRoomMember:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case:
 		}
 		delete(request.content)
+		delete(request.name)
+		delete(request.description)
 		delete(request.recipientUserIDs)
 	}
 }
@@ -908,6 +943,166 @@ MainRouterState_handleClientFetchRoomHistory :: proc(
 	)
 }
 
+MainRouterState_enqueueAdminCheck :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	userID: int,
+	pending: PendingDBRequest,
+) {
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		common.DatabaseQueryRequest {
+			queryType = .CheckUserServerAdmin,
+			adminCheck = {userId = userID},
+		},
+		pending,
+	)
+}
+
+MainRouterState_authenticatedUserForAdminRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+) -> (
+	int,
+	bool,
+) {
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated admin request")
+		return 0, false
+	}
+	return session.authenticatedUserID, true
+}
+
+MainRouterState_hasValidRoomMetadata :: proc(name: string, description: string) -> bool {
+	return len(name) >= 1 && len(name) <= 64 && len(description) <= 256
+}
+
+MainRouterState_handleClientCreateRoom :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientCreateRoomPayload
+	if cbor.unmarshal(payload, &req) != nil ||
+	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) {
+		delete(req.name)
+		delete(req.description)
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room metadata")
+		return
+	}
+	defer delete(req.name)
+	defer delete(req.description)
+	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
+	if !ok {
+		return
+	}
+	MainRouterState_enqueueAdminCheck(
+		pm,
+		state,
+		peerID,
+		userID,
+		PendingDBRequest {
+			requestType = .CheckAdminCreateRoom,
+			name = strings.clone(req.name),
+			description = strings.clone(req.description),
+		},
+	)
+}
+
+MainRouterState_handleClientEditRoom :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientEditRoomPayload
+	if cbor.unmarshal(payload, &req) != nil ||
+	   req.roomId <= 0 ||
+	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) {
+		delete(req.name)
+		delete(req.description)
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room edit")
+		return
+	}
+	defer delete(req.name)
+	defer delete(req.description)
+	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
+	if !ok {
+		return
+	}
+	MainRouterState_enqueueAdminCheck(
+		pm,
+		state,
+		peerID,
+		userID,
+		PendingDBRequest {
+			requestType = .CheckAdminEditRoom,
+			roomID = req.roomId,
+			name = strings.clone(req.name),
+			description = strings.clone(req.description),
+		},
+	)
+}
+
+MainRouterState_handleClientDeleteRoom :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientDeleteRoomPayload
+	if cbor.unmarshal(payload, &req) != nil || req.roomId <= 0 {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room delete")
+		return
+	}
+	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
+	if !ok {
+		return
+	}
+	MainRouterState_enqueueAdminCheck(
+		pm,
+		state,
+		peerID,
+		userID,
+		PendingDBRequest{requestType = .CheckAdminDeleteRoom, roomID = req.roomId},
+	)
+}
+
+MainRouterState_handleClientRoomMembershipMutation :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+	requestType: PendingDBRequestType,
+) {
+	req: common.ClientRoomMembershipPayload
+	if cbor.unmarshal(payload, &req) != nil || req.roomId <= 0 || req.userId <= 0 {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room membership request")
+		return
+	}
+	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
+	if !ok {
+		return
+	}
+	MainRouterState_enqueueAdminCheck(
+		pm,
+		state,
+		peerID,
+		userID,
+		PendingDBRequest {
+			requestType = requestType,
+			roomID = req.roomId,
+			targetUserID = req.userId,
+		},
+	)
+}
+
 MainRouterState_hasRecipientUserID :: proc(userIDs: []int, userID: int) -> bool {
 	for candidateUserID in userIDs {
 		if candidateUserID == userID {
@@ -915,6 +1110,20 @@ MainRouterState_hasRecipientUserID :: proc(userIDs: []int, userID: int) -> bool 
 		}
 	}
 	return false
+}
+
+MainRouterState_sendMessageToUserID :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	userID: int,
+	messageType: common.MessageType,
+	payload: any,
+) {
+	for recipientPeerID, recipientSession in state.peerSessions {
+		if recipientSession.isAuthenticated && recipientSession.authenticatedUserID == userID {
+			MainRouterState_sendPeerMessage(pm, state, recipientPeerID, messageType, payload)
+		}
+	}
 }
 
 MainRouterState_dispatchApplicationPacket :: proc(
@@ -930,6 +1139,28 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientListRooms(pm, state, peerID, packet.payload)
 	case .ClientFetchRoomHistory:
 		MainRouterState_handleClientFetchRoomHistory(pm, state, peerID, packet.payload)
+	case .ClientCreateRoom:
+		MainRouterState_handleClientCreateRoom(pm, state, peerID, packet.payload)
+	case .ClientEditRoom:
+		MainRouterState_handleClientEditRoom(pm, state, peerID, packet.payload)
+	case .ClientDeleteRoom:
+		MainRouterState_handleClientDeleteRoom(pm, state, peerID, packet.payload)
+	case .ClientAddRoomMember:
+		MainRouterState_handleClientRoomMembershipMutation(
+			pm,
+			state,
+			peerID,
+			packet.payload,
+			.CheckAdminAddRoomMember,
+		)
+	case .ClientRemoveRoomMember:
+		MainRouterState_handleClientRoomMembershipMutation(
+			pm,
+			state,
+			peerID,
+			packet.payload,
+			.CheckAdminRemoveRoomMember,
+		)
 	case .ClientAuthLookup:
 		MainRouterState_handleClientAuthLookupPacket(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
@@ -1090,6 +1321,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		return
 	}
 	defer delete(request.content)
+	defer delete(request.name)
+	defer delete(request.description)
 	defer delete(request.recipientUserIDs)
 	defer IPC__database_query_response_deinit(response)
 
@@ -1246,6 +1479,318 @@ MainRouterState_handleDatabaseResult :: proc(
 				hasOlder = response.hasOlderHistory,
 			},
 		)
+	case .CheckAdminCreateRoom:
+		if !response.success || !response.isServerAdmin {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				"Admin permission required",
+			)
+			return
+		}
+		creatorSession, creatorOK := MainRouterState_getPeerSession(state, request.peerID)
+		if !creatorOK || !creatorSession.isAuthenticated {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Admin session expired")
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .CreateRoom,
+				createRoom = {
+					creatorUserId = creatorSession.authenticatedUserID,
+					name = strings.clone(request.name),
+					description = strings.clone(request.description),
+				},
+			},
+			PendingDBRequest {
+				requestType = .CreateRoom,
+				targetUserID = creatorSession.authenticatedUserID,
+			},
+		)
+	case .CreateRoom:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		resultPayload := common.ServerRoomMutationPayload {
+			room    = response.mutationRoom,
+			roomId  = response.mutationRoom.id,
+			userId  = request.targetUserID,
+			changed = response.mutationChanged,
+		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerCreateRoom,
+			resultPayload,
+		)
+		MainRouterState_sendMessageToUserID(
+			pm,
+			state,
+			request.targetUserID,
+			.ServerRoomMembershipChanged,
+			common.ServerRoomMembershipChangedPayload {
+				roomId = response.mutationRoom.id,
+				joined = true,
+			},
+		)
+	case .CheckAdminEditRoom:
+		if !response.success || !response.isServerAdmin {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				"Admin permission required",
+			)
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .EditRoom,
+				editRoom = {
+					roomId = request.roomID,
+					name = strings.clone(request.name),
+					description = strings.clone(request.description),
+				},
+			},
+			PendingDBRequest{requestType = .EditRoom, roomID = request.roomID},
+		)
+	case .EditRoom:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		if !response.mutationChanged {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
+			return
+		}
+		resultPayload := common.ServerRoomMutationPayload {
+			room    = response.mutationRoom,
+			roomId  = request.roomID,
+			changed = true,
+		}
+		MainRouterState_sendPeerMessage(pm, state, request.peerID, .ServerEditRoom, resultPayload)
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .ListRoomMemberUserIDs,
+				memberList = {roomId = request.roomID},
+			},
+			PendingDBRequest {
+				requestType = .ListEditRoomRecipients,
+				roomID = request.roomID,
+				name = strings.clone(response.mutationRoom.name),
+				description = strings.clone(response.mutationRoom.description),
+			},
+		)
+	case .ListEditRoomRecipients:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		editPayload := common.ServerRoomMutationPayload {
+			room = {id = request.roomID, name = request.name, description = request.description},
+			roomId = request.roomID,
+			changed = true,
+		}
+		for recipientPeerID, recipientSession in state.peerSessions {
+			if recipientSession.isAuthenticated &&
+			   recipientPeerID != request.peerID &&
+			   MainRouterState_hasRecipientUserID(
+				   response.memberUserIDs[:],
+				   recipientSession.authenticatedUserID,
+			   ) {
+				MainRouterState_sendPeerMessage(
+					pm,
+					state,
+					recipientPeerID,
+					.ServerEditRoom,
+					editPayload,
+				)
+			}
+		}
+	case .CheckAdminDeleteRoom:
+		if !response.success || !response.isServerAdmin {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				"Admin permission required",
+			)
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .ListRoomMemberUserIDs,
+				memberList = {roomId = request.roomID},
+			},
+			PendingDBRequest{requestType = .ListDeleteRoomRecipients, roomID = request.roomID},
+		)
+	case .ListDeleteRoomRecipients:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		memberUserIDs := make([dynamic]int, 0, len(response.memberUserIDs))
+		for userID in response.memberUserIDs {
+			append(&memberUserIDs, userID)
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .DeleteRoom,
+				deleteRoom = {roomId = request.roomID},
+			},
+			PendingDBRequest {
+				requestType = .DeleteRoom,
+				roomID = request.roomID,
+				recipientUserIDs = memberUserIDs,
+			},
+		)
+	case .DeleteRoom:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		if !response.mutationChanged {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
+			return
+		}
+		deletePayload := common.ServerRoomMutationPayload {
+			roomId  = request.roomID,
+			changed = true,
+		}
+		for recipientPeerID, recipientSession in state.peerSessions {
+			if recipientSession.isAuthenticated &&
+			   (recipientPeerID == request.peerID ||
+					   MainRouterState_hasRecipientUserID(
+						   request.recipientUserIDs[:],
+						   recipientSession.authenticatedUserID,
+					   )) {
+				MainRouterState_sendPeerMessage(
+					pm,
+					state,
+					recipientPeerID,
+					.ServerDeleteRoom,
+					deletePayload,
+				)
+			}
+		}
+	case .CheckAdminAddRoomMember:
+		if !response.success || !response.isServerAdmin {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				"Admin permission required",
+			)
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .AddRoomMember,
+				addMember = {roomId = request.roomID, userId = request.targetUserID},
+			},
+			PendingDBRequest {
+				requestType = .AddRoomMember,
+				roomID = request.roomID,
+				targetUserID = request.targetUserID,
+			},
+		)
+	case .AddRoomMember:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		resultPayload := common.ServerRoomMutationPayload {
+			roomId  = request.roomID,
+			userId  = request.targetUserID,
+			changed = response.mutationChanged,
+		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerRoomMemberAdded,
+			resultPayload,
+		)
+		if response.mutationChanged {
+			MainRouterState_sendMessageToUserID(
+				pm,
+				state,
+				request.targetUserID,
+				.ServerRoomMembershipChanged,
+				common.ServerRoomMembershipChangedPayload{roomId = request.roomID, joined = true},
+			)
+		}
+	case .CheckAdminRemoveRoomMember:
+		if !response.success || !response.isServerAdmin {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				"Admin permission required",
+			)
+			return
+		}
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			request.peerID,
+			common.DatabaseQueryRequest {
+				queryType = .RemoveRoomMember,
+				removeMember = {roomId = request.roomID, userId = request.targetUserID},
+			},
+			PendingDBRequest {
+				requestType = .RemoveRoomMember,
+				roomID = request.roomID,
+				targetUserID = request.targetUserID,
+			},
+		)
+	case .RemoveRoomMember:
+		if !response.success {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+			return
+		}
+		resultPayload := common.ServerRoomMutationPayload {
+			roomId  = request.roomID,
+			userId  = request.targetUserID,
+			changed = response.mutationChanged,
+		}
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerRoomMemberRemoved,
+			resultPayload,
+		)
+		if response.mutationChanged {
+			MainRouterState_sendMessageToUserID(
+				pm,
+				state,
+				request.targetUserID,
+				.ServerRoomMembershipChanged,
+				common.ServerRoomMembershipChangedPayload{roomId = request.roomID, joined = false},
+			)
+		}
 	case:
 	}
 }

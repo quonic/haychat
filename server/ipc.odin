@@ -196,6 +196,12 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(request.rawSQL.query)
 	case .StoreRoomChatMessage:
 		delete(request.storeChat.content)
+	case .CreateRoom:
+		delete(request.createRoom.name)
+		delete(request.createRoom.description)
+	case .EditRoom:
+		delete(request.editRoom.name)
+		delete(request.editRoom.description)
 	case:
 	}
 }
@@ -211,6 +217,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	delete(response.memberUserIDs)
 	delete(response.storedChatMessage.timestamp)
 	delete(response.storedChatMessage.content)
+	delete(response.mutationRoom.name)
+	delete(response.mutationRoom.description)
 	for message in response.historyMessages {
 		delete(message.timestamp)
 		delete(message.content)

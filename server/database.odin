@@ -403,6 +403,235 @@ databaseExecuteGetRoomHistory :: proc(
 	return response
 }
 
+databaseExecuteCheckUserServerAdmin :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseUserServerAdminRequest,
+) -> common.DatabaseQueryResponse {
+	userIDText := fmt.aprintf("%d", request.userId)
+	defer delete(userIDText)
+	userIDCString, _ := strings.clone_to_cstring(userIDText)
+	defer delete(userIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)userIDCString}
+	result := pg.exec_params(
+		conn,
+		"SELECT EXISTS(SELECT 1 FROM user_server_roles usr " +
+		"JOIN server_roles sr ON sr.id = usr.role_id " +
+		"WHERE usr.user_id = $1 AND sr.name = 'admin')",
+		1,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(
+			.CheckUserServerAdmin,
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.CheckUserServerAdmin, &result)
+	}
+
+	isServerAdmin := false
+	if pg.n_tuples(result) == 1 {
+		value := cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
+		isServerAdmin = value == "t"
+		delete(value)
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .CheckUserServerAdmin,
+		success = true,
+		message = "ok",
+		isServerAdmin = isServerAdmin,
+	}
+}
+
+databaseExecuteCreateRoom :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseCreateRoomRequest,
+) -> common.DatabaseQueryResponse {
+	creatorUserIDText := fmt.aprintf("%d", request.creatorUserId)
+	defer delete(creatorUserIDText)
+	creatorUserIDCString, _ := strings.clone_to_cstring(creatorUserIDText)
+	defer delete(creatorUserIDCString)
+	nameCString, _ := strings.clone_to_cstring(request.name)
+	defer delete(nameCString)
+	descriptionCString, _ := strings.clone_to_cstring(request.description)
+	defer delete(descriptionCString)
+	paramValues := [?][^]byte {
+		transmute([^]byte)creatorUserIDCString,
+		transmute([^]byte)nameCString,
+		transmute([^]byte)descriptionCString,
+	}
+	result := pg.exec_params(
+		conn,
+		"WITH created_room AS (" +
+		"INSERT INTO rooms (name, description, created_by_user_id) VALUES ($2, $3, $1) " +
+		"RETURNING id, name, description" +
+		"), creator_membership AS (" +
+		"INSERT INTO room_members (room_id, user_id) " +
+		"SELECT id, $1 FROM created_room ON CONFLICT DO NOTHING" +
+		") SELECT id::text, name, description FROM created_room",
+		3,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(.CreateRoom, cloneCStringOrEmpty(pg.error_message(conn)))
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
+		return databaseResultError(.CreateRoom, &result)
+	}
+
+	roomIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
+	roomID, roomIDOK := strconv.parse_int(roomIDText)
+	delete(roomIDText)
+	if !roomIDOK {
+		return databaseErrorResponse(.CreateRoom, "database returned invalid room ID")
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .CreateRoom,
+		success = true,
+		message = "ok",
+		mutationChanged = true,
+		mutationRoom = {
+			id = int(roomID),
+			name = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 1))),
+			description = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 2))),
+		},
+	}
+}
+
+databaseExecuteEditRoom :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseEditRoomRequest,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	nameCString, _ := strings.clone_to_cstring(request.name)
+	defer delete(nameCString)
+	descriptionCString, _ := strings.clone_to_cstring(request.description)
+	defer delete(descriptionCString)
+	paramValues := [?][^]byte {
+		transmute([^]byte)roomIDCString,
+		transmute([^]byte)nameCString,
+		transmute([^]byte)descriptionCString,
+	}
+	result := pg.exec_params(
+		conn,
+		"UPDATE rooms SET name = $2, description = $3 WHERE id = $1 " +
+		"RETURNING id::text, name, description",
+		3,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(.EditRoom, cloneCStringOrEmpty(pg.error_message(conn)))
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.EditRoom, &result)
+	}
+	response := common.DatabaseQueryResponse {
+		queryType       = .EditRoom,
+		success         = true,
+		message         = "ok",
+		mutationChanged = pg.n_tuples(result) == 1,
+	}
+	if response.mutationChanged {
+		response.mutationRoom = {
+			id          = request.roomId,
+			name        = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 1))),
+			description = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 2))),
+		}
+	}
+	return response
+}
+
+databaseExecuteDeleteRoom :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseDeleteRoomRequest,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)roomIDCString}
+	result := pg.exec_params(
+		conn,
+		"DELETE FROM rooms WHERE id = $1 RETURNING id::text",
+		1,
+		nil,
+		raw_data(paramValues[:]),
+		nil,
+		nil,
+		.Text,
+	)
+	if result == nil {
+		return databaseErrorResponse(.DeleteRoom, cloneCStringOrEmpty(pg.error_message(conn)))
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(.DeleteRoom, &result)
+	}
+	return common.DatabaseQueryResponse {
+		queryType = .DeleteRoom,
+		success = true,
+		message = "ok",
+		mutationChanged = pg.n_tuples(result) == 1,
+	}
+}
+
+databaseExecuteRoomMemberMutation :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRoomMemberMutationRequest,
+	queryType: common.DatabaseQueryType,
+) -> common.DatabaseQueryResponse {
+	roomIDText := fmt.aprintf("%d", request.roomId)
+	defer delete(roomIDText)
+	roomIDCString, _ := strings.clone_to_cstring(roomIDText)
+	defer delete(roomIDCString)
+	userIDText := fmt.aprintf("%d", request.userId)
+	defer delete(userIDText)
+	userIDCString, _ := strings.clone_to_cstring(userIDText)
+	defer delete(userIDCString)
+	paramValues := [?][^]byte{transmute([^]byte)roomIDCString, transmute([^]byte)userIDCString}
+	query := "DELETE FROM room_members WHERE room_id = $1 AND user_id = $2 RETURNING room_id::text"
+	if queryType == .AddRoomMember {
+		query =
+			"INSERT INTO room_members (room_id, user_id) VALUES ($1, $2) " +
+			"ON CONFLICT DO NOTHING RETURNING room_id::text"
+	}
+	queryCString, _ := strings.clone_to_cstring(query)
+	defer delete(queryCString)
+	result := pg.exec_params(conn, queryCString, 2, nil, raw_data(paramValues[:]), nil, nil, .Text)
+	if result == nil {
+		return databaseErrorResponse(queryType, cloneCStringOrEmpty(pg.error_message(conn)))
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK {
+		return databaseResultError(queryType, &result)
+	}
+	return common.DatabaseQueryResponse {
+		queryType = queryType,
+		success = true,
+		message = "ok",
+		mutationChanged = pg.n_tuples(result) == 1,
+	}
+}
+
 databaseExecuteRequest :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseQueryRequest,
@@ -422,6 +651,18 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteStoreRoomChatMessage(conn, request.storeChat)
 	case .GetRoomHistory:
 		return databaseExecuteGetRoomHistory(conn, request.history)
+	case .CheckUserServerAdmin:
+		return databaseExecuteCheckUserServerAdmin(conn, request.adminCheck)
+	case .CreateRoom:
+		return databaseExecuteCreateRoom(conn, request.createRoom)
+	case .EditRoom:
+		return databaseExecuteEditRoom(conn, request.editRoom)
+	case .DeleteRoom:
+		return databaseExecuteDeleteRoom(conn, request.deleteRoom)
+	case .AddRoomMember:
+		return databaseExecuteRoomMemberMutation(conn, request.addMember, .AddRoomMember)
+	case .RemoveRoomMember:
+		return databaseExecuteRoomMemberMutation(conn, request.removeMember, .RemoveRoomMember)
 	case .None:
 		return databaseErrorResponse(.None, "missing database query type")
 	case:
