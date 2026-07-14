@@ -128,11 +128,11 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 		}
 	}
 	clone := common.StoredChatMessage {
-		id = message.id,
-		senderId = message.senderId,
-		roomId = message.roomId,
+		id        = message.id,
+		senderId  = message.senderId,
+		roomId    = message.roomId,
 		timestamp = strings.clone(message.timestamp),
-		content = strings.clone(message.content),
+		content   = strings.clone(message.content),
 	}
 	insertIndex := len(cache.messages)
 	for index in 0 ..< len(cache.messages) {
@@ -338,7 +338,8 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 				unordered_remove(&cache.roomCaches, index)
 			}
 		}
-		if m.id == out.selected_server_id && !ServerRoomCache_roomIsJoined(cache, out.selected_channel_id) {
+		if m.id == out.selected_server_id &&
+		   !ServerRoomCache_roomIsJoined(cache, out.selected_channel_id) {
 			if len(cache.rooms) > 0 {
 				out.selected_channel_id = cache.rooms[0].id
 				State_requestRoomHistory(&out, m.id, out.selected_channel_id, 0)

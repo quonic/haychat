@@ -25,21 +25,21 @@ startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
 roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
 
 RoomCache :: struct {
-	roomID:                int,
-	messages:              [dynamic]common.StoredChatMessage,
-	draft:                 string,
-	initialHistoryLoaded:  bool,
-	isLoadingHistory:      bool,
-	oldestMessageID:       int,
-	hasOlder:              bool,
+	roomID:               int,
+	messages:             [dynamic]common.StoredChatMessage,
+	draft:                string,
+	initialHistoryLoaded: bool,
+	isLoadingHistory:     bool,
+	oldestMessageID:      int,
+	hasOlder:             bool,
 }
 
 ServerRoomCache :: struct {
-	serverID:      int,
-	rooms:         [dynamic]common.RoomSummary,
-	roomCaches:    [dynamic]RoomCache,
-	roomsLoaded:   bool,
-	roomsLoading:  bool,
+	serverID:     int,
+	rooms:        [dynamic]common.RoomSummary,
+	roomCaches:   [dynamic]RoomCache,
+	roomsLoaded:  bool,
+	roomsLoading: bool,
 }
 
 startupAuthBridge_noop :: proc(
@@ -156,21 +156,24 @@ ClientTransportRuntimeEvent_toMsg :: proc(event: ClientTransportRuntimeEvent) ->
 				channel_id = event.roomID,
 				messages = event.messages,
 				has_older = event.hasOlder,
-			}, true
+			},
+			true
 	case .RoomMembershipChanged:
 		return Msg {
 				kind = .RoomMembershipChanged,
 				id = event.serverID,
 				channel_id = event.roomID,
 				joined = event.joined,
-			}, true
+			},
+			true
 	case .RoomEdited:
 		return Msg {
 				kind = .RoomEdited,
 				id = event.serverID,
 				channel_id = event.roomID,
 				room = event.room,
-			}, true
+			},
+			true
 	case .RoomDeleted:
 		return Msg{kind = .RoomDeleted, id = event.serverID, channel_id = event.roomID}, true
 

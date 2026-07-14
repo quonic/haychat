@@ -516,29 +516,47 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 
 @(test)
 testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
-	serverA := Server{id = 601, name = "Cache A", short_name = "A", host = "localhost", port = 1}
-	serverB := Server{id = 602, name = "Cache B", short_name = "B", host = "localhost", port = 1}
+	serverA := Server {
+		id         = 601,
+		name       = "Cache A",
+		short_name = "A",
+		host       = "localhost",
+		port       = 1,
+	}
+	serverB := Server {
+		id         = 602,
+		name       = "Cache B",
+		short_name = "B",
+		host       = "localhost",
+		port       = 1,
+	}
 	state := State_initFromConfig(testConfigWithServers({serverA, serverB}))
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
 	state.selected_channel_id = 10
 
-	afterA, _ := update(state, Msg {
-		kind = .RecieveChannelChatMessage,
-		id = serverA.id,
-		channel_id = 10,
-		sender_id = 42,
-		message_id = 101,
-		new_value = "from A",
-	})
-	afterB, _ := update(afterA, Msg {
-		kind = .RecieveChannelChatMessage,
-		id = serverB.id,
-		channel_id = 10,
-		sender_id = 43,
-		message_id = 101,
-		new_value = "from B",
-	})
+	afterA, _ := update(
+		state,
+		Msg {
+			kind = .RecieveChannelChatMessage,
+			id = serverA.id,
+			channel_id = 10,
+			sender_id = 42,
+			message_id = 101,
+			new_value = "from A",
+		},
+	)
+	afterB, _ := update(
+		afterA,
+		Msg {
+			kind = .RecieveChannelChatMessage,
+			id = serverB.id,
+			channel_id = 10,
+			sender_id = 43,
+			message_id = 101,
+			new_value = "from B",
+		},
+	)
 
 	cacheA := State_serverRoomCache(&afterB, serverA.id)
 	cacheB := State_serverRoomCache(&afterB, serverB.id)
@@ -552,60 +570,136 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 
 @(test)
 testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
-	server := Server{id = 603, name = "History", short_name = "H", host = "localhost", port = 1}
+	server := Server {
+		id         = 603,
+		name       = "History",
+		short_name = "H",
+		host       = "localhost",
+		port       = 1,
+	}
 	state := testUpdateStateForServer(server)
 	state.selected_channel_id = 12
 
 	firstPage := make([dynamic]common.StoredChatMessage, 0, 2)
-	append(&firstPage, common.StoredChatMessage{id = 2, roomId = 12, timestamp = strings.clone("t2"), content = strings.clone("two")})
-	append(&firstPage, common.StoredChatMessage{id = 3, roomId = 12, timestamp = strings.clone("t3"), content = strings.clone("three")})
-	afterFirstPage, _ := update(state, Msg {
-		kind = .RecieveRoomHistory,
-		id = server.id,
-		channel_id = 12,
-		messages = firstPage,
-		has_older = true,
-	})
+	append(
+		&firstPage,
+		common.StoredChatMessage {
+			id = 2,
+			roomId = 12,
+			timestamp = strings.clone("t2"),
+			content = strings.clone("two"),
+		},
+	)
+	append(
+		&firstPage,
+		common.StoredChatMessage {
+			id = 3,
+			roomId = 12,
+			timestamp = strings.clone("t3"),
+			content = strings.clone("three"),
+		},
+	)
+	afterFirstPage, _ := update(
+		state,
+		Msg {
+			kind = .RecieveRoomHistory,
+			id = server.id,
+			channel_id = 12,
+			messages = firstPage,
+			has_older = true,
+		},
+	)
 
 	olderPage := make([dynamic]common.StoredChatMessage, 0, 2)
-	append(&olderPage, common.StoredChatMessage{id = 1, roomId = 12, timestamp = strings.clone("t1"), content = strings.clone("one")})
-	append(&olderPage, common.StoredChatMessage{id = 2, roomId = 12, timestamp = strings.clone("t2"), content = strings.clone("two")})
-	afterOlderPage, _ := update(afterFirstPage, Msg {
-		kind = .RecieveRoomHistory,
-		id = server.id,
-		channel_id = 12,
-		messages = olderPage,
-		has_older = false,
-	})
+	append(
+		&olderPage,
+		common.StoredChatMessage {
+			id = 1,
+			roomId = 12,
+			timestamp = strings.clone("t1"),
+			content = strings.clone("one"),
+		},
+	)
+	append(
+		&olderPage,
+		common.StoredChatMessage {
+			id = 2,
+			roomId = 12,
+			timestamp = strings.clone("t2"),
+			content = strings.clone("two"),
+		},
+	)
+	afterOlderPage, _ := update(
+		afterFirstPage,
+		Msg {
+			kind = .RecieveRoomHistory,
+			id = server.id,
+			channel_id = 12,
+			messages = olderPage,
+			has_older = false,
+		},
+	)
 
 	cache := State_serverRoomCache(&afterOlderPage, server.id)
 	room := ServerRoomCache_roomCache(cache, 12)
 	testing.expect(t, len(room.messages) == 3, "expected overlapping history pages to deduplicate")
 	testing.expect(t, room.messages[0].id == 1, "expected older messages to prepend in ID order")
 	testing.expect(t, room.messages[2].id == 3, "expected newest messages to remain after merge")
-	testing.expect(t, room.oldestMessageID == 1, "expected pagination cursor to track oldest loaded message")
-	testing.expect(t, !room.hasOlder, "expected latest history response to update pagination state")
+	testing.expect(
+		t,
+		room.oldestMessageID == 1,
+		"expected pagination cursor to track oldest loaded message",
+	)
+	testing.expect(
+		t,
+		!room.hasOlder,
+		"expected latest history response to update pagination state",
+	)
 }
 
 @(test)
 testRoomDeletionFallsBackToAnotherJoinedRoom :: proc(t: ^testing.T) {
-	server := Server{id = 604, name = "Fallback", short_name = "F", host = "localhost", port = 1}
+	server := Server {
+		id         = 604,
+		name       = "Fallback",
+		short_name = "F",
+		host       = "localhost",
+		port       = 1,
+	}
 	state := testUpdateStateForServer(server)
 	rooms := make([dynamic]common.RoomSummary, 0, 2)
-	append(&rooms, common.RoomSummary{id = 20, name = strings.clone("Alpha"), description = strings.clone("")})
-	append(&rooms, common.RoomSummary{id = 21, name = strings.clone("Beta"), description = strings.clone("")})
+	append(
+		&rooms,
+		common.RoomSummary {
+			id = 20,
+			name = strings.clone("Alpha"),
+			description = strings.clone(""),
+		},
+	)
+	append(
+		&rooms,
+		common.RoomSummary{id = 21, name = strings.clone("Beta"), description = strings.clone("")},
+	)
 	withRooms, _ := update(state, Msg{kind = .RecieveRoomList, id = server.id, rooms = rooms})
 	withRooms.selected_channel_id = 20
 
-	afterDelete, _ := update(withRooms, Msg {
-		kind = .RoomDeleted,
-		id = server.id,
-		channel_id = 20,
-	})
+	afterDelete, _ := update(withRooms, Msg{kind = .RoomDeleted, id = server.id, channel_id = 20})
 	cache := State_serverRoomCache(&afterDelete, server.id)
-	testing.expect(t, afterDelete.selected_channel_id == 21, "expected selected deletion to choose another joined room")
-	testing.expect(t, !ServerRoomCache_roomIsJoined(cache, 20), "expected deleted room to leave room list")
-	testing.expect(t, ServerRoomCache_roomIsJoined(cache, 21), "expected remaining joined room to stay available")
+	testing.expect(
+		t,
+		afterDelete.selected_channel_id == 21,
+		"expected selected deletion to choose another joined room",
+	)
+	testing.expect(
+		t,
+		!ServerRoomCache_roomIsJoined(cache, 20),
+		"expected deleted room to leave room list",
+	)
+	testing.expect(
+		t,
+		ServerRoomCache_roomIsJoined(cache, 21),
+		"expected remaining joined room to stay available",
+	)
 }
 
 @(test)

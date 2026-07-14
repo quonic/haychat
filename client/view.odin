@@ -70,11 +70,7 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 				skald.button(
 					ctx,
 					room.name,
-					Msg {
-						kind = .SwitchToChannel,
-						id = s.selected_server_id,
-						channel_id = room.id,
-					},
+					Msg{kind = .SwitchToChannel, id = s.selected_server_id, channel_id = room.id},
 					padding = button_padding,
 				),
 			)
@@ -107,11 +103,15 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 				senderColor := th.color.fg
 				if s.selected_transport_index >= 0 &&
 				   s.selected_transport_index < len(s.serverTransports) &&
-				   s.serverTransports[s.selected_transport_index].authenticatedUserID == message.senderId {
+				   s.serverTransports[s.selected_transport_index].authenticatedUserID ==
+					   message.senderId {
 					senderLabel = "You"
 					senderColor = th.color.primary
 				}
-				append(&chatMessages, skald.span_bold(strings.concatenate({senderLabel, ": "}), senderColor))
+				append(
+					&chatMessages,
+					skald.span_bold(strings.concatenate({senderLabel, ": "}), senderColor),
+				)
 				append(&chatMessages, skald.span(message.content, th.color.fg))
 			}
 		}
@@ -142,7 +142,7 @@ view_server :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
 		view_chat_status(s, ctx),
 		skald.divider(ctx),
 		// Chat input area
-			skald.chat_input(
+		skald.chat_input(
 			ctx,
 			roomDraft,
 			Draft_Channel_Changed,

@@ -33,18 +33,18 @@ ClientTransportRuntimeEventKind :: enum {
 }
 
 ClientTransportRuntimeEvent :: struct {
-	kind:     ClientTransportRuntimeEventKind,
-	serverID: int,
-	senderID: int,
-	roomID:   int,
+	kind:      ClientTransportRuntimeEventKind,
+	serverID:  int,
+	senderID:  int,
+	roomID:    int,
 	messageID: int,
 	timestamp: string,
-	message:  string,
-	rooms:    [dynamic]common.RoomSummary,
-	messages: [dynamic]common.StoredChatMessage,
-	hasOlder: bool,
-	joined:   bool,
-	room:     common.RoomSummary,
+	message:   string,
+	rooms:     [dynamic]common.RoomSummary,
+	messages:  [dynamic]common.StoredChatMessage,
+	hasOlder:  bool,
+	joined:    bool,
+	room:      common.RoomSummary,
 }
 
 ClientStartupAuthSession :: struct {
@@ -787,80 +787,114 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				true
 		}
 		return ClientTransportRuntimeEvent {
-			kind = .RoomChatReceived,
-			serverID = transport.serverID,
-			senderID = chatPayload.senderId,
-			roomID = chatPayload.roomId,
-			messageID = chatPayload.id,
-			timestamp = chatPayload.timestamp,
-			message = chatPayload.content,
-		}, true
+				kind = .RoomChatReceived,
+				serverID = transport.serverID,
+				senderID = chatPayload.senderId,
+				roomID = chatPayload.roomId,
+				messageID = chatPayload.id,
+				timestamp = chatPayload.timestamp,
+				message = chatPayload.content,
+			},
+			true
 
 	case .ServerListRooms:
 		payload: common.ServerListRoomsPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
 			ClientServerTransport_runtimeProtocolError(transport, "invalid room list payload")
-			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+			return ClientServerTransport_makeRuntimeEvent(
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		return ClientTransportRuntimeEvent {
-			kind = .RoomListReceived,
-			serverID = transport.serverID,
-			rooms = payload.rooms,
-		}, true
+				kind = .RoomListReceived,
+				serverID = transport.serverID,
+				rooms = payload.rooms,
+			},
+			true
 
 	case .ServerRoomHistory:
 		payload: common.ServerRoomHistoryPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
 			ClientServerTransport_runtimeProtocolError(transport, "invalid room history payload")
-			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+			return ClientServerTransport_makeRuntimeEvent(
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		return ClientTransportRuntimeEvent {
-			kind = .RoomHistoryReceived,
-			serverID = transport.serverID,
-			roomID = payload.roomId,
-			messages = payload.messages,
-			hasOlder = payload.hasOlder,
-		}, true
+				kind = .RoomHistoryReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				messages = payload.messages,
+				hasOlder = payload.hasOlder,
+			},
+			true
 
 	case .ServerRoomMembershipChanged:
 		payload: common.ServerRoomMembershipChangedPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
-			ClientServerTransport_runtimeProtocolError(transport, "invalid room membership payload")
-			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+			ClientServerTransport_runtimeProtocolError(
+				transport,
+				"invalid room membership payload",
+			)
+			return ClientServerTransport_makeRuntimeEvent(
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		return ClientTransportRuntimeEvent {
-			kind = .RoomMembershipChanged,
-			serverID = transport.serverID,
-			roomID = payload.roomId,
-			joined = payload.joined,
-		}, true
+				kind = .RoomMembershipChanged,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				joined = payload.joined,
+			},
+			true
 
 	case .ServerEditRoom:
 		payload: common.ServerRoomMutationPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
 			ClientServerTransport_runtimeProtocolError(transport, "invalid room edit payload")
-			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+			return ClientServerTransport_makeRuntimeEvent(
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		return ClientTransportRuntimeEvent {
-			kind = .RoomEdited,
-			serverID = transport.serverID,
-			roomID = payload.roomId,
-			room = payload.room,
-		}, true
+				kind = .RoomEdited,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				room = payload.room,
+			},
+			true
 
 	case .ServerDeleteRoom:
 		payload: common.ServerRoomMutationPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
 			ClientServerTransport_runtimeProtocolError(transport, "invalid room delete payload")
-			return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError), true
+			return ClientServerTransport_makeRuntimeEvent(
+					transport,
+					.ProtocolError,
+					transport.lastError,
+				),
+				true
 		}
 		defer delete(payload.room.name)
 		defer delete(payload.room.description)
 		return ClientTransportRuntimeEvent {
-			kind = .RoomDeleted,
-			serverID = transport.serverID,
-			roomID = payload.roomId,
-		}, true
+				kind = .RoomDeleted,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+			},
+			true
 
 	case .ServerProtocolError:
 		protocolError: common.ProtocolErrorResponse
