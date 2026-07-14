@@ -7,6 +7,14 @@
 - Build: `odin build server`
 - Run: `odin run server`
 
+## Multi-Channel Server
+
+- Room visibility, chat sends, live-message fanout, and history retrieval are membership-scoped. Never trust a client-provided room ID without checking membership through the database flow.
+- Persist a room message before fanout. Fan out the durable message fields, including its ID and timestamp, only to the room's current members.
+- Router database work follows the typed request/continuation pattern in `MainRouterState`: queue a `common.DatabaseQuery`, record the matching pending request type, and handle its result in the exhaustive database-result switch. Keep request/response allocation cleanup in `ipc.odin` in sync with new payload fields.
+- Admin room create/edit/delete and membership mutations require the database-backed server-admin role. Room creators are automatically added as members; membership and deletion changes must notify affected users so their clients refresh the authoritative room list.
+- For deterministic router/database validation, use `odin test server -define:ODIN_TEST_THREADS=1`. Database-backed runtime tests require a bootstrap role with `USAGE, CREATE` on schema `public`.
+
 ## MVP Workflow
 
 - Load the supported local env with `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`.

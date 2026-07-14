@@ -44,6 +44,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
 - Test command: `odin test .`
+- Prefer component-scoped checks while editing: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`. The serial server suite is the reliable default for router/database tests.
 - Use the built-in testing library from Odin. `import "core:testing"` and any procedures must have `t: ^testing.T,` as the first parameter.
 - Use `assert(a == VALUE, "message that test failed")` for assertions in tests, and provide a clear message that indicates what the expected value was and what the actual value is if the assertion fails.
 
@@ -53,6 +54,13 @@ Making breaking changes to the project is currently allowed, but it is recommend
 - Server Web Service Frontend: `shared:odin-http`, repository: <https://github.com/laytan/odin-http>
 - Database: `shared:pg` bindings for libpq version 17, repository: <https://github.com/laytan/odin-postgresql>
 - Client-Server Communication: `vendor:ENet` bindings for enet
+
+## Chat Protocol And Ownership
+
+- Shared encrypted application packets and database IPC types belong in `common/protocol.odin`. When changing a wire payload, update both client transport decoding and server routing, then validate `odin test common` before component tests.
+- Room access is server-authoritative and membership-scoped. Clients may request room lists and history, but must treat `ServerListRooms`, membership, edit, and delete events as the source of truth for visible rooms.
+- Chat history uses message IDs as stable pagination cursors. Fetch the newest page with cursor `0`, request older pages with the oldest loaded message ID, and merge duplicate page boundaries by message ID.
+- CBOR-decoded strings and dynamic arrays are owned allocations. Transfer ownership explicitly between packet/event/message layers, clear the source after transfer, and free ignored payloads. Do not retain borrowed decoded data after its packet or event is deinitialized.
 
 ## Security
 
