@@ -54,8 +54,7 @@ DATABASE_SCHEMA_CREATE_SQL ::
 	"CREATE INDEX IF NOT EXISTS chat_messages_by_room_id_and_id " +
 	"ON chat_messages (room_id, id DESC);"
 
-DATABASE_SCHEMA_DROP_SQL ::
-	"DROP TABLE IF EXISTS chat_messages, room_members, user_server_roles, rooms, server_roles, users CASCADE;"
+DATABASE_SCHEMA_DROP_SQL :: "DROP TABLE IF EXISTS chat_messages, room_members, user_server_roles, rooms, server_roles, users CASCADE;"
 
 DATABASE_SCHEMA_VALIDATION_SQL ::
 	"WITH checks(name, valid) AS (VALUES " +
@@ -137,7 +136,10 @@ databaseSchemaValidationError :: proc(conn: pg.Conn) -> string {
 
 	result := pg.exec(conn, queryCString)
 	if result == nil {
-		return fmt.aprintf("database schema validation failed: %s", cloneCStringOrEmpty(pg.error_message(conn)))
+		return fmt.aprintf(
+			"database schema validation failed: %s",
+			cloneCStringOrEmpty(pg.error_message(conn)),
+		)
 	}
 	defer pg.clear(result)
 	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
@@ -182,11 +184,19 @@ databaseEnsureSchema :: proc(conn: pg.Conn) -> string {
 	if len(beginErr) > 0 {
 		return beginErr
 	}
-	if dropErr := databaseSchemaExecute(conn, "recreate incompatible tables", DATABASE_SCHEMA_DROP_SQL); len(dropErr) > 0 {
+	if dropErr := databaseSchemaExecute(
+		conn,
+		"recreate incompatible tables",
+		DATABASE_SCHEMA_DROP_SQL,
+	); len(dropErr) > 0 {
 		_ = databaseSchemaExecute(conn, "rollback destructive reconciliation", "ROLLBACK")
 		return dropErr
 	}
-	if recreateErr := databaseSchemaExecute(conn, "create required tables", DATABASE_SCHEMA_CREATE_SQL); len(recreateErr) > 0 {
+	if recreateErr := databaseSchemaExecute(
+		conn,
+		"create required tables",
+		DATABASE_SCHEMA_CREATE_SQL,
+	); len(recreateErr) > 0 {
 		_ = databaseSchemaExecute(conn, "rollback destructive reconciliation", "ROLLBACK")
 		return recreateErr
 	}
