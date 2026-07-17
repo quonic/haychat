@@ -100,12 +100,12 @@ Optional server/runtime values documented in the example file:
 - `HAYCHAT_SERVER_PRIVATE_KEY`
 - `HAYCHAT_SERVER_PUBLIC_KEY`
 
-Supported helper commands are exactly: `bootstrap`, `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, `bootstrap-start`, `bootstrap-start-background`, and `hc118-gate`.
+Supported helper commands are exactly: `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, and `hc118-gate`.
 
 Primary local MVP workflow:
 
 1. Run `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`.
-2. Run `./run-test-server.sh bootstrap-start-background` as the primary MVP start path.
+2. Run `./run-test-server.sh start-background` as the primary MVP start path. The server creates or reconciles its required schema before reporting readiness.
 3. Confirm readiness with `GET http://localhost:8080/status`.
 4. Launch clients manually with `odin run client` in separate terminals.
 5. Shut the helper-managed server down with `./run-test-server.sh stop`.
@@ -115,11 +115,9 @@ The helper owns only the server lifecycle. PostgreSQL remains a prerequisite, an
 Companion and lower-level helper flows:
 
 1. If your PostgreSQL setup differs from the supported defaults, load `.env` or export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
-2. Run `./run-test-server.sh bootstrap` to create the minimum `users` table and seed the test identities.
-3. Run `./run-test-server.sh start` to launch the server in the foreground, or `./run-test-server.sh bootstrap-start` to bootstrap and launch in one step.
-4. For the Linux-first local confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
-5. `./run-test-server.sh bootstrap-start-background` performs bootstrap, background startup, readiness waiting, and cleanup-safe lifecycle ownership through the same helper seam.
-6. `./run-test-server.sh hc118-gate` is the supported Linux-first validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The gate bootstraps the local database before starting the server, so the configured database user must own the target database or have `USAGE, CREATE` on schema `public` in that database.
+2. Run `./run-test-server.sh start` to launch the server in the foreground. It creates or validates the database schema before listening for clients.
+3. For the Linux-first local confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
+4. `./run-test-server.sh hc118-gate` is the supported Linux-first validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The configured database user must be able to create, alter, and drop the server-owned schema in `public`.
 
 Running `odin run server` directly now uses tester-safe local runtime paths by default, resolved relative to the server process working directory: logs in `./logs`, file storage in `./storage`, and the server identity file at `./storage/server_identity.json`. `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, and `HAYCHAT_SERVER_IDENTITY_FILE` still override those defaults.
 
@@ -128,7 +126,7 @@ Seeded test identities:
 - `admin` resolves to user ID `1`
 - `haypeer` resolves to user ID `2`
 
-The bootstrap SQL lives in `server/sql/auth_bootstrap.sql` and is safe to rerun. It keeps those seeded nickname-to-user-ID mappings deterministic without requiring testers to write SQL by hand.
+The server owns table creation and validation. It starts successfully only after PostgreSQL contains the required schema; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
 ## License
 

@@ -1317,6 +1317,46 @@ testDatabaseRuntimeConninfoAddsConnectTimeout :: proc(t: ^testing.T) {
 }
 
 @(test)
+testDatabaseSchemaCreationOwnsTablesWithoutSeedData :: proc(t: ^testing.T) {
+	_ = t
+
+	assert(
+		strings.contains(DATABASE_SCHEMA_CREATE_SQL, "CREATE TABLE IF NOT EXISTS users"),
+		"expected server schema setup to create the users table",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_CREATE_SQL, "CREATE TABLE IF NOT EXISTS chat_messages"),
+		"expected server schema setup to create the chat messages table",
+	)
+	assert(
+		!strings.contains(DATABASE_SCHEMA_CREATE_SQL, "INSERT INTO"),
+		"expected normal server schema setup to avoid seeding application data",
+	)
+	assert(
+		!strings.contains(DATABASE_SCHEMA_CREATE_SQL, "DELETE FROM"),
+		"expected normal server schema setup to avoid deleting application data",
+	)
+}
+
+@(test)
+testDatabaseSchemaValidationRequiresQueryIndexes :: proc(t: ^testing.T) {
+	_ = t
+
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "users_public_key_unique"),
+		"expected schema validation to require the public key index",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "room_members_by_user_id"),
+		"expected schema validation to require the room membership index",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "chat_messages_by_room_id_and_id"),
+		"expected schema validation to require the chat history index",
+	)
+}
+
+@(test)
 testWaitForDatabaseStartupAckReturnsFailureMessage :: proc(t: ^testing.T) {
 	_ = t
 

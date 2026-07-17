@@ -2,7 +2,6 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
-bootstrap_sql_path="$script_dir/server/sql/auth_bootstrap.sql"
 runtime_dir="${HAYCHAT_RUNTIME_DIR:-$script_dir/.haychat-test-server}"
 server_pid_path="$runtime_dir/server.pid"
 server_log_path="$runtime_dir/server.log"
@@ -133,77 +132,6 @@ wait_for_server_ready() {
 	return 1
 }
 
-require_bootstrap_schema_create_privilege() {
-	local privilege_state
-	local can_usage can_create
-	local psql_status=0
-	local psql_stderr_path
-	psql_stderr_path=$(mktemp "$runtime_dir/hc-203-psql-stderr.XXXXXX")
-	privilege_state=$(PGPASSWORD="$HAYCHAT_DATABASE_PASS" \
-		psql \
-			-Atq \
-			-h "$HAYCHAT_DATABASE_URL" \
-			-p "$HAYCHAT_DATABASE_PORT" \
-			-U "$HAYCHAT_DATABASE_USER" \
-			-d "$HAYCHAT_DATABASE_NAME" \
-			-c "SELECT has_schema_privilege(current_user, 'public', 'USAGE')::text || ',' || has_schema_privilege(current_user, 'public', 'CREATE')::text;" \
-			2>"$psql_stderr_path") || psql_status=$?
-
-	if (( psql_status != 0 )); then
-		if [[ -s "$psql_stderr_path" ]]; then
-			sed 's/^/[HC-203][prereq][psql] /' "$psql_stderr_path" >&2
-		fi
-		rm -f "$psql_stderr_path"
-		echo "[HC-203][prereq] could not query schema privileges for database '$HAYCHAT_DATABASE_NAME' with role '$HAYCHAT_DATABASE_USER'" >&2
-		echo "[HC-203][prereq] check database URL, port, name, and credentials before retrying bootstrap" >&2
-		return 1
-	fi
-
-	rm -f "$psql_stderr_path"
-	IFS=',' read -r can_usage can_create <<<"$privilege_state"
-
-	if [[ "$can_usage" != "t" || "$can_create" != "t" ]]; then
-		local missing_privileges=()
-		if [[ "$can_usage" != "t" ]]; then
-			missing_privileges+=("USAGE")
-		fi
-		if [[ "$can_create" != "t" ]]; then
-			missing_privileges+=("CREATE")
-		fi
-		echo "[HC-203][prereq] configured database role '$HAYCHAT_DATABASE_USER' lacks ${missing_privileges[*]} on schema public in database '$HAYCHAT_DATABASE_NAME'" >&2
-		echo "[HC-203][prereq] rerun ./setup-dev-env.sh for the default local database, or repair the reused database so the configured role owns it or has USAGE, CREATE on schema public" >&2
-		return 1
-	fi
-}
-
-run_bootstrap() {
-	if ! command -v psql >/dev/null 2>&1; then
-		echo "psql is required for database bootstrap" >&2
-		exit 1
-	fi
-
-	if [[ ! -f "$bootstrap_sql_path" ]]; then
-		echo "bootstrap SQL not found: $bootstrap_sql_path" >&2
-		exit 1
-	fi
-
-	require_bootstrap_schema_create_privilege
-
-	echo "Bootstrapping auth database state from $bootstrap_sql_path"
-	if ! PGPASSWORD="$HAYCHAT_DATABASE_PASS" \
-		psql \
-			-v ON_ERROR_STOP=1 \
-			-h "$HAYCHAT_DATABASE_URL" \
-			-p "$HAYCHAT_DATABASE_PORT" \
-			-U "$HAYCHAT_DATABASE_USER" \
-			-d "$HAYCHAT_DATABASE_NAME" \
-			-f "$bootstrap_sql_path"; then
-		echo "[HC-118][startup] bootstrap failed while preparing auth database state" >&2
-		echo "[HC-118][startup] check database permissions and bootstrap prerequisites before retrying" >&2
-		return 1
-	fi
-}
-
 run_server() {
 	if ! command -v odin >/dev/null 2>&1; then
 		echo "odin is required to start the server" >&2
@@ -245,15 +173,6 @@ start_server_background() {
 	echo "Server log: $server_log_path"
 }
 
-bootstrap_start_server_background() {
-	run_bootstrap
-	start_server_background
-	if ! wait_for_server_ready; then
-		stop_server || true
-		return 1
-	fi
-}
-
 run_hc118_gate() {
 	if ! command -v odin >/dev/null 2>&1; then
 		echo "odin is required to run the HC-118 gate" >&2
@@ -273,8 +192,12 @@ run_hc118_gate() {
 
 	trap 'stop_server >/dev/null 2>&1 || true' EXIT
 
-	echo "[HC-118][startup] bootstrap, start background server, and wait for readiness"
-	bootstrap_start_server_background
+	echo "[HC-118][startup] start background server and wait for schema readiness"
+	start_server_background
+	if ! wait_for_server_ready; then
+		stop_server || true
+		return 1
+	fi
 
 	echo "[HC-118][connect] running live startup/connect proof"
 	echo "[HC-118][auth] verifying both clients authenticate against the live server"
@@ -290,9 +213,6 @@ run_hc118_gate() {
 command_name=${1:-start}
 
 case "$command_name" in
-	bootstrap)
-		run_bootstrap
-		;;
 	start)
 		run_server
 		;;
@@ -305,18 +225,11 @@ case "$command_name" in
 	stop)
 		stop_server
 		;;
-	bootstrap-start)
-		run_bootstrap
-		run_server
-		;;
-	bootstrap-start-background)
-		bootstrap_start_server_background
-		;;
 	hc118-gate)
 		run_hc118_gate
 		;;
 	*)
-		echo "Usage: $0 [bootstrap|start|start-background|wait-ready [timeout_secs]|stop|bootstrap-start|bootstrap-start-background|hc118-gate]" >&2
+		echo "Usage: $0 [start|start-background|wait-ready [timeout_secs]|stop|hc118-gate]" >&2
 		exit 1
 		;;
 esac
