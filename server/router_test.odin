@@ -364,8 +364,8 @@ testMainRouterHandshakeRoutesEncryptedApplicationPackets :: proc(t: ^testing.T) 
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
-		.ClientDatabaseQuery,
-		common.ClientDatabaseQueryRequest{query = "SELECT 1"},
+		.ClientListRooms,
+		common.ClientListRoomsPayload{},
 	)
 	assert(sealOK, "expected encrypted client application packet sealing to succeed")
 	defer delete(sealedPacket.payload)
@@ -382,17 +382,17 @@ testMainRouterHandshakeRoutesEncryptedApplicationPackets :: proc(t: ^testing.T) 
 	databaseQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(databaseQuery.request)
 	assert(
-		databaseQuery.request.queryType == .RawSQL,
-		"expected encrypted ClientDatabaseQuery to be routed as a raw SQL database request",
+		databaseQuery.request.queryType == .ListRoomsForUser,
+		"expected encrypted ClientListRooms to be routed as a room list database request",
 	)
 	assert(
-		databaseQuery.request.rawSQL.query == "SELECT 1",
-		"expected encrypted ClientDatabaseQuery to reach database IPC intact",
+		databaseQuery.request.roomList.userId == 42,
+		"expected room list request to be scoped to the authenticated user ID",
 	)
 }
 
 @(test)
-testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
+testMainRouterRejectsUnsupportedApplicationMessage :: proc(t: ^testing.T) {
 	_ = t
 
 	sync.mutex_lock(&routerTestMutex)
@@ -406,10 +406,10 @@ testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
-		.ClientAuthLookup,
-		common.ClientAuthLookupRequest{nickname = "hayseed"},
+		.ClientUploadFile,
+		common.ClientListRoomsPayload{},
 	)
-	assert(sealOK, "expected encrypted auth lookup packet sealing to succeed")
+	assert(sealOK, "expected encrypted unsupported packet sealing to succeed")
 	defer delete(sealedPacket.payload)
 
 	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
@@ -421,15 +421,62 @@ testMainRouterAuthLookupUsesStructuredDatabaseRequest :: proc(t: ^testing.T) {
 		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
 	)
 
-	databaseQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(databaseQuery.request)
+	responseSend := routerPollNetworkSend(&h)
+	defer delete(responseSend.data)
+	responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+	defer delete(responseOuterPacket.payload)
+	responseInnerPacket, openOK := common.openPacketForSession(
+		&clientTransport,
+		responseOuterPacket,
+	)
+	assert(openOK, "expected client to decrypt unsupported message response")
+	defer delete(responseInnerPacket.payload)
 	assert(
-		databaseQuery.request.queryType == .AuthLookupByNickname,
-		"expected auth lookup to use structured auth lookup request type",
+		responseInnerPacket.messageType == .ServerProtocolError,
+		"expected unsupported application message to produce ServerProtocolError",
+	)
+
+	_, databaseErr := IPC_Client_poll(h.databaseFd)
+	assert(databaseErr != nil, "expected unsupported application message to reach no database")
+}
+
+@(test)
+testMainRouterInitParsesConfiguredAdminPublicKey :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	assert(!h.state.hasAdminPublicKey, "expected no admin key when none is configured")
+
+	_, adminPublicKey, keyOK := common.generateIdentityKeyPair()
+	assert(keyOK, "expected admin key generation to succeed")
+	h.config.adminPublicKey = common.identityPublicKeyToHex(adminPublicKey)
+	defer delete(h.config.adminPublicKey)
+
+	state := MainRouterState_init(&h.pm)
+	defer MainRouterState_deinit(&state)
+	assert(state.hasAdminPublicKey, "expected configured admin key to be parsed")
+	assert(state.adminPublicKey == adminPublicKey, "expected parsed admin key to match config")
+}
+
+@(test)
+testResolveUserIdentitySQLGuardsPrivilegedAccounts :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "user_server_roles"),
+		"expected identity claim SQL to check server roles before binding a key",
 	)
 	assert(
-		databaseQuery.request.authLookup.nickname == "hayseed",
-		"expected auth lookup nickname to be forwarded in structured request",
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "$3"),
+		"expected identity claim SQL to compare against the configured admin key",
+	)
+	assert(
+		!strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "WHERE users.public_key IS NULL OR"),
+		"expected identity claim SQL not to let any key claim any keyless account",
 	)
 }
 
@@ -792,8 +839,8 @@ testMainRouterRejectsUnexpectedPlaintextMessageBeforeAuth :: proc(t: ^testing.T)
 
 	peerID := u32(1)
 	packetBytes, packetOK := common.buildPacketBytes(
-		.ClientDatabaseQuery,
-		common.ClientDatabaseQueryRequest{query = "SELECT 3"},
+		.ClientListRooms,
+		common.ClientListRoomsPayload{},
 	)
 	assert(packetOK, "expected plaintext application packet encoding to succeed")
 	defer delete(packetBytes)
@@ -888,8 +935,8 @@ testMainRouterRejectsPlaintextAfterAuthentication :: proc(t: ^testing.T) {
 	clientTransport := routerCompleteHandshake(&h, peerID)
 
 	plaintextPacketBytes, plaintextPacketOK := common.buildPacketBytes(
-		.ClientDatabaseQuery,
-		common.ClientDatabaseQueryRequest{query = "SELECT 2"},
+		.ClientListRooms,
+		common.ClientListRoomsPayload{},
 	)
 	assert(plaintextPacketOK, "expected plaintext application packet encoding to succeed")
 	defer delete(plaintextPacketBytes)
@@ -980,10 +1027,10 @@ testMainRouterPrepareForDatabaseRestartFailsPendingRequest :: proc(t: ^testing.T
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
-		.ClientDatabaseQuery,
-		common.ClientDatabaseQueryRequest{query = "SELECT restart"},
+		.ClientListRooms,
+		common.ClientListRoomsPayload{},
 	)
-	assert(sealOK, "expected encrypted database query packet sealing to succeed")
+	assert(sealOK, "expected encrypted room list packet sealing to succeed")
 	defer delete(sealedPacket.payload)
 
 	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
@@ -998,7 +1045,7 @@ testMainRouterPrepareForDatabaseRestartFailsPendingRequest :: proc(t: ^testing.T
 	databaseQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(databaseQuery.request)
 	assert(
-		databaseQuery.request.rawSQL.query == "SELECT restart",
+		databaseQuery.request.queryType == .ListRoomsForUser,
 		"expected database request to be queued before restart cleanup",
 	)
 
@@ -1020,16 +1067,14 @@ testMainRouterPrepareForDatabaseRestartFailsPendingRequest :: proc(t: ^testing.T
 	assert(openOK, "expected client to decrypt restart failure response")
 	defer delete(responseInnerPacket.payload)
 	assert(
-		responseInnerPacket.messageType == .ServerDatabaseQueryResponse,
-		"expected failed pending generic database request to produce database query response",
+		responseInnerPacket.messageType == .ServerProtocolError,
+		"expected failed pending room list request to produce a protocol error",
 	)
 
-	responsePayload: common.ServerDatabaseQueryResult
+	responsePayload: common.ProtocolErrorResponse
 	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
 	assert(responsePayloadErr == nil, "expected failed restart response payload decode to succeed")
 	defer delete(responsePayload.message)
-	defer delete(responsePayload.result)
-	assert(!responsePayload.success, "expected pending request to fail during database restart")
 	assert(
 		responsePayload.message == "database restarting",
 		"expected restart failure message to explain database restart",

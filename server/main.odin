@@ -14,9 +14,7 @@ import "core:thread"
 import "core:time"
 
 PendingDBRequestType :: enum {
-	AuthLookup,
 	ResolveUserIdentity,
-	Generic,
 	ListRooms,
 	CheckChatMembership,
 	ListChatRecipients,
@@ -118,6 +116,8 @@ MainRouterState :: struct {
 	nextRequestID:            u64,
 	serverIdentityPrivateKey: common.IdentityPrivateKeyBytes,
 	serverIdentityPublicKey:  common.IdentityPublicKeyBytes,
+	adminPublicKey:           common.IdentityPublicKeyBytes,
+	hasAdminPublicKey:        bool,
 }
 
 MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
@@ -136,6 +136,12 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 	serverPublicKey, publicKeyOK := common.identityPublicKeyFromHex(pm.config.serverPublicKey)
 	if publicKeyOK {
 		state.serverIdentityPublicKey = serverPublicKey
+	}
+
+	if len(pm.config.adminPublicKey) > 0 {
+		state.adminPublicKey, state.hasAdminPublicKey = common.identityPublicKeyFromHex(
+			pm.config.adminPublicKey,
+		)
 	}
 
 	return state
@@ -437,25 +443,9 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		}
 
 		switch request.requestType {
-		case .AuthLookup:
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerAuthLookupResponse,
-				common.ServerAuthLookupResult{success = false, message = message, result = ""},
-			)
 		case .ResolveUserIdentity:
 			MainRouterState_sendAuthFailure(pm, state, request.peerID, message)
 			MainRouterState_disconnectPeer(pm, request.peerID)
-		case .Generic:
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				request.peerID,
-				common.MessageType.ServerDatabaseQueryResponse,
-				common.ServerDatabaseQueryResult{success = false, message = message, result = ""},
-			)
 		case .ListRooms,
 		     .CheckChatMembership,
 		     .ListChatRecipients,
@@ -515,122 +505,6 @@ MainRouterState_sendDatabaseRequest :: proc(
 		pm.config.databaseFd,
 		DatabaseQuery{request_id = requestID, request = request},
 	)
-}
-
-MainRouterState_handleClientAuthLookupPacket :: proc(
-	pm: ^ProcessManager,
-	state: ^MainRouterState,
-	peerID: u32,
-	payload: []u8,
-) {
-	req: common.ClientAuthLookupRequest
-	err := cbor.unmarshal(payload, &req)
-	defer delete(req.nickname)
-	if err != nil {
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			peerID,
-			common.MessageType.ServerAuthLookupResponse,
-			common.ServerAuthLookupResult {
-				success = false,
-				message = "invalid payload",
-				result = "",
-			},
-		)
-		return
-	}
-
-	if len(req.nickname) < 3 || len(req.nickname) > 32 {
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			peerID,
-			common.MessageType.ServerAuthLookupResponse,
-			common.ServerAuthLookupResult {
-				success = false,
-				message = "invalid nickname length",
-				result = "",
-			},
-		)
-		return
-	}
-
-	MainRouterState_sendDatabaseRequest(
-		pm,
-		state,
-		peerID,
-		.AuthLookup,
-		common.DatabaseQueryRequest {
-			queryType = .AuthLookupByNickname,
-			authLookup = {nickname = strings.clone(req.nickname)},
-		},
-	)
-}
-
-MainRouterState_handleClientDatabaseQueryPacket :: proc(
-	pm: ^ProcessManager,
-	state: ^MainRouterState,
-	peerID: u32,
-	payload: []u8,
-) {
-	req: common.ClientDatabaseQueryRequest
-	err := cbor.unmarshal(payload, &req)
-	defer delete(req.query)
-	if err != nil {
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			peerID,
-			common.MessageType.ServerDatabaseQueryResponse,
-			common.ServerDatabaseQueryResult {
-				success = false,
-				message = "invalid payload",
-				result = "",
-			},
-		)
-		return
-	}
-
-	if len(req.query) == 0 {
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			peerID,
-			common.MessageType.ServerDatabaseQueryResponse,
-			common.ServerDatabaseQueryResult {
-				success = false,
-				message = "empty query",
-				result = "",
-			},
-		)
-		return
-	}
-
-	MainRouterState_sendDatabaseRequest(
-		pm,
-		state,
-		peerID,
-		.Generic,
-		common.DatabaseQueryRequest {
-			queryType = .RawSQL,
-			rawSQL = {query = strings.clone(req.query)},
-		},
-	)
-}
-
-MainRouterState_authenticatedUserIDFromIdentity :: proc(
-	publicKey: common.IdentityPublicKeyBytes,
-) -> int {
-	fingerprint := common.fingerprintIdentityPublicKey(publicKey)
-	value: u32
-	for i in 0 ..< 4 {
-		value |= u32(fingerprint[i]) << u32(8 * i)
-	}
-	if value == 0 {
-		return 1
-	}
-	return int(value)
 }
 
 MainRouterState_handleClientHello :: proc(
@@ -855,6 +729,8 @@ MainRouterState_handleClientAuthRequest :: proc(
 			userIdentity = {
 				nickname = strings.clone(session.clientNickname),
 				publicKey = session.clientIdentityPublicKey,
+				adminPublicKey = state.adminPublicKey,
+				hasAdminPublicKey = state.hasAdminPublicKey,
 			},
 		},
 	)
@@ -1189,8 +1065,6 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			packet.payload,
 			.CheckAdminRemoveRoomMember,
 		)
-	case .ClientAuthLookup:
-		MainRouterState_handleClientAuthLookupPacket(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1239,8 +1113,6 @@ MainRouterState_dispatchApplicationPacket :: proc(
 				hashedFilename = strings.clone(hashedName),
 			},
 		)
-	case .ClientDatabaseQuery:
-		MainRouterState_handleClientDatabaseQueryPacket(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -1355,18 +1227,6 @@ MainRouterState_handleDatabaseResult :: proc(
 	defer IPC__database_query_response_deinit(response)
 
 	switch request.requestType {
-	case .AuthLookup:
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			request.peerID,
-			common.MessageType.ServerAuthLookupResponse,
-			common.ServerAuthLookupResult {
-				success = response.success,
-				message = response.message,
-				result = response.result,
-			},
-		)
 	case .ResolveUserIdentity:
 		userID, userIDOK := strconv.parse_int(response.result)
 		if !response.success || !userIDOK || userID <= 0 {
@@ -1406,18 +1266,6 @@ MainRouterState_handleDatabaseResult :: proc(
 				"Failed to send auth success",
 			)
 		}
-	case .Generic:
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			request.peerID,
-			common.MessageType.ServerDatabaseQueryResponse,
-			common.ServerDatabaseQueryResult {
-				success = response.success,
-				message = response.message,
-				result = response.result,
-			},
-		)
 	case .ListRooms:
 		if !response.success {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)

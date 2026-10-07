@@ -99,6 +99,16 @@ Optional server/runtime values documented in the example file:
 - `HAYCHAT_MAX_STORAGE_CAPACITY`
 - `HAYCHAT_SERVER_PRIVATE_KEY`
 - `HAYCHAT_SERVER_PUBLIC_KEY`
+- `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname.
+- `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
+
+### Web Admin
+
+The web admin listens on `localhost` only. `GET /status` is an unauthenticated health probe. `GET /peers`, `GET /logs`, `POST /shutdown`, and `POST /restart` require the bearer token:
+
+```sh
+curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:8080/peers
+```
 
 Supported helper commands are exactly: `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, and `hc118-gate`.
 
@@ -123,8 +133,8 @@ Running `odin run server` directly now uses tester-safe local runtime paths by d
 
 Seeded test identities:
 
-- `admin` resolves to user ID `1`
-- `haypeer` resolves to user ID `2`
+- `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
+- `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
 
 The server owns table creation and validation. It starts successfully only after PostgreSQL contains the required schema; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 

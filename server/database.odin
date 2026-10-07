@@ -99,6 +99,17 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	"('chat messages primary key', EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.chat_messages'::regclass AND contype = 'p')) " +
 	") SELECT COALESCE(string_agg(name, ', ' ORDER BY name), '') FROM checks WHERE NOT valid;"
 
+// Binds a client identity key to a nickname. A keyless account can be claimed on first
+// connect only when it holds no server roles; privileged keyless accounts (such as the
+// seeded admin) can only be claimed by the configured HAYCHAT_ADMIN_PUBLIC_KEY ($3).
+DATABASE_RESOLVE_USER_IDENTITY_SQL ::
+	"INSERT INTO users (nickname, public_key) VALUES ($1, decode($2, 'hex')) " +
+	"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
+	"WHERE users.public_key = EXCLUDED.public_key OR (users.public_key IS NULL AND (" +
+	"NOT EXISTS (SELECT 1 FROM user_server_roles usr WHERE usr.user_id = users.id) " +
+	"OR EXCLUDED.public_key = decode(NULLIF($3, ''), 'hex'))) " +
+	"RETURNING id::text"
+
 databaseSchemaExecute :: proc(conn: pg.Conn, operation: string, query: string) -> string {
 	queryCString, queryCStringErr := strings.clone_to_cstring(query)
 	if queryCStringErr != nil {
@@ -218,6 +229,7 @@ cloneCStringOrEmpty :: proc(value: cstring) -> string {
 	return text
 }
 
+// Takes ownership of message, which must be heap allocated because the router frees it.
 databaseErrorResponse :: proc(
 	queryType: common.DatabaseQueryType,
 	message: string,
@@ -226,76 +238,6 @@ databaseErrorResponse :: proc(
 		queryType = queryType,
 		success = false,
 		message = message,
-		result = "",
-	}
-}
-
-databaseExecuteRawQuery :: proc(
-	conn: pg.Conn,
-	request: common.DatabaseRawQueryRequest,
-) -> common.DatabaseQueryResponse {
-	queryCString, _ := strings.clone_to_cstring(request.query)
-	result := pg.exec(conn, queryCString)
-	if result == nil {
-		return databaseErrorResponse(.RawSQL, cloneCStringOrEmpty(pg.error_message(conn)))
-	}
-	defer pg.clear(result)
-
-	status := pg.result_status(result)
-	if status == .Fatal_Error || status == .Bad_Response {
-		return databaseErrorResponse(.RawSQL, cloneCStringOrEmpty(pg.result_error_message(result)))
-	}
-
-	return common.DatabaseQueryResponse {
-		queryType = .RawSQL,
-		success = true,
-		message = "ok",
-		result = cloneCStringOrEmpty(pg.res_status(status)),
-	}
-}
-
-databaseExecuteAuthLookup :: proc(
-	conn: pg.Conn,
-	request: common.DatabaseAuthLookupRequest,
-) -> common.DatabaseQueryResponse {
-	nicknameCString, _ := strings.clone_to_cstring(request.nickname)
-	paramValues := [?][^]byte{transmute([^]byte)nicknameCString}
-	result := pg.exec_params(
-		conn,
-		"SELECT id::text FROM users WHERE nickname = $1 LIMIT 1",
-		1,
-		nil,
-		raw_data(paramValues[:]),
-		nil,
-		nil,
-		.Text,
-	)
-	if result == nil {
-		return databaseErrorResponse(
-			.AuthLookupByNickname,
-			cloneCStringOrEmpty(pg.error_message(conn)),
-		)
-	}
-	defer pg.clear(result)
-
-	status := pg.result_status(result)
-	if status != .Tuples_OK {
-		return databaseErrorResponse(
-			.AuthLookupByNickname,
-			cloneCStringOrEmpty(pg.result_error_message(result)),
-		)
-	}
-
-	lookupResult := ""
-	if pg.n_tuples(result) > 0 && !pg.get_is_null(result, 0, 0) {
-		lookupResult = cloneCStringOrEmpty(cstring(pg.get_value(result, 0, 0)))
-	}
-
-	return common.DatabaseQueryResponse {
-		queryType = .AuthLookupByNickname,
-		success = true,
-		message = "ok",
-		result = lookupResult,
 	}
 }
 
@@ -309,17 +251,23 @@ databaseExecuteUserIdentityResolution :: proc(
 	defer delete(publicKeyHex)
 	publicKeyHexCString, _ := strings.clone_to_cstring(publicKeyHex)
 	defer delete(publicKeyHexCString)
+	// An empty $3 means no admin key is configured, so privileged accounts stay unclaimable.
+	adminPublicKeyHex: string
+	if request.hasAdminPublicKey {
+		adminPublicKeyHex = common.identityPublicKeyToHex(request.adminPublicKey)
+	}
+	defer if request.hasAdminPublicKey do delete(adminPublicKeyHex)
+	adminPublicKeyHexCString, _ := strings.clone_to_cstring(adminPublicKeyHex)
+	defer delete(adminPublicKeyHexCString)
 	paramValues := [?][^]byte {
 		transmute([^]byte)nicknameCString,
 		transmute([^]byte)publicKeyHexCString,
+		transmute([^]byte)adminPublicKeyHexCString,
 	}
 	result := pg.exec_params(
 		conn,
-		"INSERT INTO users (nickname, public_key) VALUES ($1, decode($2, 'hex')) " +
-		"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
-		"WHERE users.public_key IS NULL OR users.public_key = EXCLUDED.public_key " +
-		"RETURNING id::text",
-		2,
+		DATABASE_RESOLVE_USER_IDENTITY_SQL,
+		3,
 		nil,
 		raw_data(paramValues[:]),
 		nil,
@@ -348,7 +296,7 @@ databaseExecuteUserIdentityResolution :: proc(
 	return common.DatabaseQueryResponse {
 		queryType = .ResolveUserIdentity,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		result = userID,
 	}
 }
@@ -395,7 +343,7 @@ databaseExecuteListRoomsForUser :: proc(
 	response := common.DatabaseQueryResponse {
 		queryType = .ListRoomsForUser,
 		success   = true,
-		message   = "ok",
+		message   = strings.clone("ok"),
 	}
 	for row in 0 ..< pg.n_tuples(result) {
 		roomIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 0)))
@@ -459,7 +407,7 @@ databaseExecuteCheckRoomMembership :: proc(
 	return common.DatabaseQueryResponse {
 		queryType = .CheckRoomMembership,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		isRoomMember = isMember,
 	}
 }
@@ -497,7 +445,7 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 	response := common.DatabaseQueryResponse {
 		queryType = .ListRoomMemberUserIDs,
 		success   = true,
-		message   = "ok",
+		message   = strings.clone("ok"),
 	}
 	for row in 0 ..< pg.n_tuples(result) {
 		userIDText := cloneCStringOrEmpty(cstring(pg.get_value(result, row, 0)))
@@ -555,12 +503,12 @@ databaseExecuteStoreRoomChatMessage :: proc(
 	messageID, messageIDOK := strconv.parse_int(messageIDText)
 	delete(messageIDText)
 	if !messageIDOK {
-		return databaseErrorResponse(.StoreRoomChatMessage, "database returned invalid message ID")
+		return databaseErrorResponse(.StoreRoomChatMessage, strings.clone("database returned invalid message ID"))
 	}
 	return common.DatabaseQueryResponse {
 		queryType = .StoreRoomChatMessage,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		storedChatMessage = {
 			id = int(messageID),
 			senderId = request.senderId,
@@ -620,7 +568,7 @@ databaseExecuteGetRoomHistory :: proc(
 	response := common.DatabaseQueryResponse {
 		queryType       = .GetRoomHistory,
 		success         = true,
-		message         = "ok",
+		message         = strings.clone("ok"),
 		hasOlderHistory = rowCount > limit,
 	}
 	messageCount := min(rowCount, limit)
@@ -690,7 +638,7 @@ databaseExecuteCheckUserServerAdmin :: proc(
 	return common.DatabaseQueryResponse {
 		queryType = .CheckUserServerAdmin,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		isServerAdmin = isServerAdmin,
 	}
 }
@@ -740,12 +688,12 @@ databaseExecuteCreateRoom :: proc(
 	roomID, roomIDOK := strconv.parse_int(roomIDText)
 	delete(roomIDText)
 	if !roomIDOK {
-		return databaseErrorResponse(.CreateRoom, "database returned invalid room ID")
+		return databaseErrorResponse(.CreateRoom, strings.clone("database returned invalid room ID"))
 	}
 	return common.DatabaseQueryResponse {
 		queryType = .CreateRoom,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		mutationChanged = true,
 		mutationRoom = {
 			id = int(roomID),
@@ -793,7 +741,7 @@ databaseExecuteEditRoom :: proc(
 	response := common.DatabaseQueryResponse {
 		queryType       = .EditRoom,
 		success         = true,
-		message         = "ok",
+		message         = strings.clone("ok"),
 		mutationChanged = pg.n_tuples(result) == 1,
 	}
 	if response.mutationChanged {
@@ -835,7 +783,7 @@ databaseExecuteDeleteRoom :: proc(
 	return common.DatabaseQueryResponse {
 		queryType = .DeleteRoom,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		mutationChanged = pg.n_tuples(result) == 1,
 	}
 }
@@ -873,7 +821,7 @@ databaseExecuteRoomMemberMutation :: proc(
 	return common.DatabaseQueryResponse {
 		queryType = queryType,
 		success = true,
-		message = "ok",
+		message = strings.clone("ok"),
 		mutationChanged = pg.n_tuples(result) == 1,
 	}
 }
@@ -883,12 +831,8 @@ databaseExecuteRequest :: proc(
 	request: common.DatabaseQueryRequest,
 ) -> common.DatabaseQueryResponse {
 	switch request.queryType {
-	case .AuthLookupByNickname:
-		return databaseExecuteAuthLookup(conn, request.authLookup)
 	case .ResolveUserIdentity:
 		return databaseExecuteUserIdentityResolution(conn, request.userIdentity)
-	case .RawSQL:
-		return databaseExecuteRawQuery(conn, request.rawSQL)
 	case .ListRoomsForUser:
 		return databaseExecuteListRoomsForUser(conn, request.roomList)
 	case .CheckRoomMembership:
@@ -912,9 +856,9 @@ databaseExecuteRequest :: proc(
 	case .RemoveRoomMember:
 		return databaseExecuteRoomMemberMutation(conn, request.removeMember, .RemoveRoomMember)
 	case .None:
-		return databaseErrorResponse(.None, "missing database query type")
+		return databaseErrorResponse(.None, strings.clone("missing database query type"))
 	case:
-		return databaseErrorResponse(request.queryType, "unsupported database query type")
+		return databaseErrorResponse(request.queryType, strings.clone("unsupported database query type"))
 	}
 }
 

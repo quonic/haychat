@@ -1,5 +1,6 @@
 package server
 
+import "../common"
 import "core:fmt"
 import "core:net"
 import "core:os"
@@ -46,6 +47,7 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	// Route matching is implemented using an implementation of Lua patterns, see the docs on them here:
 	// https://www.lua.org/pil/20.2.html
 	// They are very similar to regex patterns but a bit more limited, which makes them much easier to implement since Odin does not have a regex implementation.
+	// /status stays open as a health probe; every other route requires the bearer token.
 	http.route_get(&router, "/status", http.handler(statusWebAdmin))
 	http.route_get(&router, "/peers", http.handler(peersWebAdmin))
 	http.route_get(&router, "/logs", http.handler(logsWebAdmin))
@@ -58,6 +60,9 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 	routed := http.router_handler(&router)
 
 	fmt.printfln("Listening on http://localhost:%d", pm.config.webAdminPort)
+	if len(os.get_env("HAYCHAT_WEB_ADMIN_TOKEN", context.temp_allocator)) == 0 {
+		fmt.printfln("[WebAdmin] Bearer token stored in %s", pm.config.webAdminTokenFilePath)
+	}
 
 	err := http.listen_and_serve(
 		&s,
@@ -124,7 +129,9 @@ statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
-	_ = req
+	if !webAdminAuthorize(req, res) {
+		return
+	}
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetPeers{})
 	if err_send != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err_send)
@@ -162,7 +169,9 @@ peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
-	_ = req
+	if !webAdminAuthorize(req, res) {
+		return
+	}
 	err_send := IPC_Client_send(pmWebAdmin.config.webAdminFd, AdminGetLogs{})
 	if err_send != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err_send)
@@ -190,6 +199,9 @@ logsWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 shutdownWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
+	if !webAdminAuthorize(req, res) {
+		return
+	}
 	err := IPC_Client_send(pmWebAdmin.config.webAdminFd, ProcessShutdown{})
 	if err != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err)
@@ -200,6 +212,9 @@ shutdownWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 }
 
 restartWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
+	if !webAdminAuthorize(req, res) {
+		return
+	}
 	err := IPC_Client_send(pmWebAdmin.config.webAdminFd, ProcessRestart{})
 	if err != nil {
 		fmt.eprintfln("[WebAdmin] IPC send error: %s", err)
@@ -211,4 +226,29 @@ restartWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 
 webAdmin404 :: proc(req: ^http.Request, res: ^http.Response) {
 	http.respond_with_status(res, .Not_Found)
+}
+
+WEB_ADMIN_BEARER_PREFIX :: "Bearer "
+
+// Reports whether an Authorization header carries the expected bearer token. The custom
+// header also forces a CORS preflight, so browsers cannot forge these requests cross-site.
+webAdminAuthorizationValid :: proc(authorization: string, expectedToken: string) -> bool {
+	if len(expectedToken) == 0 || !strings.has_prefix(authorization, WEB_ADMIN_BEARER_PREFIX) {
+		return false
+	}
+	presented := authorization[len(WEB_ADMIN_BEARER_PREFIX):]
+	if len(presented) != len(expectedToken) {
+		return false
+	}
+	return common.constantTimeEqual(transmute([]u8)presented, transmute([]u8)expectedToken)
+}
+
+// Guards a protected handler. Responds 401 and returns false when the token is missing or wrong.
+webAdminAuthorize :: proc(req: ^http.Request, res: ^http.Response) -> bool {
+	authorization, _ := http.headers_get(req.headers, "authorization")
+	if webAdminAuthorizationValid(authorization, pmWebAdmin.config.webAdminToken) {
+		return true
+	}
+	http.respond_with_status(res, .Unauthorized)
+	return false
 }

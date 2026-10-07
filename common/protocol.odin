@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 4
+protocolVersion: ProtocolVersion = 5
 GENERAL_ROOM_ID :: int(1)
 
 // Packet is the logical application packet format.
@@ -250,12 +250,8 @@ MessageType :: enum {
 	ServerShutdownServer, // Response to ClientShutdownServer, includes success/failure and reason if failure
 
 	// File Management
-	ClientAuthLookup, // Request auth lookup by nickname for threaded server routing
-	ServerAuthLookupResponse, // Response to ClientAuthLookup, includes success/failure and optional DB result
 	ClientStoreFile, // Request to store file content on server
 	ServerStoreFileResponse, // Response to ClientStoreFile, includes success/failure and stored hash name
-	ClientDatabaseQuery, // Request to execute a database query through main router
-	ServerDatabaseQueryResponse, // Response to ClientDatabaseQuery, includes success/failure and result text
 	ServerProtocolError, // Generic protocol decode/validation error response
 
 	// File Management
@@ -427,16 +423,6 @@ VideoData :: struct {
 	data:      []u8, // Raw VP8-encoded video data
 }
 
-ClientAuthLookupRequest :: struct {
-	nickname: string,
-}
-
-ServerAuthLookupResult :: struct {
-	success: bool,
-	message: string,
-	result:  string,
-}
-
 ClientStoreFileRequest :: struct {
 	filename: string,
 	content:  []u8,
@@ -448,21 +434,9 @@ ServerStoreFileResult :: struct {
 	hashedFilename: string,
 }
 
-ClientDatabaseQueryRequest :: struct {
-	query: string,
-}
-
-ServerDatabaseQueryResult :: struct {
-	success: bool,
-	message: string,
-	result:  string,
-}
-
 DatabaseQueryType :: enum u8 {
 	None = 0,
-	AuthLookupByNickname,
 	ResolveUserIdentity,
-	RawSQL,
 	ListRoomsForUser,
 	CheckRoomMembership,
 	ListRoomMemberUserIDs,
@@ -476,17 +450,12 @@ DatabaseQueryType :: enum u8 {
 	RemoveRoomMember,
 }
 
-DatabaseAuthLookupRequest :: struct {
-	nickname: string,
-}
-
 DatabaseUserIdentityRequest :: struct {
-	nickname:  string,
-	publicKey: IdentityPublicKeyBytes,
-}
-
-DatabaseRawQueryRequest :: struct {
-	query: string,
+	nickname:          string,
+	publicKey:         IdentityPublicKeyBytes,
+	// Only this key may claim a keyless account that already holds server roles.
+	adminPublicKey:    IdentityPublicKeyBytes,
+	hasAdminPublicKey: bool,
 }
 
 DatabaseRoomListRequest :: struct {
@@ -541,9 +510,7 @@ DatabaseRoomMemberMutationRequest :: struct {
 
 DatabaseQueryRequest :: struct {
 	queryType:    DatabaseQueryType,
-	authLookup:   DatabaseAuthLookupRequest,
 	userIdentity: DatabaseUserIdentityRequest,
-	rawSQL:       DatabaseRawQueryRequest,
 	roomList:     DatabaseRoomListRequest,
 	membership:   DatabaseRoomMembershipRequest,
 	memberList:   DatabaseRoomMemberListRequest,

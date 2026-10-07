@@ -1298,6 +1298,12 @@ testStateInitFromConfigSurfacesSelectedTransportInitFailure :: proc(t: ^testing.
 	)
 }
 
+// The server binds a nickname to the first identity key it sees, and live tests generate a
+// fresh key every run, so each run needs nicknames the database has not seen before.
+liveTestUniqueNickname :: proc(prefix: string) -> string {
+	return fmt.aprintf("%s-%x", prefix, time.time_to_unix_nano(time.now()))
+}
+
 @(test)
 testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing.T) {
 	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.allocator) != "1" {
@@ -1318,6 +1324,8 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 			},
 		},
 	)
+
+	config.display_name = liveTestUniqueNickname("live")
 
 	originalBridge := startupAuthBridge
 	startupAuthBridge = startupAuthBridge_real
@@ -1392,6 +1400,9 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 			},
 		},
 	)
+
+	configA.display_name = liveTestUniqueNickname("live-a")
+	configB.display_name = liveTestUniqueNickname("live-b")
 
 	originalBridge := startupAuthBridge
 	startupAuthBridge = startupAuthBridge_real
