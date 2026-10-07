@@ -181,14 +181,8 @@ run_hc118_gate() {
 
 	cd "$script_dir"
 
-	echo "[HC-118][baseline] common: odin test common"
-	odin test common
-
-	echo "[HC-118][baseline] server: odin test server"
-	odin test server
-
-	echo "[HC-118][baseline] client: odin test client"
-	odin test client
+	echo "[HC-118][baseline] compile checks and leak-checked tests: ./check.sh"
+	"$script_dir/check.sh"
 
 	trap 'stop_server >/dev/null 2>&1 || true' EXIT
 

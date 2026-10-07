@@ -1184,6 +1184,8 @@ testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
 
 @(test)
 testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 
 	sync.mutex_lock(&routerTestMutex)
@@ -1218,6 +1220,8 @@ testConfigStartupPreflightFailsWhenFileStoragePathIsNotWritable :: proc(t: ^test
 
 @(test)
 testValidateAndNormalizeConfigUsesTesterSafeLocalRuntimeDefaults :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 
 	config := ServerConfig{}
@@ -1240,6 +1244,8 @@ testValidateAndNormalizeConfigUsesTesterSafeLocalRuntimeDefaults :: proc(t: ^tes
 
 @(test)
 testValidateAndNormalizeConfigUsesConfiguredStorageForDefaultIdentityPath :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 
 	config := ServerConfig {
@@ -1258,6 +1264,8 @@ testValidateAndNormalizeConfigUsesConfiguredStorageForDefaultIdentityPath :: pro
 testConfigStartupPreflightSkipsIdentityWriteGateWhenConfigAlreadyHasValidIdentity :: proc(
 	t: ^testing.T,
 ) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 
 	sync.mutex_lock(&routerTestMutex)
@@ -1306,6 +1314,7 @@ testDatabaseOpenRuntimeConnectionWithHooksReturnsActionableFailure :: proc(t: ^t
 	)
 	assert(connectMessageErr == nil, "expected test cstring allocation to succeed")
 	routerTestDatabaseConnectMessage = connectMessage
+	defer delete(connectMessage)
 
 	config := ServerConfig {
 		databaseURL  = "127.0.0.1",

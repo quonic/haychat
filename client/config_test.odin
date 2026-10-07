@@ -20,17 +20,17 @@ ConfigTestEnvSnapshot :: struct {
 }
 
 configTestJoinPath :: proc(parts: []string) -> string {
-	path, err := filepath.join(parts)
+	path, err := filepath.join(parts, context.temp_allocator)
 	assert(err == nil, "expected test path join to succeed")
 	return path
 }
 
 configTestCreateTempDir :: proc(prefix: string) -> string {
-	tempRoot, tempRootErr := os.temp_directory(context.allocator)
+	tempRoot, tempRootErr := os.temp_directory(context.temp_allocator)
 	assert(tempRootErr == nil, "expected temp directory lookup to succeed")
 
 	tempPath := configTestJoinPath(
-		{tempRoot, fmt.aprintf("%s_%d", prefix, time.time_to_unix_nano(time.now()))},
+		{tempRoot, fmt.tprintf("%s_%d", prefix, time.time_to_unix_nano(time.now()))},
 	)
 	makeErr := os.make_directory(tempPath)
 	assert(makeErr == nil, "expected temp directory creation to succeed")
@@ -47,9 +47,9 @@ configTestRemovePathIfExists :: proc(path: string) {
 
 configTestCaptureEnv :: proc() -> ConfigTestEnvSnapshot {
 	return ConfigTestEnvSnapshot {
-		home = os.get_env("HOME", context.allocator),
-		xdgConfigHome = os.get_env("XDG_CONFIG_HOME", context.allocator),
-		appData = os.get_env("APPDATA", context.allocator),
+		home = os.get_env("HOME", context.temp_allocator),
+		xdgConfigHome = os.get_env("XDG_CONFIG_HOME", context.temp_allocator),
+		appData = os.get_env("APPDATA", context.temp_allocator),
 		globalXdgConfigHome = XDG_CONFIG_HOME,
 		globalAppData = APP_DATA,
 	}
@@ -74,15 +74,18 @@ configTestRestoreEnv :: proc(snapshot: ConfigTestEnvSnapshot) {
 }
 
 configTestExpectedCurrentLinuxConfigPath :: proc(configHome: string) -> string {
-	return strings.concatenate({configHome, "/haychat/config.json"}, context.allocator)
+	return strings.concatenate({configHome, "/haychat/config.json"}, context.temp_allocator)
 }
 
 configTestExpectedHistoricalLegacyLinuxConfigDir :: proc(home, configHome: string) -> string {
-	return strings.concatenate({home, configHome, "/haychat"}, context.allocator)
+	return strings.concatenate({home, configHome, "/haychat"}, context.temp_allocator)
 }
 
 configTestExpectedHistoricalLegacyLinuxConfigPath :: proc(home, configHome: string) -> string {
-	return strings.concatenate({home, configHome, "/haychat/config.json"}, context.allocator)
+	return strings.concatenate(
+		{home, configHome, "/haychat/config.json"},
+		context.temp_allocator,
+	)
 }
 
 @(test)
@@ -111,22 +114,24 @@ testLegacyLinuxConfigPathUsesHistoricalDefaultHomeConfig :: proc(t: ^testing.T) 
 
 	configTestSetEnv("HOME", homeDir)
 	configTestSetEnv("XDG_CONFIG_HOME", customXdgDir)
-	XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.allocator)
+	XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
 
 	legacyPath := getLegacyLinuxConfigPath()
+	defer delete(legacyPath)
 	currentPath := getConfigPath()
+	defer delete(currentPath)
 	expectedLegacyPath := configTestExpectedHistoricalLegacyLinuxConfigPath(homeDir, customXdgDir)
 	expectedCurrentPath := configTestExpectedCurrentLinuxConfigPath(customXdgDir)
 
 	testing.expect(
 		t,
 		legacyPath == expectedLegacyPath,
-		fmt.aprintf("expected legacy config path %q, got %q", expectedLegacyPath, legacyPath),
+		fmt.tprintf("expected legacy config path %q, got %q", expectedLegacyPath, legacyPath),
 	)
 	testing.expect(
 		t,
 		currentPath == expectedCurrentPath,
-		fmt.aprintf("expected current config path %q, got %q", expectedCurrentPath, currentPath),
+		fmt.tprintf("expected current config path %q, got %q", expectedCurrentPath, currentPath),
 	)
 
 	_ = t
@@ -173,7 +178,7 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigToCurrentXdgPath :: proc(t: ^te
 		servers      = {},
 		friends      = {},
 	}
-	legacyJSON, legacyJSONErr := json.marshal(legacyConfig)
+	legacyJSON, legacyJSONErr := json.marshal(legacyConfig, allocator = context.temp_allocator)
 	assert(legacyJSONErr == nil, "expected legacy config JSON encode to succeed")
 	assert(
 		os.write_entire_file_from_bytes(legacyPath, legacyJSON) == nil,
@@ -181,11 +186,14 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigToCurrentXdgPath :: proc(t: ^te
 	)
 
 	loadedConfig := loadConfig()
+	defer Config_deinit(&loadedConfig)
+	// loadConfig allocates the process-lifetime XDG_CONFIG_HOME global; release it per test.
+	defer delete(XDG_CONFIG_HOME)
 
 	testing.expect(
 		t,
 		loadedConfig.display_name == "Legacy Linux Tester",
-		fmt.aprintf(
+		fmt.tprintf(
 			"expected migrated config to preserve display name, got %q",
 			loadedConfig.display_name,
 		),
@@ -196,15 +204,19 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigToCurrentXdgPath :: proc(t: ^te
 		"expected migrated config to be written to the current XDG path",
 	)
 
-	persistedBytes, persistedErr := os.read_entire_file_from_path(currentPath, context.allocator)
+	persistedBytes, persistedErr := os.read_entire_file_from_path(
+		currentPath,
+		context.temp_allocator,
+	)
 	assert(persistedErr == nil, "expected migrated config read to succeed")
 
 	persistedConfig: Config
 	json.unmarshal(persistedBytes, &persistedConfig)
+	defer Config_deinit(&persistedConfig)
 	testing.expect(
 		t,
 		persistedConfig.display_name == "Legacy Linux Tester",
-		fmt.aprintf(
+		fmt.tprintf(
 			"expected persisted migrated config to preserve display name, got %q",
 			persistedConfig.display_name,
 		),
@@ -251,7 +263,7 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigFromDefaultConfigHome :: proc(t
 		servers      = {},
 		friends      = {},
 	}
-	legacyJSON, legacyJSONErr := json.marshal(legacyConfig)
+	legacyJSON, legacyJSONErr := json.marshal(legacyConfig, allocator = context.temp_allocator)
 	assert(legacyJSONErr == nil, "expected legacy config JSON encode to succeed")
 	assert(
 		os.write_entire_file_from_bytes(legacyPath, legacyJSON) == nil,
@@ -259,11 +271,14 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigFromDefaultConfigHome :: proc(t
 	)
 
 	loadedConfig := loadConfig()
+	defer Config_deinit(&loadedConfig)
+	// loadConfig allocates the process-lifetime XDG_CONFIG_HOME global; release it per test.
+	defer delete(XDG_CONFIG_HOME)
 
 	testing.expect(
 		t,
 		loadedConfig.display_name == "Default Linux Tester",
-		fmt.aprintf(
+		fmt.tprintf(
 			"expected migrated config to preserve display name, got %q",
 			loadedConfig.display_name,
 		),

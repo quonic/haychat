@@ -17,6 +17,8 @@ configTestStorageConfig :: proc(storagePath: string) -> ServerConfig {
 
 @(test)
 testConfigStartupPreflightRejectsInvalidAdminPublicKey :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 	storagePath := routerTestCreateTempDir("haychat_config_admin_key")
 	defer os.remove_all(storagePath)
@@ -41,6 +43,8 @@ testConfigStartupPreflightRejectsInvalidAdminPublicKey :: proc(t: ^testing.T) {
 
 @(test)
 testConfigStartupPreflightRejectsShortWebAdminToken :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 	storagePath := routerTestCreateTempDir("haychat_config_short_token")
 	defer os.remove_all(storagePath)
@@ -56,6 +60,8 @@ testConfigStartupPreflightRejectsShortWebAdminToken :: proc(t: ^testing.T) {
 
 @(test)
 testEnsureWebAdminTokenGeneratesPrivateFileAndReusesIt :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 	storagePath := routerTestCreateTempDir("haychat_config_token_file")
 	defer os.remove_all(storagePath)
@@ -86,6 +92,8 @@ testEnsureWebAdminTokenGeneratesPrivateFileAndReusesIt :: proc(t: ^testing.T) {
 
 @(test)
 testEnsureWebAdminTokenPrefersEnvironmentValue :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
 	_ = t
 	storagePath := routerTestCreateTempDir("haychat_config_token_env")
 	defer os.remove_all(storagePath)

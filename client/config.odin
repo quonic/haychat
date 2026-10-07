@@ -56,7 +56,8 @@ loadConfig :: proc() -> (config: Config) {
 	} else when ODIN_OS == .Linux {
 		XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.allocator)
 		if XDG_CONFIG_HOME == "" {
-			XDG_CONFIG_HOME = getDefaultLinuxConfigHome(os.get_env("HOME", context.allocator))
+			delete(XDG_CONFIG_HOME)
+			XDG_CONFIG_HOME = getDefaultLinuxConfigHome(os.get_env("HOME", context.temp_allocator))
 		}
 	}
 
@@ -65,12 +66,14 @@ loadConfig :: proc() -> (config: Config) {
 	}
 
 	path := getConfigPath()
+	defer delete(path)
 	shouldLoad := false
 	shouldPersist := false
 	readPath := path
 
 	when ODIN_OS == .Linux {
 		legacyPath := getLegacyLinuxConfigPath()
+		defer delete(legacyPath)
 		if !os.exists(path) && legacyPath != path && os.exists(legacyPath) {
 			fmt.println("[Info] Migrating config from legacy path: ", legacyPath)
 			readPath = legacyPath
@@ -93,6 +96,7 @@ loadConfig :: proc() -> (config: Config) {
 			fmt.println("[Error] Failed to read config file: ", err)
 			return {}
 		}
+		defer delete(data)
 		json.unmarshal(data, &config)
 	}
 
@@ -117,17 +121,25 @@ saveConfig :: proc(config: Config) {
 		fmt.println("[Error] Failed to marshal config to JSON: ", json_err)
 		return
 	}
+	defer delete(jsonData)
 
-	write_err := os.write_entire_file_from_bytes(getConfigPath(), jsonData)
+	// The config holds the client's private identity key, so only the user may read it.
+	configPath := getConfigPath()
+	defer delete(configPath)
+	write_err := os.write_entire_file_from_bytes(configPath, jsonData, os.perm(0o600))
+	if write_err == nil {
+		write_err = os.change_mode(configPath, os.perm(0o600))
+	}
 	if write_err != nil {
 		fmt.println("[Error] Failed to write config file: ", write_err)
 		return
 	}
-	fmt.println("[Info] Config saved successfully to: ", getConfigPath())
+	fmt.println("[Info] Config saved successfully to: ", configPath)
 }
 
 ensureConfigDirExists :: proc() -> bool {
 	configDir := getConfigDir()
+	defer delete(configDir)
 	if configDir == "" {
 		fmt.println("[Error] Config directory could not be determined")
 		return false
@@ -157,9 +169,9 @@ ensureConfigDirExists :: proc() -> bool {
 	return true
 }
 
-getDefaultLinuxConfigHome :: proc(home: string) -> string {
+getDefaultLinuxConfigHome :: proc(home: string, allocator := context.allocator) -> string {
 	when ODIN_OS == .Linux {
-		return strings.concatenate({home, "/.config"}, context.allocator)
+		return strings.concatenate({home, "/.config"}, allocator)
 	}
 	return ""
 }
@@ -173,20 +185,18 @@ getLinuxConfigDirForConfigHome :: proc(configHome: string) -> string {
 
 getLinuxConfigPathForConfigHome :: proc(configHome: string) -> string {
 	when ODIN_OS == .Linux {
-		return strings.concatenate(
-			{getLinuxConfigDirForConfigHome(configHome), "/config.json"},
-			context.allocator,
-		)
+		configDir := getLinuxConfigDirForConfigHome(configHome)
+		defer delete(configDir)
+		return strings.concatenate({configDir, "/config.json"}, context.allocator)
 	}
 	return ""
 }
 
 getHistoricalLegacyLinuxConfigPathForConfigHome :: proc(home, configHome: string) -> string {
 	when ODIN_OS == .Linux {
-		return strings.concatenate(
-			{home, getLinuxConfigPathForConfigHome(configHome)},
-			context.allocator,
-		)
+		configPath := getLinuxConfigPathForConfigHome(configHome)
+		defer delete(configPath)
+		return strings.concatenate({home, configPath}, context.allocator)
 	}
 	return ""
 }
@@ -203,7 +213,9 @@ getConfigDir :: proc() -> string {
 getConfigPath :: proc() -> string {
 	// Returns the path to the configuration file based on the operating system
 	when ODIN_OS == .Windows {
-		return strings.concatenate({getConfigDir(), "\\config.json"}, context.allocator)
+		configDir := getConfigDir()
+		defer delete(configDir)
+		return strings.concatenate({configDir, "\\config.json"}, context.allocator)
 	} else when ODIN_OS == .Linux {
 		return getLinuxConfigPathForConfigHome(XDG_CONFIG_HOME)
 	}
@@ -212,13 +224,13 @@ getConfigPath :: proc() -> string {
 
 getLegacyLinuxConfigPath :: proc() -> string {
 	when ODIN_OS == .Linux {
-		home := os.get_env("HOME", context.allocator)
+		home := os.get_env("HOME", context.temp_allocator)
 		legacyConfigHome := XDG_CONFIG_HOME
 		if legacyConfigHome == "" {
-			legacyConfigHome = os.get_env("XDG_CONFIG_HOME", context.allocator)
+			legacyConfigHome = os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
 		}
 		if legacyConfigHome == "" {
-			legacyConfigHome = getDefaultLinuxConfigHome(home)
+			legacyConfigHome = getDefaultLinuxConfigHome(home, context.temp_allocator)
 		}
 
 		// The original Linux client wrote to HOME + XDG_CONFIG_HOME + /haychat/config.json.
@@ -242,6 +254,8 @@ ensureIdentityKeys :: proc(config: ^Config) -> bool {
 		return false
 	}
 
+	delete(config.private_key)
+	delete(config.public_key)
 	config.private_key = common.identityPrivateKeyToHex(privateKeyBytes)
 	config.public_key = common.identityPublicKeyToHex(publicKeyBytes)
 	return true
@@ -271,4 +285,78 @@ pinServerIdentity :: proc(
 	}
 
 	return .Changed, false
+}
+
+// Config values are owned: every string and array is heap allocated. Clone before storing a
+// config somewhere that frees it, and free it with Config_deinit.
+Server_clone :: proc(server: Server) -> Server {
+	return Server {
+		id = server.id,
+		name = strings.clone(server.name),
+		short_name = strings.clone(server.short_name),
+		host = strings.clone(server.host),
+		port = server.port,
+		pinned_server_public_key = strings.clone(server.pinned_server_public_key),
+		pinned_server_fingerprint = strings.clone(server.pinned_server_fingerprint),
+	}
+}
+
+Server_deinit :: proc(server: ^Server) {
+	delete(server.name)
+	delete(server.short_name)
+	delete(server.host)
+	delete(server.pinned_server_public_key)
+	delete(server.pinned_server_fingerprint)
+	server^ = {}
+}
+
+Friend_clone :: proc(friend: Friend) -> Friend {
+	servers := make([dynamic]int, 0, len(friend.servers))
+	append(&servers, ..friend.servers[:])
+	return Friend {
+		id = friend.id,
+		display_name = strings.clone(friend.display_name),
+		public_key = strings.clone(friend.public_key),
+		servers = servers,
+		status = friend.status,
+	}
+}
+
+Friend_deinit :: proc(friend: ^Friend) {
+	delete(friend.display_name)
+	delete(friend.public_key)
+	delete(friend.servers)
+	friend^ = {}
+}
+
+Config_clone :: proc(config: Config) -> Config {
+	clone := Config {
+		private_key  = strings.clone(config.private_key),
+		public_key   = strings.clone(config.public_key),
+		display_name = strings.clone(config.display_name),
+		servers      = make([dynamic]Server, 0, len(config.servers)),
+		friends      = make([dynamic]Friend, 0, len(config.friends)),
+	}
+	for server in config.servers {
+		append(&clone.servers, Server_clone(server))
+	}
+	for friend in config.friends {
+		append(&clone.friends, Friend_clone(friend))
+	}
+	return clone
+}
+
+Config_deinit :: proc(config: ^Config) {
+	delete(config.private_key)
+	delete(config.public_key)
+	delete(config.display_name)
+	for index in 0 ..< len(config.servers) {
+		Server_deinit(&config.servers[index])
+	}
+	delete(config.servers)
+	for index in 0 ..< len(config.friends) {
+		Friend_deinit(&config.friends[index])
+	}
+	delete(config.friends)
+	config^ = {}
 }

@@ -138,6 +138,11 @@ bootstrap_odin() {
 		cd "$odin_root"
 		./build_odin.sh
 	)
+	# Skald uses vendor:stb, whose static libraries are not committed for Linux.
+	(
+		cd "$odin_root/vendor/stb/src"
+		CC=${CC:-clang} AR=${AR:-llvm-ar} ./build_stb.sh
+	)
 
 	mkdir -p "$local_bin_dir"
 	ln -sf "$odin_root/odin" "$local_bin_dir/odin"

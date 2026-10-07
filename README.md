@@ -38,7 +38,7 @@ The supported HC-201 bootstrap path is a Linux-first, source-based maintainer fl
 1. Run `./setup-dev-env.sh` on a clean Ubuntu/Debian machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
    If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
 2. Ensure `odin` is on your `PATH`. The bootstrap script links it into `$HOME/.local/bin/odin`; if your shell does not already include `$HOME/.local/bin`, add that directory before continuing.
-3. Validate the supported source-build environment with `odin check server`, `odin check client -target:linux_amd64`, and `odin check client -target:windows_amd64`.
+3. Validate the supported source-build environment with `./check.sh`, which runs `odin check server`, `odin check client -target:linux_amd64`, and every test suite with leak detection enabled (a test fails on any leak or bad free). CI runs the same script on every push and pull request, plus `odin check client -target:windows_amd64` on Windows.
 4. Use the server helper seam below to seed auth data and launch the local MVP runtime.
 
 The supported bootstrap script assumes these defaults unless you override them before running it:

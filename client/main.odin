@@ -107,7 +107,10 @@ Msg :: struct {
 	room:          common.RoomSummary,
 	vector:        Vector2, // Generic Vector2 field for passing position or size data in messages, such as for window resize events
 	window_vector: iVector2, // Generic iVector2 field for passing integer vector data in messages if needed
-	new_value:     string, // Generic string field for passing new values in messages, such as for updating the chat input value
+	// Generic string field for passing new values in messages, such as the chat input value.
+	// Borrowed for view-originated messages; owned (and freed by update) for transport
+	// messages: RecieveChannelChatMessage and TransportProtocolError.
+	new_value:     string,
 }
 
 MsgKind :: enum {
@@ -284,27 +287,26 @@ State_attemptSelectedServerStartup :: proc(state: ^State) {
 	delete(packetBytes)
 }
 
+// The state keeps its own deep copy of config, so callers still own (and free) theirs.
 State_initFromConfig :: proc(config: Config) -> (init_state: State) {
-	init_state.config = config
+	init_state.config = Config_clone(config)
 
 	if len(init_state.config.display_name) == 0 {
-		init_state.config.display_name = "Test User"
+		delete(init_state.config.display_name)
+		init_state.config.display_name = strings.clone("Test User")
 	}
 
 	if len(init_state.config.servers) == 0 {
-		init_state.config.servers = {
+		append(
+			&init_state.config.servers,
 			Server {
 				id = 1,
-				name = "Test Server",
+				name = strings.clone("Test Server"),
 				short_name = getShortServerName("Test Server"),
-				host = "localhost",
+				host = strings.clone("localhost"),
 				port = common.DEFAULT_SERVER_PORT,
 			},
-		}
-	}
-
-	if len(init_state.config.friends) == 0 {
-		init_state.config.friends = {}
+		)
 	}
 
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
@@ -322,14 +324,51 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	}
 	init_state.window_width = 1920
 	init_state.window_height = 1080
-	append(&init_state.current_dm_chat, skald.span("Say Hi!", skald.theme_dark().color.fg_muted))
+	State_appendTranscriptSpan(
+		&init_state.current_dm_chat,
+		skald.span("Say Hi!", skald.theme_dark().color.fg_muted),
+	)
 
 	return
 }
 
+State_deinit :: proc(state: ^State) {
+	Config_deinit(&state.config)
+	ClientTransportCatalog_deinit(&state.serverTransports)
+	delete(state.joinServerFromScheme_host)
+	delete(state.joinServerFromScheme_port)
+	TranscriptSpans_deinit(&state.current_dm_chat)
+	TranscriptSpans_deinit(&state.current_chat_messages)
+	delete(state.dm_chat_draft)
+	delete(state.chat_input_draft)
+	delete(state.chat_status_message)
+	for index in 0 ..< len(state.server_room_caches) {
+		ServerRoomCache_deinit(&state.server_room_caches[index])
+	}
+	delete(state.server_room_caches)
+	state^ = {}
+}
+
+// Transcript spans own their text: append clones it, and deinit frees it.
+State_appendTranscriptSpan :: proc(spans: ^[dynamic]skald.Text_Span, span: skald.Text_Span) {
+	owned := span
+	owned.str = strings.clone(span.str)
+	append(spans, owned)
+}
+
+TranscriptSpans_deinit :: proc(spans: ^[dynamic]skald.Text_Span) {
+	for span in spans {
+		delete(span.str)
+	}
+	delete(spans^)
+	spans^ = nil
+}
+
 init :: proc() -> (init_state: State) {
 	startupAuthBridge = startupAuthBridge_real
-	init_state = State_initFromConfig(loadConfig())
+	config := loadConfig()
+	defer Config_deinit(&config)
+	init_state = State_initFromConfig(config)
 
 	if len(os.args) > 1 {
 		for arg in os.args {
@@ -368,26 +407,25 @@ changeWindowState :: proc(new_state: skald.Window_State) -> Msg {
 	return Msg{kind = .UpdateWindowSize, window_vector = new_state.size}
 }
 
-// Utility function to generate short server names
+// Builds a short server label from the first letter of each word, or the first two characters
+// of a single-word name. The result is always heap allocated.
 getShortServerName :: proc(serverName: string) -> string {
-	// Generate a short name for the server by taking the first letter of each word in the server name
-	words := strings.split(serverName, " ")
-	shortName := ""
-	for word in words {
-		if len(word) > 0 {
-			subString, ok := strings.substring(word, 0, 1)
-			if ok {
-				shortName = strings.concatenate({shortName, subString})
-			}
+	builder := strings.builder_make()
+	wordCount := 0
+	remaining := serverName
+	for word in strings.fields_iterator(&remaining) {
+		wordCount += 1
+		if firstRune, ok := strings.substring(word, 0, 1); ok {
+			strings.write_string(&builder, firstRune)
 		}
 	}
-	if len(shortName) == 0 {
-		return "?"
+	if wordCount == 1 {
+		strings.builder_reset(&builder)
+		shortName, _ := strings.substring(strings.trim_space(serverName), 0, 2)
+		strings.write_string(&builder, shortName)
 	}
-	if len(words) < 2 {
-		shortName, _ = strings.substring(serverName, 0, 2)
-		return shortName
+	if strings.builder_len(builder) == 0 {
+		strings.write_string(&builder, "?")
 	}
-
-	return shortName
+	return strings.to_string(builder)
 }
