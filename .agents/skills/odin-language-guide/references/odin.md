@@ -1,0 +1,375 @@
+# Odin Programming Language Guide
+
+This guide is a compact reference for helping language models understand and use the Odin programming language effectively. It is grounded in the official Odin documentation and intended for code generation, code review, and prompt-driven editing.
+
+## 1. What Odin is
+
+Odin is a systems-oriented language with a simple, explicit syntax and strong support for low-level programming. It emphasizes:
+
+- explicit declarations
+- predictable control flow
+- manual memory management with allocators and context
+- straightforward interop with C and other foreign code
+- data-oriented and performance-conscious design
+
+## 2. Core syntax patterns
+
+### Hello world
+
+```odin
+package main
+
+import "core:fmt"
+
+main :: proc() {
+    fmt.println("Hellope!")
+}
+```
+
+### Key syntax notes
+
+- `package main` declares the package.
+- `import "core:fmt"` imports a package.
+- `main :: proc()` defines the entry point.
+- `proc` is Odin’s equivalent of a function.
+- `::` is used for declarations and aliases.
+- `:=` declares and infers a value.
+- `=` assigns to an existing variable.
+
+## 3. Declarations and variables
+
+### Variables
+
+```odin
+x: int = 123
+x = 637
+
+y := 1
+z, w := 2, "hello"
+```
+
+### Constants
+
+```odin
+PI :: 3.14159
+name :: "Odin"
+```
+
+Constants are compile-time values and must be evaluable at compile time.
+
+### Type aliases and typed constants
+
+```odin
+Flags :: u8
+READABLE :: Flags(0b0001)
+```
+
+- Type aliases use `Name :: Type`; do not write `type Name = Type`.
+- Typed constants put the cast on the value side, such as `Flag :: Flags(1)`.
+
+## 4. Basic types
+
+Common built-in types include:
+
+```odin
+bool
+int, i8, i16, i32, i64, i128
+uint, u8, u16, u32, u64, u128, uintptr
+f32, f64
+string
+cstring
+rawptr
+rune
+```
+
+### Notes
+
+- Use `int` for general integer work unless a specific width is needed.
+- Use Odin's fixed-width names such as `u8`, `i32`, and `u64`; C-style names such as `uint8` are not built-in type names.
+- `string` is a UTF-8 string type.
+- `cstring` is for C interop.
+- `rune` represents a Unicode code point.
+
+## 5. Procedures
+
+Procedures are defined with `proc`.
+
+```odin
+multiply :: proc(x, y: int) -> int {
+    return x * y
+}
+```
+
+### Multiple return values
+
+```odin
+swap :: proc(x, y: int) -> (int, int) {
+    return y, x
+}
+
+a, b := swap(1, 2)
+```
+
+### No closure capture
+
+Nested procedures cannot capture variables from an outer procedure. Pass needed values explicitly, move the procedure to a wider scope, or inline the logic.
+
+### Named return values
+
+```odin
+sum_and_diff :: proc(a, b: int) -> (sum: int, diff: int) {
+    sum = a + b
+    diff = a - b
+    return
+}
+```
+
+### Polymorphic procedures and inference
+
+`$T` introduces a polymorphic type parameter. After that declaration, refer to the type as `T`:
+
+```odin
+get_or_value :: proc(value: $T, p: ^T = nil) -> T {
+    if p != nil {
+        return p^
+    }
+    return value
+}
+
+x := 42
+y := get_or_value(x) // T is int; p defaults to nil
+```
+
+A default for a polymorphic parameter is checked against its concrete type at instantiation. The type must be determined by an argument; an omitted polymorphic argument cannot determine its own type from `nil`. For pointer defaults, introduce `T` on a type-determining parameter, then use `^T = nil` for the optional pointer.
+
+An untyped argument can be deferred until another argument determines its expected type. This supports compound literals, implicit selectors, and conditionals whose branches are untyped, including named or reordered arguments:
+
+```odin
+push :: proc(a: ^[dynamic]$E, e: E) {
+    append(a, e)
+}
+
+xs: [dynamic][3]int
+push(&xs, {1, 2, 3})
+push(e = {4, 5, 6}, a = &xs)
+push(&xs, condition ? {7, 8, 9} : {10, 11, 12})
+```
+
+Bare compound literals can also determine polymorphic element types and array counts directly:
+
+```odin
+element_type :: proc(a: [3]$T) -> typeid { return T }
+array_length :: proc(a: [$N]int) -> int { return N }
+
+element_type({1, 2, 3})       // int
+array_length({10, 20, 30, 40}) // 4
+```
+
+`[$N]$T` can infer both element type and count. Element-type inference needs literal-constant elements; count-only inference works with other element expressions. A bare keyed, nested, or empty literal does not provide enough information by itself, though an empty literal can be deferred when another argument determines its expected type. If the call does not determine a polymorphic type, it remains an error.
+
+Polymorphic record parameters can also be compile-time constants that are not types or integers:
+
+```odin
+Named_Array :: struct($N: int, $name: string, $enabled: bool) {
+    values: [N]int,
+}
+
+scores: Named_Array(3, "scores", true)
+```
+
+## 6. Control flow
+
+### If statements
+
+```odin
+if x >= 0 {
+    fmt.println("positive")
+}
+```
+
+### For loops
+
+```odin
+for i := 0; i < 10; i += 1 {
+    fmt.println(i)
+}
+```
+
+### Range-based for loops
+
+```odin
+for i in 0..<10 {
+    fmt.println(i)
+}
+```
+
+### Switch
+
+```odin
+switch value {
+case 0:
+    fmt.println("zero")
+case 1:
+    fmt.println("one")
+case:
+    fmt.println("other")
+}
+```
+
+## 7. Arrays, slices, and dynamic arrays
+
+### Fixed arrays
+
+```odin
+arr: [3]int = {1, 2, 3}
+```
+
+### Slices
+
+```odin
+s := []int{1, 2, 3}
+```
+
+### Dynamic arrays
+
+```odin
+values: [dynamic]int
+append(&values, 1, 2, 3)
+```
+
+### Common helpers
+
+- `len(x)` gets length
+- `cap(x)` gets capacity for dynamic arrays
+- `append(&arr, ...)` adds elements
+- `delete(x)` cleans up allocated data structures
+
+## 8. Structs, enums, and unions
+
+### Structs
+
+```odin
+Vector2 :: struct {
+    x: f32,
+    y: f32,
+}
+
+v := Vector2{1, 2}
+v.x = 4
+```
+
+### Enums
+
+```odin
+Direction :: enum {
+    North,
+    East,
+    South,
+    West,
+}
+```
+
+### Unions
+
+```odin
+Value :: union {
+    int,
+    string,
+}
+```
+
+When switching over a union stored by value, the case binding is a copy of the variant value. Mutating that binding does not update the original union; write the changed value back explicitly.
+
+## 9. Pointers and references
+
+Odin uses `^T` for pointers.
+
+```odin
+x := 123
+p := &x
+fmt.println(p^)
+p^ = 456
+```
+
+Important differences from C:
+
+- Odin uses `^` instead of `*` for pointer syntax.
+- There is no pointer arithmetic by default.
+- Use `ptr_offset` or related helpers when needed.
+
+## 10. Memory and context
+
+Odin has an implicit `context` system used by allocators and core libraries.
+
+```odin
+ptr := new(int)
+free(ptr)
+```
+
+Models should not assume garbage collection. Odin is usually explicit about allocation and cleanup.
+
+## 11. Import and package conventions
+
+- Packages are directory-based.
+- The entry point is usually in a package named `main`.
+- Core standard library imports commonly use `core:` prefixes, such as:
+  - `import "core:fmt"`
+  - `import "core:os"`
+  - `import "core:strings"`
+
+## 12. Build and run
+
+From the project root:
+
+```bash
+odin run .
+```
+
+Or for a single file:
+
+```bash
+odin run file.odin -file
+```
+
+Useful validation commands:
+
+```bash
+odin check .
+odin test .
+odin check path/to/package -no-entry-point
+```
+
+Use `-no-entry-point` when checking a package that intentionally has no `main` procedure.
+
+## 13. Common model mistakes to avoid
+
+- Do not write C-style function syntax like `int foo()`. Use `proc`.
+- Do not use `*` for pointer types; use `^`.
+- Do not assume `return` syntax matches other languages; Odin uses `return` and supports multiple results.
+- Do not assume automatic memory management; use explicit allocation patterns when needed.
+- Do not write closure-style nested procedures that capture outer variables.
+- Do not use C-style fixed-width names such as `uint8`; use Odin names such as `u8`.
+- Prefer explicit declarations over overly clever abstractions.
+
+## 14. Recommended generation pattern for models
+
+When generating Odin code, prefer this shape:
+
+```odin
+package main
+
+import "core:fmt"
+
+main :: proc() {
+    fmt.println("example")
+}
+```
+
+For small utilities, keep the code explicit, use `proc`, and favor simple data structures before advanced metaprogramming.
+
+## 15. Useful references
+
+- Official language overview: <https://odin-lang.org/docs/overview/>
+- Installation guide: <https://odin-lang.org/docs/install/>
+- Package docs: <https://pkg.odin-lang.org/>
+- GitHub repository: <https://github.com/odin-lang/Odin>
