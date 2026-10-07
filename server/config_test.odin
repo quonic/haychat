@@ -136,10 +136,10 @@ testWebAdminAuthorizationRequiresExactBearerToken :: proc(t: ^testing.T) {
 testDatabaseErrorResponsesOwnTheirStrings :: proc(t: ^testing.T) {
 	_ = t
 	// The router frees every response string, so literals here would crash the server.
-	response := databaseExecuteRequest(nil, common.DatabaseQueryRequest{queryType = .None})
+	response := databaseExecuteRequest(nil, nil)
 	assert(!response.success, "expected missing query type to fail")
 	assert(
-		response.message == "missing database query type",
+		response.message == "missing database query",
 		fmt.tprintf("expected missing query type message, got %q", response.message),
 	)
 	IPC__database_query_response_deinit(response)

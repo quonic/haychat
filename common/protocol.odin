@@ -434,20 +434,21 @@ ServerStoreFileResult :: struct {
 	hashedFilename: string,
 }
 
-DatabaseQueryType :: enum u8 {
-	None = 0,
-	ResolveUserIdentity,
-	ListRoomsForUser,
-	CheckRoomMembership,
-	ListRoomMemberUserIDs,
-	StoreRoomChatMessage,
-	GetRoomHistory,
-	CheckUserServerAdmin,
-	CreateRoom,
-	EditRoom,
-	DeleteRoom,
-	AddRoomMember,
-	RemoveRoomMember,
+// Database IPC between the server router and its database worker. Requests and results are
+// tagged unions, so every switch over them must handle each variant; adding a query without
+// routing or cleanup is a compile error rather than a silent leak or dropped reply.
+DatabaseQueryRequest :: union {
+	DatabaseUserIdentityRequest,
+	DatabaseRoomListRequest,
+	DatabaseRoomMemberListRequest,
+	DatabasePostRoomChatMessageRequest,
+	DatabaseRoomHistoryRequest,
+	DatabaseUserServerAdminRequest,
+	DatabaseCreateRoomRequest,
+	DatabaseEditRoomRequest,
+	DatabaseDeleteRoomRequest,
+	DatabaseAddRoomMemberRequest,
+	DatabaseRemoveRoomMemberRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -462,23 +463,22 @@ DatabaseRoomListRequest :: struct {
 	userId: int,
 }
 
-DatabaseRoomMembershipRequest :: struct {
-	roomId: int,
-	userId: int,
-}
-
 DatabaseRoomMemberListRequest :: struct {
 	roomId: int,
 }
 
-DatabaseStoreRoomChatMessageRequest :: struct {
+// Checks membership, stores the message, and lists recipients in one statement, so the
+// membership check and the insert cannot race.
+DatabasePostRoomChatMessageRequest :: struct {
 	roomId:   int,
 	senderId: int,
 	content:  string,
 }
 
+// Returns a history page only when userId is a member of the room.
 DatabaseRoomHistoryRequest :: struct {
 	roomId:          int,
+	userId:          int,
 	beforeMessageID: int,
 	limit:           int,
 }
@@ -508,36 +508,60 @@ DatabaseRoomMemberMutationRequest :: struct {
 	userId: int,
 }
 
-DatabaseQueryRequest :: struct {
-	queryType:    DatabaseQueryType,
-	userIdentity: DatabaseUserIdentityRequest,
-	roomList:     DatabaseRoomListRequest,
-	membership:   DatabaseRoomMembershipRequest,
-	memberList:   DatabaseRoomMemberListRequest,
-	storeChat:    DatabaseStoreRoomChatMessageRequest,
-	history:      DatabaseRoomHistoryRequest,
-	adminCheck:   DatabaseUserServerAdminRequest,
-	createRoom:   DatabaseCreateRoomRequest,
-	editRoom:     DatabaseEditRoomRequest,
-	deleteRoom:   DatabaseDeleteRoomRequest,
-	addMember:    DatabaseRoomMemberMutationRequest,
-	removeMember: DatabaseRoomMemberMutationRequest,
+DatabaseAddRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
+DatabaseRemoveRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
+
+// message holds the error text when success is false. All strings and arrays are owned.
+DatabaseQueryResponse :: struct {
+	success: bool,
+	message: string,
+	result:  DatabaseQueryResult,
 }
 
-DatabaseQueryResponse :: struct {
-	queryType:         DatabaseQueryType,
-	success:           bool,
-	message:           string,
-	result:            string,
-	isRoomMember:      bool,
-	roomSummaries:     [dynamic]RoomSummary,
-	memberUserIDs:     [dynamic]int,
-	storedChatMessage: StoredChatMessage,
-	historyMessages:   [dynamic]StoredChatMessage,
-	hasOlderHistory:   bool,
-	isServerAdmin:     bool,
-	mutationRoom:      RoomSummary,
-	mutationChanged:   bool,
+DatabaseQueryResult :: union {
+	DatabaseUserIdentityResult,
+	DatabaseRoomListResult,
+	DatabaseRoomMemberListResult,
+	DatabasePostRoomChatMessageResult,
+	DatabaseRoomHistoryResult,
+	DatabaseUserServerAdminResult,
+	DatabaseRoomMutationResult,
+}
+
+// userId is 0 when the identity could not be resolved, for example when the nickname is bound
+// to a different key.
+DatabaseUserIdentityResult :: struct {
+	userId: int,
+}
+
+DatabaseRoomListResult :: struct {
+	rooms: [dynamic]RoomSummary,
+}
+
+DatabaseRoomMemberListResult :: struct {
+	userIDs: [dynamic]int,
+}
+
+// When isMember is false nothing was stored and the other fields are empty.
+DatabasePostRoomChatMessageResult :: struct {
+	isMember:         bool,
+	storedMessage:    StoredChatMessage,
+	recipientUserIDs: [dynamic]int,
+}
+
+DatabaseRoomHistoryResult :: struct {
+	isMember: bool,
+	messages: [dynamic]StoredChatMessage,
+	hasOlder: bool,
+}
+
+DatabaseUserServerAdminResult :: struct {
+	isAdmin: bool,
+}
+
+DatabaseRoomMutationResult :: struct {
+	room:    RoomSummary,
+	changed: bool,
 }
 
 ProtocolErrorResponse :: struct {

@@ -278,12 +278,13 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 
 	identityQuery := routerPollDatabaseQuery(h)
 	defer IPC__database_query_request_deinit(identityQuery.request)
+	identityRequest, identityRequestOK := identityQuery.request.(common.DatabaseUserIdentityRequest)
 	assert(
-		identityQuery.request.queryType == .ResolveUserIdentity,
+		identityRequestOK,
 		"expected auth to resolve the durable user identity before succeeding",
 	)
 	assert(
-		identityQuery.request.userIdentity.nickname == clientHello.nickname,
+		identityRequest.nickname == clientHello.nickname,
 		"expected identity resolution to use the client nickname",
 	)
 	MainRouterState_handleDatabaseResult(
@@ -291,10 +292,8 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 		&h.state,
 		identityQuery.request_id,
 		common.DatabaseQueryResponse {
-			queryType = .ResolveUserIdentity,
 			success = true,
-			message = strings.clone("ok"),
-			result = strings.clone("42"),
+			result = common.DatabaseUserIdentityResult{userId = 42},
 		},
 	)
 
@@ -381,12 +380,13 @@ testMainRouterHandshakeRoutesEncryptedApplicationPackets :: proc(t: ^testing.T) 
 
 	databaseQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(databaseQuery.request)
+	roomListRequest, roomListRequestOK := databaseQuery.request.(common.DatabaseRoomListRequest)
 	assert(
-		databaseQuery.request.queryType == .ListRoomsForUser,
+		roomListRequestOK,
 		"expected encrypted ClientListRooms to be routed as a room list database request",
 	)
 	assert(
-		databaseQuery.request.roomList.userId == 42,
+		roomListRequest.userId == 42,
 		"expected room list request to be scoped to the authenticated user ID",
 	)
 }
@@ -496,10 +496,7 @@ testMainRouterRejectsFailedUserIdentityResolution :: proc(t: ^testing.T) {
 		&h.state,
 		peerID,
 		.ResolveUserIdentity,
-		common.DatabaseQueryRequest {
-			queryType = .ResolveUserIdentity,
-			userIdentity = {nickname = strings.clone("taken-name")},
-		},
+		common.DatabaseUserIdentityRequest{nickname = strings.clone("taken-name")},
 	)
 	identityQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(identityQuery.request)
@@ -508,10 +505,8 @@ testMainRouterRejectsFailedUserIdentityResolution :: proc(t: ^testing.T) {
 		&h.state,
 		identityQuery.request_id,
 		common.DatabaseQueryResponse {
-			queryType = .ResolveUserIdentity,
 			success = true,
-			message = strings.clone("ok"),
-			result = "",
+			result = common.DatabaseUserIdentityResult{userId = 0},
 		},
 	)
 
@@ -574,30 +569,17 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 		&h.state,
 		NetworkDataReceived{peerId = senderPeerID, channel = .Chat, data = sealedPacketBytes},
 	)
-	membershipQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(membershipQuery.request)
+	postQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(postQuery.request)
+	postRequest, postRequestOK := postQuery.request.(common.DatabasePostRoomChatMessageRequest)
+	assert(postRequestOK, "expected chat send to be a single post-room-chat database request")
 	assert(
-		membershipQuery.request.queryType == .CheckRoomMembership,
-		"expected chat send to check sender room membership first",
+		postRequest.senderId == senderSession.authenticatedUserID,
+		"expected chat post to use the authenticated sender, not a client-supplied ID",
 	)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		membershipQuery.request_id,
-		common.DatabaseQueryResponse {
-			queryType = .CheckRoomMembership,
-			success = true,
-			message = strings.clone("ok"),
-			isRoomMember = true,
-		},
-	)
+	assert(postRequest.roomId == 1, "expected chat post to target the requested room")
+	assert(postRequest.content == "hello haychat", "expected chat post to carry the content")
 
-	recipientQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(recipientQuery.request)
-	assert(
-		recipientQuery.request.queryType == .ListRoomMemberUserIDs,
-		"expected member sender to resolve room recipients",
-	)
 	recipientUserIDs := make([dynamic]int)
 	append(&recipientUserIDs, senderSession.authenticatedUserID)
 	recipientSession, recipientOK := MainRouterState_getPeerSession(&h.state, recipientPeerID)
@@ -606,38 +588,25 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 	MainRouterState_handleDatabaseResult(
 		&h.pm,
 		&h.state,
-		recipientQuery.request_id,
+		postQuery.request_id,
 		common.DatabaseQueryResponse {
-			queryType = .ListRoomMemberUserIDs,
 			success = true,
-			message = strings.clone("ok"),
-			memberUserIDs = recipientUserIDs,
-		},
-	)
-
-	storeQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(storeQuery.request)
-	assert(
-		storeQuery.request.queryType == .StoreRoomChatMessage,
-		"expected recipient snapshot to be followed by persisted chat storage",
-	)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		storeQuery.request_id,
-		common.DatabaseQueryResponse {
-			queryType = .StoreRoomChatMessage,
-			success = true,
-			message = strings.clone("ok"),
-			storedChatMessage = {
-				id = 17,
-				senderId = senderSession.authenticatedUserID,
-				roomId = 1,
-				timestamp = strings.clone("2026-07-14T00:00:00Z"),
-				content = strings.clone("hello haychat"),
+			result = common.DatabasePostRoomChatMessageResult {
+				isMember = true,
+				storedMessage = {
+					id = 17,
+					senderId = senderSession.authenticatedUserID,
+					roomId = 1,
+					timestamp = strings.clone("2026-07-14T00:00:00Z"),
+					content = strings.clone("hello haychat"),
+				},
+				recipientUserIDs = recipientUserIDs,
 			},
 		},
 	)
+
+	_, extraQueryErr := IPC_Client_poll(h.databaseFd)
+	assert(extraQueryErr != nil, "expected chat send to need no further database round trips")
 
 	seenSender := false
 	seenRecipient := false
@@ -727,21 +696,17 @@ testMainRouterRejectsChatFromNonMember :: proc(t: ^testing.T) {
 		&h.state,
 		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
 	)
-	membershipQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(membershipQuery.request)
-	assert(
-		membershipQuery.request.queryType == .CheckRoomMembership,
-		"expected chat send to check membership before rejecting a non-member",
-	)
+	postQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(postQuery.request)
+	_, postRequestOK := postQuery.request.(common.DatabasePostRoomChatMessageRequest)
+	assert(postRequestOK, "expected chat send to let the database check membership")
 	MainRouterState_handleDatabaseResult(
 		&h.pm,
 		&h.state,
-		membershipQuery.request_id,
+		postQuery.request_id,
 		common.DatabaseQueryResponse {
-			queryType = .CheckRoomMembership,
 			success = true,
-			message = strings.clone("ok"),
-			isRoomMember = false,
+			result = common.DatabasePostRoomChatMessageResult{isMember = false},
 		},
 	)
 
@@ -1044,10 +1009,8 @@ testMainRouterPrepareForDatabaseRestartFailsPendingRequest :: proc(t: ^testing.T
 
 	databaseQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(databaseQuery.request)
-	assert(
-		databaseQuery.request.queryType == .ListRoomsForUser,
-		"expected database request to be queued before restart cleanup",
-	)
+	_, isRoomListRequest := databaseQuery.request.(common.DatabaseRoomListRequest)
+	assert(isRoomListRequest, "expected database request to be queued before restart cleanup")
 
 	MainRouterState_prepareForProcessStop(&h.pm, &h.state, .Database, "database restarting")
 
@@ -1517,4 +1480,140 @@ testWaitForDatabaseStartupAckReturnsActionableExitFailure :: proc(t: ^testing.T)
 	IPC__state_deinit()
 	ipcState.next_fd = linux.Fd(10)
 	sync.mutex_unlock(&ipcState.state_mutex)
+}
+
+routerTestSendRoomHistoryRequest :: proc(
+	h: ^RouterTestHarness,
+	clientTransport: ^common.TransportState,
+	peerID: u32,
+) -> DatabaseQuery {
+	sealedPacket, sealOK := common.sealPacketForSession(
+		clientTransport,
+		.ClientFetchRoomHistory,
+		common.ClientFetchRoomHistoryPayload{roomId = 3, beforeMessageID = 0, limit = 20},
+	)
+	assert(sealOK, "expected encrypted history request sealing to succeed")
+	defer delete(sealedPacket.payload)
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+	)
+	return routerPollDatabaseQuery(h)
+}
+
+routerTestOpenInnerPacket :: proc(
+	h: ^RouterTestHarness,
+	clientTransport: ^common.TransportState,
+) -> common.Packet {
+	responseSend := routerPollNetworkSend(h)
+	defer delete(responseSend.data)
+	responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+	defer delete(responseOuterPacket.payload)
+	innerPacket, openOK := common.openPacketForSession(clientTransport, responseOuterPacket)
+	assert(openOK, "expected client to decrypt the router response")
+	return innerPacket
+}
+
+@(test)
+testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	historyQuery := routerTestSendRoomHistoryRequest(&h, &clientTransport, peerID)
+	defer IPC__database_query_request_deinit(historyQuery.request)
+	historyRequest, historyRequestOK := historyQuery.request.(common.DatabaseRoomHistoryRequest)
+	assert(historyRequestOK, "expected history fetch to be a single room history request")
+	assert(
+		historyRequest.userId == 42 && historyRequest.roomId == 3 && historyRequest.limit == 20,
+		"expected history request to carry the authenticated user, room, and page size",
+	)
+
+	messages := make([dynamic]common.StoredChatMessage)
+	append(
+		&messages,
+		common.StoredChatMessage {
+			id = 5,
+			senderId = 42,
+			roomId = 3,
+			timestamp = strings.clone("t5"),
+			content = strings.clone("five"),
+		},
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		historyQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRoomHistoryResult {
+				isMember = true,
+				messages = messages,
+				hasOlder = true,
+			},
+		},
+	)
+	historyPacket := routerTestOpenInnerPacket(&h, &clientTransport)
+	defer delete(historyPacket.payload)
+	assert(historyPacket.messageType == .ServerRoomHistory, "expected members to get history")
+	historyPayload: common.ServerRoomHistoryPayload
+	assert(
+		cbor.unmarshal(historyPacket.payload, &historyPayload) == nil,
+		"expected history payload decode to succeed",
+	)
+	defer {
+		for message in historyPayload.messages {
+			delete(message.timestamp)
+			delete(message.content)
+		}
+		delete(historyPayload.messages)
+	}
+	assert(
+		len(historyPayload.messages) == 1 && historyPayload.messages[0].id == 5,
+		"expected the stored page to reach the client",
+	)
+	assert(historyPayload.hasOlder, "expected pagination state to reach the client")
+
+	deniedQuery := routerTestSendRoomHistoryRequest(&h, &clientTransport, peerID)
+	defer IPC__database_query_request_deinit(deniedQuery.request)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		deniedQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRoomHistoryResult{isMember = false},
+		},
+	)
+	deniedPacket := routerTestOpenInnerPacket(&h, &clientTransport)
+	defer delete(deniedPacket.payload)
+	assert(
+		deniedPacket.messageType == .ServerProtocolError,
+		"expected non-members to be refused room history",
+	)
+}
+
+@(test)
+testDatabaseParseIDListSkipsInvalidEntries :: proc(t: ^testing.T) {
+	_ = t
+	ids := databaseParseIDList("10,11,,x,12")
+	defer delete(ids)
+	assert(
+		len(ids) == 3 && ids[0] == 10 && ids[1] == 11 && ids[2] == 12,
+		"expected numeric IDs to be parsed and blanks or junk skipped",
+	)
+	empty := databaseParseIDList("")
+	defer delete(empty)
+	assert(len(empty) == 0, "expected an empty recipient list to parse as empty")
 }

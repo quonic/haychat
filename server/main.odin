@@ -16,10 +16,7 @@ import "core:time"
 PendingDBRequestType :: enum {
 	ResolveUserIdentity,
 	ListRooms,
-	CheckChatMembership,
-	ListChatRecipients,
-	StoreChatMessage,
-	CheckHistoryMembership,
+	PostChatMessage,
 	GetRoomHistory,
 	CheckAdminCreateRoom,
 	CreateRoom,
@@ -40,13 +37,16 @@ PendingDBRequest :: struct {
 	peerID:           u32,
 	requestType:      PendingDBRequestType,
 	roomID:           int,
-	beforeMessageID:  int,
-	limit:            int,
-	content:          string,
 	name:             string,
 	description:      string,
 	targetUserID:     int,
 	recipientUserIDs: [dynamic]int,
+}
+
+PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
+	delete(request.name)
+	delete(request.description)
+	delete(request.recipientUserIDs)
 }
 
 RouterPeerSession :: struct {
@@ -152,10 +152,7 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 		delete(session.clientNickname)
 	}
 	for _, request in state.pendingDatabaseRequests {
-		delete(request.content)
-		delete(request.name)
-		delete(request.description)
-		delete(request.recipientUserIDs)
+		PendingDBRequest_deinit(request)
 	}
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
@@ -220,10 +217,7 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 
 	for requestID in requestIDs {
 		request := state.pendingDatabaseRequests[requestID]
-		delete(request.content)
-		delete(request.name)
-		delete(request.description)
-		delete(request.recipientUserIDs)
+		PendingDBRequest_deinit(request)
 		delete_key(&state.pendingDatabaseRequests, requestID)
 	}
 }
@@ -408,10 +402,7 @@ MainRouterState_getDatabaseRequest :: proc(
 
 MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
 	for _, request in state.pendingDatabaseRequests {
-		delete(request.content)
-		delete(request.name)
-		delete(request.description)
-		delete(request.recipientUserIDs)
+		PendingDBRequest_deinit(request)
 	}
 	for _, session in state.peerSessions {
 		delete(session.clientNickname)
@@ -447,10 +438,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			MainRouterState_sendAuthFailure(pm, state, request.peerID, message)
 			MainRouterState_disconnectPeer(pm, request.peerID)
 		case .ListRooms,
-		     .CheckChatMembership,
-		     .ListChatRecipients,
-		     .StoreChatMessage,
-		     .CheckHistoryMembership,
+		     .PostChatMessage,
 		     .GetRoomHistory,
 		     .CheckAdminCreateRoom,
 		     .CreateRoom,
@@ -467,10 +455,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case:
 		}
-		delete(request.content)
-		delete(request.name)
-		delete(request.description)
-		delete(request.recipientUserIDs)
+		PendingDBRequest_deinit(request)
 	}
 }
 
@@ -724,14 +709,11 @@ MainRouterState_handleClientAuthRequest :: proc(
 		state,
 		peerID,
 		.ResolveUserIdentity,
-		common.DatabaseQueryRequest {
-			queryType = .ResolveUserIdentity,
-			userIdentity = {
-				nickname = strings.clone(session.clientNickname),
-				publicKey = session.clientIdentityPublicKey,
-				adminPublicKey = state.adminPublicKey,
-				hasAdminPublicKey = state.hasAdminPublicKey,
-			},
+		common.DatabaseUserIdentityRequest {
+			nickname = strings.clone(session.clientNickname),
+			publicKey = session.clientIdentityPublicKey,
+			adminPublicKey = state.adminPublicKey,
+			hasAdminPublicKey = state.hasAdminPublicKey,
 		},
 	)
 }
@@ -765,15 +747,12 @@ MainRouterState_handleClientChatMessage :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseQueryRequest {
-			queryType = .CheckRoomMembership,
-			membership = {roomId = req.roomId, userId = session.authenticatedUserID},
-		},
-		PendingDBRequest {
-			requestType = .CheckChatMembership,
-			roomID = req.roomId,
+		common.DatabasePostRoomChatMessageRequest {
+			roomId = req.roomId,
+			senderId = session.authenticatedUserID,
 			content = strings.clone(req.content),
 		},
+		PendingDBRequest{requestType = .PostChatMessage, roomID = req.roomId},
 	)
 }
 
@@ -797,10 +776,7 @@ MainRouterState_handleClientListRooms :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseQueryRequest {
-			queryType = .ListRoomsForUser,
-			roomList = {userId = session.authenticatedUserID},
-		},
+		common.DatabaseRoomListRequest{userId = session.authenticatedUserID},
 		PendingDBRequest{requestType = .ListRooms},
 	)
 }
@@ -834,16 +810,13 @@ MainRouterState_handleClientFetchRoomHistory :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseQueryRequest {
-			queryType = .CheckRoomMembership,
-			membership = {roomId = req.roomId, userId = session.authenticatedUserID},
-		},
-		PendingDBRequest {
-			requestType = .CheckHistoryMembership,
-			roomID = req.roomId,
+		common.DatabaseRoomHistoryRequest {
+			roomId = req.roomId,
+			userId = session.authenticatedUserID,
 			beforeMessageID = req.beforeMessageID,
 			limit = req.limit,
 		},
+		PendingDBRequest{requestType = .GetRoomHistory, roomID = req.roomId},
 	)
 }
 
@@ -858,10 +831,7 @@ MainRouterState_enqueueAdminCheck :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseQueryRequest {
-			queryType = .CheckUserServerAdmin,
-			adminCheck = {userId = userID},
-		},
+		common.DatabaseUserServerAdminRequest{userId = userID},
 		pending,
 	)
 }
@@ -1209,27 +1179,57 @@ MainRouterState_handleNetworkDataReceived :: proc(
 	MainRouterState_handlePlaintextPacket(pm, state, msg.peerId, packet)
 }
 
+// Reports a failed database response to the peer and returns true. A successful response with
+// the wrong result variant is a router bug, reported the same way rather than crashing.
+MainRouterState_databaseFailed :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	response: common.DatabaseQueryResponse,
+	resultOK: bool,
+) -> bool {
+	if !response.success {
+		MainRouterState_sendProtocolError(pm, state, peerID, response.message)
+		return true
+	}
+	if !resultOK {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unexpected database result")
+		return true
+	}
+	return false
+}
+
+MainRouterState_isAdminResponse :: proc(response: common.DatabaseQueryResponse) -> bool {
+	result, ok := response.result.(common.DatabaseUserServerAdminResult)
+	return response.success && ok && result.isAdmin
+}
+
+MainRouterState_sendAdminRequired :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+) {
+	MainRouterState_sendProtocolError(pm, state, peerID, "Admin permission required")
+}
+
 MainRouterState_handleDatabaseResult :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	requestID: u64,
 	response: common.DatabaseQueryResponse,
 ) {
+	defer IPC__database_query_response_deinit(response)
 	request, ok := MainRouterState_getDatabaseRequest(state, requestID)
 	if !ok {
-		fmt.printfln("[Main] Received database response for unknown request ID %d\n", requestID)
+		fmt.printfln("[Main] Received database response for unknown request ID %d", requestID)
 		return
 	}
-	defer delete(request.content)
-	defer delete(request.name)
-	defer delete(request.description)
-	defer delete(request.recipientUserIDs)
-	defer IPC__database_query_response_deinit(response)
+	defer PendingDBRequest_deinit(request)
 
 	switch request.requestType {
 	case .ResolveUserIdentity:
-		userID, userIDOK := strconv.parse_int(response.result)
-		if !response.success || !userIDOK || userID <= 0 {
+		identity, identityOK := response.result.(common.DatabaseUserIdentityResult)
+		if !response.success || !identityOK || identity.userId <= 0 {
 			MainRouterState_sendAuthFailure(
 				pm,
 				state,
@@ -1250,7 +1250,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 		session.isAuthenticated = true
-		session.authenticatedUserID = int(userID)
+		session.authenticatedUserID = identity.userId
 		MainRouterState_setPeerSession(state, request.peerID, session)
 		if !MainRouterState_sendPeerMessage(
 			pm,
@@ -1267,8 +1267,8 @@ MainRouterState_handleDatabaseResult :: proc(
 			)
 		}
 	case .ListRooms:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, roomListOK) {
 			return
 		}
 		MainRouterState_sendPeerMessage(
@@ -1276,74 +1276,28 @@ MainRouterState_handleDatabaseResult :: proc(
 			state,
 			request.peerID,
 			.ServerListRooms,
-			common.ServerListRoomsPayload{rooms = response.roomSummaries},
+			common.ServerListRoomsPayload{rooms = roomList.rooms},
 		)
-	case .CheckChatMembership:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+	case .PostChatMessage:
+		posted, postedOK := response.result.(common.DatabasePostRoomChatMessageResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, postedOK) {
 			return
 		}
-		if !response.isRoomMember {
+		if !posted.isMember {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
 			return
 		}
-		MainRouterState_enqueueChannelDatabaseRequest(
-			pm,
-			state,
-			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .ListRoomMemberUserIDs,
-				memberList = {roomId = request.roomID},
-			},
-			PendingDBRequest {
-				requestType = .ListChatRecipients,
-				roomID = request.roomID,
-				content = strings.clone(request.content),
-			},
-		)
-	case .ListChatRecipients:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
-			return
-		}
-		recipientUserIDs := make([dynamic]int, 0, len(response.memberUserIDs))
-		for userID in response.memberUserIDs {
-			append(&recipientUserIDs, userID)
-		}
-		MainRouterState_enqueueChannelDatabaseRequest(
-			pm,
-			state,
-			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .StoreRoomChatMessage,
-				storeChat = {
-					roomId = request.roomID,
-					senderId = MainRouterState_ensurePeerSession(state, request.peerID).authenticatedUserID,
-					content = strings.clone(request.content),
-				},
-			},
-			PendingDBRequest {
-				requestType = .StoreChatMessage,
-				roomID = request.roomID,
-				recipientUserIDs = recipientUserIDs,
-			},
-		)
-	case .StoreChatMessage:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
-			return
-		}
 		chatPayload := common.ServerChatMessagePayload {
-			id        = response.storedChatMessage.id,
-			senderId  = response.storedChatMessage.senderId,
-			roomId    = response.storedChatMessage.roomId,
-			timestamp = response.storedChatMessage.timestamp,
-			content   = response.storedChatMessage.content,
+			id        = posted.storedMessage.id,
+			senderId  = posted.storedMessage.senderId,
+			roomId    = posted.storedMessage.roomId,
+			timestamp = posted.storedMessage.timestamp,
+			content   = posted.storedMessage.content,
 		}
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if recipientSession.isAuthenticated &&
 			   MainRouterState_hasRecipientUserID(
-				   request.recipientUserIDs[:],
+				   posted.recipientUserIDs[:],
 				   recipientSession.authenticatedUserID,
 			   ) {
 				MainRouterState_sendPeerMessage(
@@ -1355,32 +1309,13 @@ MainRouterState_handleDatabaseResult :: proc(
 				)
 			}
 		}
-	case .CheckHistoryMembership:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
-			return
-		}
-		if !response.isRoomMember {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
-			return
-		}
-		MainRouterState_enqueueChannelDatabaseRequest(
-			pm,
-			state,
-			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .GetRoomHistory,
-				history = {
-					roomId = request.roomID,
-					beforeMessageID = request.beforeMessageID,
-					limit = request.limit,
-				},
-			},
-			PendingDBRequest{requestType = .GetRoomHistory, roomID = request.roomID},
-		)
 	case .GetRoomHistory:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		history, historyOK := response.result.(common.DatabaseRoomHistoryResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, historyOK) {
+			return
+		}
+		if !history.isMember {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
 			return
 		}
 		MainRouterState_sendPeerMessage(
@@ -1390,18 +1325,13 @@ MainRouterState_handleDatabaseResult :: proc(
 			.ServerRoomHistory,
 			common.ServerRoomHistoryPayload {
 				roomId = request.roomID,
-				messages = response.historyMessages,
-				hasOlder = response.hasOlderHistory,
+				messages = history.messages,
+				hasOlder = history.hasOlder,
 			},
 		)
 	case .CheckAdminCreateRoom:
-		if !response.success || !response.isServerAdmin {
-			MainRouterState_sendProtocolError(
-				pm,
-				state,
-				request.peerID,
-				"Admin permission required",
-			)
+		if !MainRouterState_isAdminResponse(response) {
+			MainRouterState_sendAdminRequired(pm, state, request.peerID)
 			return
 		}
 		creatorSession, creatorOK := MainRouterState_getPeerSession(state, request.peerID)
@@ -1413,13 +1343,10 @@ MainRouterState_handleDatabaseResult :: proc(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .CreateRoom,
-				createRoom = {
-					creatorUserId = creatorSession.authenticatedUserID,
-					name = strings.clone(request.name),
-					description = strings.clone(request.description),
-				},
+			common.DatabaseCreateRoomRequest {
+				creatorUserId = creatorSession.authenticatedUserID,
+				name = strings.clone(request.name),
+				description = strings.clone(request.description),
 			},
 			PendingDBRequest {
 				requestType = .CreateRoom,
@@ -1427,90 +1354,80 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 	case .CreateRoom:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
 			return
-		}
-		resultPayload := common.ServerRoomMutationPayload {
-			room    = response.mutationRoom,
-			roomId  = response.mutationRoom.id,
-			userId  = request.targetUserID,
-			changed = response.mutationChanged,
 		}
 		MainRouterState_sendPeerMessage(
 			pm,
 			state,
 			request.peerID,
 			.ServerCreateRoom,
-			resultPayload,
+			common.ServerRoomMutationPayload {
+				room = mutation.room,
+				roomId = mutation.room.id,
+				userId = request.targetUserID,
+				changed = mutation.changed,
+			},
 		)
 		MainRouterState_sendMessageToUserID(
 			pm,
 			state,
 			request.targetUserID,
 			.ServerRoomMembershipChanged,
-			common.ServerRoomMembershipChangedPayload {
-				roomId = response.mutationRoom.id,
-				joined = true,
-			},
+			common.ServerRoomMembershipChangedPayload{roomId = mutation.room.id, joined = true},
 		)
 	case .CheckAdminEditRoom:
-		if !response.success || !response.isServerAdmin {
-			MainRouterState_sendProtocolError(
-				pm,
-				state,
-				request.peerID,
-				"Admin permission required",
-			)
+		if !MainRouterState_isAdminResponse(response) {
+			MainRouterState_sendAdminRequired(pm, state, request.peerID)
 			return
 		}
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .EditRoom,
-				editRoom = {
-					roomId = request.roomID,
-					name = strings.clone(request.name),
-					description = strings.clone(request.description),
-				},
+			common.DatabaseEditRoomRequest {
+				roomId = request.roomID,
+				name = strings.clone(request.name),
+				description = strings.clone(request.description),
 			},
 			PendingDBRequest{requestType = .EditRoom, roomID = request.roomID},
 		)
 	case .EditRoom:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
 			return
 		}
-		if !response.mutationChanged {
+		if !mutation.changed {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
 			return
 		}
-		resultPayload := common.ServerRoomMutationPayload {
-			room    = response.mutationRoom,
-			roomId  = request.roomID,
-			changed = true,
-		}
-		MainRouterState_sendPeerMessage(pm, state, request.peerID, .ServerEditRoom, resultPayload)
+		MainRouterState_sendPeerMessage(
+			pm,
+			state,
+			request.peerID,
+			.ServerEditRoom,
+			common.ServerRoomMutationPayload {
+				room = mutation.room,
+				roomId = request.roomID,
+				changed = true,
+			},
+		)
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .ListRoomMemberUserIDs,
-				memberList = {roomId = request.roomID},
-			},
+			common.DatabaseRoomMemberListRequest{roomId = request.roomID},
 			PendingDBRequest {
 				requestType = .ListEditRoomRecipients,
 				roomID = request.roomID,
-				name = strings.clone(response.mutationRoom.name),
-				description = strings.clone(response.mutationRoom.description),
+				name = strings.clone(mutation.room.name),
+				description = strings.clone(mutation.room.description),
 			},
 		)
 	case .ListEditRoomRecipients:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		members, membersOK := response.result.(common.DatabaseRoomMemberListResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, membersOK) {
 			return
 		}
 		editPayload := common.ServerRoomMutationPayload {
@@ -1522,7 +1439,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			if recipientSession.isAuthenticated &&
 			   recipientPeerID != request.peerID &&
 			   MainRouterState_hasRecipientUserID(
-				   response.memberUserIDs[:],
+				   members.userIDs[:],
 				   recipientSession.authenticatedUserID,
 			   ) {
 				MainRouterState_sendPeerMessage(
@@ -1535,42 +1452,30 @@ MainRouterState_handleDatabaseResult :: proc(
 			}
 		}
 	case .CheckAdminDeleteRoom:
-		if !response.success || !response.isServerAdmin {
-			MainRouterState_sendProtocolError(
-				pm,
-				state,
-				request.peerID,
-				"Admin permission required",
-			)
+		if !MainRouterState_isAdminResponse(response) {
+			MainRouterState_sendAdminRequired(pm, state, request.peerID)
 			return
 		}
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .ListRoomMemberUserIDs,
-				memberList = {roomId = request.roomID},
-			},
+			common.DatabaseRoomMemberListRequest{roomId = request.roomID},
 			PendingDBRequest{requestType = .ListDeleteRoomRecipients, roomID = request.roomID},
 		)
 	case .ListDeleteRoomRecipients:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		members, membersOK := response.result.(common.DatabaseRoomMemberListResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, membersOK) {
 			return
 		}
-		memberUserIDs := make([dynamic]int, 0, len(response.memberUserIDs))
-		for userID in response.memberUserIDs {
-			append(&memberUserIDs, userID)
-		}
+		// Capture recipients before the delete cascades their memberships away.
+		memberUserIDs := make([dynamic]int, 0, len(members.userIDs))
+		append(&memberUserIDs, ..members.userIDs[:])
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .DeleteRoom,
-				deleteRoom = {roomId = request.roomID},
-			},
+			common.DatabaseDeleteRoomRequest{roomId = request.roomID},
 			PendingDBRequest {
 				requestType = .DeleteRoom,
 				roomID = request.roomID,
@@ -1578,11 +1483,11 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 	case .DeleteRoom:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
 			return
 		}
-		if !response.mutationChanged {
+		if !mutation.changed {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
 			return
 		}
@@ -1607,22 +1512,17 @@ MainRouterState_handleDatabaseResult :: proc(
 			}
 		}
 	case .CheckAdminAddRoomMember:
-		if !response.success || !response.isServerAdmin {
-			MainRouterState_sendProtocolError(
-				pm,
-				state,
-				request.peerID,
-				"Admin permission required",
-			)
+		if !MainRouterState_isAdminResponse(response) {
+			MainRouterState_sendAdminRequired(pm, state, request.peerID)
 			return
 		}
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .AddRoomMember,
-				addMember = {roomId = request.roomID, userId = request.targetUserID},
+			common.DatabaseAddRoomMemberRequest {
+				roomId = request.roomID,
+				userId = request.targetUserID,
 			},
 			PendingDBRequest {
 				requestType = .AddRoomMember,
@@ -1631,23 +1531,22 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 	case .AddRoomMember:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
 			return
-		}
-		resultPayload := common.ServerRoomMutationPayload {
-			roomId  = request.roomID,
-			userId  = request.targetUserID,
-			changed = response.mutationChanged,
 		}
 		MainRouterState_sendPeerMessage(
 			pm,
 			state,
 			request.peerID,
 			.ServerRoomMemberAdded,
-			resultPayload,
+			common.ServerRoomMutationPayload {
+				roomId = request.roomID,
+				userId = request.targetUserID,
+				changed = mutation.changed,
+			},
 		)
-		if response.mutationChanged {
+		if mutation.changed {
 			MainRouterState_sendMessageToUserID(
 				pm,
 				state,
@@ -1657,22 +1556,17 @@ MainRouterState_handleDatabaseResult :: proc(
 			)
 		}
 	case .CheckAdminRemoveRoomMember:
-		if !response.success || !response.isServerAdmin {
-			MainRouterState_sendProtocolError(
-				pm,
-				state,
-				request.peerID,
-				"Admin permission required",
-			)
+		if !MainRouterState_isAdminResponse(response) {
+			MainRouterState_sendAdminRequired(pm, state, request.peerID)
 			return
 		}
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
 			request.peerID,
-			common.DatabaseQueryRequest {
-				queryType = .RemoveRoomMember,
-				removeMember = {roomId = request.roomID, userId = request.targetUserID},
+			common.DatabaseRemoveRoomMemberRequest {
+				roomId = request.roomID,
+				userId = request.targetUserID,
 			},
 			PendingDBRequest {
 				requestType = .RemoveRoomMember,
@@ -1681,23 +1575,22 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 	case .RemoveRoomMember:
-		if !response.success {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, response.message)
+		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
+		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
 			return
-		}
-		resultPayload := common.ServerRoomMutationPayload {
-			roomId  = request.roomID,
-			userId  = request.targetUserID,
-			changed = response.mutationChanged,
 		}
 		MainRouterState_sendPeerMessage(
 			pm,
 			state,
 			request.peerID,
 			.ServerRoomMemberRemoved,
-			resultPayload,
+			common.ServerRoomMutationPayload {
+				roomId = request.roomID,
+				userId = request.targetUserID,
+				changed = mutation.changed,
+			},
 		)
-		if response.mutationChanged {
+		if mutation.changed {
 			MainRouterState_sendMessageToUserID(
 				pm,
 				state,
@@ -1706,7 +1599,6 @@ MainRouterState_handleDatabaseResult :: proc(
 				common.ServerRoomMembershipChangedPayload{roomId = request.roomID, joined = false},
 			)
 		}
-	case:
 	}
 }
 
@@ -1947,7 +1839,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 					pm,
 					&routerState,
 					m.request_id,
-					common.DatabaseQueryResponse{success = false, message = m.error, result = ""},
+					common.DatabaseQueryResponse{success = false, message = m.error},
 				)
 			case DatabaseStartupReady, DatabaseStartupFailed:
 			// Startup-only coordination messages are consumed before the main loop starts.
