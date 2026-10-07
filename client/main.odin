@@ -9,7 +9,7 @@ import "core:os"
 import "core:strings"
 import "shared:skald"
 
-CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 4
+CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
 DIRECT_MESSAGES_UNSUPPORTED_STATUS :: "Direct messages are not supported yet"
 
 StartupAuthBridge :: proc(
@@ -88,6 +88,8 @@ State :: struct {
 	current_chat_messages:          [dynamic]skald.Text_Span, // List of chat messages currently displayed in the chat area, used for rendering the chat history
 	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
 	server_room_caches:             [dynamic]ServerRoomCache,
+	// Services every live server session off the UI thread; nil until init starts it.
+	networkWorker:                  ^ClientNetworkWorker,
 }
 
 Vector2 :: [2]f32
@@ -190,26 +192,18 @@ ClientTransportRuntimeEvent_toMsg :: proc(event: ClientTransportRuntimeEvent) ->
 	return {}, false
 }
 
-State_serviceSelectedTransportRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)) {
-	if state.selected_transport_index < 0 ||
-	   state.selected_transport_index >= len(state.serverTransports) {
-		return
-	}
-
-	transport := &state.serverTransports[state.selected_transport_index]
-	if transport.transport.phase != .Established ||
-	   !ClientServerTransport_hasLiveENetSession(transport) {
-		return
-	}
-
+// Converts queued network events from every server into Msgs. The network worker does all the
+// ENet servicing, so this only moves already-decoded events and never blocks on I/O.
+State_drainNetworkEvents :: proc(state: State, ctx: ^skald.Ctx(Msg)) {
 	for _ in 0 ..< CHAT_RUNTIME_MAX_EVENTS_PER_FRAME {
-		runtimeEvent, hasEvent := ClientServerTransport_serviceRuntime(transport)
+		runtimeEvent, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
 		if !hasEvent {
 			return
 		}
 
 		msg, hasMsg := ClientTransportRuntimeEvent_toMsg(runtimeEvent)
 		if hasMsg {
+			// Ownership of these fields moved into msg.
 			runtimeEvent.timestamp = ""
 			runtimeEvent.message = ""
 			runtimeEvent.rooms = {}
@@ -222,7 +216,7 @@ State_serviceSelectedTransportRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)
 }
 
 viewWithRuntime :: proc(state: State, ctx: ^skald.Ctx(Msg)) -> skald.View {
-	State_serviceSelectedTransportRuntime(state, ctx)
+	State_drainNetworkEvents(state, ctx)
 	return view(state, ctx)
 }
 
@@ -333,6 +327,8 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 }
 
 State_deinit :: proc(state: ^State) {
+	// Stop the worker before freeing the transports it services.
+	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)
 	delete(state.joinServerFromScheme_host)
@@ -369,6 +365,8 @@ init :: proc() -> (init_state: State) {
 	config := loadConfig()
 	defer Config_deinit(&config)
 	init_state = State_initFromConfig(config)
+	// Startup auth above runs before the worker exists; from here on the worker owns servicing.
+	init_state.networkWorker = ClientNetworkWorker_start(init_state.serverTransports[:])
 
 	if len(os.args) > 1 {
 		for arg in os.args {

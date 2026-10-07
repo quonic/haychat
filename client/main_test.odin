@@ -1397,6 +1397,28 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 		"expected startup return to retain the live ENet session",
 	)
 
+	// Startup requested the room list; the background worker must service the session and
+	// queue the server's reply without the UI polling ENet.
+	state.networkWorker = ClientNetworkWorker_start(state.serverTransports[:])
+	roomListReceived := false
+	deadline := time.tick_now()
+	for !roomListReceived && time.tick_since(deadline) < 3 * time.Second {
+		event, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
+		if hasEvent {
+			roomListReceived = event.kind == .RoomListReceived
+			ClientTransportRuntimeEvent_deinit(&event)
+		} else {
+			time.sleep(10 * time.Millisecond)
+		}
+	}
+	ClientNetworkWorker_stop(state.networkWorker)
+	state.networkWorker = nil
+	testing.expect(
+		t,
+		roomListReceived,
+		"expected the network worker to deliver the startup room list from a live server",
+	)
+
 	postAuthProbeSent := ClientServerTransport_sendENetPacket(
 		transport.enetHost,
 		transport.enetPeer,

@@ -13,6 +13,7 @@
 - Keep every loaded history page and live message in its room cache. A live message for an inactive room or inactive server must update only that cache; render updates are limited to the selected server and selected room.
 - Drafts are client-local and belong to their room cache. Switching rooms restores that room's draft without sending or persisting it.
 - `transport.odin` owns encrypted runtime packet construction and decoded runtime-event cleanup. Event conversion in `main.odin` transfers dynamic payload ownership into `Msg`; clear transferred fields before the runtime event is deinitialized.
+- `network_worker.odin` services every live server session on a background thread and queues decoded runtime events; `view` only drains that queue (`State_drainNetworkEvents`). Any UI-thread code that sends through a transport or reads its mutable fields (`lastError`, crypto state) must hold `ClientNetworkWorker_lock`. Startup auth runs in `init` before the worker starts.
 - Room discovery starts after authenticated startup has adopted a live ENet session. Test startup bridges may establish transport state without a live ENet session, so do not make discovery failure invalidate authentication.
 - Build sidebar rooms from the selected server's joined-room list. The chat view derives its transcript from structured cached messages and only shows pagination when `hasOlder` is true.
 - Add reducer tests for cache isolation, history page merge/de-duplication, and selected-room removal fallback whenever channel behavior changes.

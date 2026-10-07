@@ -161,6 +161,8 @@ State_requestRoomList :: proc(state: ^State, serverID: int) {
 		return
 	}
 	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	defer ClientNetworkWorker_unlock(state.networkWorker)
 	if ClientServerTransport_requestRoomList(transport) {
 		cache.roomsLoading = true
 	} else if len(transport.lastError) > 0 {
@@ -179,6 +181,8 @@ State_requestRoomHistory :: proc(state: ^State, serverID: int, roomID: int, befo
 		return
 	}
 	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	defer ClientNetworkWorker_unlock(state.networkWorker)
 	if ClientServerTransport_requestRoomHistory(transport, roomID, beforeMessageID, 50) {
 		roomCache.isLoadingHistory = true
 	} else if len(transport.lastError) > 0 {
@@ -290,7 +294,13 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 			State_setChatStatus(&out, "Selected transport does not match the active server")
 			break
 		}
-		if roomChatSendBridge(transport, out.selected_channel_id, new_message) {
+		// The worker may replace lastError at any time, so copy it while holding the lock.
+		ClientNetworkWorker_lock(out.networkWorker)
+		sent := roomChatSendBridge(transport, out.selected_channel_id, new_message)
+		sendError := sent ? "" : strings.clone(transport.lastError)
+		ClientNetworkWorker_unlock(out.networkWorker)
+		defer if !sent do delete(sendError)
+		if sent {
 			delete(out.chat_input_draft)
 			out.chat_input_draft = ""
 			cache := State_serverRoomCache(&out, out.selected_server_id)
@@ -298,8 +308,8 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 			delete(roomCache.draft)
 			roomCache.draft = ""
 			State_clearChatStatus(&out)
-		} else if len(transport.lastError) > 0 {
-			State_setChatStatus(&out, transport.lastError)
+		} else if len(sendError) > 0 {
+			State_setChatStatus(&out, sendError)
 		} else {
 			State_setChatStatus(&out, "Failed to send room chat message")
 		}
