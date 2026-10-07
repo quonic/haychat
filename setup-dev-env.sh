@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Bootstraps the supported Linux-first HayChat development environment.
-# Supported host flow: Ubuntu/Debian with apt and systemd.
+# Supported host flow: Fedora 40+ with dnf, or Ubuntu 25.04+/Debian 13+ with apt (earlier
+# Ubuntu and Debian releases do not package SDL3, which the client links against).
 
 repo_dir=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
 odin_root=${HAYCHAT_ODIN_ROOT:-$HOME/Odin}
@@ -24,6 +25,7 @@ required_packages_dnf=(
 	pkg-config
 	libpq-devel
 	enet-devel
+	SDL3-devel
 	postgresql
 	postgresql-contrib
 	postgresql-devel
@@ -47,6 +49,7 @@ required_packages_apt=(
 	pkg-config
 	libpq-dev
 	enet-dev
+	libsdl3-dev
 	postgresql
 	postgresql-client
 	libx11-dev

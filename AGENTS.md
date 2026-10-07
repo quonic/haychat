@@ -43,7 +43,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 ## Testing
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
-- Test command: `odin test .`
+- Full check (what CI runs): `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
 - Prefer component-scoped checks while editing: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`. The serial server suite is the reliable default for router/database tests.
 - Use the built-in testing library from Odin. `import "core:testing"` and any procedures must have `t: ^testing.T,` as the first parameter.
 - Use `assert(a == VALUE, "message that test failed")` for assertions in tests, and provide a clear message that indicates what the expected value was and what the actual value is if the assertion fails.

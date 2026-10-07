@@ -4,11 +4,12 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 
 ## Current Baseline
 
-- `odin check server` passes.
-- `odin check client -target:linux_amd64` passes.
-- `odin test server` passes with 16 tests.
-- `odin test common` passes with 3 tests.
-- The repository already contains a threaded server, a Skald-based client UI, shared protocol and crypto code, file storage helpers, a localhost web admin surface, and a small automated test suite.
+Updated 2026-10-07. Run `./check.sh` for the current numbers; CI runs it on every push.
+
+- `odin check server` and `odin check client -target:linux_amd64` pass; CI also checks the Windows client.
+- Tests: `common` 4, `client` 25, `server` 41, all leak-checked.
+- The live startup-auth proof passes against a real server and PostgreSQL.
+- The repository contains a threaded server, a Skald-based client UI with a background network worker, shared protocol and crypto code, file storage helpers, a token-protected localhost web admin, and an automated test suite.
 
 ## What Is Already Complete
 
@@ -19,10 +20,10 @@ This directory breaks the path to a tester-usable HayChat release into focused w
 
 ## What Blocks Tester Usage Today
 
-- The client only auto-attempts the selected/default configured server at startup; authenticated-session completion still belongs to HC-103.
-- The client chat UI currently appends messages locally instead of sending them over the network.
-- The server only dispatches a narrow set of post-auth application packets today: auth lookup, file store, and raw database query routing.
-- There is no checked-in database schema, migration flow, seed data, or sample test accounts.
+- The client only auto-attempts the selected/default configured server at startup.
+- New accounts are not added to any room, so a second tester cannot chat until an admin adds them. The two-client live chat proof fails for this reason.
+- The server creates and validates its schema, but there is no migration flow; an incompatible schema is rebuilt and its data dropped.
+- Seed data (`server/sql/auth_bootstrap.sql`) is applied only by `reset-local-env.sh`.
 - The public docs are too thin for a clean-machine install and run.
 - There is no packaging or release artifact flow for handing a build to testers.
 
