@@ -1,9 +1,0 @@
-name: haychat
-version: 1.0.0
-description: APM project for haychat
-author: quonic
-dependencies:
-  apm: []
-  mcp: []
-includes: auto
-scripts: {}
