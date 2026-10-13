@@ -32,11 +32,7 @@ webAdminServerLoop :: proc(pm: ^ProcessManager) {
 
 	s: http.Server
 	webAdminHTTPServer = &s
-	defer {
-		if webAdminHTTPServer == &s {
-			webAdminHTTPServer = nil
-		}
-	}
+	defer webAdminHTTPServer = nil
 
 	// Set up routing
 	router: http.Router
