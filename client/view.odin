@@ -189,17 +189,23 @@ view_selected_transport_status :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> skald.
 		return skald.text("No transport selected", th.color.fg_muted)
 	}
 
-	transport := s.serverTransports[s.selected_transport_index]
+	// The network worker mutates transports, so snapshot what we show while holding its lock.
+	ClientNetworkWorker_lock(s.networkWorker)
+	transport := &s.serverTransports[s.selected_transport_index]
 	status := fmt.tprintf(
 		"Transport phase: %v | Trust: %v | User ID: %d",
 		transport.transport.phase,
 		transport.transport.peerTrustState,
 		transport.authenticatedUserID,
 	)
-	if len(transport.lastError) > 0 {
+	lastError := fmt.tprintf("Last error: %s", transport.lastError)
+	hasError := len(transport.lastError) > 0
+	ClientNetworkWorker_unlock(s.networkWorker)
+
+	if hasError {
 		return skald.col(
 			skald.text(status, th.color.fg_muted),
-			skald.text(fmt.tprintf("Last error: %s", transport.lastError), th.color.danger),
+			skald.text(lastError, th.color.danger),
 			spacing = general_spacing,
 		)
 	}

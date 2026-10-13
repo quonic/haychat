@@ -127,6 +127,24 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.authenticatedUserID = 0
 }
 
+// Releases the ENet session and every string the transport owns.
+ClientServerTransport_deinit :: proc(transport: ^ClientServerTransport) {
+	ClientServerTransport_releaseENetSession(transport)
+	delete(transport.serverName)
+	delete(transport.serverHost)
+	delete(transport.nickname)
+	delete(transport.lastError)
+	transport^ = {}
+}
+
+ClientTransportCatalog_deinit :: proc(catalog: ^[dynamic]ClientServerTransport) {
+	for index in 0 ..< len(catalog) {
+		ClientServerTransport_deinit(&catalog[index])
+	}
+	delete(catalog^)
+	catalog^ = nil
+}
+
 ClientServerTransport_fail :: proc(transport: ^ClientServerTransport, message: string) {
 	ClientServerTransport_setLastError(transport, message)
 	ClientServerTransport_clearSessionRuntimeState(transport)

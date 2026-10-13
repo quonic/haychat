@@ -11,7 +11,8 @@
 
 - Room visibility, chat sends, live-message fanout, and history retrieval are membership-scoped. Never trust a client-provided room ID without checking membership through the database flow.
 - Persist a room message before fanout. Fan out the durable message fields, including its ID and timestamp, only to the room's current members.
-- Router database work follows the typed request/continuation pattern in `MainRouterState`: queue a `common.DatabaseQuery`, record the matching pending request type, and handle its result in the exhaustive database-result switch. Keep request/response allocation cleanup in `ipc.odin` in sync with new payload fields.
+- Router database work follows the typed request/continuation pattern in `MainRouterState`: queue a `common.DatabaseQuery`, record the matching pending request type, and handle its result in the exhaustive database-result switch. `common.DatabaseQueryRequest` and `common.DatabaseQueryResult` are tagged unions; the cleanup switches in `ipc.odin` are exhaustive, so a new variant will not compile until its cleanup is written.
+- Prefer one SQL statement per client action when correctness depends on a check, as `PostRoomChatMessage` (membership check, insert, and recipients) and room history (membership check and page) do. Separate round trips let state change between the check and the action.
 - Admin room create/edit/delete and membership mutations require the database-backed server-admin role. Room creators are automatically added as members; membership and deletion changes must notify affected users so their clients refresh the authoritative room list.
 - For deterministic router/database validation, use `odin test server -define:ODIN_TEST_THREADS=1`. Database-backed runtime tests require a role that can create, alter, and drop the server-owned schema in `public`.
 

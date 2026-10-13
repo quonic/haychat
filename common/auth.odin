@@ -449,11 +449,12 @@ encodeBytesToHex :: proc(data: []u8) -> string {
 }
 
 decodeHexIntoBuffer :: proc(hexValue: string, dst: []u8) -> bool {
+	// decode allocates its output even when the input turns out to be invalid hex.
 	decoded, ok := encoding_hex.decode(transmute([]u8)hexValue)
+	defer delete(decoded)
 	if !ok {
 		return false
 	}
-	defer delete(decoded)
 
 	if len(decoded) != len(dst) {
 		return false

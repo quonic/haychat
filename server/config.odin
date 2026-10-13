@@ -7,6 +7,7 @@ import "core:mem"
 import "core:net"
 import "core:os"
 import "core:strconv"
+import "core:strings"
 import "core:sys/linux"
 import "core:time"
 
@@ -61,6 +62,11 @@ ServerConfig :: struct {
 	serverIdentityFilePath: string,
 	serverPrivateKey:       string,
 	serverPublicKey:        string,
+
+	// Access control settings
+	adminPublicKey:         string, // Hex Ed25519 key allowed to claim keyless privileged accounts
+	webAdminToken:          string, // Bearer token required by protected web admin routes
+	webAdminTokenFilePath:  string, // Where a generated web admin token is persisted
 }
 
 ServerIdentityFile :: struct {
@@ -71,6 +77,9 @@ ServerIdentityFile :: struct {
 DEFAULT_LOG_PATH :: "logs"
 DEFAULT_FILE_STORAGE_PATH :: "storage"
 DEFAULT_SERVER_IDENTITY_FILE_NAME :: "server_identity.json"
+DEFAULT_WEB_ADMIN_TOKEN_FILE_NAME :: "web_admin_token"
+WEB_ADMIN_TOKEN_MIN_LENGTH :: 32
+WEB_ADMIN_GENERATED_TOKEN_BYTES :: 32
 
 loadConfig :: proc() -> (ServerConfig, string) {
 	logDir := getEnvOr("HAYCHAT_LOG_DIR", DEFAULT_LOG_PATH)
@@ -110,6 +119,8 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		),
 		serverPrivateKey       = getEnvOr("HAYCHAT_SERVER_PRIVATE_KEY", ""),
 		serverPublicKey        = getEnvOr("HAYCHAT_SERVER_PUBLIC_KEY", ""),
+		adminPublicKey         = getEnvOr("HAYCHAT_ADMIN_PUBLIC_KEY", ""),
+		webAdminToken          = getEnvOr("HAYCHAT_WEB_ADMIN_TOKEN", ""),
 	}
 
 	validateAndNormalizeConfig(&config)
@@ -118,6 +129,9 @@ loadConfig :: proc() -> (ServerConfig, string) {
 	}
 	if identityErr := ensureServerIdentityKeys(&config); len(identityErr) > 0 {
 		return config, identityErr
+	}
+	if tokenErr := ensureWebAdminToken(&config); len(tokenErr) > 0 {
+		return config, tokenErr
 	}
 	return config, ""
 }
@@ -158,6 +172,14 @@ validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
 			"%s/%s",
 			config.fileStoragePath,
 			DEFAULT_SERVER_IDENTITY_FILE_NAME,
+		)
+	}
+
+	if len(config.webAdminTokenFilePath) == 0 {
+		config.webAdminTokenFilePath = fmt.aprintf(
+			"%s/%s",
+			config.fileStoragePath,
+			DEFAULT_WEB_ADMIN_TOKEN_FILE_NAME,
 		)
 	}
 
@@ -253,6 +275,18 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 	if storageErr := startupProbeWriteError(config.fileStoragePath, "file storage path");
 	   len(storageErr) > 0 {
 		return storageErr
+	}
+
+	if len(config.adminPublicKey) > 0 {
+		if _, ok := common.identityPublicKeyFromHex(config.adminPublicKey); !ok {
+			return "startup preflight failed: HAYCHAT_ADMIN_PUBLIC_KEY must be a hex Ed25519 public key"
+		}
+	}
+	if len(config.webAdminToken) > 0 && len(config.webAdminToken) < WEB_ADMIN_TOKEN_MIN_LENGTH {
+		return fmt.aprintf(
+			"startup preflight failed: HAYCHAT_WEB_ADMIN_TOKEN must be at least %d characters",
+			WEB_ADMIN_TOKEN_MIN_LENGTH,
+		)
 	}
 
 	if hasValidServerIdentity(config) {
@@ -404,7 +438,7 @@ saveServerIdentityFile :: proc(config: ServerConfig) -> string {
 	}
 	defer delete(jsonData)
 
-	writeErr := os.write_entire_file_from_bytes(config.serverIdentityFilePath, jsonData)
+	writeErr := writePrivateFile(config.serverIdentityFilePath, jsonData)
 	if writeErr != nil {
 		return fmt.aprintf(
 			"startup preflight failed: could not persist server identity file at %q: %v",
@@ -413,5 +447,51 @@ saveServerIdentityFile :: proc(config: ServerConfig) -> string {
 		)
 	}
 
+	return ""
+}
+
+// Writes a file that only the server's user may read, because it holds secret material.
+writePrivateFile :: proc(path: string, data: []u8) -> os.Error {
+	if err := os.write_entire_file_from_bytes(path, data, os.perm(0o600)); err != nil {
+		return err
+	}
+	// An existing file keeps its old mode on truncate, so tighten it explicitly.
+	return os.change_mode(path, os.perm(0o600))
+}
+
+// Uses HAYCHAT_WEB_ADMIN_TOKEN when set; otherwise reuses or generates a token persisted at
+// webAdminTokenFilePath so operators can read it without it appearing in logs.
+ensureWebAdminToken :: proc(config: ^ServerConfig) -> string {
+	if len(config.webAdminToken) > 0 {
+		return ""
+	}
+
+	if os.exists(config.webAdminTokenFilePath) {
+		data, err := os.read_entire_file_from_path(config.webAdminTokenFilePath, context.allocator)
+		if err == nil {
+			token := strings.trim_space(string(data))
+			if len(token) >= WEB_ADMIN_TOKEN_MIN_LENGTH {
+				config.webAdminToken = strings.clone(token)
+				delete(data)
+				return ""
+			}
+		}
+		delete(data)
+	}
+
+	tokenBytes: [WEB_ADMIN_GENERATED_TOKEN_BYTES]u8
+	if !common.generateRandomBytes(tokenBytes[:]) {
+		return "startup preflight failed: could not generate web admin token"
+	}
+	config.webAdminToken = common.encodeBytesToHex(tokenBytes[:])
+
+	if writeErr := writePrivateFile(config.webAdminTokenFilePath, transmute([]u8)config.webAdminToken);
+	   writeErr != nil {
+		return fmt.aprintf(
+			"startup preflight failed: could not persist web admin token at %q: %v",
+			config.webAdminTokenFilePath,
+			writeErr,
+		)
+	}
 	return ""
 }

@@ -7,8 +7,8 @@ We welcome contributions to HayChat! Please follow these guidelines to ensure a 
 1. Fork the repository and create a new branch for your changes.
 2. Follow the project's code style and conventions (see below).
 3. Write tests for your changes using the built-in Odin testing framework.
-4. Run `odin check .` to verify no syntax or type errors exist.
-5. Run `odin test .` to ensure all tests pass.
+4. Run `./check.sh`. It runs the compile checks and every test suite, and a test fails on any memory leak or bad free. CI runs the same script on every pull request.
+5. While iterating, scope checks to one component: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`.
 6. Commit with clear, descriptive messages and push to your fork.
 7. Create a pull request against the main branch.
 
@@ -36,4 +36,4 @@ We welcome contributions to HayChat! Please follow these guidelines to ensure a 
 
 ## License
 
-By contributing, you agree your work will be licensed under the GPLv3 License. Ensure you have the right to license any code you contribute under the GPLv3 License.
+By contributing, you agree your work will be licensed under the AGPLv3 License. Ensure you have the right to license any code you contribute under the AGPLv3 License.

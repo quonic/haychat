@@ -2,14 +2,14 @@
 
 ![HayChat Logo](assets/icon.png)
 
-HayChat is an alternative to Discord. It features end-to-end encryption, a responsive user interface, and a modular architecture for easy extensibility.
+HayChat is a self-hosted alternative to Discord. It features encrypted client-server transport, a responsive user interface, and a modular architecture for easy extensibility.
 
 > [!IMPORTANT]
 > HayChat is currently in early development and is not yet ready for production use. The project is open-source and welcomes contributions from the community.
 
 ## Features
 
-- End-to-end encryption for secure communication
+- Encrypted transport between client and server: Ed25519 identities, X25519 key exchange, and XChaCha20-Poly1305 packets, with the server key pinned on first connect. The server decrypts messages and stores them unencrypted in its PostgreSQL database; end-to-end encryption is not implemented yet.
 - Real-time messaging with low latency
 - User-friendly interface with customizable themes
 - Support for server chat in shared rooms, with direct messages planned for a later release
@@ -21,7 +21,7 @@ HayChat is an alternative to Discord. It features end-to-end encryption, a respo
 
 - Open-source and self-hosted, giving users full control over their data and privacy
 - Lightweight and optimized for performance, reducing resource usage
-- Focus on security and privacy, with end-to-end encryption and no data collection
+- Focus on security and privacy: self-hosted, encrypted in transit, and no data collection
 - Customizable and extensible architecture, allowing users to tailor the application to their needs
 - Transparent development process with community involvement and contributions
 
@@ -33,12 +33,12 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 
 ### Development Environment Setup
 
-The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Ubuntu/Debian hosts with `apt`. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
+The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Fedora 40+ (`dnf`) or Ubuntu 25.04+/Debian 13+ (`apt`). Earlier Ubuntu and Debian releases do not package SDL3, which the client links against. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
 
-1. Run `./setup-dev-env.sh` on a clean Ubuntu/Debian machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
+1. Run `./setup-dev-env.sh` on a clean supported machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
    If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
 2. Ensure `odin` is on your `PATH`. The bootstrap script links it into `$HOME/.local/bin/odin`; if your shell does not already include `$HOME/.local/bin`, add that directory before continuing.
-3. Validate the supported source-build environment with `odin check server`, `odin check client -target:linux_amd64`, and `odin check client -target:windows_amd64`.
+3. Validate the supported source-build environment with `./check.sh`, which runs `odin check server`, `odin check client -target:linux_amd64`, and every test suite with leak detection enabled (a test fails on any leak or bad free). CI runs the same script on every push and pull request, plus `odin check client -target:windows_amd64` on Windows.
 4. Use the server helper seam below to seed auth data and launch the local MVP runtime.
 
 The supported bootstrap script assumes these defaults unless you override them before running it:
@@ -99,6 +99,16 @@ Optional server/runtime values documented in the example file:
 - `HAYCHAT_MAX_STORAGE_CAPACITY`
 - `HAYCHAT_SERVER_PRIVATE_KEY`
 - `HAYCHAT_SERVER_PUBLIC_KEY`
+- `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname.
+- `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
+
+### Web Admin
+
+The web admin listens on `localhost` only. `GET /status` is an unauthenticated health probe. `GET /peers`, `GET /logs`, `POST /shutdown`, and `POST /restart` require the bearer token:
+
+```sh
+curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:8080/peers
+```
 
 Supported helper commands are exactly: `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, and `hc118-gate`.
 
@@ -123,8 +133,14 @@ Running `odin run server` directly now uses tester-safe local runtime paths by d
 
 Seeded test identities:
 
-- `admin` resolves to user ID `1`
-- `haypeer` resolves to user ID `2`
+- `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
+- `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
+
+### Known Limitations
+
+- New accounts are not added to any room. The seed fixture creates the `general` room with only `admin` as a member, so other users cannot chat until an admin adds them (`ClientAddRoomMember`). The two-client live chat proof (part of `hc118-gate`) fails for the same reason, so CI runs only the startup auth proof.
+- Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
+- Messages are not end-to-end encrypted (see Features).
 
 The server owns table creation and validation. It starts successfully only after PostgreSQL contains the required schema; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 

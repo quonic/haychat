@@ -161,6 +161,8 @@ State_requestRoomList :: proc(state: ^State, serverID: int) {
 		return
 	}
 	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	defer ClientNetworkWorker_unlock(state.networkWorker)
 	if ClientServerTransport_requestRoomList(transport) {
 		cache.roomsLoading = true
 	} else if len(transport.lastError) > 0 {
@@ -179,11 +181,22 @@ State_requestRoomHistory :: proc(state: ^State, serverID: int, roomID: int, befo
 		return
 	}
 	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	defer ClientNetworkWorker_unlock(state.networkWorker)
 	if ClientServerTransport_requestRoomHistory(transport, roomID, beforeMessageID, 50) {
 		roomCache.isLoadingHistory = true
 	} else if len(transport.lastError) > 0 {
 		State_setChatStatus(state, transport.lastError)
 	}
+}
+
+// Returns an owned copy of value with tabs expanded for consistent input rendering.
+normalizeTabs :: proc(value: string) -> string {
+	normalized, allocated := strings.replace_all(value, "\t", "    ")
+	if !allocated {
+		return strings.clone(value)
+	}
+	return normalized
 }
 
 State_appendChannelChatMessage :: proc(state: ^State, senderID: int, message: string) {
@@ -198,17 +211,17 @@ State_appendChannelChatMessage :: proc(state: ^State, senderID: int, message: st
 	}
 
 	if len(state.current_chat_messages) > 0 {
-		append(&state.current_chat_messages, skald.span("\n", th.color.fg))
+		State_appendTranscriptSpan(&state.current_chat_messages, skald.span("\n", th.color.fg))
 	}
-	append(
+	State_appendTranscriptSpan(
 		&state.current_chat_messages,
-		skald.span_bold(strings.concatenate({senderLabel, ": "}), senderColor),
+		skald.span_bold(fmt.tprintf("%s: ", senderLabel), senderColor),
 	)
-	append(&state.current_chat_messages, skald.span(message, th.color.fg))
+	State_appendTranscriptSpan(&state.current_chat_messages, skald.span(message, th.color.fg))
 }
 
 State_clearVisibleRoomTranscript :: proc(state: ^State) {
-	state.current_chat_messages = [dynamic]skald.Text_Span{}
+	TranscriptSpans_deinit(&state.current_chat_messages)
 }
 
 update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
@@ -252,9 +265,11 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		out.window_width = f32(m.window_vector.x)
 		out.window_height = f32(m.window_vector.y)
 	case .UpdateChatInputValue:
-		out.dm_chat_draft, _ = strings.replace(strings.clone(m.new_value), "\t", "    ", -1) // Replace tabs with spaces for consistent formatting in the chat input
+		delete(out.dm_chat_draft)
+		out.dm_chat_draft = normalizeTabs(m.new_value)
 	case .UpdateChannelChatInputValue:
-		out.chat_input_draft, _ = strings.replace(strings.clone(m.new_value), "\t", "    ", -1) // Replace tabs with spaces for consistent formatting in the chat input
+		delete(out.chat_input_draft)
+		out.chat_input_draft = normalizeTabs(m.new_value)
 		if out.selected_channel_id != 0 {
 			cache := State_serverRoomCache(&out, out.selected_server_id)
 			roomCache := ServerRoomCache_roomCache(cache, out.selected_channel_id)
@@ -264,7 +279,8 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 	case .SendChatMessage:
 		State_setChatStatus(&out, DIRECT_MESSAGES_UNSUPPORTED_STATUS)
 	case .SendChannelChatMessage:
-		new_message, _ := strings.replace(strings.clone(m.new_value), "\t", "    ", -1)
+		new_message := normalizeTabs(m.new_value)
+		defer delete(new_message)
 		if out.selected_channel_id == 0 {
 			State_setChatStatus(&out, "No channel selected")
 			break
@@ -278,29 +294,41 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 			State_setChatStatus(&out, "Selected transport does not match the active server")
 			break
 		}
-		if roomChatSendBridge(transport, out.selected_channel_id, new_message) {
+		// The worker may replace lastError at any time, so copy it while holding the lock.
+		ClientNetworkWorker_lock(out.networkWorker)
+		sent := roomChatSendBridge(transport, out.selected_channel_id, new_message)
+		sendError := sent ? "" : strings.clone(transport.lastError)
+		ClientNetworkWorker_unlock(out.networkWorker)
+		defer if !sent do delete(sendError)
+		if sent {
+			delete(out.chat_input_draft)
 			out.chat_input_draft = ""
 			cache := State_serverRoomCache(&out, out.selected_server_id)
 			roomCache := ServerRoomCache_roomCache(cache, out.selected_channel_id)
 			delete(roomCache.draft)
 			roomCache.draft = ""
 			State_clearChatStatus(&out)
-		} else if len(transport.lastError) > 0 {
-			State_setChatStatus(&out, transport.lastError)
+		} else if len(sendError) > 0 {
+			State_setChatStatus(&out, sendError)
 		} else {
 			State_setChatStatus(&out, "Failed to send room chat message")
 		}
 	case .RecieveChatMessage:
 		// Handle receiving a new chat message, such as by appending it to the current DM chat
 		sender_name := "Friend" // In a real implementation, you would look up the sender's name based on the message data
-		append(&out.current_dm_chat, skald.span("\n", skald.theme_dark().color.fg)) // Newline
-		append(
+		th := skald.theme_dark()
+		State_appendTranscriptSpan(&out.current_dm_chat, skald.span("\n", th.color.fg))
+		State_appendTranscriptSpan(
 			&out.current_dm_chat,
-			skald.span_bold(strings.concatenate({sender_name, ": "}), skald.theme_dark().color.fg),
+			skald.span_bold(fmt.tprintf("%s: ", sender_name), th.color.fg),
 		)
-		new_message, _ := strings.replace(strings.clone(m.new_value), "\t", "    ", -1) // Replace tabs with spaces for consistent formatting in the chat message
-		append(&out.current_dm_chat, skald.span(new_message, skald.theme_dark().color.fg))
+		new_message := normalizeTabs(m.new_value)
+		defer delete(new_message)
+		State_appendTranscriptSpan(&out.current_dm_chat, skald.span(new_message, th.color.fg))
 	case .RecieveChannelChatMessage:
+		// Transport-originated: the message text and timestamp are owned by this Msg.
+		defer delete(m.new_value)
+		defer delete(m.timestamp)
 		transportIndex := State_selectedTransportIndexForServerID(out, m.id)
 		if transportIndex < 0 {
 			break
@@ -318,7 +346,8 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 			},
 		)
 		if m.id == out.selected_server_id && m.channel_id == out.selected_channel_id {
-			new_message, _ := strings.replace(strings.clone(m.new_value), "\t", "    ", -1)
+			new_message := normalizeTabs(m.new_value)
+			defer delete(new_message)
 			State_appendChannelChatMessage(&out, m.sender_id, new_message)
 		}
 		State_clearChatStatus(&out)
@@ -414,9 +443,10 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 			ServerRoomCache_roomCache(cache, out.selected_channel_id).isLoadingHistory = false
 		}
 		State_setChatStatus(&out, m.new_value)
+		delete(m.new_value)
 	case .New_Conversation:
 		// Handle starting a new conversation, such as by clearing the current DM chat and resetting the selected server or friend
-		out.current_dm_chat = [dynamic]skald.Text_Span{}
+		TranscriptSpans_deinit(&out.current_dm_chat)
 		out.selected_server_id = 0
 		out.selected_transport_index = -1
 		out.selected_channel_id = 0
@@ -428,8 +458,8 @@ update :: proc(s: State, m: Msg) -> (State, skald.Command(Msg)) {
 		// For this example, we'll just add a dummy friend to demonstrate the functionality
 		new_friend := Friend {
 			id           = len(s.config.friends) + 1,
-			display_name = "New Friend",
-			public_key   = "new_friend_public_key",
+			display_name = strings.clone("New Friend"),
+			public_key   = strings.clone("new_friend_public_key"),
 			status       = .Online, // Set the new friend's status to Online for demonstration purposes
 		}
 		append(&out.config.friends, new_friend)

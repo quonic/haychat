@@ -25,7 +25,9 @@ roomChatSendBridgeTestStub :: proc(
 ) -> bool {
 	roomChatSendBridgeTestServerID = transport.serverID
 	roomChatSendBridgeTestRoomID = roomID
-	roomChatSendBridgeTestContent = content
+	// update frees the message after sending, so keep a copy for assertions.
+	delete(roomChatSendBridgeTestContent)
+	roomChatSendBridgeTestContent = strings.clone(content)
 	return roomChatSendBridgeTestReturnValue
 }
 
@@ -60,17 +62,34 @@ buildServerHelloPacketBytes :: proc(
 	return common.buildPacketBytes(.ServerHello, serverHello)
 }
 
+// Returns a fully owned config (free it with Config_deinit). The servers array is consumed;
+// its entries may use string literals because each one is cloned.
 testConfigWithServers :: proc(servers: [dynamic]Server) -> Config {
+	defer delete(servers)
 	privateKey, publicKey, ok := common.generateIdentityKeyPair()
 	assert(ok, "expected identity key generation to succeed")
 
-	return Config {
-		private_key = common.identityPrivateKeyToHex(privateKey),
-		public_key = common.identityPublicKeyToHex(publicKey),
-		display_name = "Tester",
-		servers = servers,
-		friends = {},
+	config := Config {
+		private_key  = common.identityPrivateKeyToHex(privateKey),
+		public_key   = common.identityPublicKeyToHex(publicKey),
+		display_name = strings.clone("Tester"),
 	}
+	for server in servers {
+		owned := Server_clone(server)
+		if len(owned.short_name) == 0 {
+			delete(owned.short_name)
+			owned.short_name = getShortServerName(owned.name)
+		}
+		append(&config.servers, owned)
+	}
+	return config
+}
+
+// Builds a state that owns all of its memory; free it with State_deinit.
+testStateWithServers :: proc(servers: [dynamic]Server) -> State {
+	config := testConfigWithServers(servers)
+	defer Config_deinit(&config)
+	return State_initFromConfig(config)
 }
 
 buildEstablishedTransportPair :: proc(
@@ -130,14 +149,13 @@ buildEstablishedTransportPair :: proc(
 }
 
 testUpdateStateForServer :: proc(server: Server) -> State {
-	config := testConfigWithServers({server})
-	state := State_initFromConfig(config)
+	state := testStateWithServers({server})
 	state.view_dms = false
 	state.selected_server_id = server.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, server.id)
 	state.selected_channel_id = common.GENERAL_ROOM_ID
-	state.chat_input_draft = "pending channel draft"
-	state.dm_chat_draft = "pending dm draft"
+	state.chat_input_draft = strings.clone("pending channel draft")
+	state.dm_chat_draft = strings.clone("pending dm draft")
 	return state
 }
 
@@ -232,11 +250,11 @@ testStateInitFromConfigStartsInServerChatForFirstRelease :: proc(t: ^testing.T) 
 	server := Server {
 		id         = 500,
 		name       = "First Release Server",
-		short_name = getShortServerName("First Release Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
-	state := State_initFromConfig(testConfigWithServers({server}))
+	state := testStateWithServers({server})
+	defer State_deinit(&state)
 
 	testing.expect(
 		t,
@@ -265,7 +283,6 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 	server := Server {
 		id         = 501,
 		name       = "Reducer Server",
-		short_name = getShortServerName("Reducer Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
@@ -274,6 +291,7 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 	originalRoomChatSendBridge := roomChatSendBridge
 	roomChatSendBridgeTestServerID = 0
 	roomChatSendBridgeTestRoomID = 0
+	delete(roomChatSendBridgeTestContent)
 	roomChatSendBridgeTestContent = ""
 	roomChatSendBridgeTestReturnValue = true
 	roomChatSendBridge = roomChatSendBridgeTestStub
@@ -312,6 +330,9 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 		"expected successful channel submit to keep the chat status clear",
 	)
 
+	State_deinit(&out)
+	delete(roomChatSendBridgeTestContent)
+	roomChatSendBridgeTestContent = ""
 	_ = t
 }
 
@@ -323,7 +344,6 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 	server := Server {
 		id         = 502,
 		name       = "Authoritative Server",
-		short_name = getShortServerName("Authoritative Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
@@ -352,7 +372,7 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 			id = server.id,
 			channel_id = common.GENERAL_ROOM_ID,
 			sender_id = 77,
-			new_value = "self echo",
+			new_value = strings.clone("self echo"),
 		},
 	)
 	testing.expect(
@@ -388,7 +408,7 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 			id = server.id,
 			channel_id = common.GENERAL_ROOM_ID,
 			sender_id = 42,
-			new_value = "other echo",
+			new_value = strings.clone("other echo"),
 		},
 	)
 	testing.expect(
@@ -412,6 +432,9 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 		"expected non-self echoes to render with the standard sender styling",
 	)
 
+	State_deinit(&afterOtherReceive)
+	delete(roomChatSendBridgeTestContent)
+	roomChatSendBridgeTestContent = ""
 	_ = t
 }
 
@@ -420,7 +443,6 @@ testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^tes
 	server := Server {
 		id         = 503,
 		name       = "DM Server",
-		short_name = getShortServerName("DM Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
@@ -452,6 +474,7 @@ testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^tes
 		"expected unsupported DM submit to surface a visible status message",
 	)
 
+	State_deinit(&out)
 	_ = t
 }
 
@@ -460,7 +483,6 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 	server := Server {
 		id         = 504,
 		name       = "Narrow Server",
-		short_name = getShortServerName("Narrow Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
@@ -473,7 +495,7 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 			id = server.id + 1,
 			channel_id = common.GENERAL_ROOM_ID,
 			sender_id = 42,
-			new_value = "wrong server",
+			new_value = strings.clone("wrong server"),
 		},
 	)
 	testing.expect(
@@ -483,13 +505,13 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 	)
 
 	mismatchedRoom, _ := update(
-		state,
+		mismatchedServer,
 		Msg {
 			kind = .RecieveChannelChatMessage,
 			id = server.id,
 			channel_id = common.GENERAL_ROOM_ID + 1,
 			sender_id = 42,
-			new_value = "wrong room",
+			new_value = strings.clone("wrong room"),
 		},
 	)
 	testing.expect(
@@ -499,8 +521,8 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 	)
 
 	protocolErrorState, _ := update(
-		state,
-		Msg{kind = .TransportProtocolError, new_value = "Unsupported roomId"},
+		mismatchedRoom,
+		Msg{kind = .TransportProtocolError, new_value = strings.clone("Unsupported roomId")},
 	)
 	testing.expect(
 		t,
@@ -513,6 +535,7 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 		"expected protocol errors to surface through the chat status surface",
 	)
 
+	State_deinit(&protocolErrorState)
 	_ = t
 }
 
@@ -532,7 +555,7 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 		host       = "localhost",
 		port       = 1,
 	}
-	state := State_initFromConfig(testConfigWithServers({serverA, serverB}))
+	state := testStateWithServers({serverA, serverB})
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
 	state.selected_channel_id = 10
@@ -545,7 +568,7 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 			channel_id = 10,
 			sender_id = 42,
 			message_id = 101,
-			new_value = "from A",
+			new_value = strings.clone("from A"),
 		},
 	)
 	afterB, _ := update(
@@ -556,7 +579,7 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 			channel_id = 10,
 			sender_id = 43,
 			message_id = 101,
-			new_value = "from B",
+			new_value = strings.clone("from B"),
 		},
 	)
 
@@ -568,6 +591,7 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 	testing.expect(t, len(roomB.messages) == 1, "expected server B to retain its room message")
 	testing.expect(t, roomA.messages[0].content == "from A", "expected server A cache isolation")
 	testing.expect(t, roomB.messages[0].content == "from B", "expected server B cache isolation")
+	State_deinit(&afterB)
 }
 
 @(test)
@@ -657,6 +681,7 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		!room.hasOlder,
 		"expected latest history response to update pagination state",
 	)
+	State_deinit(&afterOlderPage)
 }
 
 @(test)
@@ -702,6 +727,7 @@ testRoomDeletionFallsBackToAnotherJoinedRoom :: proc(t: ^testing.T) {
 		ServerRoomCache_roomIsJoined(cache, 21),
 		"expected remaining joined room to stay available",
 	)
+	State_deinit(&afterDelete)
 }
 
 @(test)
@@ -709,18 +735,16 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 	serverA := Server {
 		id         = 506,
 		name       = "First Server",
-		short_name = getShortServerName("First Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	serverB := Server {
 		id         = 507,
 		name       = "Second Server",
-		short_name = getShortServerName("Second Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
-	state := State_initFromConfig(testConfigWithServers({serverA, serverB}))
+	state := testStateWithServers({serverA, serverB})
 	state.view_dms = false
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
@@ -733,7 +757,7 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 			id = serverA.id,
 			channel_id = common.GENERAL_ROOM_ID,
 			sender_id = 42,
-			new_value = "persisted room text",
+			new_value = strings.clone("persisted room text"),
 		},
 	)
 	testing.expect(
@@ -752,15 +776,24 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 		"expected switching channels to clear the previously visible room transcript",
 	)
 
+	backToGeneral, _ := update(
+		afterChannelSwitch,
+		Msg{kind = .SwitchToChannel, id = serverA.id, channel_id = common.GENERAL_ROOM_ID},
+	)
 	restoredTranscript, _ := update(
-		withTranscript,
+		backToGeneral,
 		Msg {
 			kind = .RecieveChannelChatMessage,
 			id = serverA.id,
 			channel_id = common.GENERAL_ROOM_ID,
 			sender_id = 42,
-			new_value = "server scoped room text",
+			new_value = strings.clone("server scoped room text"),
 		},
+	)
+	testing.expect(
+		t,
+		len(restoredTranscript.current_chat_messages) > 0,
+		"expected a receive in the reselected room to repopulate the visible transcript",
 	)
 	afterServerSwitch, _ := update(
 		restoredTranscript,
@@ -772,6 +805,7 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 		"expected switching servers to clear the previously visible room transcript",
 	)
 
+	State_deinit(&afterServerSwitch)
 	_ = t
 }
 
@@ -780,17 +814,19 @@ testViewServerRendersChatStatusInRoomChat :: proc(t: ^testing.T) {
 	server := Server {
 		id         = 505,
 		name       = "Room View Server",
-		short_name = getShortServerName("Room View Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
 	State_setChatStatus(&state, "Unsupported roomId")
 
 	theme := skald.theme_dark()
 	input: skald.Input
 	msgs: [dynamic]Msg
 	widgets: skald.Widget_Store
+	defer skald.widget_store_destroy(&widgets)
+	defer delete(msgs)
 	ctx := testViewCtx(&theme, &input, &msgs, &widgets)
 	chatArea, chatAreaOK := testRoomChatAreaView(state, &ctx)
 	testing.expect(t, chatAreaOK, "expected room chat branch to expose a chat area stack")
@@ -818,14 +854,15 @@ testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.
 	server := Server {
 		id         = 77,
 		name       = "Room Server",
-		short_name = getShortServerName("Room Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
+	defer Config_deinit(&config)
 
 	transport, serverTransport, ok := buildEstablishedTransportPair(server, config)
 	assert(ok, "expected transport pair setup to succeed")
+	defer ClientServerTransport_deinit(&transport)
 
 	packetBytes, packetOK := ClientServerTransport_buildRoomChatPacketBytes(
 		&transport,
@@ -873,14 +910,15 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 	server := Server {
 		id         = 88,
 		name       = "Runtime Server",
-		short_name = getShortServerName("Runtime Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
+	defer Config_deinit(&config)
 
 	transport, serverTransport, ok := buildEstablishedTransportPair(server, config)
 	assert(ok, "expected transport pair setup to succeed")
+	defer ClientServerTransport_deinit(&transport)
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&serverTransport,
@@ -930,14 +968,15 @@ testClientServerTransportTranslatesProtocolErrorIntoRuntimeEvent :: proc(t: ^tes
 	server := Server {
 		id         = 99,
 		name       = "Protocol Server",
-		short_name = getShortServerName("Protocol Server"),
 		host       = "localhost",
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
+	defer Config_deinit(&config)
 
 	transport, _, ok := buildEstablishedTransportPair(server, config)
 	assert(ok, "expected transport pair setup to succeed")
+	defer ClientServerTransport_deinit(&transport)
 
 	packetBytes, packetOK := common.buildPacketBytes(
 		.ServerProtocolError,
@@ -990,21 +1029,21 @@ testStateInitFromConfigAttemptsOnlySelectedDefaultServer :: proc(t: ^testing.T) 
 			Server {
 				id = 11,
 				name = "Alpha Server",
-				short_name = getShortServerName("Alpha Server"),
 				host = "localhost",
 				port = common.DEFAULT_SERVER_PORT,
 			},
 			Server {
 				id = 22,
 				name = "Bravo Server",
-				short_name = getShortServerName("Bravo Server"),
 				host = "localhost",
 				port = common.DEFAULT_SERVER_PORT + 1,
 			},
 		},
 	)
 
+	defer Config_deinit(&config)
 	state := State_initFromConfig(config)
+	defer State_deinit(&state)
 
 	testing.expect(
 		t,
@@ -1044,7 +1083,6 @@ testStateInitFromConfigCanEstablishSelectedTransportViaStartupBridge :: proc(t: 
 			Server {
 				id = 44,
 				name = "Handshake Server",
-				short_name = getShortServerName("Handshake Server"),
 				host = "localhost",
 				port = common.DEFAULT_SERVER_PORT,
 			},
@@ -1133,7 +1171,9 @@ testStateInitFromConfigCanEstablishSelectedTransportViaStartupBridge :: proc(t: 
 	}
 	defer startupAuthBridge = originalBridge
 
+	defer Config_deinit(&config)
 	state := State_initFromConfig(config)
+	defer State_deinit(&state)
 
 	testing.expect(t, len(state.serverTransports) == 1, "expected a single transport")
 	testing.expect(
@@ -1158,7 +1198,6 @@ testStateInitFromConfigClearsPendingAuthStateAfterFailureAndDisconnect :: proc(t
 			Server {
 				id = 55,
 				name = "Rejecting Server",
-				short_name = getShortServerName("Rejecting Server"),
 				host = "localhost",
 				port = common.DEFAULT_SERVER_PORT,
 			},
@@ -1222,7 +1261,9 @@ testStateInitFromConfigClearsPendingAuthStateAfterFailureAndDisconnect :: proc(t
 	}
 	defer startupAuthBridge = originalBridge
 
+	defer Config_deinit(&config)
 	state := State_initFromConfig(config)
+	defer State_deinit(&state)
 	transport := state.serverTransports[0]
 
 	testing.expect(
@@ -1266,15 +1307,15 @@ testStateInitFromConfigSurfacesSelectedTransportInitFailure :: proc(t: ^testing.
 			Server {
 				id = 33,
 				name = "Broken Server",
-				short_name = getShortServerName("Broken Server"),
 				host = "localhost",
 				port = common.DEFAULT_SERVER_PORT,
 			},
 		},
-		friends      = {},
 	}
+	defer delete(config.servers)
 
 	state := State_initFromConfig(config)
+	defer State_deinit(&state)
 
 	testing.expect(
 		t,
@@ -1298,9 +1339,15 @@ testStateInitFromConfigSurfacesSelectedTransportInitFailure :: proc(t: ^testing.
 	)
 }
 
+// The server binds a nickname to the first identity key it sees, and live tests generate a
+// fresh key every run, so each run needs nicknames the database has not seen before.
+liveTestUniqueNickname :: proc(prefix: string) -> string {
+	return fmt.aprintf("%s-%x", prefix, time.time_to_unix_nano(time.now()))
+}
+
 @(test)
 testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing.T) {
-	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.allocator) != "1" {
+	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.temp_allocator) != "1" {
 		return
 	}
 
@@ -1312,12 +1359,14 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 			Server {
 				id = 66,
 				name = "Live Server",
-				short_name = getShortServerName("Live Server"),
 				host = "127.0.0.1",
 				port = 12345,
 			},
 		},
 	)
+
+	delete(config.display_name)
+	config.display_name = liveTestUniqueNickname("live")
 
 	originalBridge := startupAuthBridge
 	startupAuthBridge = startupAuthBridge_real
@@ -1348,6 +1397,28 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 		"expected startup return to retain the live ENet session",
 	)
 
+	// Startup requested the room list; the background worker must service the session and
+	// queue the server's reply without the UI polling ENet.
+	state.networkWorker = ClientNetworkWorker_start(state.serverTransports[:])
+	roomListReceived := false
+	deadline := time.tick_now()
+	for !roomListReceived && time.tick_since(deadline) < 3 * time.Second {
+		event, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
+		if hasEvent {
+			roomListReceived = event.kind == .RoomListReceived
+			ClientTransportRuntimeEvent_deinit(&event)
+		} else {
+			time.sleep(10 * time.Millisecond)
+		}
+	}
+	ClientNetworkWorker_stop(state.networkWorker)
+	state.networkWorker = nil
+	testing.expect(
+		t,
+		roomListReceived,
+		"expected the network worker to deliver the startup room list from a live server",
+	)
+
 	postAuthProbeSent := ClientServerTransport_sendENetPacket(
 		transport.enetHost,
 		transport.enetPeer,
@@ -1363,7 +1434,7 @@ testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing
 
 @(test)
 testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: proc(t: ^testing.T) {
-	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.allocator) != "1" {
+	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.temp_allocator) != "1" {
 		return
 	}
 
@@ -1375,7 +1446,6 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 			Server {
 				id = 67,
 				name = "Live Chat Server",
-				short_name = getShortServerName("Live Chat Server"),
 				host = "127.0.0.1",
 				port = 12345,
 			},
@@ -1386,12 +1456,16 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 			Server {
 				id = 67,
 				name = "Live Chat Server",
-				short_name = getShortServerName("Live Chat Server"),
 				host = "127.0.0.1",
 				port = 12345,
 			},
 		},
 	)
+
+	delete(configA.display_name)
+	configA.display_name = liveTestUniqueNickname("live-a")
+	delete(configB.display_name)
+	configB.display_name = liveTestUniqueNickname("live-b")
 
 	originalBridge := startupAuthBridge
 	startupAuthBridge = startupAuthBridge_real

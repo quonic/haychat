@@ -188,44 +188,61 @@ IPC__state_init :: proc() {
 	ipcState.database_queue = make([dynamic]IPC_Queue_Message)
 }
 
+// Exhaustive on purpose: a new request variant must decide what it owns.
 IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest) {
-	#partial switch request.queryType {
-	case .AuthLookupByNickname:
-		delete(request.authLookup.nickname)
-	case .ResolveUserIdentity:
-		delete(request.userIdentity.nickname)
-	case .RawSQL:
-		delete(request.rawSQL.query)
-	case .StoreRoomChatMessage:
-		delete(request.storeChat.content)
-	case .CreateRoom:
-		delete(request.createRoom.name)
-		delete(request.createRoom.description)
-	case .EditRoom:
-		delete(request.editRoom.name)
-		delete(request.editRoom.description)
-	case:
+	switch r in request {
+	case common.DatabaseUserIdentityRequest:
+		delete(r.nickname)
+	case common.DatabasePostRoomChatMessageRequest:
+		delete(r.content)
+	case common.DatabaseCreateRoomRequest:
+		delete(r.name)
+		delete(r.description)
+	case common.DatabaseEditRoomRequest:
+		delete(r.name)
+		delete(r.description)
+	case common.DatabaseRoomListRequest,
+	     common.DatabaseRoomMemberListRequest,
+	     common.DatabaseRoomHistoryRequest,
+	     common.DatabaseUserServerAdminRequest,
+	     common.DatabaseDeleteRoomRequest,
+	     common.DatabaseAddRoomMemberRequest,
+	     common.DatabaseRemoveRoomMemberRequest:
+	case nil:
 	}
 }
 
+IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
+	delete(message.timestamp)
+	delete(message.content)
+}
+
+// Exhaustive on purpose: a new result variant must decide what it owns.
 IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryResponse) {
 	delete(response.message)
-	delete(response.result)
-	for room in response.roomSummaries {
-		delete(room.name)
-		delete(room.description)
+	switch r in response.result {
+	case common.DatabaseRoomListResult:
+		for room in r.rooms {
+			delete(room.name)
+			delete(room.description)
+		}
+		delete(r.rooms)
+	case common.DatabaseRoomMemberListResult:
+		delete(r.userIDs)
+	case common.DatabasePostRoomChatMessageResult:
+		IPC__stored_chat_message_deinit(r.storedMessage)
+		delete(r.recipientUserIDs)
+	case common.DatabaseRoomHistoryResult:
+		for message in r.messages {
+			IPC__stored_chat_message_deinit(message)
+		}
+		delete(r.messages)
+	case common.DatabaseRoomMutationResult:
+		delete(r.room.name)
+		delete(r.room.description)
+	case common.DatabaseUserIdentityResult, common.DatabaseUserServerAdminResult:
+	case nil:
 	}
-	delete(response.roomSummaries)
-	delete(response.memberUserIDs)
-	delete(response.storedChatMessage.timestamp)
-	delete(response.storedChatMessage.content)
-	delete(response.mutationRoom.name)
-	delete(response.mutationRoom.description)
-	for message in response.historyMessages {
-		delete(message.timestamp)
-		delete(message.content)
-	}
-	delete(response.historyMessages)
 }
 
 IPC__message_deinit :: proc(msg: ^Message) {
