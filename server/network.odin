@@ -5,7 +5,6 @@ import "core:fmt"
 import "core:net"
 import "core:os"
 import "core:sys/linux"
-import "core:time"
 import "vendor:ENet"
 
 NetworkPeerInfo :: struct {

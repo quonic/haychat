@@ -6,7 +6,6 @@ import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
-import "core:strconv"
 import "core:strings"
 import "core:sync"
 

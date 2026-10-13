@@ -3,7 +3,6 @@ package server
 import "../common"
 import "core:crypto/ecdh"
 import "core:fmt"
-import "core:net"
 import "core:sync"
 import "vendor:ENet"
 
