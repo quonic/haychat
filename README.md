@@ -33,13 +33,22 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 
 ### Development Environment Setup
 
-The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Fedora 40+ (`dnf`) or Ubuntu 25.04+/Debian 13+ (`apt`). Earlier Ubuntu and Debian releases do not package SDL3, which the client links against. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
+The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Fedora 40+ (`dnf`) or Ubuntu 25.04+/Debian 13+ (`apt`). Earlier Ubuntu and Debian releases do not package SDL3 and SDL3_ttf, which the client links against. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
 
 1. Run `./setup-dev-env.sh` on a clean supported machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
    If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
 2. Ensure `odin` is on your `PATH`. The bootstrap script links it into `$HOME/.local/bin/odin`; if your shell does not already include `$HOME/.local/bin`, add that directory before continuing.
-3. Validate the supported source-build environment with `./check.sh`, which runs `odin check server`, `odin check client -target:linux_amd64`, and every test suite with leak detection enabled (a test fails on any leak or bad free). CI runs the same script on every push and pull request, plus `odin check client -target:windows_amd64` on Windows.
+3. Validate the supported source-build environment with `./check.sh`, which runs `odin check server`, `odin check client -target:linux_amd64`, and every test suite (including the client UI toolkit in `client/ui`) with leak detection enabled (a test fails on any leak or bad free). CI runs the same script on every push and pull request, plus `odin check client -target:windows_amd64` on Windows.
 4. Use the server helper seam below to seed auth data and launch the local MVP runtime.
+
+### Client Dependencies
+
+The client draws its own immediate-mode UI with `vendor:sdl3` (windowing, input, and the 2D renderer) and `vendor:sdl3/ttf` (text shaping and layout), both from Odin's vendor collection. No other GUI library is needed.
+
+- Linux: install SDL3 and SDL3_ttf development packages (`SDL3-devel SDL3_ttf-devel` on Fedora, `libsdl3-dev libsdl3-ttf-dev` on Ubuntu/Debian). `./setup-dev-env.sh` installs them.
+- Windows: Odin's vendor collection ships the import libraries. To run the client, copy `SDL3.dll` from `%ODIN_ROOT%\vendor\sdl3\` and `SDL3_ttf.dll` from `%ODIN_ROOT%\vendor\sdl3\ttf\` next to `client.exe`.
+
+The UI fonts (Inter, under the SIL Open Font License, and Twemoji, under CC-BY 4.0) are embedded into the client binary from `client/assets/fonts/`, where their license files live.
 
 The supported bootstrap script assumes these defaults unless you override them before running it:
 
@@ -49,7 +58,6 @@ The supported bootstrap script assumes these defaults unless you override them b
 - PostgreSQL password: `haychat`
 - PostgreSQL database: `haychat`
 - Odin root: `$HOME/Odin`
-- Skald checkout: `$HOME/Skald`
 
 Supported environment overrides for the bootstrap script:
 
@@ -59,7 +67,6 @@ Supported environment overrides for the bootstrap script:
 - `HAYCHAT_DATABASE_PASS`
 - `HAYCHAT_DATABASE_NAME`
 - `HAYCHAT_ODIN_ROOT`
-- `HAYCHAT_SKALD_ROOT`
 - `HAYCHAT_LOCAL_BIN_DIR`
 
 ### Local Test Server Bootstrap

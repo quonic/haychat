@@ -1,0 +1,31 @@
+Twemoji-Mozilla — attribution and licence
+==========================================
+
+The HayChat client embeds `Twemoji-Mozilla.ttf` (with Odin's `#load`) as
+the colour-emoji fallback for the Inter UI font.
+
+Artwork
+-------
+The emoji glyphs are derived from **Twemoji** by Twitter, Inc. and
+contributors. Twemoji artwork is licensed under the Creative Commons
+Attribution 4.0 International licence (CC-BY-4.0).
+
+  https://creativecommons.org/licenses/by/4.0/
+
+Required attribution: "Twemoji by Twitter, Inc. and contributors —
+CC-BY 4.0 — https://twemoji.twitter.com".
+
+Every HayChat client binary redistributes this artwork, so this
+attribution must ship with the client (for example in its credits or
+documentation).
+
+Build
+-----
+This is the **Twemoji-Mozilla** build: a TTF assembling Twemoji's SVG
+sources into COLRv0 layered glyphs. The build tooling is maintained by
+Mozilla under the Apache 2.0 licence at:
+
+  https://github.com/mozilla/twemoji-colr
+
+The artwork licence (CC-BY-4.0) governs redistribution; the tool
+licence (Apache 2.0) only matters if the font is regenerated.

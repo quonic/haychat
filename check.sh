@@ -23,6 +23,9 @@ odin test common "${test_flags[@]}"
 echo "==> odin test client"
 odin test client "${test_flags[@]}"
 
+echo "==> odin test client/ui"
+odin test client/ui "${test_flags[@]}"
+
 # Router and database tests share process-wide state, so the server suite runs serially.
 echo "==> odin test server"
 odin test server "${test_flags[@]}" -define:ODIN_TEST_THREADS=1

@@ -12,7 +12,7 @@ jobs:
   linux:
     name: Linux checks, tests, and live auth proof
     runs-on: ubuntu-latest
-    # Fedora packages SDL3, which the client links and Ubuntu 24.04 does not provide.
+    # Fedora packages SDL3 and SDL3_ttf, which the client links and Ubuntu 24.04 does not provide.
     container: fedora:44
     services:
       postgres:
@@ -36,7 +36,7 @@ jobs:
       - name: Install system packages
         run: >-
           dnf install -y git clang llvm llvm-devel lld libpq-devel enet-devel SDL3-devel
-          libX11-devel openssl-devel which findutils procps-ng
+          SDL3_ttf-devel libX11-devel openssl-devel which findutils procps-ng
 
       - uses: actions/checkout@v4
 
@@ -99,9 +99,6 @@ jobs:
           checkout_pinned https://github.com/laytan/odin-postgresql.git /c/Odin/shared/pg "$PG_COMMIT"
           checkout_pinned https://github.com/laytan/odin-http.git /c/Odin/shared/odin-http \
             "$ODIN_HTTP_COMMIT"
-          checkout_pinned https://github.com/BuLEEto/Skald.git /c/Skald "$SKALD_COMMIT"
-          rm -rf /c/Odin/shared/skald
-          cp -r /c/Skald/skald /c/Odin/shared/skald
 
       - name: Build Odin
         shell: cmd

@@ -12,23 +12,34 @@ NETWORK_WORKER_IDLE_SLEEP :: 5 * time.Millisecond
 // ClientNetworkWorker services every live server session on a background thread. ENet needs
 // regular servicing to send acknowledgements and keepalives, so servers the user is not
 // looking at would otherwise time out. Decoded runtime events are queued for the UI thread,
-// which drains them in view without doing any network I/O itself.
+// which drains them each frame without doing any network I/O itself.
 //
 // mutex guards the ENet hosts, the transport crypto state, and the event queue. Any code on
 // the UI thread that sends through a transport must hold it (see ClientNetworkWorker_lock).
 ClientNetworkWorker :: struct {
-	mutex:      sync.Mutex,
-	transports: []ClientServerTransport,
-	events:     [dynamic]ClientTransportRuntimeEvent,
-	thread:     ^thread.Thread,
-	stopping:   bool,
+	mutex:             sync.Mutex,
+	transports:        []ClientServerTransport,
+	events:            [dynamic]ClientTransportRuntimeEvent,
+	thread:            ^thread.Thread,
+	stopping:          bool,
+	// Called on the worker thread, without the mutex held, after a pass queued new events.
+	onEventQueued:     NetworkWorkerEventQueuedProc,
+	onEventQueuedData: rawptr,
 }
+
+NetworkWorkerEventQueuedProc :: proc(userdata: rawptr)
 
 // Starts servicing transports. The slice must stay valid until ClientNetworkWorker_stop, so
 // the owning array must not be reallocated while the worker runs.
-ClientNetworkWorker_start :: proc(transports: []ClientServerTransport) -> ^ClientNetworkWorker {
+ClientNetworkWorker_start :: proc(
+	transports: []ClientServerTransport,
+	onEventQueued: NetworkWorkerEventQueuedProc = nil,
+	onEventQueuedData: rawptr = nil,
+) -> ^ClientNetworkWorker {
 	worker := new(ClientNetworkWorker)
 	worker.transports = transports
+	worker.onEventQueued = onEventQueued
+	worker.onEventQueuedData = onEventQueuedData
 	worker.events = make([dynamic]ClientTransportRuntimeEvent)
 	worker.thread = thread.create_and_start_with_data(worker, ClientNetworkWorker_run)
 	return worker
@@ -65,9 +76,8 @@ ClientNetworkWorker_unlock :: proc(worker: ^ClientNetworkWorker) {
 // Services each transport once and queues any events. Exposed separately from the thread loop
 // so tests can drive it deterministically.
 ClientNetworkWorker_servicePass :: proc(worker: ^ClientNetworkWorker) {
+	queued := false
 	sync.mutex_lock(&worker.mutex)
-	defer sync.mutex_unlock(&worker.mutex)
-
 	for index in 0 ..< len(worker.transports) {
 		transport := &worker.transports[index]
 		for _ in 0 ..< NETWORK_WORKER_MAX_EVENTS_PER_SERVER {
@@ -76,7 +86,13 @@ ClientNetworkWorker_servicePass :: proc(worker: ^ClientNetworkWorker) {
 				break
 			}
 			append(&worker.events, event)
+			queued = true
 		}
+	}
+	sync.mutex_unlock(&worker.mutex)
+
+	if queued && worker.onEventQueued != nil {
+		worker.onEventQueued(worker.onEventQueuedData)
 	}
 }
 

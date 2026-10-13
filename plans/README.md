@@ -9,7 +9,7 @@ Updated 2026-10-07. Run `./check.sh` for the current numbers; CI runs it on ever
 - `odin check server` and `odin check client -target:linux_amd64` pass; CI also checks the Windows client.
 - Tests: `common` 4, `client` 25, `server` 41, all leak-checked.
 - The live startup-auth proof passes against a real server and PostgreSQL.
-- The repository contains a threaded server, a Skald-based client UI with a background network worker, shared protocol and crypto code, file storage helpers, a token-protected localhost web admin, and an automated test suite.
+- The repository contains a threaded server, an SDL3 client with its own immediate-mode UI and a background network worker, shared protocol and crypto code, file storage helpers, a token-protected localhost web admin, and an automated test suite.
 
 ## What Is Already Complete
 

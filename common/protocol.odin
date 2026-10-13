@@ -9,6 +9,8 @@ import "core:time/datetime"
 ProtocolVersion :: u32
 protocolVersion: ProtocolVersion = 5
 GENERAL_ROOM_ID :: int(1)
+// Largest room chat message the server accepts, in bytes of UTF-8 content.
+CHAT_MESSAGE_MAX_BYTES :: 4000
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.

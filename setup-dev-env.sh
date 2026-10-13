@@ -3,11 +3,10 @@ set -euo pipefail
 
 # Bootstraps the supported Linux-first HayChat development environment.
 # Supported host flow: Fedora 40+ with dnf, or Ubuntu 25.04+/Debian 13+ with apt (earlier
-# Ubuntu and Debian releases do not package SDL3, which the client links against).
+# Ubuntu and Debian releases do not package SDL3 and SDL3_ttf, which the client links against).
 
 repo_dir=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
 odin_root=${HAYCHAT_ODIN_ROOT:-$HOME/Odin}
-skald_root=${HAYCHAT_SKALD_ROOT:-$HOME/Skald}
 local_bin_dir=${HAYCHAT_LOCAL_BIN_DIR:-$HOME/.local/bin}
 default_db_user=${HAYCHAT_DATABASE_USER:-haychat}
 default_db_pass=${HAYCHAT_DATABASE_PASS:-haychat}
@@ -26,6 +25,7 @@ required_packages_dnf=(
 	libpq-devel
 	enet-devel
 	SDL3-devel
+	SDL3_ttf-devel
 	postgresql
 	postgresql-contrib
 	postgresql-devel
@@ -50,6 +50,7 @@ required_packages_apt=(
 	libpq-dev
 	enet-dev
 	libsdl3-dev
+	libsdl3-ttf-dev
 	postgresql
 	postgresql-client
 	libx11-dev
@@ -141,11 +142,6 @@ bootstrap_odin() {
 		cd "$odin_root"
 		./build_odin.sh
 	)
-	# Skald uses vendor:stb, whose static libraries are not committed for Linux.
-	(
-		cd "$odin_root/vendor/stb/src"
-		CC=${CC:-clang} AR=${AR:-llvm-ar} ./build_stb.sh
-	)
 
 	mkdir -p "$local_bin_dir"
 	ln -sf "$odin_root/odin" "$local_bin_dir/odin"
@@ -164,10 +160,6 @@ bootstrap_shared_libraries() {
 	log_step "Preparing Odin shared libraries used by HayChat"
 	clone_or_update_repo "https://github.com/laytan/odin-postgresql.git" "$odin_root/shared/pg"
 	clone_or_update_repo "https://github.com/laytan/odin-http.git" "$odin_root/shared/odin-http"
-	clone_or_update_repo "https://github.com/BuLEEto/Skald.git" "$skald_root"
-
-	mkdir -p "$odin_root/shared"
-	ln -sfn "$skald_root/skald" "$odin_root/shared/skald"
 }
 
 bootstrap_postgres() {

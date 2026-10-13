@@ -9,7 +9,6 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
-import "shared:skald"
 
 startupAuthBridgeTestMutex: sync.Mutex
 roomChatSendBridgeTestMutex: sync.Mutex
@@ -25,7 +24,7 @@ roomChatSendBridgeTestStub :: proc(
 ) -> bool {
 	roomChatSendBridgeTestServerID = transport.serverID
 	roomChatSendBridgeTestRoomID = roomID
-	// update frees the message after sending, so keep a copy for assertions.
+	// The sender frees the message after sending, so keep a copy for assertions.
 	delete(roomChatSendBridgeTestContent)
 	roomChatSendBridgeTestContent = strings.clone(content)
 	return roomChatSendBridgeTestReturnValue
@@ -154,38 +153,34 @@ testUpdateStateForServer :: proc(server: Server) -> State {
 	state.selected_server_id = server.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, server.id)
 	state.selected_channel_id = common.GENERAL_ROOM_ID
-	state.chat_input_draft = strings.clone("pending channel draft")
-	state.dm_chat_draft = strings.clone("pending dm draft")
+	append(State_selectedRoomDraft(&state), "pending channel draft")
+	append(&state.dm_chat_draft, "pending dm draft")
 	return state
 }
 
-testViewCtx :: proc(
-	theme: ^skald.Theme,
-	input: ^skald.Input,
-	msgs: ^[dynamic]Msg,
-	widgets: ^skald.Widget_Store,
-) -> skald.Ctx(Msg) {
-	return skald.Ctx(Msg){theme = theme, input = input, msgs = msgs, widgets = widgets}
+// Applies a room chat event the way the frame loop does, including the event cleanup, so tests
+// exercise the real ownership path.
+testApplyRoomChat :: proc(
+	state: ^State,
+	serverID, roomID, senderID, messageID: int,
+	content: string,
+) {
+	event := ClientTransportRuntimeEvent {
+		kind      = .RoomChatReceived,
+		serverID  = serverID,
+		roomID    = roomID,
+		senderID  = senderID,
+		messageID = messageID,
+		timestamp = strings.clone("t"),
+		message   = strings.clone(content),
+	}
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
 }
 
-testRoomChatAreaView :: proc(s: State, ctx: ^skald.Ctx(Msg)) -> (skald.View_Stack, bool) {
-	rootView := view_server(s, ctx)
-	root, rootOK := rootView.(skald.View_Stack)
-	if !rootOK || len(root.children) != 1 {
-		return {}, false
-	}
-
-	innerRow, innerRowOK := root.children[0].(skald.View_Stack)
-	if !innerRowOK || len(innerRow.children) < 3 {
-		return {}, false
-	}
-
-	chatArea, chatAreaOK := innerRow.children[2].(skald.View_Stack)
-	if !chatAreaOK {
-		return {}, false
-	}
-
-	return chatArea, true
+testSetDraft :: proc(draft: ^[dynamic]u8, value: string) {
+	clear(draft)
+	append(draft, value)
 }
 
 liveTestTransportStatus :: proc(transport: ^ClientServerTransport) -> string {
@@ -276,7 +271,7 @@ testStateInitFromConfigStartsInServerChatForFirstRelease :: proc(t: ^testing.T) 
 }
 
 @(test)
-testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^testing.T) {
+testSendChannelChatDoesNotAppendVisibleChatOnSubmit :: proc(t: ^testing.T) {
 	sync.mutex_lock(&roomChatSendBridgeTestMutex)
 	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
 
@@ -287,6 +282,8 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	testSetDraft(State_selectedRoomDraft(&state), "hello\thaychat")
 
 	originalRoomChatSendBridge := roomChatSendBridge
 	roomChatSendBridgeTestServerID = 0
@@ -297,17 +294,18 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 	roomChatSendBridge = roomChatSendBridgeTestStub
 	defer roomChatSendBridge = originalRoomChatSendBridge
 
-	out, _ := update(state, Msg{kind = .SendChannelChatMessage, new_value = "hello haychat"})
+	State_sendChannelChat(&state)
 
+	view := buildRoomView(&state)
 	testing.expect(
 		t,
-		len(out.current_chat_messages) == 0,
+		len(view.lines) == 0,
 		"expected channel submit to avoid locally appending visible chat",
 	)
 	testing.expect(
 		t,
-		out.chat_input_draft == "",
-		"expected successful channel submit to clear the draft",
+		len(State_selectedRoomDraft(&state)) == 0,
+		"expected successful channel submit to clear the room draft",
 	)
 	testing.expect(
 		t,
@@ -319,25 +317,61 @@ testUpdateSendChannelChatMessageDoesNotAppendVisibleChatOnSubmit :: proc(t: ^tes
 		roomChatSendBridgeTestRoomID == common.GENERAL_ROOM_ID,
 		"expected channel submit to target the General room",
 	)
-	testing.expect(
+	testing.expectf(
 		t,
-		roomChatSendBridgeTestContent == "hello haychat",
-		"expected channel submit to forward the typed content to the transport bridge",
+		roomChatSendBridgeTestContent == "hello    haychat",
+		"expected the tab-normalized draft to reach the transport bridge, got %q",
+		roomChatSendBridgeTestContent,
 	)
 	testing.expect(
 		t,
-		len(out.chat_status_message) == 0,
+		len(state.chat_status_message) == 0,
 		"expected successful channel submit to keep the chat status clear",
 	)
 
-	State_deinit(&out)
 	delete(roomChatSendBridgeTestContent)
 	roomChatSendBridgeTestContent = ""
-	_ = t
 }
 
 @(test)
-testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T) {
+testSendChannelChatKeepsDraftWhenTransportRejects :: proc(t: ^testing.T) {
+	sync.mutex_lock(&roomChatSendBridgeTestMutex)
+	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
+
+	server := Server {
+		id   = 508,
+		name = "Rejecting Server",
+		host = "localhost",
+		port = common.DEFAULT_SERVER_PORT,
+	}
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+
+	originalRoomChatSendBridge := roomChatSendBridge
+	roomChatSendBridgeTestReturnValue = false
+	roomChatSendBridge = roomChatSendBridgeTestStub
+	defer roomChatSendBridge = originalRoomChatSendBridge
+
+	State_sendChannelChat(&state)
+
+	testing.expectf(
+		t,
+		string(State_selectedRoomDraft(&state)[:]) == "pending channel draft",
+		"expected a rejected send to keep the draft, got %q",
+		string(State_selectedRoomDraft(&state)[:]),
+	)
+	testing.expect(
+		t,
+		len(state.chat_status_message) > 0,
+		"expected a rejected send to surface a chat status",
+	)
+
+	delete(roomChatSendBridgeTestContent)
+	roomChatSendBridgeTestContent = ""
+}
+
+@(test)
+testReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T) {
 	sync.mutex_lock(&roomChatSendBridgeTestMutex)
 	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
 
@@ -348,6 +382,7 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
 	state.serverTransports[state.selected_transport_index].authenticatedUserID = 77
 
 	originalRoomChatSendBridge := roomChatSendBridge
@@ -355,91 +390,63 @@ testUpdateReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T
 	roomChatSendBridge = roomChatSendBridgeTestStub
 	defer roomChatSendBridge = originalRoomChatSendBridge
 
-	afterSend, _ := update(
-		state,
-		Msg{kind = .SendChannelChatMessage, new_value = "should wait for echo"},
-	)
+	testSetDraft(State_selectedRoomDraft(&state), "should wait for echo")
+	State_sendChannelChat(&state)
 	testing.expect(
 		t,
-		len(afterSend.current_chat_messages) == 0,
+		len(buildRoomView(&state).lines) == 0,
 		"expected submit to keep chat empty until the server echo arrives",
 	)
 
-	afterSelfReceive, _ := update(
-		afterSend,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = server.id,
-			channel_id = common.GENERAL_ROOM_ID,
-			sender_id = 77,
-			new_value = strings.clone("self echo"),
-		},
-	)
-	testing.expect(
+	testApplyRoomChat(&state, server.id, common.GENERAL_ROOM_ID, 77, 1, "self echo")
+	afterSelf := buildRoomView(&state)
+	testing.expectf(
 		t,
-		len(afterSelfReceive.current_chat_messages) == 2,
-		"expected authoritative self echo to append one visible room-chat line",
+		len(afterSelf.lines) == 1,
+		"expected authoritative self echo to append one line, got %d",
+		len(afterSelf.lines),
 	)
-	testing.expect(
-		t,
-		afterSelfReceive.current_chat_messages[0].str == "You: ",
-		"expected self echoes to render with a self label",
-	)
-	testing.expect(
-		t,
-		afterSelfReceive.current_chat_messages[0].weight == .Bold,
-		"expected self labels to keep the existing bold sender styling",
-	)
-	testing.expect(
-		t,
-		afterSelfReceive.current_chat_messages[0].color == skald.theme_dark().color.primary,
-		"expected self echoes to render with distinct self styling",
-	)
-	testing.expect(
-		t,
-		afterSelfReceive.current_chat_messages[1].str == "self echo",
-		"expected self echo content to be appended on authoritative receive",
-	)
+	if len(afterSelf.lines) == 1 {
+		testing.expect(
+			t,
+			afterSelf.lines[0].senderLabel == "You",
+			"expected self echoes to use the self label",
+		)
+		testing.expect(t, afterSelf.lines[0].isSelf, "expected self echoes to be marked as self")
+		testing.expect(
+			t,
+			afterSelf.lines[0].content == "self echo",
+			"expected self echo content to appear on authoritative receive",
+		)
+	}
 
-	afterOtherReceive, _ := update(
-		afterSelfReceive,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = server.id,
-			channel_id = common.GENERAL_ROOM_ID,
-			sender_id = 42,
-			new_value = strings.clone("other echo"),
-		},
-	)
-	testing.expect(
+	testApplyRoomChat(&state, server.id, common.GENERAL_ROOM_ID, 42, 2, "other echo")
+	afterOther := buildRoomView(&state)
+	testing.expectf(
 		t,
-		len(afterOtherReceive.current_chat_messages) == 5,
-		"expected a second authoritative receive to append a second visible room-chat line",
+		len(afterOther.lines) == 2,
+		"expected a second authoritative receive to append a second line, got %d",
+		len(afterOther.lines),
 	)
-	testing.expect(
-		t,
-		afterOtherReceive.current_chat_messages[3].str == "User 42: ",
-		"expected non-self echoes to render with the sender ID label",
-	)
-	testing.expect(
-		t,
-		afterOtherReceive.current_chat_messages[3].weight == .Bold,
-		"expected non-self echoes to keep the existing bold sender styling",
-	)
-	testing.expect(
-		t,
-		afterOtherReceive.current_chat_messages[3].color == skald.theme_dark().color.fg,
-		"expected non-self echoes to render with the standard sender styling",
-	)
+	if len(afterOther.lines) == 2 {
+		testing.expect(
+			t,
+			afterOther.lines[1].senderLabel == "User 42",
+			"expected non-self echoes to use the sender ID label",
+		)
+		testing.expect(
+			t,
+			!afterOther.lines[1].isSelf,
+			"expected non-self echoes to use the standard sender styling",
+		)
+	}
 
-	State_deinit(&afterOtherReceive)
 	delete(roomChatSendBridgeTestContent)
 	roomChatSendBridgeTestContent = ""
-	_ = t
 }
 
 @(test)
-testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^testing.T) {
+testSendDirectMessageSurfacesUnsupportedStatusWithoutLocalAppend :: proc(t: ^testing.T) {
 	server := Server {
 		id         = 503,
 		name       = "DM Server",
@@ -447,39 +454,30 @@ testUpdateSendChatMessageSurfacesUnsupportedDMWithoutLocalAppend :: proc(t: ^tes
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
-	state.view_dms = true
-	initialChatLen := len(state.current_dm_chat)
-	initialPrompt := state.current_dm_chat[0].str
+	defer State_deinit(&state)
+	State_showDMs(&state)
 
-	out, _ := update(state, Msg{kind = .SendChatMessage, new_value = "hello dm"})
+	State_sendDirectMessage(&state)
 
 	testing.expect(
 		t,
-		len(out.current_dm_chat) == initialChatLen,
+		len(state.current_dm_chat) == 0,
 		"expected unsupported DM submit to avoid locally appending visible chat",
 	)
 	testing.expect(
 		t,
-		out.current_dm_chat[0].str == initialPrompt,
-		"expected unsupported DM submit to leave the visible DM transcript unchanged",
-	)
-	testing.expect(
-		t,
-		out.dm_chat_draft == "pending dm draft",
+		string(state.dm_chat_draft[:]) == "pending dm draft",
 		"expected unsupported DM submit to keep the draft intact",
 	)
 	testing.expect(
 		t,
-		out.chat_status_message == DIRECT_MESSAGES_UNSUPPORTED_STATUS,
+		state.chat_status_message == DIRECT_MESSAGES_UNSUPPORTED_STATUS,
 		"expected unsupported DM submit to surface a visible status message",
 	)
-
-	State_deinit(&out)
-	_ = t
 }
 
 @(test)
-testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
+testMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 	server := Server {
 		id         = 504,
 		name       = "Narrow Server",
@@ -487,56 +485,50 @@ testUpdateMismatchedReceiveAndProtocolErrorStayNarrow :: proc(t: ^testing.T) {
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
 
-	mismatchedServer, _ := update(
-		state,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = server.id + 1,
-			channel_id = common.GENERAL_ROOM_ID,
-			sender_id = 42,
-			new_value = strings.clone("wrong server"),
-		},
-	)
+	testApplyRoomChat(&state, server.id + 1, common.GENERAL_ROOM_ID, 42, 1, "wrong server")
 	testing.expect(
 		t,
-		len(mismatchedServer.current_chat_messages) == 0,
+		len(buildRoomView(&state).lines) == 0,
 		"expected room chat from a different server to stay hidden",
 	)
 
-	mismatchedRoom, _ := update(
-		mismatchedServer,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = server.id,
-			channel_id = common.GENERAL_ROOM_ID + 1,
-			sender_id = 42,
-			new_value = strings.clone("wrong room"),
-		},
-	)
+	testApplyRoomChat(&state, server.id, common.GENERAL_ROOM_ID + 1, 42, 2, "wrong room")
 	testing.expect(
 		t,
-		len(mismatchedRoom.current_chat_messages) == 0,
+		len(buildRoomView(&state).lines) == 0,
 		"expected room chat from a different room to stay hidden",
 	)
-
-	protocolErrorState, _ := update(
-		mismatchedRoom,
-		Msg{kind = .TransportProtocolError, new_value = strings.clone("Unsupported roomId")},
+	otherRoom := ServerRoomCache_roomCache(
+		State_serverRoomCache(&state, server.id),
+		common.GENERAL_ROOM_ID + 1,
 	)
 	testing.expect(
 		t,
-		len(protocolErrorState.current_chat_messages) == 0,
+		len(otherRoom.messages) == 1 && otherRoom.messages[0].content == "wrong room",
+		"expected room chat for an inactive room to land in that room's cache",
+	)
+
+	event := ClientTransportRuntimeEvent {
+		kind     = .ProtocolError,
+		serverID = server.id,
+		message  = strings.clone("Unsupported roomId"),
+	}
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	view := buildRoomView(&state)
+	testing.expect(
+		t,
+		len(view.lines) == 0,
 		"expected protocol errors to avoid mutating visible room chat",
 	)
 	testing.expect(
 		t,
-		protocolErrorState.chat_status_message == "Unsupported roomId",
-		"expected protocol errors to surface through the chat status surface",
+		view.status == "Unsupported roomId",
+		"expected protocol errors to surface through the chat status",
 	)
-
-	State_deinit(&protocolErrorState)
-	_ = t
 }
 
 @(test)
@@ -556,42 +548,69 @@ testRoomCachesAreScopedByServerAndRoom :: proc(t: ^testing.T) {
 		port       = 1,
 	}
 	state := testStateWithServers({serverA, serverB})
+	defer State_deinit(&state)
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
 	state.selected_channel_id = 10
 
-	afterA, _ := update(
-		state,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = serverA.id,
-			channel_id = 10,
-			sender_id = 42,
-			message_id = 101,
-			new_value = strings.clone("from A"),
-		},
-	)
-	afterB, _ := update(
-		afterA,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = serverB.id,
-			channel_id = 10,
-			sender_id = 43,
-			message_id = 101,
-			new_value = strings.clone("from B"),
-		},
-	)
+	testApplyRoomChat(&state, serverA.id, 10, 42, 101, "from A")
+	testApplyRoomChat(&state, serverB.id, 10, 43, 101, "from B")
 
-	cacheA := State_serverRoomCache(&afterB, serverA.id)
-	cacheB := State_serverRoomCache(&afterB, serverB.id)
+	cacheA := State_serverRoomCache(&state, serverA.id)
+	cacheB := State_serverRoomCache(&state, serverB.id)
 	roomA := ServerRoomCache_roomCache(cacheA, 10)
 	roomB := ServerRoomCache_roomCache(cacheB, 10)
 	testing.expect(t, len(roomA.messages) == 1, "expected server A to retain its room message")
 	testing.expect(t, len(roomB.messages) == 1, "expected server B to retain its room message")
 	testing.expect(t, roomA.messages[0].content == "from A", "expected server A cache isolation")
 	testing.expect(t, roomB.messages[0].content == "from B", "expected server B cache isolation")
-	State_deinit(&afterB)
+}
+
+@(test)
+testRoomDraftsAreScopedByRoom :: proc(t: ^testing.T) {
+	sync.mutex_lock(&roomChatSendBridgeTestMutex)
+	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
+
+	server := Server {
+		id   = 605,
+		name = "Drafts",
+		host = "localhost",
+		port = 1,
+	}
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+
+	otherRoomID := common.GENERAL_ROOM_ID + 1
+	State_switchToChannel(&state, server.id, otherRoomID)
+	testing.expect(
+		t,
+		len(State_selectedRoomDraft(&state)) == 0,
+		"expected a newly selected room to start with an empty draft",
+	)
+	testSetDraft(State_selectedRoomDraft(&state), "other room draft")
+
+	State_switchToChannel(&state, server.id, common.GENERAL_ROOM_ID)
+	testing.expect(
+		t,
+		string(State_selectedRoomDraft(&state)[:]) == "pending channel draft",
+		"expected switching back to restore the General room draft",
+	)
+
+	originalRoomChatSendBridge := roomChatSendBridge
+	roomChatSendBridgeTestReturnValue = true
+	roomChatSendBridge = roomChatSendBridgeTestStub
+	defer roomChatSendBridge = originalRoomChatSendBridge
+	State_sendChannelChat(&state)
+
+	State_switchToChannel(&state, server.id, otherRoomID)
+	testing.expect(
+		t,
+		string(State_selectedRoomDraft(&state)[:]) == "other room draft",
+		"expected sending in one room to leave other room drafts untouched",
+	)
+
+	delete(roomChatSendBridgeTestContent)
+	roomChatSendBridgeTestContent = ""
 }
 
 @(test)
@@ -604,11 +623,17 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		port       = 1,
 	}
 	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
 	state.selected_channel_id = 12
 
-	firstPage := make([dynamic]common.StoredChatMessage, 0, 2)
+	firstPage := ClientTransportRuntimeEvent {
+		kind     = .RoomHistoryReceived,
+		serverID = server.id,
+		roomID   = 12,
+		hasOlder = true,
+	}
 	append(
-		&firstPage,
+		&firstPage.messages,
 		common.StoredChatMessage {
 			id = 2,
 			roomId = 12,
@@ -617,7 +642,7 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		},
 	)
 	append(
-		&firstPage,
+		&firstPage.messages,
 		common.StoredChatMessage {
 			id = 3,
 			roomId = 12,
@@ -625,20 +650,17 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 			content = strings.clone("three"),
 		},
 	)
-	afterFirstPage, _ := update(
-		state,
-		Msg {
-			kind = .RecieveRoomHistory,
-			id = server.id,
-			channel_id = 12,
-			messages = firstPage,
-			has_older = true,
-		},
-	)
+	State_applyRuntimeEvent(&state, &firstPage)
+	ClientTransportRuntimeEvent_deinit(&firstPage)
 
-	olderPage := make([dynamic]common.StoredChatMessage, 0, 2)
+	olderPage := ClientTransportRuntimeEvent {
+		kind     = .RoomHistoryReceived,
+		serverID = server.id,
+		roomID   = 12,
+		hasOlder = false,
+	}
 	append(
-		&olderPage,
+		&olderPage.messages,
 		common.StoredChatMessage {
 			id = 1,
 			roomId = 12,
@@ -647,7 +669,7 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		},
 	)
 	append(
-		&olderPage,
+		&olderPage.messages,
 		common.StoredChatMessage {
 			id = 2,
 			roomId = 12,
@@ -655,18 +677,10 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 			content = strings.clone("two"),
 		},
 	)
-	afterOlderPage, _ := update(
-		afterFirstPage,
-		Msg {
-			kind = .RecieveRoomHistory,
-			id = server.id,
-			channel_id = 12,
-			messages = olderPage,
-			has_older = false,
-		},
-	)
+	State_applyRuntimeEvent(&state, &olderPage)
+	ClientTransportRuntimeEvent_deinit(&olderPage)
 
-	cache := State_serverRoomCache(&afterOlderPage, server.id)
+	cache := State_serverRoomCache(&state, server.id)
 	room := ServerRoomCache_roomCache(cache, 12)
 	testing.expect(t, len(room.messages) == 3, "expected overlapping history pages to deduplicate")
 	testing.expect(t, room.messages[0].id == 1, "expected older messages to prepend in ID order")
@@ -681,7 +695,24 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		!room.hasOlder,
 		"expected latest history response to update pagination state",
 	)
-	State_deinit(&afterOlderPage)
+}
+
+testRoomListEvent :: proc(serverID: int, roomIDs: ..int) -> ClientTransportRuntimeEvent {
+	event := ClientTransportRuntimeEvent {
+		kind     = .RoomListReceived,
+		serverID = serverID,
+	}
+	for roomID in roomIDs {
+		append(
+			&event.rooms,
+			common.RoomSummary {
+				id = roomID,
+				name = fmt.aprintf("Room %d", roomID),
+				description = strings.clone(""),
+			},
+		)
+	}
+	return event
 }
 
 @(test)
@@ -694,27 +725,26 @@ testRoomDeletionFallsBackToAnotherJoinedRoom :: proc(t: ^testing.T) {
 		port       = 1,
 	}
 	state := testUpdateStateForServer(server)
-	rooms := make([dynamic]common.RoomSummary, 0, 2)
-	append(
-		&rooms,
-		common.RoomSummary {
-			id = 20,
-			name = strings.clone("Alpha"),
-			description = strings.clone(""),
-		},
-	)
-	append(
-		&rooms,
-		common.RoomSummary{id = 21, name = strings.clone("Beta"), description = strings.clone("")},
-	)
-	withRooms, _ := update(state, Msg{kind = .RecieveRoomList, id = server.id, rooms = rooms})
-	withRooms.selected_channel_id = 20
+	defer State_deinit(&state)
 
-	afterDelete, _ := update(withRooms, Msg{kind = .RoomDeleted, id = server.id, channel_id = 20})
-	cache := State_serverRoomCache(&afterDelete, server.id)
+	roomList := testRoomListEvent(server.id, 20, 21)
+	State_applyRuntimeEvent(&state, &roomList)
+	testing.expect(t, len(roomList.rooms) == 0, "expected the room list to move into State")
+	ClientTransportRuntimeEvent_deinit(&roomList)
+	state.selected_channel_id = 20
+
+	deleted := ClientTransportRuntimeEvent {
+		kind     = .RoomDeleted,
+		serverID = server.id,
+		roomID   = 20,
+	}
+	State_applyRuntimeEvent(&state, &deleted)
+	ClientTransportRuntimeEvent_deinit(&deleted)
+
+	cache := State_serverRoomCache(&state, server.id)
 	testing.expect(
 		t,
-		afterDelete.selected_channel_id == 21,
+		state.selected_channel_id == 21,
 		"expected selected deletion to choose another joined room",
 	)
 	testing.expect(
@@ -727,11 +757,58 @@ testRoomDeletionFallsBackToAnotherJoinedRoom :: proc(t: ^testing.T) {
 		ServerRoomCache_roomIsJoined(cache, 21),
 		"expected remaining joined room to stay available",
 	)
-	State_deinit(&afterDelete)
 }
 
 @(test)
-testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testing.T) {
+testRoomEditedReplacesJoinedRoomOrLeavesEventOwned :: proc(t: ^testing.T) {
+	server := Server {
+		id   = 606,
+		name = "Edits",
+		host = "localhost",
+		port = 1,
+	}
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+
+	roomList := testRoomListEvent(server.id, 30)
+	State_applyRuntimeEvent(&state, &roomList)
+	ClientTransportRuntimeEvent_deinit(&roomList)
+
+	edited := ClientTransportRuntimeEvent {
+		kind = .RoomEdited,
+		serverID = server.id,
+		roomID = 30,
+		room = common.RoomSummary {
+			id = 30,
+			name = strings.clone("Renamed"),
+			description = strings.clone("new"),
+		},
+	}
+	State_applyRuntimeEvent(&state, &edited)
+	testing.expect(t, len(edited.room.name) == 0, "expected a matching edit to move the room")
+	ClientTransportRuntimeEvent_deinit(&edited)
+	cache := State_serverRoomCache(&state, server.id)
+	testing.expect(t, cache.rooms[0].name == "Renamed", "expected the joined room to be renamed")
+
+	// An edit for a room we have not joined stays owned by the event, which frees it.
+	unknown := ClientTransportRuntimeEvent {
+		kind = .RoomEdited,
+		serverID = server.id,
+		roomID = 99,
+		room = common.RoomSummary {
+			id = 99,
+			name = strings.clone("Unknown"),
+			description = strings.clone(""),
+		},
+	}
+	State_applyRuntimeEvent(&state, &unknown)
+	testing.expect(t, unknown.room.name == "Unknown", "expected an unmatched edit to stay owned")
+	ClientTransportRuntimeEvent_deinit(&unknown)
+	testing.expect(t, len(cache.rooms) == 1, "expected an unmatched edit to add no room")
+}
+
+@(test)
+testRoomViewFollowsSelectedRoomAcrossSwitches :: proc(t: ^testing.T) {
 	serverA := Server {
 		id         = 506,
 		name       = "First Server",
@@ -745,72 +822,68 @@ testUpdateClearsVisibleRoomTranscriptOnServerAndChannelSwitch :: proc(t: ^testin
 		port       = common.DEFAULT_SERVER_PORT,
 	}
 	state := testStateWithServers({serverA, serverB})
+	defer State_deinit(&state)
 	state.view_dms = false
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
 	state.selected_channel_id = common.GENERAL_ROOM_ID
 
-	withTranscript, _ := update(
-		state,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = serverA.id,
-			channel_id = common.GENERAL_ROOM_ID,
-			sender_id = 42,
-			new_value = strings.clone("persisted room text"),
-		},
-	)
+	testApplyRoomChat(&state, serverA.id, common.GENERAL_ROOM_ID, 42, 1, "persisted room text")
 	testing.expect(
 		t,
-		len(withTranscript.current_chat_messages) > 0,
-		"expected authoritative receive to seed the visible room transcript before switching",
+		len(buildRoomView(&state).lines) == 1,
+		"expected authoritative receive to show in the selected room",
 	)
 
-	afterChannelSwitch, _ := update(
-		withTranscript,
-		Msg{kind = .SwitchToChannel, id = serverA.id, channel_id = common.GENERAL_ROOM_ID + 1},
-	)
+	State_switchToChannel(&state, serverA.id, common.GENERAL_ROOM_ID + 1)
 	testing.expect(
 		t,
-		len(afterChannelSwitch.current_chat_messages) == 0,
-		"expected switching channels to clear the previously visible room transcript",
+		len(buildRoomView(&state).lines) == 0,
+		"expected switching channels to show only the new room's messages",
 	)
 
-	backToGeneral, _ := update(
-		afterChannelSwitch,
-		Msg{kind = .SwitchToChannel, id = serverA.id, channel_id = common.GENERAL_ROOM_ID},
-	)
-	restoredTranscript, _ := update(
-		backToGeneral,
-		Msg {
-			kind = .RecieveChannelChatMessage,
-			id = serverA.id,
-			channel_id = common.GENERAL_ROOM_ID,
-			sender_id = 42,
-			new_value = strings.clone("server scoped room text"),
-		},
-	)
+	State_switchToChannel(&state, serverA.id, common.GENERAL_ROOM_ID)
 	testing.expect(
 		t,
-		len(restoredTranscript.current_chat_messages) > 0,
-		"expected a receive in the reselected room to repopulate the visible transcript",
-	)
-	afterServerSwitch, _ := update(
-		restoredTranscript,
-		Msg{kind = .SwitchToServer, id = serverB.id},
-	)
-	testing.expect(
-		t,
-		len(afterServerSwitch.current_chat_messages) == 0,
-		"expected switching servers to clear the previously visible room transcript",
+		len(buildRoomView(&state).lines) == 1,
+		"expected switching back to restore the room's cached messages",
 	)
 
-	State_deinit(&afterServerSwitch)
-	_ = t
+	State_switchToServer(&state, serverB.id)
+	testing.expect(
+		t,
+		len(buildRoomView(&state).lines) == 0,
+		"expected switching servers to hide the previous server's room messages",
+	)
 }
 
 @(test)
-testViewServerRendersChatStatusInRoomChat :: proc(t: ^testing.T) {
+testRailTogglesBetweenDMsAndServers :: proc(t: ^testing.T) {
+	server := Server {
+		id   = 509,
+		name = "Rail",
+		host = "localhost",
+		port = 1,
+	}
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	State_setChatStatus(&state, "stale status")
+
+	State_showDMs(&state)
+	testing.expect(t, state.view_dms, "expected the DM toggle to open direct messages")
+	testing.expect(t, len(state.chat_status_message) == 0, "expected switching to clear status")
+
+	State_switchToServer(&state, server.id)
+	testing.expect(t, !state.view_dms, "expected selecting a server to leave direct messages")
+	testing.expect(
+		t,
+		state.selected_server_id == server.id,
+		"expected selecting a server to select it",
+	)
+}
+
+@(test)
+testRoomViewExposesChatStatus :: proc(t: ^testing.T) {
 	server := Server {
 		id         = 505,
 		name       = "Room View Server",
@@ -821,32 +894,11 @@ testViewServerRendersChatStatusInRoomChat :: proc(t: ^testing.T) {
 	defer State_deinit(&state)
 	State_setChatStatus(&state, "Unsupported roomId")
 
-	theme := skald.theme_dark()
-	input: skald.Input
-	msgs: [dynamic]Msg
-	widgets: skald.Widget_Store
-	defer skald.widget_store_destroy(&widgets)
-	defer delete(msgs)
-	ctx := testViewCtx(&theme, &input, &msgs, &widgets)
-	chatArea, chatAreaOK := testRoomChatAreaView(state, &ctx)
-	testing.expect(t, chatAreaOK, "expected room chat branch to expose a chat area stack")
-	if !chatAreaOK {
-		return
-	}
-
-	statusText, statusTextOK := chatArea.children[3].(skald.View_Text)
-	testing.expect(t, statusTextOK, "expected room chat branch to render the chat status view")
-	if !statusTextOK {
-		return
-	}
-
 	testing.expect(
 		t,
-		statusText.str == "Unsupported roomId",
-		"expected room chat status text to render the current chat status message",
+		buildRoomView(&state).status == "Unsupported roomId",
+		"expected the room view to expose the current chat status message",
 	)
-
-	_ = t
 }
 
 @(test)

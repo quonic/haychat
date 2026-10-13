@@ -732,7 +732,9 @@ MainRouterState_handleClientChatMessage :: proc(
 		return
 	}
 
-	if req.roomId <= 0 || len(req.content) == 0 || len(req.content) > 4000 {
+	if req.roomId <= 0 ||
+	   len(req.content) == 0 ||
+	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room chat message")
 		return
 	}

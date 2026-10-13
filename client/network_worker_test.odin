@@ -5,7 +5,6 @@ import "../common"
 import "core:strings"
 import "core:testing"
 import "core:time"
-import "shared:skald"
 
 @(test)
 testNetworkWorkerStartsAndStopsWithoutLiveSessions :: proc(t: ^testing.T) {
@@ -49,32 +48,41 @@ testDrainNetworkEventsDeliversEveryServer :: proc(t: ^testing.T) {
 		)
 	}
 
-	theme := skald.theme_dark()
-	input: skald.Input
-	msgs: [dynamic]Msg
-	defer delete(msgs)
-	widgets: skald.Widget_Store
-	defer skald.widget_store_destroy(&widgets)
-	ctx := testViewCtx(&theme, &input, &msgs, &widgets)
+	applied := State_drainNetworkEvents(&state)
 
-	State_drainNetworkEvents(state, &ctx)
-
-	testing.expect(t, len(msgs) == 2, "expected one Msg per queued event")
+	testing.expect(t, applied, "expected draining to report applied events")
 	testing.expect(
 		t,
 		len(state.networkWorker.events) == 0,
 		"expected draining to empty the worker queue",
 	)
-	seenA, seenB := false, false
-	for msg in msgs {
-		seenA ||= msg.id == serverA.id
-		seenB ||= msg.id == serverB.id
-		testing.expect(t, msg.new_value == "background message", "expected message text to move")
-		// Transport messages own their strings; update would normally free them.
-		delete(msg.new_value)
-		delete(msg.timestamp)
+	for server in ([]Server{serverA, serverB}) {
+		cache := State_serverRoomCache(&state, server.id)
+		room := ServerRoomCache_roomCache(cache, common.GENERAL_ROOM_ID)
+		testing.expectf(
+			t,
+			len(room.messages) == 1 && room.messages[0].content == "background message",
+			"expected server %d's room cache to receive its background message",
+			server.id,
+		)
 	}
-	testing.expect(t, seenA && seenB, "expected events from the non-selected server too")
+	testing.expect(t, !State_drainNetworkEvents(&state), "expected an empty queue to apply nothing")
+}
+
+@(test)
+testNetworkWorkerServicePassWakesOnlyWhenEventsQueue :: proc(t: ^testing.T) {
+	worker := ClientNetworkWorker {
+		events = make([dynamic]ClientTransportRuntimeEvent),
+		onEventQueued = proc(userdata: rawptr) {
+			(^int)(userdata)^ += 1
+		},
+	}
+	defer delete(worker.events)
+	wakeCount := 0
+	worker.onEventQueuedData = &wakeCount
+
+	ClientNetworkWorker_servicePass(&worker)
+	testing.expect(t, wakeCount == 0, "expected a pass without events not to wake the UI")
 }
 
 @(test)

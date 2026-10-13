@@ -82,14 +82,14 @@ jq -r .public_key "${XDG_CONFIG_HOME:-$HOME/.config}/haychat/config.json"
   - `Config`, transports, room caches and transcript spans have deinit procedures.
   - `Msg.new_value` ownership is documented.
 - Wrote the client config, which holds the private identity key, with mode `0600`.
-- Running the bootstrap in a clean container showed that a fresh checkout also needs Odin's vendored STB libraries built for Skald. Both the CI bootstrap and `setup-dev-env.sh` now build them.
+- Running the bootstrap in a clean container showed that a fresh checkout also needs Odin's vendored STB libraries built for Skald. Both the CI bootstrap and `setup-dev-env.sh` now build them. (Superseded: the client no longer uses Skald, so the STB build step was removed with the SDL3 rewrite.)
 
 ### 3. Client network worker — `fce8259`
 
 - The client used to poll ENet from inside `view()`, and only for the selected server. Background servers missed keepalives and acknowledgements, so their sessions would time out.
 - A `ClientNetworkWorker` thread now services every live session and queues decoded events. `view()` only drains that queue.
 - Code that sends through a transport, or reads its mutable fields, holds the worker's lock.
-- Skald's `cmd_thread` returns one message per worker, so it can't express a long-lived receive loop. Draining in `view()` remains the delivery hook.
+- Skald's `cmd_thread` returns one message per worker, so it can't express a long-lived receive loop. Draining in `view()` remains the delivery hook. (Superseded: after the SDL3 rewrite the worker wakes the frame loop with an SDL user event, and the loop drains the queue before drawing.)
 - The live auth proof now checks that the worker delivers the startup room list from a real server.
 
 ### 4. Database flow and tagged unions — `8a9303d`
