@@ -7,11 +7,10 @@ server image, running it with PostgreSQL under podman, first-time setup, backups
 and the release builds that produce the image and the client downloads. Testers need only
 [docs/tester-guide.md](https://git.spyingwind.com/jim/haychat/src/branch/main/docs/tester-guide.md).
 
-> [!WARNING]
-> HayChat is unreleased. When a new server version changes the database schema, the server
-> **drops and rebuilds its tables on startup, deleting every account, room, and message**.
-> There are no migrations yet. Take a backup before every upgrade (see [Upgrades](#upgrades))
-> and tell testers their history may be wiped.
+> [!NOTE]
+> HayChat is unreleased. A new server version migrates the database in place on startup and
+> never drops data, but it cannot be downgraded without the backup taken before the upgrade.
+> Take a backup before every upgrade (see [Upgrades](#upgrades)).
 
 ## What Is Here
 
@@ -301,28 +300,41 @@ podman volume export haychat-storage >"haychat-storage-$(date +%F).tar"
 The storage archive holds the server's private key and the web admin token: store it as
 privately as the database dump. To restore into a fresh deployment, import the volume before
 the first start (`podman volume create haychat-storage && podman volume import
-haychat-storage FILE.tar`), start the pod, stop the server, and load the dump:
+haychat-storage FILE.tar`), start the pod, stop the server, empty the database, and load the
+dump:
 
 ```sh
-podman exec -i haychat-db pg_restore -U haychat -d haychat --clean --if-exists <FILE.dump
+podman exec haychat-db psql -U haychat -d haychat -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public'
+podman exec -i haychat-db pg_restore -U haychat -d haychat <FILE.dump
 ```
 
-Then start the server again. A dump from an older schema is rebuilt (emptied) by a newer
-server; see below.
+Emptying the schema first matters: the server's own `schema_migrations` table must come from
+the dump, not from the server that ran before it. Then start the server again. A dump from an
+older server version is migrated on that start, exactly like an upgrade (see below).
 
 ## Upgrades
 
-> [!CAUTION]
-> While HayChat is unreleased, a server whose schema check fails **drops every HayChat
-> table and recreates them empty**. Accounts, rooms, room history, and direct messages are
-> gone. The server recreates `#general`; repeat [First-Time Setup](#first-time-setup) for the
-> admin role. Testers keep their client
-> identity, and the first client to reconnect with a given name gets that name again.
+The server migrates its database at startup. It records every applied migration in the
+`schema_migrations` table, applies the missing ones in order inside one transaction, and logs
+one line per migration, for example `[Database] Applied database migration 2 (read markers)`.
+A database from v0.1.0-rc1, which has no `schema_migrations` yet, is adopted as version 1
+(`[Database] Adopted the existing database schema as migration 1 (baseline)`) with every
+account, room, and message kept. A start that changes nothing logs nothing extra. Two servers
+started against one database take turns: the migration holds a PostgreSQL advisory lock.
+
+The server never drops tables on its own. It refuses to start, prints a `[Startup]` line, and
+exits with status 1, leaving the database exactly as it was, when:
+
+- the database records a newer schema version than the server knows ("database schema version
+  N is newer than this server supports (M)"), which means a downgrade;
+- the HayChat tables have no recorded version and do not match the v0.1.0-rc1 schema;
+- a migration fails, or the migrated schema fails the server's checks.
 
 1. Read the release notes: they say whether the schema or the protocol version changed. A
    protocol change means every tester must update the client too; older clients show "This
    client and the server speak different protocol versions".
-2. Take a backup (above).
+2. Take a backup (above). Migrations only add to the schema, but the backup is the only way
+   back to the older server version.
 3. Change the image tag and restart:
 
    ```sh
@@ -333,8 +345,30 @@ server; see below.
 
    With plain podman: `podman pull` the new tag, `podman rm -f haychat-server`, and run it
    again with the same volumes.
-4. Watch the log for `=== Server Running ===`. Keep the `haychat-storage` volume: it holds the
-   identity key that every client has pinned.
+4. Watch the log for the migration lines and `=== Server Running ===`. Keep the
+   `haychat-storage` volume: it holds the identity key that every client has pinned.
+
+### Downgrading
+
+An older server refuses a database that a newer one migrated. To go back, stop the server,
+restore the backup taken before the upgrade as in [Backups](#backups) (empty the schema, then
+`pg_restore`), set the older image tag, and start it. Messages sent since the upgrade are lost
+with that restore, so downgrade only to recover from a broken release.
+
+### Resetting a Throwaway Database
+
+A test server whose data does not matter can start over instead. This deletes every account,
+room, and message; the server recreates the schema and `#general` on its next start. Stop the
+server first, then either empty the schema:
+
+```sh
+podman exec haychat-db psql -U haychat -d haychat -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public'
+```
+
+or remove the database volume (`podman rm -f haychat-db && podman volume rm haychat-pgdata`,
+then start the pod again). Keep `haychat-storage` so clients still recognise the server's
+identity key; repeat [First-Time Setup](#first-time-setup) for the admin role. In the dev
+environment, `./dev.sh reset` does this.
 
 ## Running the Server Binary Without Containers
 

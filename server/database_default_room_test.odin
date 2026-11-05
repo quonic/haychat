@@ -12,7 +12,7 @@ import "shared:pg"
 // and the running server's rooms in public are never touched.
 
 databaseDefaultRoomTestExec :: proc(conn: pg.Conn, operation: string, query: string) {
-	err := databaseSchemaExecute(conn, operation, query)
+	err := databaseMigrationExec(conn, operation, query)
 	assert(len(err) == 0, err)
 }
 
@@ -53,7 +53,7 @@ testDefaultRoomStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 
 	// Start from a protocol 7 rooms table, whose creator column is NOT NULL, to prove the
-	// create statement upgrades it in place rather than needing a rebuild.
+	// migrations adopt and upgrade it in place rather than needing a rebuild.
 	databaseDefaultRoomTestExec(
 		conn,
 		"create protocol 7 tables",
@@ -68,7 +68,11 @@ testDefaultRoomStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP); " +
 		"INSERT INTO users (nickname) VALUES ('room-alice'), ('room-bob')",
 	)
-	databaseDefaultRoomTestExec(conn, "create current schema", DATABASE_SCHEMA_CREATE_SQL)
+	{
+		outcome, migrateErr := databaseApplyMigrations(conn, DATABASE_MIGRATIONS[:])
+		assert(len(migrateErr) == 0, migrateErr)
+		assert(outcome.adopted, "expected the protocol 7 tables to be adopted as version 1")
+	}
 	{
 		nullable := databaseDefaultRoomTestValue(
 			conn,

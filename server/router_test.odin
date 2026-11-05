@@ -1391,19 +1391,25 @@ testDatabaseSchemaCreationOwnsTablesWithoutSeedData :: proc(t: ^testing.T) {
 	_ = t
 
 	assert(
-		strings.contains(DATABASE_SCHEMA_CREATE_SQL, "CREATE TABLE IF NOT EXISTS users"),
+		strings.contains(
+			DATABASE_MIGRATION_1_BASELINE_SQL,
+			"CREATE TABLE IF NOT EXISTS users",
+		),
 		"expected server schema setup to create the users table",
 	)
 	assert(
-		strings.contains(DATABASE_SCHEMA_CREATE_SQL, "CREATE TABLE IF NOT EXISTS chat_messages"),
+		strings.contains(
+			DATABASE_MIGRATION_1_BASELINE_SQL,
+			"CREATE TABLE IF NOT EXISTS chat_messages",
+		),
 		"expected server schema setup to create the chat messages table",
 	)
 	assert(
-		!strings.contains(DATABASE_SCHEMA_CREATE_SQL, "INSERT INTO"),
+		!strings.contains(DATABASE_MIGRATION_1_BASELINE_SQL, "INSERT INTO"),
 		"expected normal server schema setup to avoid seeding application data",
 	)
 	assert(
-		!strings.contains(DATABASE_SCHEMA_CREATE_SQL, "DELETE FROM"),
+		!strings.contains(DATABASE_MIGRATION_1_BASELINE_SQL, "DELETE FROM"),
 		"expected normal server schema setup to avoid deleting application data",
 	)
 }

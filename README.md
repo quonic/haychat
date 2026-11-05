@@ -110,7 +110,7 @@ The server's web admin uses `core:nbio`, which needs io_uring on Linux. Podman's
 
 #### Without Containers
 
-`./check.sh` and `dev/live-proof.sh` also run directly on a host that has `odin` on `PATH`. On Fedora 44, `sudo dev/install-packages.sh` installs the system packages and `dev/bootstrap-odin.sh [odin_root]` builds the pinned Odin toolchain and shared libraries. `dev/live-proof.sh` expects a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`, and that role must be able to create, alter, and drop the server-owned schema in `public`.
+`./check.sh` and `dev/live-proof.sh` also run directly on a host that has `odin` on `PATH`. On Fedora 44, `sudo dev/install-packages.sh` installs the system packages and `dev/bootstrap-odin.sh [odin_root]` builds the pinned Odin toolchain and shared libraries. `dev/live-proof.sh` expects a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`, and that role must be able to create and alter objects in `public` and to create and drop schemas (the SQL proofs run in schemas of their own).
 
 ### Client Dependencies
 
@@ -157,7 +157,7 @@ Runtime (configurable in `.env`):
 - `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key.
 - `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
 
-The server owns table creation and validation. It creates or reconciles its schema before it reports readiness; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. The configured role must be able to create, alter, and drop objects in `public`. When the `rooms` table is empty, startup then creates `#general` (see Rooms). `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
+The server owns its schema and migrates it at startup, before it reports readiness. The migrations (`server/database_migrations.odin`) are numbered, applied in order inside one transaction under an advisory lock (so two servers never migrate one database at once), and recorded in the `schema_migrations` table. An empty database gets every migration; a database created before migrations existed (v0.1.0-rc1 and earlier dev databases) is adopted as version 1 with every row kept; an older version gets the missing migrations. The server never drops data: a database whose recorded version is newer than the server knows (a downgrade), or whose tables it does not recognise, stops startup with a `[Startup]` error and exit status 1 and is left exactly as it was (see deploy/README.md "Upgrades" for restoring a backup or resetting a throwaway database). The configured role must be able to create and alter objects in its schema (`public`). When the `rooms` table is empty, startup then creates `#general` (see Rooms). `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
 ### Web Admin
 
@@ -260,7 +260,6 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
 - Direct messages have no read receipts or server-side unread state; the client counts unread messages only while it is running.
-- The server has no schema migrations: a server version with an incompatible schema rebuilds the database empty (see deploy/README.md "Upgrades").
 
 ## License
 

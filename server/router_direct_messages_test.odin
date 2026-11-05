@@ -880,9 +880,11 @@ testDirectMessageSQLChecksRecipientInOneStatement :: proc(t: ^testing.T) {
 		"expected the conversation list to keep one row per peer",
 	)
 	assert(
-		strings.contains(DATABASE_SCHEMA_CREATE_SQL, "TABLE IF NOT EXISTS direct_messages") &&
-		strings.contains(DATABASE_SCHEMA_DROP_SQL, "direct_messages"),
-		"expected the schema to create and drop the direct messages table",
+		strings.contains(
+			DATABASE_MIGRATION_1_BASELINE_SQL,
+			"TABLE IF NOT EXISTS direct_messages",
+		),
+		"expected the baseline migration to create the direct messages table",
 	)
 	assert(
 		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "direct_messages_by_sender_and_") &&

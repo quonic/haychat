@@ -111,7 +111,8 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	conn, openErr := databaseOpenRuntimeConnection(databaseSQLTestConfig())
 	assert(len(openErr) == 0, openErr)
 	defer pg.finish(conn)
-	schemaErr := databaseEnsureSchema(conn)
+	// The running server already migrated this database, so this changes nothing.
+	_, schemaErr := databaseMigrateSchema(conn, DATABASE_MIGRATIONS[:])
 	assert(len(schemaErr) == 0, schemaErr)
 
 	suffix := time.time_to_unix_nano(time.now()) % 1_000_000_000
@@ -129,7 +130,7 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 			bobName,
 			carolName,
 		)
-		cleanupErr := databaseSchemaExecute(conn, "clean up direct message test", string(cleanup))
+		cleanupErr := databaseMigrationExec(conn, "clean up direct message test", string(cleanup))
 		assert(len(cleanupErr) == 0, cleanupErr)
 	}
 
