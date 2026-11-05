@@ -1,0 +1,456 @@
+package client
+
+import "core:fmt"
+import "core:strings"
+import "core:time"
+
+// The UI thread's copy of one server's connection state. It changes only through runtime
+// events (and the State actions below), so the view can read it without the worker lock.
+// Every string is owned.
+ServerConnection :: struct {
+	serverID:                 int,
+	status:                   ClientConnectionStatus,
+	failureKind:              ClientConnectFailureKind,
+	retryable:                bool,
+	// When the worker retries, for the countdown. Meaningful while status is Disconnected.
+	retryAt:                  time.Tick,
+	// True when the last attempt failed before signing in (as opposed to a lost session).
+	lastAttemptFailed:        bool,
+	userID:                   int,
+	nickname:                 string,
+	// The raw reason from the transport or server.
+	detail:                   string,
+	// The key a server offered that did not match the pin, for "Trust the new key".
+	offeredServerPublicKey:   string,
+	offeredServerFingerprint: string,
+}
+
+ServerConnection_deinit :: proc(connection: ^ServerConnection) {
+	delete(connection.nickname)
+	delete(connection.detail)
+	delete(connection.offeredServerPublicKey)
+	delete(connection.offeredServerFingerprint)
+	connection^ = {}
+}
+
+@(private = "file")
+ServerConnection_setDetail :: proc(connection: ^ServerConnection, detail: ^string) {
+	delete(connection.detail)
+	connection.detail = detail^
+	detail^ = ""
+}
+
+@(private = "file")
+ServerConnection_clearOfferedKey :: proc(connection: ^ServerConnection) {
+	delete(connection.offeredServerPublicKey)
+	delete(connection.offeredServerFingerprint)
+	connection.offeredServerPublicKey = ""
+	connection.offeredServerFingerprint = ""
+}
+
+State_serverConnectionIndex :: proc(state: State, serverID: int) -> int {
+	for index in 0 ..< len(state.serverConnections) {
+		if state.serverConnections[index].serverID == serverID {
+			return index
+		}
+	}
+	return -1
+}
+
+// Returns the connection entry for serverID, creating an idle one. The pointer is valid until
+// the next entry is added or removed.
+State_serverConnection :: proc(state: ^State, serverID: int) -> ^ServerConnection {
+	if index := State_serverConnectionIndex(state^, serverID); index >= 0 {
+		return &state.serverConnections[index]
+	}
+	append(&state.serverConnections, ServerConnection{serverID = serverID})
+	return &state.serverConnections[len(state.serverConnections) - 1]
+}
+
+State_removeServerConnection :: proc(state: ^State, serverID: int) {
+	if index := State_serverConnectionIndex(state^, serverID); index >= 0 {
+		ServerConnection_deinit(&state.serverConnections[index])
+		ordered_remove(&state.serverConnections, index)
+	}
+}
+
+// Sets the mirror from a transport that the worker is not running yet: either queued to
+// connect, or failed because its config cannot work.
+State_resetServerConnection :: proc(state: ^State, transport: ^ClientServerTransport) {
+	connection := State_serverConnection(state, transport.serverID)
+	serverID := transport.serverID
+	ServerConnection_deinit(connection)
+	connection.serverID = serverID
+	if transport.connection.status == .Failed {
+		connection.status = .Failed
+		connection.failureKind = classifyConnectFailure(transport.lastError)
+		connection.retryable = false
+		connection.lastAttemptFailed = true
+		connection.detail = strings.clone(transport.lastError)
+	} else {
+		connection.status = .Connecting
+	}
+}
+
+State_isServerConnected :: proc(state: ^State, serverID: int) -> bool {
+	index := State_serverConnectionIndex(state^, serverID)
+	return index >= 0 && state.serverConnections[index].status == .Established
+}
+
+// The signed-in user ID on serverID, or 0 while not signed in.
+State_selfUserID :: proc(state: ^State, serverID: int) -> int {
+	index := State_serverConnectionIndex(state^, serverID)
+	if index < 0 || state.serverConnections[index].status != .Established {
+		return 0
+	}
+	return state.serverConnections[index].userID
+}
+
+State_serverConfig :: proc(state: ^State, serverID: int) -> (^Server, bool) {
+	for index in 0 ..< len(state.config.servers) {
+		if state.config.servers[index].id == serverID {
+			return &state.config.servers[index], true
+		}
+	}
+	return nil, false
+}
+
+// Writes the config file, but only for the real app (see State.persistConfig).
+State_saveConfig :: proc(state: ^State) {
+	if state.persistConfig {
+		saveConfig(state.config)
+	}
+}
+
+// Requests in flight died with the session, so their loading flags must not block new ones.
+@(private = "file")
+State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {
+	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
+	if cacheIndex < 0 {
+		return
+	}
+	cache := &state.server_room_caches[cacheIndex]
+	cache.roomsLoading = false
+	for index in 0 ..< len(cache.roomCaches) {
+		roomCache := &cache.roomCaches[index]
+		roomCache.isLoadingHistory = false
+		// Messages may have arrived while disconnected; fetch the newest page again. Merging
+		// by message ID keeps what is already loaded.
+		if reloadHistory {
+			roomCache.initialHistoryLoaded = false
+		}
+	}
+}
+
+// Keeps the previous failure's detail, so a retry still shows why the last attempt failed.
+State_connectionStarted :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) {
+	connection := State_serverConnection(state, event.serverID)
+	connection.status = .Connecting
+}
+
+// Takes ownership of the event's nickname and newly pinned key.
+State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) {
+	connection := State_serverConnection(state, event.serverID)
+	connection.status = .Established
+	connection.failureKind = .None
+	connection.retryable = false
+	connection.lastAttemptFailed = false
+	connection.userID = event.userID
+	delete(connection.nickname)
+	connection.nickname = event.nickname
+	event.nickname = ""
+	delete(connection.detail)
+	connection.detail = ""
+	ServerConnection_clearOfferedKey(connection)
+
+	// The worker pinned the server's key on first use; remember it for the next start.
+	if len(event.serverPublicKey) > 0 {
+		if server, ok := State_serverConfig(state, event.serverID); ok {
+			Server_setPins(server, event.serverPublicKey, event.serverFingerprint)
+			State_saveConfig(state)
+		}
+	}
+
+	State_resetPendingRequests(state, event.serverID, true)
+	State_requestRoomList(state, event.serverID)
+}
+
+// Takes ownership of the event's message and offered key.
+State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) {
+	connection := State_serverConnection(state, event.serverID)
+	connection.status = event.retryable ? .Disconnected : .Failed
+	connection.failureKind = event.failureKind
+	connection.retryable = event.retryable
+	connection.retryAt = event.retryAt
+	connection.lastAttemptFailed = true
+	connection.userID = 0
+	ServerConnection_setDetail(connection, &event.message)
+	ServerConnection_clearOfferedKey(connection)
+	if event.failureKind == .ServerKeyChanged {
+		connection.offeredServerPublicKey = event.serverPublicKey
+		connection.offeredServerFingerprint = event.serverFingerprint
+		event.serverPublicKey = ""
+		event.serverFingerprint = ""
+	}
+	State_resetPendingRequests(state, event.serverID, false)
+}
+
+// Takes ownership of the event's message.
+State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) {
+	connection := State_serverConnection(state, event.serverID)
+	connection.status = .Disconnected
+	connection.failureKind = .None
+	connection.retryable = true
+	connection.retryAt = event.retryAt
+	connection.lastAttemptFailed = false
+	connection.userID = 0
+	ServerConnection_setDetail(connection, &event.message)
+	State_resetPendingRequests(state, event.serverID, false)
+}
+
+// "Retry now": connect immediately instead of waiting for the backoff (or after a failure
+// that stopped retrying).
+State_retryConnection :: proc(state: ^State, serverID: int) {
+	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
+	if transportIndex < 0 {
+		return
+	}
+	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	configInvalid := transport.configInvalid
+	ClientServerTransport_requestConnect(transport, {})
+	ClientNetworkWorker_unlock(state.networkWorker)
+	if !configInvalid {
+		State_serverConnection(state, serverID).status = .Connecting
+	}
+}
+
+// "Trust the new key": replaces the pin with the key the server offered, saves the config,
+// and reconnects.
+State_trustNewServerKey :: proc(state: ^State, serverID: int) {
+	connectionIndex := State_serverConnectionIndex(state^, serverID)
+	if connectionIndex < 0 {
+		return
+	}
+	connection := &state.serverConnections[connectionIndex]
+	if connection.failureKind != .ServerKeyChanged ||
+	   len(connection.offeredServerPublicKey) == 0 {
+		return
+	}
+	server, serverOK := State_serverConfig(state, serverID)
+	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
+	if !serverOK || transportIndex < 0 {
+		return
+	}
+	Server_setPins(
+		server,
+		connection.offeredServerPublicKey,
+		connection.offeredServerFingerprint,
+	)
+	State_saveConfig(state)
+
+	transport := &state.serverTransports[transportIndex]
+	ClientNetworkWorker_lock(state.networkWorker)
+	ClientServerTransport_setPins(
+		transport,
+		server.pinned_server_public_key,
+		server.pinned_server_fingerprint,
+	)
+	ClientServerTransport_requestConnect(transport, {})
+	ClientNetworkWorker_unlock(state.networkWorker)
+
+	ServerConnection_clearOfferedKey(connection)
+	connection.status = .Connecting
+	connection.failureKind = .None
+}
+
+ConnectionBannerTone :: enum u8 {
+	Quiet, // Connected: shown only as a muted status line
+	Progress, // Connecting or waiting to reconnect
+	Error, // Stopped until the user acts
+}
+
+// What the view shows about the selected server's connection. Strings are allocated with the
+// view model's allocator.
+ConnectionBanner :: struct {
+	hasServer:    bool,
+	tone:         ConnectionBannerTone,
+	// One-line status, e.g. "Connected as alice" or "Reconnecting in 4 s".
+	summary:      string,
+	// The longer explanation shown above the room while not connected; empty when connected.
+	text:         string,
+	showRetry:    bool,
+	showTrustKey: bool,
+	showSettings: bool,
+	// How long until the countdown text changes; 0 when nothing is counting down.
+	refreshIn:    time.Duration,
+}
+
+// Explains a failure in words a tester can act on.
+describeConnectFailure :: proc(
+	kind: ClientConnectFailureKind,
+	detail, nickname, fingerprint: string,
+	allocator := context.temp_allocator,
+) -> string {
+	switch kind {
+	case .NameUnavailable:
+		return fmt.aprintf(
+			"The name %s is already in use on this server (or bound to another device's " +
+			"key). Choose another name in Settings.",
+			nickname,
+			allocator = allocator,
+		)
+	case .ServerKeyChanged:
+		return fmt.aprintf(
+			"The server's identity key does not match the one pinned for it. That is " +
+			"expected after the server was reset or reinstalled, but it can also mean " +
+			"someone is impersonating it. Trust the new key only if you expected this. " +
+			"New key fingerprint: %s",
+			len(fingerprint) > 0 ? fingerprint : "unknown",
+			allocator = allocator,
+		)
+	case .ProtocolMismatch:
+		return strings.clone(
+			"This client and the server speak different protocol versions. Update the " +
+			"client or the server so they match.",
+			allocator,
+		)
+	case .InvalidName:
+		return strings.clone(
+			"Display names must be 3 to 32 bytes long (accented letters and emoji count as " +
+			"2 to 4). Choose another name in Settings.",
+			allocator,
+		)
+	case .InvalidIdentity:
+		return strings.clone(
+			"The identity key in your config file is missing or corrupt.",
+			allocator,
+		)
+	case .None, .Unreachable, .Other:
+	}
+	if len(detail) == 0 {
+		return strings.clone("unknown error", allocator)
+	}
+	return strings.clone(detail, allocator)
+}
+
+// Whole seconds left until `at`, rounded up, and how long until that number changes.
+@(private = "file")
+secondsUntil :: proc(at, now: time.Tick) -> (seconds: int, changesIn: time.Duration) {
+	remaining := time.tick_diff(now, at)
+	if remaining <= 0 {
+		return 0, 0
+	}
+	seconds = int((remaining + time.Second - 1) / time.Second)
+	changesIn = remaining - time.Duration(seconds - 1) * time.Second
+	return
+}
+
+// Builds the selected server's connection status for drawing at `now`.
+buildConnectionBanner :: proc(
+	state: ^State,
+	now: time.Tick,
+	allocator := context.temp_allocator,
+) -> (
+	banner: ConnectionBanner,
+) {
+	server, serverOK := State_serverConfig(state, state.selected_server_id)
+	connectionIndex := State_serverConnectionIndex(state^, state.selected_server_id)
+	if !serverOK || connectionIndex < 0 {
+		return
+	}
+	connection := &state.serverConnections[connectionIndex]
+	banner.hasServer = true
+	serverName := server.name
+
+	switch connection.status {
+	case .Established:
+		banner.tone = .Quiet
+		banner.summary = fmt.aprintf("Connected as %s", connection.nickname, allocator = allocator)
+	case .Connecting, .Handshaking:
+		banner.tone = .Progress
+		banner.summary = strings.clone("Connecting…", allocator)
+		switch {
+		case connection.lastAttemptFailed && len(connection.detail) > 0:
+			reason := describeConnectFailure(
+				connection.failureKind,
+				connection.detail,
+				state.config.display_name,
+				"",
+			)
+			banner.text = fmt.aprintf(
+				"Connecting to %s… The last attempt failed: %s",
+				serverName,
+				reason,
+				allocator = allocator,
+			)
+		case len(connection.detail) > 0:
+			// The detail of a lost session: this is a reconnect.
+			banner.text = fmt.aprintf("Reconnecting to %s…", serverName, allocator = allocator)
+		case:
+			banner.text = fmt.aprintf("Connecting to %s…", serverName, allocator = allocator)
+		}
+	case .Disconnected:
+		banner.tone = .Progress
+		banner.showRetry = true
+		seconds, changesIn := secondsUntil(connection.retryAt, now)
+		banner.refreshIn = changesIn
+		countdown := "Reconnecting…"
+		if seconds > 0 {
+			countdown = fmt.tprintf("Reconnecting in %d s", seconds)
+		}
+		banner.summary = strings.clone(countdown, allocator)
+		if connection.lastAttemptFailed {
+			reason := describeConnectFailure(
+				connection.failureKind,
+				connection.detail,
+				state.config.display_name,
+				"",
+			)
+			banner.text = fmt.aprintf(
+				"Could not connect to %s: %s. %s",
+				serverName,
+				reason,
+				countdown,
+				allocator = allocator,
+			)
+		} else {
+			banner.text = fmt.aprintf(
+				"Disconnected from %s. %s",
+				serverName,
+				countdown,
+				allocator = allocator,
+			)
+		}
+	case .Failed:
+		banner.tone = .Error
+		banner.summary = strings.clone("Not connected", allocator)
+		reason := describeConnectFailure(
+			connection.failureKind,
+			connection.detail,
+			state.config.display_name,
+			connection.offeredServerFingerprint,
+		)
+		banner.text = fmt.aprintf(
+			"Could not connect to %s: %s",
+			serverName,
+			reason,
+			allocator = allocator,
+		)
+		banner.showTrustKey =
+			connection.failureKind == .ServerKeyChanged &&
+			len(connection.offeredServerPublicKey) > 0
+		banner.showSettings =
+			connection.failureKind == .NameUnavailable || connection.failureKind == .InvalidName
+		// Retrying cannot fix these on its own, but the button still lets the user try again
+		// after fixing the server side. A local config problem needs Settings instead.
+		banner.showRetry =
+			connection.failureKind != .InvalidIdentity && connection.failureKind != .InvalidName
+	case .Idle:
+		banner.tone = .Progress
+		banner.showRetry = true
+		banner.summary = strings.clone("Not connected", allocator)
+		banner.text = fmt.aprintf("Not connected to %s", serverName, allocator = allocator)
+	}
+	return
+}

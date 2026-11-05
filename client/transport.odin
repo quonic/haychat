@@ -5,13 +5,11 @@ import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
 import "core:strings"
+import "core:time"
 import "vendor:ENet"
 
 STARTUP_AUTH_CHANNEL_CHAT :: u8(1)
 STARTUP_AUTH_CHANNEL_COUNT :: uint(5)
-STARTUP_AUTH_CONNECT_TIMEOUT_MS :: u32(1000)
-STARTUP_AUTH_EVENT_TIMEOUT_MS :: u32(1000)
-STARTUP_AUTH_MAX_EVENTS :: 8
 
 ClientTransportResult :: struct {
 	responsePacketBytes: []u8,
@@ -29,29 +27,38 @@ ClientTransportRuntimeEventKind :: enum {
 	RoomEdited,
 	RoomDeleted,
 	ProtocolError,
+	// Connection lifecycle, emitted by the connect state machine in connection.odin.
+	Connecting,
+	Connected,
+	ConnectFailed,
 	Disconnected,
 }
 
 ClientTransportRuntimeEvent :: struct {
-	kind:           ClientTransportRuntimeEventKind,
-	serverID:       int,
-	senderID:       int,
-	senderNickname: string, // Set for .RoomChatReceived
-	roomID:         int,
-	messageID:      int,
-	timestamp:      string,
-	message:        string,
-	rooms:          [dynamic]common.RoomSummary,
-	messages:       [dynamic]common.StoredChatMessage,
-	hasOlder:       bool,
-	joined:         bool,
-	room:           common.RoomSummary,
-}
-
-ClientStartupAuthSession :: struct {
-	enetHost:        ^ENet.Host,
-	enetPeer:        ^ENet.Peer,
-	enetInitialized: bool,
+	kind:              ClientTransportRuntimeEventKind,
+	serverID:          int,
+	senderID:          int,
+	senderNickname:    string, // Set for .RoomChatReceived
+	roomID:            int,
+	messageID:         int,
+	timestamp:         string,
+	message:           string,
+	rooms:             [dynamic]common.RoomSummary,
+	messages:          [dynamic]common.StoredChatMessage,
+	hasOlder:          bool,
+	joined:            bool,
+	room:              common.RoomSummary,
+	// Connection lifecycle fields. userID and nickname are set on Connected. retryAt is when
+	// the worker tries again after Disconnected or a retryable ConnectFailed.
+	userID:            int,
+	nickname:          string,
+	failureKind:       ClientConnectFailureKind,
+	retryable:         bool,
+	retryAt:           time.Tick,
+	// Hex server identity key and fingerprint: on Connected, a key pinned on first use that
+	// the config should store; on a ServerKeyChanged failure, the key the server offered.
+	serverPublicKey:   string,
+	serverFingerprint: string,
 }
 
 ClientServerTransport :: struct {
@@ -75,7 +82,15 @@ ClientServerTransport :: struct {
 	lastError:                 string,
 	enetHost:                  ^ENet.Host,
 	enetPeer:                  ^ENet.Peer,
-	enetInitialized:           bool,
+	// Owned copies of the server's pins, so the worker thread never reads State.config.
+	pinnedServerPublicKey:     string,
+	pinnedServerFingerprint:   string,
+	// The key a server offered when it did not match the pin; kept for "Trust the new key".
+	rejectedServerPublicKey:   common.IdentityPublicKeyBytes,
+	hasRejectedServerKey:      bool,
+	// Set when the server or identity config cannot produce a valid ClientHello at all.
+	configInvalid:             bool,
+	connection:                ClientConnection,
 }
 
 ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, message: string) {
@@ -86,32 +101,22 @@ ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, me
 }
 
 ClientServerTransport_hasLiveENetSession :: proc(transport: ^ClientServerTransport) -> bool {
-	return transport.enetInitialized && transport.enetHost != nil && transport.enetPeer != nil
+	return transport.enetHost != nil && transport.enetPeer != nil
 }
 
+// Closes the ENet session. ENet itself stays initialised for the whole process (see
+// clientEnsureENetInitialized), so this never deinitialises it.
 ClientServerTransport_releaseENetSession :: proc(transport: ^ClientServerTransport) {
 	if transport.enetPeer != nil {
-		ENet.peer_reset(transport.enetPeer)
+		// Tells a still-connected server right away, so it can drop the session; a peer that
+		// is already disconnected is only reset.
+		ENet.peer_disconnect_now(transport.enetPeer, 0)
 		transport.enetPeer = nil
 	}
 	if transport.enetHost != nil {
 		ENet.host_destroy(transport.enetHost)
 		transport.enetHost = nil
 	}
-	if transport.enetInitialized {
-		ENet.deinitialize()
-		transport.enetInitialized = false
-	}
-}
-
-ClientServerTransport_adoptStartupAuthSession :: proc(
-	transport: ^ClientServerTransport,
-	session: ClientStartupAuthSession,
-) {
-	ClientServerTransport_releaseENetSession(transport)
-	transport.enetHost = session.enetHost
-	transport.enetPeer = session.enetPeer
-	transport.enetInitialized = session.enetInitialized
 }
 
 ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerTransport) {
@@ -135,6 +140,8 @@ ClientServerTransport_deinit :: proc(transport: ^ClientServerTransport) {
 	delete(transport.serverHost)
 	delete(transport.nickname)
 	delete(transport.lastError)
+	delete(transport.pinnedServerPublicKey)
+	delete(transport.pinnedServerFingerprint)
 	transport^ = {}
 }
 
@@ -184,6 +191,9 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.messages)
 	delete(event.room.name)
 	delete(event.room.description)
+	delete(event.nickname)
+	delete(event.serverPublicKey)
+	delete(event.serverFingerprint)
 	event^ = {}
 }
 
@@ -215,13 +225,15 @@ ClientServerTransport_initFailed :: proc(
 	message: string,
 ) -> ClientServerTransport {
 	transport := ClientServerTransport {
-		serverID   = server.id,
-		serverName = strings.clone(server.name),
-		serverHost = strings.clone(server.host),
-		serverPort = server.port,
-		transport  = common.TransportState_init(.Client),
+		serverID      = server.id,
+		serverName    = strings.clone(server.name),
+		serverHost    = strings.clone(server.host),
+		serverPort    = server.port,
+		transport     = common.TransportState_init(.Client),
+		configInvalid = true,
 	}
 	ClientServerTransport_fail(&transport, message)
+	transport.connection.status = .Failed
 	return transport
 }
 
@@ -233,14 +245,15 @@ ClientServerTransport_init :: proc(
 	string,
 	bool,
 ) {
-	if len(config.display_name) < 3 || len(config.display_name) > 32 {
-		return {}, "client display name must be between 3 and 32 characters", false
+	if len(config.display_name) < DISPLAY_NAME_MIN_BYTES ||
+	   len(config.display_name) > DISPLAY_NAME_MAX_BYTES {
+		return {}, CLIENT_INVALID_NICKNAME_MESSAGE, false
 	}
 
 	clientPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(config.private_key)
 	clientPublicKey, publicKeyOK := common.identityPublicKeyFromHex(config.public_key)
 	if !privateKeyOK || !publicKeyOK {
-		return {}, "client identity keys are missing or invalid", false
+		return {}, CLIENT_INVALID_IDENTITY_MESSAGE, false
 	}
 
 	clientEphemeralPrivateKey, clientEphemeralPublicKey, clientEphemeralOK :=
@@ -260,19 +273,29 @@ ClientServerTransport_init :: proc(
 			clientEphemeralPrivateKey = clientEphemeralPrivateKey,
 			clientEphemeralPublicKey  = clientEphemeralPublicKey,
 			transport                 = common.TransportState_init(.Client),
+			pinnedServerPublicKey     = strings.clone(server.pinned_server_public_key),
+			pinnedServerFingerprint   = strings.clone(server.pinned_server_fingerprint),
 		}
 	return transport, "", true
+}
+
+// Builds the transport for one server; a config that cannot work yields a failed transport
+// that keeps the reason in lastError.
+ClientServerTransport_initForServer :: proc(
+	server: Server,
+	config: Config,
+) -> ClientServerTransport {
+	transport, message, ok := ClientServerTransport_init(server, config)
+	if ok {
+		return transport
+	}
+	return ClientServerTransport_initFailed(server, message)
 }
 
 ClientTransportCatalog_init :: proc(config: ^Config) -> [dynamic]ClientServerTransport {
 	catalog := make([dynamic]ClientServerTransport, 0, len(config.servers))
 	for server in config.servers {
-		transport, message, ok := ClientServerTransport_init(server, config^)
-		if ok {
-			append(&catalog, transport)
-		} else {
-			append(&catalog, ClientServerTransport_initFailed(server, message))
-		}
+		append(&catalog, ClientServerTransport_initForServer(server, config^))
 	}
 	return catalog
 }
@@ -302,153 +325,6 @@ ClientServerTransport_sendENetPacket :: proc(
 	return true
 }
 
-ClientServerTransport_completeStartupAuthOverENet :: proc(
-	transport: ^ClientServerTransport,
-	server: ^Server,
-	config: ^Config,
-	clientHelloPacketBytes: []u8,
-) -> ClientStartupAuthSession {
-	session: ClientStartupAuthSession
-	shouldReleaseSession := true
-	defer if shouldReleaseSession {
-		if session.enetPeer != nil {
-			ENet.peer_reset(session.enetPeer)
-			session.enetPeer = nil
-		}
-		if session.enetHost != nil {
-			ENet.host_destroy(session.enetHost)
-			session.enetHost = nil
-		}
-		if session.enetInitialized {
-			ENet.deinitialize()
-			session.enetInitialized = false
-		}
-	}
-
-	if ENet.initialize() != 0 {
-		ClientServerTransport_fail(transport, "failed to initialize ENet")
-		return session
-	}
-	session.enetInitialized = true
-
-	session.enetHost = ENet.host_create(nil, 1, STARTUP_AUTH_CHANNEL_COUNT, 0, 0)
-	if session.enetHost == nil {
-		ClientServerTransport_fail(transport, "failed to create ENet client host")
-		return session
-	}
-
-	serverHostCString, serverHostCStringErr := strings.clone_to_cstring(server.host)
-	if serverHostCStringErr != nil {
-		ClientServerTransport_fail(transport, "failed to prepare server host")
-		return session
-	}
-	defer delete(serverHostCString)
-
-	address := ENet.Address {
-			port = u16(server.port),
-		}
-	if ENet.address_set_host(&address, serverHostCString) != 0 {
-		ClientServerTransport_fail(
-			transport,
-			fmt.aprintf("failed to resolve server host: %s", server.host),
-		)
-		return session
-	}
-
-	session.enetPeer = ENet.host_connect(session.enetHost, &address, STARTUP_AUTH_CHANNEL_COUNT, 0)
-	if session.enetPeer == nil {
-		ClientServerTransport_fail(transport, "failed to start ENet connection")
-		return session
-	}
-
-	connectEvent: ENet.Event
-	connectResult := ENet.host_service(
-		session.enetHost,
-		&connectEvent,
-		STARTUP_AUTH_CONNECT_TIMEOUT_MS,
-	)
-	if connectResult <= 0 || connectEvent.type != .CONNECT {
-		ClientServerTransport_fail(transport, "timed out connecting to server")
-		return session
-	}
-
-	if !ClientServerTransport_sendENetPacket(
-		session.enetHost,
-		session.enetPeer,
-		STARTUP_AUTH_CHANNEL_CHAT,
-		clientHelloPacketBytes,
-	) {
-		ClientServerTransport_fail(transport, "failed to send client hello packet")
-		return session
-	}
-
-	for _ in 0 ..< STARTUP_AUTH_MAX_EVENTS {
-		event: ENet.Event
-		eventResult := ENet.host_service(session.enetHost, &event, STARTUP_AUTH_EVENT_TIMEOUT_MS)
-		if eventResult <= 0 {
-			if transport.transport.phase == .Failed {
-				return session
-			}
-			ClientServerTransport_fail(transport, "timed out waiting for auth response")
-			return session
-		}
-
-		switch event.type {
-		case .RECEIVE:
-			packetData := event.packet.data[:event.packet.dataLength]
-			packetCopy := make([dynamic]u8, 0, len(packetData))
-			for b in packetData {
-				append(&packetCopy, b)
-			}
-			ENet.packet_destroy(event.packet)
-
-			result, ok := ClientServerTransport_handleIncomingPacket(
-				transport,
-				server,
-				config,
-				packetCopy[:],
-			)
-			delete(packetCopy)
-			defer if result.hasOpenedPacket do delete(result.openedPacket.payload)
-
-			if result.hasResponse {
-				responseSent := ClientServerTransport_sendENetPacket(
-					session.enetHost,
-					session.enetPeer,
-					STARTUP_AUTH_CHANNEL_CHAT,
-					result.responsePacketBytes,
-				)
-				delete(result.responsePacketBytes)
-				if !responseSent {
-					ClientServerTransport_fail(transport, "failed to send auth response packet")
-					return session
-				}
-			}
-
-			if transport.transport.phase == .Established {
-				shouldReleaseSession = false
-				return session
-			}
-
-			if !ok && transport.transport.phase == .Failed {
-				continue
-			}
-
-		case .DISCONNECT:
-			ClientServerTransport_handleDisconnect(transport)
-			return session
-
-		case .CONNECT, .NONE:
-		}
-	}
-
-	if transport.transport.phase != .Established && transport.transport.phase != .Failed {
-		ClientServerTransport_fail(transport, "startup auth did not complete")
-	}
-
-	return session
-}
-
 ClientServerTransport_beginHandshake :: proc(transport: ^ClientServerTransport) -> ([]u8, bool) {
 	transport.pendingKeysReady = false
 	transport.transport.phase = .ClientHelloSent
@@ -462,10 +338,10 @@ ClientServerTransport_beginHandshake :: proc(transport: ^ClientServerTransport) 
 	return common.buildPacketBytes(.ClientHello, clientHello)
 }
 
+// Handles one plaintext handshake packet from the server. Runs on the network worker thread,
+// so it reads the pins from the transport's own copies rather than the shared config.
 ClientServerTransport_handleIncomingPacket :: proc(
 	transport: ^ClientServerTransport,
-	server: ^Server,
-	config: ^Config,
 	packetBytes: []u8,
 ) -> (
 	ClientTransportResult,
@@ -504,10 +380,12 @@ ClientServerTransport_handleIncomingPacket :: proc(
 			return result, false
 		}
 
-		trustState, configChanged := pinServerIdentity(server, serverHello.serverIdentityPublicKey)
-		transport.transport.peerTrustState = trustState
-		if configChanged {
-			saveConfig(config^)
+		// Refuse to authenticate to a server whose key no longer matches the pin: the user
+		// has to accept the new key explicitly.
+		serverKey := serverHello.serverIdentityPublicKey
+		if !ClientServerTransport_pinServerIdentity(transport, serverKey) {
+			ClientServerTransport_fail(transport, SERVER_KEY_CHANGED_MESSAGE)
+			return result, false
 		}
 		transport.serverIdentityPublicKey = serverHello.serverIdentityPublicKey
 		transport.serverEphemeralPublicKey = serverHello.serverEphemeralPublicKey
@@ -662,7 +540,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 	case:
 		ClientServerTransport_fail(
 			transport,
-			fmt.aprintf("unexpected server message type: %v", outerPacket.messageType),
+			fmt.tprintf("unexpected server message type: %v", outerPacket.messageType),
 		)
 		return result, false
 	}
@@ -719,8 +597,10 @@ ClientServerTransport_sendRoomChatMessage :: proc(
 	roomID: int,
 	content: string,
 ) -> bool {
-	if !ClientServerTransport_hasLiveENetSession(transport) {
-		ClientServerTransport_fail(transport, "live ENet session is unavailable")
+	// Not being connected yet is normal while the worker connects or reconnects, so it only
+	// reports an error instead of failing (and tearing down) the session.
+	if !ClientServerTransport_isConnected(transport) {
+		ClientServerTransport_setLastError(transport, NOT_CONNECTED_MESSAGE)
 		return false
 	}
 
@@ -748,8 +628,10 @@ ClientServerTransport_sendEncryptedRuntimeMessage :: proc(
 	messageType: common.MessageType,
 	payload: any,
 ) -> bool {
-	if !ClientServerTransport_hasLiveENetSession(transport) {
-		ClientServerTransport_fail(transport, "live ENet session is unavailable")
+	// Not being connected yet is normal while the worker connects or reconnects, so it only
+	// reports an error instead of failing (and tearing down) the session.
+	if !ClientServerTransport_isConnected(transport) {
+		ClientServerTransport_setLastError(transport, NOT_CONNECTED_MESSAGE)
 		return false
 	}
 	packetBytes, ok := ClientServerTransport_buildEncryptedPacketBytes(
@@ -946,7 +828,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	case:
 		ClientServerTransport_runtimeProtocolError(
 			transport,
-			fmt.aprintf("unexpected runtime message type: %v", innerPacket.messageType),
+			fmt.tprintf("unexpected runtime message type: %v", innerPacket.messageType),
 		)
 		return ClientServerTransport_makeRuntimeEvent(
 				transport,
@@ -1021,7 +903,7 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 	case:
 		ClientServerTransport_fail(
 			transport,
-			fmt.aprintf("unexpected runtime outer message type: %v", outerPacket.messageType),
+			fmt.tprintf("unexpected runtime outer message type: %v", outerPacket.messageType),
 		)
 		return ClientServerTransport_makeRuntimeEvent(
 				transport,
@@ -1033,41 +915,57 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 	return {}, false
 }
 
+// Services the transport once without blocking: advances the connect state machine and, once
+// established, returns at most one decoded runtime event. Called by the network worker.
 ClientServerTransport_serviceRuntime :: proc(
 	transport: ^ClientServerTransport,
 ) -> (
 	ClientTransportRuntimeEvent,
 	bool,
 ) {
-	if transport.transport.phase != .Established ||
-	   !ClientServerTransport_hasLiveENetSession(transport) {
-		return {}, false
-	}
+	return ClientServerTransport_serviceConnection(transport, time.tick_now())
+}
 
+// Reads one ENet event from the established session and decodes it.
+ClientServerTransport_serviceEstablishedSession :: proc(
+	transport: ^ClientServerTransport,
+	now: time.Tick,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
 	event: ENet.Event
 	eventResult := ENet.host_service(transport.enetHost, &event, 0)
-	if eventResult <= 0 {
+	if eventResult < 0 {
+		return ClientServerTransport_lostConnection(transport, now, "network error")
+	}
+	if eventResult == 0 {
 		return {}, false
 	}
 
 	switch event.type {
 	case .RECEIVE:
-		packetData := event.packet.data[:event.packet.dataLength]
-		packetCopy := make([dynamic]u8, 0, len(packetData))
-		for b in packetData {
-			append(&packetCopy, b)
-		}
-		ENet.packet_destroy(event.packet)
-		defer delete(packetCopy)
-
-		return ClientServerTransport_handleRuntimePacketBytes(transport, packetCopy[:])
+		packetBytes := ClientServerTransport_copyENetPacket(event.packet)
+		defer delete(packetBytes)
+		return ClientServerTransport_handleRuntimePacketBytes(transport, packetBytes)
 
 	case .DISCONNECT:
-		ClientServerTransport_handleDisconnect(transport)
-		return ClientServerTransport_makeRuntimeEvent(transport, .Disconnected, ""), true
+		return ClientServerTransport_lostConnection(
+			transport,
+			now,
+			"the server closed the connection",
+		)
 
 	case .CONNECT, .NONE:
 		return {}, false
 	}
 	return {}, false
+}
+
+// Copies an ENet packet's bytes and destroys the packet.
+ClientServerTransport_copyENetPacket :: proc(packet: ^ENet.Packet) -> []u8 {
+	packetBytes := make([]u8, packet.dataLength)
+	copy(packetBytes, packet.data[:packet.dataLength])
+	ENet.packet_destroy(packet)
+	return packetBytes
 }

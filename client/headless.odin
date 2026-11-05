@@ -23,6 +23,8 @@ HEADLESS_EXIT_OK :: 0
 HEADLESS_EXIT_ERROR :: 1
 HEADLESS_EXIT_CONNECT_FAILED :: 2
 HEADLESS_DEFAULT_WAIT_MS :: 5000
+// How long startup waits for the first connection before giving up with exit code 2.
+HEADLESS_DEFAULT_CONNECT_TIMEOUT_MS :: 15000
 // Upper bound for `wait` and `sleep`, so a typo cannot park a scripted client for days.
 HEADLESS_MAX_WAIT_MS :: 10 * 60 * 1000
 HEADLESS_POLL_INTERVAL :: 5 * time.Millisecond
@@ -31,9 +33,11 @@ HEADLESS_DISPLAY_NAME_MIN :: 3
 HEADLESS_DISPLAY_NAME_MAX :: 32
 HEADLESS_USAGE ::
 	"usage: client --headless [--name NAME] [--server HOST:PORT] [--config-dir DIR]\n" +
-	"  --name NAME          display name (3-32 characters); saved to the profile\n" +
-	"  --server HOST:PORT   the profile's only server; saved to the profile\n" +
-	"  --config-dir DIR     config root for this profile (like XDG_CONFIG_HOME)\n" +
+	"                         [--connect-timeout MS]\n" +
+	"  --name NAME            display name (3-32 bytes); saved to the profile\n" +
+	"  --server HOST:PORT     the profile's only server; saved to the profile\n" +
+	"  --config-dir DIR       config root for this profile (like XDG_CONFIG_HOME)\n" +
+	"  --connect-timeout MS   how long to wait for the first connection (default 15000)\n" +
 	"Commands are read from stdin; type `help` for the list."
 
 // ── Options ───────────────────────────────────────────────────────
@@ -43,8 +47,9 @@ HeadlessOptions :: struct {
 	name:       string,
 	serverHost: string,
 	serverPort: i32,
-	hasServer:  bool,
-	configDir:  string,
+	hasServer:        bool,
+	configDir:        string,
+	connectTimeoutMS: int,
 }
 
 headlessRequested :: proc(args: []string) -> bool {
@@ -76,6 +81,7 @@ headlessParseServerAddress :: proc(value: string) -> (host: string, port: i32, o
 
 // Parses the arguments after the program name. Returns a static error message on failure.
 headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: string) {
+	options.connectTimeoutMS = HEADLESS_DEFAULT_CONNECT_TIMEOUT_MS
 	for index := 0; index < len(args); index += 1 {
 		arg := args[index]
 		if arg == HEADLESS_FLAG {
@@ -90,7 +96,7 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 			hasValue = true
 		}
 		switch flag {
-		case "--name", "--server", "--config-dir":
+		case "--name", "--server", "--config-dir", "--connect-timeout":
 		case:
 			return {}, "unknown argument"
 		}
@@ -104,7 +110,7 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 		switch flag {
 		case "--name":
 			if len(value) < HEADLESS_DISPLAY_NAME_MIN || len(value) > HEADLESS_DISPLAY_NAME_MAX {
-				return {}, "--name must be between 3 and 32 characters"
+				return {}, "--name must be between 3 and 32 bytes"
 			}
 			options.name = value
 		case "--server":
@@ -120,6 +126,12 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 				return {}, "--config-dir must not be empty"
 			}
 			options.configDir = value
+		case "--connect-timeout":
+			timeoutMS, ok := headlessParseNumber(value, HEADLESS_MAX_WAIT_MS)
+			if !ok || timeoutMS == 0 {
+				return {}, "--connect-timeout must be from 1 to 600000 milliseconds"
+			}
+			options.connectTimeoutMS = timeoutMS
 		}
 	}
 	return options, ""
@@ -127,7 +139,9 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 
 // Applies --name and --server to config. A headless profile has exactly one server: the entry
 // matching --server is kept with its pinned key, anything else is replaced by a fresh entry
-// without a pin. Returns true when config changed and should be saved.
+// without a pin. Without --server the profile's saved servers are used as they are; there is
+// no built-in default, so a profile with neither fails to connect with a clear message.
+// Returns true when config changed and should be saved.
 headlessApplyOptions :: proc(config: ^Config, options: HeadlessOptions) -> bool {
 	changed := false
 	if len(options.name) > 0 && options.name != config.display_name {
@@ -136,16 +150,11 @@ headlessApplyOptions :: proc(config: ^Config, options: HeadlessOptions) -> bool 
 		changed = true
 	}
 
+	if !options.hasServer {
+		return changed
+	}
 	host := options.serverHost
 	port := options.serverPort
-	if !options.hasServer {
-		if len(config.servers) > 0 {
-			return changed
-		}
-		// A new profile without --server talks to the default local dev server.
-		host = "localhost"
-		port = common.DEFAULT_SERVER_PORT
-	}
 
 	keepIndex := -1
 	for server, index in config.servers {
@@ -205,9 +214,11 @@ headlessUseConfigDir :: proc(dir: string) -> bool {
 
 // ── Event rendering ───────────────────────────────────────────────
 
-// Kinds an agent can `wait` for. Connected and ConnectFailed come from the harness's connect
-// step today; when the handshake moves onto the network worker they become runtime events.
+// Kinds an agent can `wait` for. The connection lifecycle kinds come from the network worker's
+// connect state machine, so they keep arriving after startup (for example a reconnect after the
+// server restarts).
 HeadlessEventKind :: enum {
+	Connecting,
 	Connected,
 	ConnectFailed,
 	RoomChat,
@@ -221,6 +232,7 @@ HeadlessEventKind :: enum {
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
+	.Connecting     = "connecting",
 	.Connected      = "connected",
 	.ConnectFailed  = "connect_failed",
 	.RoomChat       = "room_chat",
@@ -247,6 +259,34 @@ HeadlessConnectedJSON :: struct {
 	serverID: int,
 	userID:   int,
 	nickname: string,
+}
+
+HeadlessConnectingJSON :: struct {
+	event:    string,
+	serverID: int,
+	// Attempts since the last connected or disconnected event, starting at 1.
+	attempt:  int,
+}
+
+// failure names the ClientConnectFailureKind, or a harness-only reason (NoServer, Timeout).
+// message is the explanation the GUI shows; detail is the raw transport or server reason.
+// retryable is true when the worker will try again (retryInMS from now); false means no further
+// attempt happens until something changes.
+HeadlessConnectFailedJSON :: struct {
+	event:     string,
+	serverID:  int,
+	message:   string,
+	detail:    string,
+	failure:   string,
+	retryable: bool,
+	retryInMS: int,
+}
+
+HeadlessDisconnectedJSON :: struct {
+	event:     string,
+	serverID:  int,
+	message:   string,
+	retryInMS: int,
 }
 
 HeadlessMessageEventJSON :: struct {
@@ -309,9 +349,20 @@ HeadlessRoomEventJSON :: struct {
 	roomID:   int,
 }
 
-HeadlessServerEventJSON :: struct {
-	event:    string,
-	serverID: int,
+// What rendering needs beyond the event itself. The harness fills it in; zero values are fine
+// for tests (now defaults to the current time).
+HeadlessRenderInfo :: struct {
+	attempt:     int, // For .Connecting
+	displayName: string, // Names the user in a NameUnavailable explanation
+	now:         time.Tick, // Reference for retryInMS
+}
+
+// Milliseconds from now until at, never negative; 0 when at is unset.
+headlessMillisecondsUntil :: proc(at, now: time.Tick) -> int {
+	if at == {} {
+		return 0
+	}
+	return max(int(time.duration_milliseconds(time.tick_diff(now, at))), 0)
 }
 
 // Marshals value as one compact JSON object. The result is allocated with allocator.
@@ -329,12 +380,17 @@ headlessMarshal :: proc(value: any, allocator := context.allocator) -> string {
 // are not reported (.None).
 headlessRenderRuntimeEvent :: proc(
 	event: ^ClientTransportRuntimeEvent,
+	info := HeadlessRenderInfo{},
 	allocator := context.allocator,
 ) -> (
 	line: string,
 	kind: HeadlessEventKind,
 	ok: bool,
 ) {
+	now := info.now
+	if now == {} {
+		now = time.tick_now()
+	}
 	switch event.kind {
 	case .None:
 		return "", {}, false
@@ -429,10 +485,58 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
+	case .Connecting:
+		kind = .Connecting
+		line = headlessMarshal(
+			HeadlessConnectingJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				attempt = max(info.attempt, 1),
+			},
+			allocator,
+		)
+	case .Connected:
+		kind = .Connected
+		line = headlessMarshal(
+			HeadlessConnectedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				userID = event.userID,
+				nickname = event.nickname,
+			},
+			allocator,
+		)
+	case .ConnectFailed:
+		kind = .ConnectFailed
+		message := describeConnectFailure(
+			event.failureKind,
+			event.message,
+			info.displayName,
+			event.serverFingerprint,
+			allocator,
+		)
+		defer delete(message, allocator)
+		line = headlessMarshal(
+			HeadlessConnectFailedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				message = message,
+				detail = event.message,
+				failure = fmt.tprintf("%v", event.failureKind),
+				retryable = event.retryable,
+				retryInMS = event.retryable ? headlessMillisecondsUntil(event.retryAt, now) : 0,
+			},
+			allocator,
+		)
 	case .Disconnected:
 		kind = .Disconnected
 		line = headlessMarshal(
-			HeadlessServerEventJSON{event = HEADLESS_EVENT_NAMES[kind], serverID = event.serverID},
+			HeadlessDisconnectedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				message = event.message,
+				retryInMS = headlessMillisecondsUntil(event.retryAt, now),
+			},
 			allocator,
 		)
 	}
@@ -452,11 +556,14 @@ HeadlessErrorJSON :: struct {
 	error: string,
 }
 
+// connection is "connecting", "connected", "retrying" (retryInMS until the next attempt),
+// "failed" (stopped until `reconnect`), or "none" when no server is selected.
 HeadlessStatusJSON :: struct {
 	ok:             bool,
 	cmd:            string,
-	phase:          string,
+	connection:     string,
 	connected:      bool,
+	retryInMS:      int,
 	serverID:       int,
 	server:         string,
 	userID:         int,
@@ -480,6 +587,12 @@ HeadlessHistoryJSON :: struct {
 	serverID:        int,
 	roomID:          int,
 	beforeMessageID: int,
+}
+
+HeadlessServerResultJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
 }
 
 HeadlessSendJSON :: struct {
@@ -534,8 +647,11 @@ HeadlessCommand :: struct {
 // direct messages (package B): {"users", 0, 0, false, ...}, {"dm", 1, 0, true, "dm USER_ID
 // TEXT...", ...} and {"dm-history", 1, 1, false, ...}, plus their event kinds above.
 HEADLESS_COMMANDS := [?]HeadlessCommand {
-	{"status", 0, 0, false, "status", "connection phase, user, nickname, selected server",
+	{"status", 0, 0, false, "status", "connection status, user, nickname, selected server",
 		headlessCommandStatus},
+	{"reconnect", 0, 0, false, "reconnect",
+		"connects again now, without waiting for the next retry (also after a failure)",
+		headlessCommandReconnect},
 	{"rooms", 0, 0, false, "rooms", "joined rooms from the cache; requests them if not loaded",
 		headlessCommandRooms},
 	{"history", 1, 1, false, "history ROOM_ID [BEFORE_MESSAGE_ID]",
@@ -645,12 +761,16 @@ HeadlessHarness :: struct {
 	out:           io.Writer, // JSON lines only
 	commands:      []HeadlessCommand,
 	// Events that arrived and have not been consumed by `wait` yet, per kind.
-	pendingEvents: [HeadlessEventKind]int,
-	running:       bool,
+	pendingEvents:   [HeadlessEventKind]int,
+	// Connecting events per server since its last connected or disconnected event.
+	connectAttempts: map[int]int,
+	running:         bool,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
 	State_deinit(&harness.state)
+	delete(harness.connectAttempts)
+	harness.connectAttempts = nil
 }
 
 // Writes one line followed by a newline in a single write, so lines never interleave.
@@ -679,7 +799,17 @@ headlessRecordEvent :: proc(harness: ^HeadlessHarness, kind: HeadlessEventKind) 
 // Prints a runtime event, counts it for `wait`, then applies it to State exactly as the GUI
 // does. The caller still owns the event and must deinit it.
 headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTransportRuntimeEvent) {
-	line, kind, ok := headlessRenderRuntimeEvent(event)
+	info := HeadlessRenderInfo {
+		displayName = harness.state.config.display_name,
+	}
+	#partial switch event.kind {
+	case .Connecting:
+		harness.connectAttempts[event.serverID] += 1
+		info.attempt = harness.connectAttempts[event.serverID]
+	case .Connected, .Disconnected:
+		delete_key(&harness.connectAttempts, event.serverID)
+	}
+	line, kind, ok := headlessRenderRuntimeEvent(event, info)
 	if ok {
 		headlessWriteLine(harness, line)
 		delete(line)
@@ -714,58 +844,96 @@ headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {
 	}
 }
 
-// Connects the selected server and blocks until it is connected or has failed, then reports
-// the outcome as a `connected` or `connect_failed` event. This is the only place that knows
-// how the client connects. Today the handshake runs synchronously inside
-// State_initFromConfig and the worker starts afterwards. When the handshake moves onto the
-// network worker, this becomes: start the worker, then drain events until a Connected or
-// ConnectFailed runtime event arrives (or a timeout passes).
-headlessConnectAndWait :: proc(harness: ^HeadlessHarness, config: Config) -> bool {
-	startupAuthBridge = startupAuthBridge_real
-	harness.state = State_initFromConfig(config)
-	harness.state.networkWorker = ClientNetworkWorker_start(harness.state.serverTransports[:])
-
-	transport, ok := State_selectedTransport(&harness.state)
-	if !ok {
-		headlessWriteJSON(
-			harness,
-			HeadlessMessageEventJSON {
-				event = HEADLESS_EVENT_NAMES[.ConnectFailed],
-				message = "no server is configured",
-			},
-		)
-		headlessRecordEvent(harness, .ConnectFailed)
-		return false
-	}
-
-	ClientNetworkWorker_lock(harness.state.networkWorker)
-	defer ClientNetworkWorker_unlock(harness.state.networkWorker)
-	if transport.transport.phase == .Established {
-		headlessWriteJSON(
-			harness,
-			HeadlessConnectedJSON {
-				event = HEADLESS_EVENT_NAMES[.Connected],
-				serverID = transport.serverID,
-				userID = transport.authenticatedUserID,
-				nickname = transport.nickname,
-			},
-		)
-		headlessRecordEvent(harness, .Connected)
-		return true
-	}
-	message := transport.lastError
-	if len(message) == 0 {
-		message = "connection failed"
-	}
+// Writes a connect_failed line that the harness itself produces (no runtime event behind it)
+// and counts it for `wait`.
+headlessWriteConnectFailed :: proc(
+	harness: ^HeadlessHarness,
+	serverID: int,
+	message, detail, failure: string,
+) {
 	headlessWriteJSON(
 		harness,
-		HeadlessMessageEventJSON {
+		HeadlessConnectFailedJSON {
 			event = HEADLESS_EVENT_NAMES[.ConnectFailed],
-			serverID = transport.serverID,
+			serverID = serverID,
 			message = message,
+			detail = detail,
+			failure = failure,
 		},
 	)
 	headlessRecordEvent(harness, .ConnectFailed)
+}
+
+// Builds the state, starts the network worker, and waits until the selected server is
+// connected. This is the only place that knows how the client connects. The worker drives the
+// connect state machine (connection.odin) and reports every step as a runtime event, which is
+// printed and applied like any other, so `connecting` and `connect_failed` lines for retried
+// attempts show up here too. Returns false, after a connect_failed line, when there is no
+// server, when a failure stops retrying, or when timeout passes first.
+headlessConnectAndWait :: proc(
+	harness: ^HeadlessHarness,
+	config: Config,
+	timeout: time.Duration,
+) -> bool {
+	harness.state = State_initFromConfig(config)
+	state := &harness.state
+	serverID := state.selected_server_id
+	_, hasTransport := State_selectedTransport(state)
+	connectionIndex := State_serverConnectionIndex(state^, serverID)
+	if !hasTransport || connectionIndex < 0 {
+		headlessWriteConnectFailed(harness, 0, "no server is configured", "", "NoServer")
+		return false
+	}
+	// A server whose config cannot work (such as a corrupt identity key) is failed before the
+	// worker starts, so no runtime event will report it.
+	if connection := state.serverConnections[connectionIndex]; connection.status == .Failed {
+		message := describeConnectFailure(
+			connection.failureKind,
+			connection.detail,
+			state.config.display_name,
+			"",
+		)
+		failure := fmt.tprintf("%v", connection.failureKind)
+		headlessWriteConnectFailed(harness, serverID, message, connection.detail, failure)
+		return false
+	}
+
+	State_startNetwork(state)
+	start := time.tick_now()
+	for {
+		headlessDrainEvents(harness)
+		free_all(context.temp_allocator)
+		// Applying events can add connection entries, so look the index up again.
+		connectionIndex = State_serverConnectionIndex(state^, serverID)
+		if connectionIndex >= 0 {
+			#partial switch state.serverConnections[connectionIndex].status {
+			case .Established:
+				return true
+			case .Failed:
+				// The worker's connect_failed event (retryable false) is already printed.
+				return false
+			}
+		}
+		if time.tick_since(start) >= timeout {
+			break
+		}
+		time.sleep(HEADLESS_POLL_INTERVAL)
+	}
+
+	address := ""
+	if server, ok := State_serverConfig(state, serverID); ok {
+		address = fmt.tprintf("%s:%d", server.host, server.port)
+	}
+	detail := ""
+	if connectionIndex >= 0 {
+		detail = state.serverConnections[connectionIndex].detail
+	}
+	message := fmt.tprintf(
+		"timed out after %d ms connecting to %s",
+		int(time.duration_milliseconds(timeout)),
+		address,
+	)
+	headlessWriteConnectFailed(harness, serverID, message, detail, "Timeout")
 	return false
 }
 
@@ -784,33 +952,66 @@ headlessPumpFor :: proc(harness: ^HeadlessHarness, duration: time.Duration) {
 
 // ── Command handlers ──────────────────────────────────────────────
 
+// Reports State's mirror of the connection, the same source the GUI's status line uses, so it
+// needs no worker lock.
 headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
 	state := &harness.state
 	result := HeadlessStatusJSON {
 		ok             = true,
 		cmd            = command.name,
-		phase          = "None",
+		connection     = "none",
 		serverID       = state.selected_server_id,
 		selectedRoomID = state.selected_channel_id,
 	}
-	for server in state.config.servers {
-		if server.id == state.selected_server_id {
-			result.server = fmt.tprintf("%s:%d", server.host, server.port)
-		}
+	if server, ok := State_serverConfig(state, state.selected_server_id); ok {
+		result.server = fmt.tprintf("%s:%d", server.host, server.port)
 	}
-	if transport, ok := State_selectedTransport(state); ok {
-		// The worker updates phase and lastError on disconnect, so read them under its lock.
-		ClientNetworkWorker_lock(state.networkWorker)
-		result.phase = fmt.tprintf("%v", transport.transport.phase)
-		result.connected =
-			transport.transport.phase == .Established &&
-			ClientServerTransport_hasLiveENetSession(transport)
-		result.userID = transport.authenticatedUserID
-		result.nickname = strings.clone(transport.nickname, context.temp_allocator)
-		result.lastError = strings.clone(transport.lastError, context.temp_allocator)
-		ClientNetworkWorker_unlock(state.networkWorker)
+	if index := State_serverConnectionIndex(state^, state.selected_server_id); index >= 0 {
+		connection := &state.serverConnections[index]
+		switch connection.status {
+		case .Idle, .Connecting, .Handshaking:
+			result.connection = "connecting"
+		case .Established:
+			result.connection = "connected"
+			result.connected = true
+			result.userID = connection.userID
+			result.nickname = connection.nickname
+		case .Disconnected:
+			result.connection = "retrying"
+			result.retryInMS = headlessMillisecondsUntil(connection.retryAt, time.tick_now())
+		case .Failed:
+			result.connection = "failed"
+		}
+		result.lastError = connection.detail
 	}
 	headlessWriteJSON(harness, result)
+}
+
+// "Retry now": drops any session in progress and connects at once. The outcome arrives as
+// connecting and then connected or connect_failed events.
+headlessCommandReconnect :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	state := &harness.state
+	serverID := state.selected_server_id
+	if _, ok := State_selectedTransport(state); !ok {
+		headlessWriteError(harness, command.name, "no server is configured")
+		return
+	}
+	State_retryConnection(state, serverID)
+	// A server whose config cannot work stays failed; retrying it cannot help.
+	if index := State_serverConnectionIndex(state^, serverID); index >= 0 {
+		if connection := &state.serverConnections[index]; connection.status == .Failed {
+			message := connection.detail
+			if len(message) == 0 {
+				message = "the server's config cannot be used to connect"
+			}
+			headlessWriteError(harness, command.name, message)
+			return
+		}
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessServerResultJSON{ok = true, cmd = command.name, serverID = serverID},
+	)
 }
 
 headlessCommandRooms :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
@@ -1094,7 +1295,8 @@ headlessMain :: proc(args: []string) -> int {
 		running  = true,
 	}
 	defer HeadlessHarness_deinit(&harness)
-	if !headlessConnectAndWait(&harness, config) {
+	connectTimeout := time.Duration(options.connectTimeoutMS) * time.Millisecond
+	if !headlessConnectAndWait(&harness, config, connectTimeout) {
 		return HEADLESS_EXIT_CONNECT_FAILED
 	}
 

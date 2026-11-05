@@ -38,12 +38,8 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	view.hasOlder = roomCache.hasOlder
 	view.isLoadingHistory = roomCache.isLoadingHistory
 
-	// authenticatedUserID is written during startup auth, before the network worker starts,
-	// so reading it here without the worker lock is safe.
-	selfUserID := 0
-	if transport, ok := State_selectedTransport(state); ok {
-		selfUserID = transport.authenticatedUserID
-	}
+	// The worker writes the transport's user ID, so read the UI thread's copy instead.
+	selfUserID := State_selfUserID(state, state.selected_server_id)
 
 	lines := make([]TranscriptLine, len(roomCache.messages), allocator)
 	for message, index in roomCache.messages {

@@ -10,7 +10,6 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 
-startupAuthBridgeTestMutex: sync.Mutex
 roomChatSendBridgeTestMutex: sync.Mutex
 roomChatSendBridgeTestServerID: int
 roomChatSendBridgeTestRoomID: int
@@ -185,69 +184,87 @@ testSetDraft :: proc(draft: ^[dynamic]u8, value: string) {
 	append(draft, value)
 }
 
-liveTestTransportStatus :: proc(transport: ^ClientServerTransport) -> string {
-	return fmt.aprintf("phase=%v lastError=%q", transport.transport.phase, transport.lastError)
+// Marks a server as signed in the way the worker's Connected event does.
+testApplyConnected :: proc(state: ^State, serverID, userID: int) {
+	event := ClientTransportRuntimeEvent {
+		kind     = .Connected,
+		serverID = serverID,
+		userID   = userID,
+		nickname = strings.clone(state.config.display_name),
+	}
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
 }
 
-liveTestExpectEstablishedTransport :: proc(
-	t: ^testing.T,
-	transport: ^ClientServerTransport,
-	label: string,
-) {
-	status := liveTestTransportStatus(transport)
-	defer delete(status)
-
-	testing.expect(
-		t,
-		transport.transport.phase == .Established,
-		fmt.aprintf("expected %s to complete live connect/auth, got %s", label, status),
-	)
-	testing.expect(
-		t,
-		transport.authenticatedUserID != 0,
-		fmt.aprintf(
-			"expected %s to report a non-zero authenticated user ID, got %s",
-			label,
-			status,
-		),
-	)
-	testing.expect(
-		t,
-		len(transport.lastError) == 0,
-		fmt.aprintf("expected %s to finish live auth without an error, got %s", label, status),
-	)
-	testing.expect(
-		t,
-		ClientServerTransport_hasLiveENetSession(transport),
-		fmt.aprintf("expected %s to retain a live ENet session, got %s", label, status),
+liveTestConnectionStatus :: proc(state: ^State, serverID: int) -> string {
+	connection := State_serverConnection(state, serverID)
+	return fmt.tprintf(
+		"status=%v failure=%v detail=%q",
+		connection.status,
+		connection.failureKind,
+		connection.detail,
 	)
 }
 
-// Services the transport until an event of the wanted kind arrives. Other events, such as the
-// room list that startup requested, are freed and skipped, so the result does not depend on
-// the order the server's replies arrive in.
-liveTestWaitForRuntimeEvent :: proc(
-	transport: ^ClientServerTransport,
+// Pumps the state's network worker the way the frame loop does, until an event of `kind`
+// arrives or the timeout passes. Other events are applied to the state; the matching event is
+// returned unapplied and the caller owns it.
+liveTestWaitForEvent :: proc(
+	state: ^State,
 	kind: ClientTransportRuntimeEventKind,
 	timeout: time.Duration,
 ) -> (
 	ClientTransportRuntimeEvent,
 	bool,
 ) {
-	start := time.now()
-	for time.since(start) < timeout {
-		runtimeEvent, hasEvent := ClientServerTransport_serviceRuntime(transport)
+	start := time.tick_now()
+	for time.tick_since(start) < timeout {
+		event, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
 		if !hasEvent {
-			time.sleep(1 * time.Millisecond)
+			time.sleep(5 * time.Millisecond)
 			continue
 		}
-		if runtimeEvent.kind == kind {
-			return runtimeEvent, true
+		if event.kind == kind {
+			return event, true
 		}
-		ClientTransportRuntimeEvent_deinit(&runtimeEvent)
+		State_applyRuntimeEvent(state, &event)
+		ClientTransportRuntimeEvent_deinit(&event)
 	}
-
 	return {}, false
+}
+
+// Starts the worker and waits until the server has signed the client in, then applies the
+// Connected event (which also requests the room list).
+liveTestConnect :: proc(
+	t: ^testing.T,
+	state: ^State,
+	label: string,
+	timeout: time.Duration = 10 * time.Second,
+) -> bool {
+	State_startNetwork(state)
+	serverID := state.selected_server_id
+	event, connected := liveTestWaitForEvent(state, .Connected, timeout)
+	if !connected {
+		testing.expectf(
+			t,
+			false,
+			"expected %s to connect and sign in, got %s",
+			label,
+			liveTestConnectionStatus(state, serverID),
+		)
+		return false
+	}
+	testing.expectf(t, event.userID != 0, "expected %s to get a non-zero user ID", label)
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+	testing.expectf(
+		t,
+		State_isServerConnected(state, serverID),
+		"expected %s to show as connected, got %s",
+		label,
+		liveTestConnectionStatus(state, serverID),
+	)
+	return true
 }
 
 @(test)
@@ -393,7 +410,7 @@ testReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T) {
 	}
 	state := testUpdateStateForServer(server)
 	defer State_deinit(&state)
-	state.serverTransports[state.selected_transport_index].authenticatedUserID = 77
+	testApplyConnected(&state, server.id, 77)
 
 	originalRoomChatSendBridge := roomChatSendBridge
 	roomChatSendBridgeTestReturnValue = true
@@ -1117,11 +1134,10 @@ testClientServerTransportTranslatesProtocolErrorIntoRuntimeEvent :: proc(t: ^tes
 	_ = t
 }
 
+// Rewritten from testStateInitFromConfigAttemptsOnlySelectedDefaultServer: startup no longer
+// begins a handshake synchronously. Every server is queued for the network worker instead.
 @(test)
-testStateInitFromConfigAttemptsOnlySelectedDefaultServer :: proc(t: ^testing.T) {
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
+testStateInitFromConfigQueuesEveryServerToConnect :: proc(t: ^testing.T) {
 	config := testConfigWithServers(
 		{
 			Server {
@@ -1138,231 +1154,193 @@ testStateInitFromConfigAttemptsOnlySelectedDefaultServer :: proc(t: ^testing.T) 
 			},
 		},
 	)
-
 	defer Config_deinit(&config)
 	state := State_initFromConfig(config)
 	defer State_deinit(&state)
 
-	testing.expect(
-		t,
-		state.selected_server_id == 11,
-		"expected first configured server to be selected",
-	)
+	testing.expect(t, state.selected_server_id == 11, "expected the first server to be selected")
 	testing.expect(
 		t,
 		state.selected_transport_index == 0,
 		"expected selected transport index to point at the selected server",
 	)
 	testing.expect(t, len(state.serverTransports) == 2, "expected a transport entry per server")
+	testing.expect(t, !state.settingsOpen, "expected a complete config to skip first-run setup")
+	for index in 0 ..< len(state.serverTransports) {
+		transport := &state.serverTransports[index]
+		testing.expectf(
+			t,
+			transport.connection.status == .Disconnected &&
+			transport.connection.nextAttemptAt == {},
+			"expected server %d to be queued for an immediate attempt, got %v",
+			transport.serverID,
+			transport.connection.status,
+		)
+		testing.expect(
+			t,
+			!ClientServerTransport_hasLiveENetSession(transport),
+			"expected no network I/O before the worker starts",
+		)
+		testing.expect(t, len(transport.lastError) == 0, "expected no error before connecting")
+		testing.expect(
+			t,
+			State_serverConnection(&state, transport.serverID).status == .Connecting,
+			"expected the UI to show every queued server as connecting",
+		)
+	}
+}
+
+// Feeds a server handshake through the transport the way the worker does, using a fresh
+// server identity. Returns that identity's public key.
+testRunHandshake :: proc(
+	transport: ^ClientServerTransport,
+	serverIdentityPrivateKey: common.IdentityPrivateKeyBytes,
+	serverIdentityPublicKey: common.IdentityPublicKeyBytes,
+	userID: int,
+) -> bool {
+	helloBytes, helloOK := ClientServerTransport_beginHandshake(transport)
+	delete(helloBytes)
+	if !helloOK {
+		return false
+	}
+	_, serverEphemeralPublicKey, ephemeralOK := common.generateKeyExchangeKeyPair()
+	assert(ephemeralOK, "expected server ephemeral key generation to succeed")
+	sessionID, sessionIDOK := common.generateSessionID()
+	assert(sessionIDOK, "expected session ID generation to succeed")
+
+	serverHelloBytes, serverHelloOK := buildServerHelloPacketBytes(
+		transport,
+		serverIdentityPrivateKey,
+		serverIdentityPublicKey,
+		serverEphemeralPublicKey,
+		sessionID,
+	)
+	assert(serverHelloOK, "expected ServerHello packet encoding to succeed")
+	defer delete(serverHelloBytes)
+	if _, ok := ClientServerTransport_handleIncomingPacket(transport, serverHelloBytes); !ok {
+		return false
+	}
+
+	authChallenge, authChallengeOK := common.generateAuthChallenge()
+	assert(authChallengeOK, "expected auth challenge generation to succeed")
+	challengeBytes, challengeBytesOK := common.buildPacketBytes(
+		.ServerAuthChallenge,
+		common.ServerAuthChallengePayload {
+			sessionID = transport.sessionID,
+			challenge = authChallenge,
+		},
+	)
+	assert(challengeBytesOK, "expected auth challenge packet encoding to succeed")
+	defer delete(challengeBytes)
+	challengeResult, challengeOK := ClientServerTransport_handleIncomingPacket(
+		transport,
+		challengeBytes,
+	)
+	if challengeResult.hasResponse {
+		delete(challengeResult.responsePacketBytes)
+	}
+	if !challengeOK || !challengeResult.hasResponse {
+		return false
+	}
+
+	successBytes, successBytesOK := common.buildPacketBytes(
+		.ServerAuthSuccess,
+		common.ServerAuthSuccessPayload{userId = userID, message = "ok"},
+	)
+	assert(successBytesOK, "expected auth success packet encoding to succeed")
+	defer delete(successBytes)
+	_, successOK := ClientServerTransport_handleIncomingPacket(transport, successBytes)
+	return successOK
+}
+
+// Rewritten from testStateInitFromConfigCanEstablishSelectedTransportViaStartupBridge: the
+// handshake packets now go straight to the transport, as the worker feeds them.
+@(test)
+testHandshakePacketsEstablishTransportAndPinServerKeyOnFirstUse :: proc(t: ^testing.T) {
+	server := Server {
+		id   = 44,
+		name = "Handshake Server",
+		host = "localhost",
+		port = common.DEFAULT_SERVER_PORT,
+	}
+	config := testConfigWithServers({server})
+	defer Config_deinit(&config)
+	transport, message, ok := ClientServerTransport_init(config.servers[0], config)
+	assert(ok, message)
+	defer ClientServerTransport_deinit(&transport)
+
+	serverPrivateKey, serverPublicKey, identityOK := common.generateIdentityKeyPair()
+	assert(identityOK, "expected server identity key generation to succeed")
 	testing.expect(
 		t,
-		state.serverTransports[0].transport.phase == .ClientHelloSent,
-		"expected selected/default server startup attempt to begin the handshake",
+		testRunHandshake(&transport, serverPrivateKey, serverPublicKey, 77),
+		"expected the handshake to succeed",
 	)
 	testing.expect(
 		t,
-		state.serverTransports[1].transport.phase == .Disconnected,
-		"expected non-selected servers to remain idle",
+		transport.transport.phase == .Established,
+		"expected the handshake to establish the transport",
 	)
+	testing.expect(t, transport.authenticatedUserID == 77, "expected the server's user ID")
+	expectedKey := common.identityPublicKeyToHex(serverPublicKey)
+	defer delete(expectedKey)
 	testing.expect(
 		t,
-		len(state.serverTransports[0].lastError) == 0,
-		"expected selected/default startup attempt to avoid setting an error on success",
+		transport.pinnedServerPublicKey == expectedKey && transport.connection.newlyPinned,
+		"expected an unpinned server's key to be pinned on first use",
 	)
 }
 
 @(test)
-testStateInitFromConfigCanEstablishSelectedTransportViaStartupBridge :: proc(t: ^testing.T) {
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
-	config := testConfigWithServers(
-		{
-			Server {
-				id = 44,
-				name = "Handshake Server",
-				host = "localhost",
-				port = common.DEFAULT_SERVER_PORT,
-			},
-		},
-	)
-
-	originalBridge := startupAuthBridge
-	startupAuthBridge = proc(
-		transport: ^ClientServerTransport,
-		server: ^Server,
-		bridgeConfig: ^Config,
-		clientHelloPacketBytes: []u8,
-	) -> ClientStartupAuthSession {
-		_ = clientHelloPacketBytes
-
-		serverIdentityPrivateKey, serverIdentityPublicKey, identityOK :=
-			common.generateIdentityKeyPair()
-		assert(identityOK, "expected server identity key generation to succeed")
-
-		_, serverEphemeralPublicKey, ephemeralOK := common.generateKeyExchangeKeyPair()
-		assert(ephemeralOK, "expected server ephemeral key generation to succeed")
-
-		sessionID, sessionIDOK := common.generateSessionID()
-		assert(sessionIDOK, "expected session ID generation to succeed")
-
-		serverHelloBytes, serverHelloOK := buildServerHelloPacketBytes(
-			transport,
-			serverIdentityPrivateKey,
-			serverIdentityPublicKey,
-			serverEphemeralPublicKey,
-			sessionID,
-		)
-		assert(serverHelloOK, "expected ServerHello packet encoding to succeed")
-		defer delete(serverHelloBytes)
-
-		_, serverHelloHandleOK := ClientServerTransport_handleIncomingPacket(
-			transport,
-			server,
-			bridgeConfig,
-			serverHelloBytes,
-		)
-		assert(serverHelloHandleOK, "expected selected startup bridge to accept ServerHello")
-
-		authChallenge, authChallengeOK := common.generateAuthChallenge()
-		assert(authChallengeOK, "expected auth challenge generation to succeed")
-
-		authChallengeBytes, authChallengeBytesOK := common.buildPacketBytes(
-			.ServerAuthChallenge,
-			common.ServerAuthChallengePayload {
-				sessionID = transport.sessionID,
-				challenge = authChallenge,
-			},
-		)
-		assert(authChallengeBytesOK, "expected auth challenge packet encoding to succeed")
-		defer delete(authChallengeBytes)
-
-		authChallengeResult, authChallengeHandleOK := ClientServerTransport_handleIncomingPacket(
-			transport,
-			server,
-			bridgeConfig,
-			authChallengeBytes,
-		)
-		assert(authChallengeHandleOK, "expected selected startup bridge to accept auth challenge")
-		defer if authChallengeResult.hasResponse do delete(authChallengeResult.responsePacketBytes)
-		assert(
-			authChallengeResult.hasResponse,
-			"expected auth challenge handling to emit ClientAuthRequest bytes",
-		)
-
-		authSuccessBytes, authSuccessBytesOK := common.buildPacketBytes(
-			.ServerAuthSuccess,
-			common.ServerAuthSuccessPayload{userId = 77, message = "ok"},
-		)
-		assert(authSuccessBytesOK, "expected auth success packet encoding to succeed")
-		defer delete(authSuccessBytes)
-
-		_, authSuccessHandleOK := ClientServerTransport_handleIncomingPacket(
-			transport,
-			server,
-			bridgeConfig,
-			authSuccessBytes,
-		)
-		assert(authSuccessHandleOK, "expected selected startup bridge to accept auth success")
-
-		return {}
+testAuthFailureThenDisconnectClearsPendingAuthState :: proc(t: ^testing.T) {
+	server := Server {
+		id   = 55,
+		name = "Rejecting Server",
+		host = "localhost",
+		port = common.DEFAULT_SERVER_PORT,
 	}
-	defer startupAuthBridge = originalBridge
-
+	config := testConfigWithServers({server})
 	defer Config_deinit(&config)
-	state := State_initFromConfig(config)
-	defer State_deinit(&state)
+	transport, message, ok := ClientServerTransport_init(config.servers[0], config)
+	assert(ok, message)
+	defer ClientServerTransport_deinit(&transport)
 
-	testing.expect(t, len(state.serverTransports) == 1, "expected a single transport")
-	testing.expect(
-		t,
-		state.serverTransports[0].transport.phase == .Established,
-		"expected startup bridge to be able to establish the selected transport",
+	helloBytes, helloOK := ClientServerTransport_beginHandshake(&transport)
+	assert(helloOK, "expected ClientHello encoding to succeed")
+	delete(helloBytes)
+	serverPrivateKey, serverPublicKey, identityOK := common.generateIdentityKeyPair()
+	assert(identityOK, "expected server identity key generation to succeed")
+	_, serverEphemeralPublicKey, ephemeralOK := common.generateKeyExchangeKeyPair()
+	assert(ephemeralOK, "expected server ephemeral key generation to succeed")
+	sessionID, sessionIDOK := common.generateSessionID()
+	assert(sessionIDOK, "expected session ID generation to succeed")
+	serverHelloBytes, serverHelloOK := buildServerHelloPacketBytes(
+		&transport,
+		serverPrivateKey,
+		serverPublicKey,
+		serverEphemeralPublicKey,
+		sessionID,
 	)
-	testing.expect(
-		t,
-		state.serverTransports[0].authenticatedUserID == 77,
-		"expected startup bridge to capture the authenticated user ID",
+	assert(serverHelloOK, "expected ServerHello packet encoding to succeed")
+	defer delete(serverHelloBytes)
+	_, serverHelloHandled := ClientServerTransport_handleIncomingPacket(
+		&transport,
+		serverHelloBytes,
 	)
-}
+	assert(serverHelloHandled, "expected the transport to accept ServerHello")
 
-@(test)
-testStateInitFromConfigClearsPendingAuthStateAfterFailureAndDisconnect :: proc(t: ^testing.T) {
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
-	config := testConfigWithServers(
-		{
-			Server {
-				id = 55,
-				name = "Rejecting Server",
-				host = "localhost",
-				port = common.DEFAULT_SERVER_PORT,
-			},
-		},
+	authFailureBytes, authFailureBytesOK := common.buildPacketBytes(
+		.ServerAuthFailure,
+		common.ServerAuthFailurePayload{message = "invalid client auth signature"},
 	)
-
-	originalBridge := startupAuthBridge
-	startupAuthBridge = proc(
-		transport: ^ClientServerTransport,
-		server: ^Server,
-		bridgeConfig: ^Config,
-		clientHelloPacketBytes: []u8,
-	) -> ClientStartupAuthSession {
-		_ = clientHelloPacketBytes
-
-		serverIdentityPrivateKey, serverIdentityPublicKey, identityOK :=
-			common.generateIdentityKeyPair()
-		assert(identityOK, "expected server identity key generation to succeed")
-
-		_, serverEphemeralPublicKey, ephemeralOK := common.generateKeyExchangeKeyPair()
-		assert(ephemeralOK, "expected server ephemeral key generation to succeed")
-
-		sessionID, sessionIDOK := common.generateSessionID()
-		assert(sessionIDOK, "expected session ID generation to succeed")
-
-		serverHelloBytes, serverHelloOK := buildServerHelloPacketBytes(
-			transport,
-			serverIdentityPrivateKey,
-			serverIdentityPublicKey,
-			serverEphemeralPublicKey,
-			sessionID,
-		)
-		assert(serverHelloOK, "expected ServerHello packet encoding to succeed")
-		defer delete(serverHelloBytes)
-
-		_, serverHelloHandleOK := ClientServerTransport_handleIncomingPacket(
-			transport,
-			server,
-			bridgeConfig,
-			serverHelloBytes,
-		)
-		assert(serverHelloHandleOK, "expected selected startup bridge to accept ServerHello")
-
-		authFailureBytes, authFailureBytesOK := common.buildPacketBytes(
-			.ServerAuthFailure,
-			common.ServerAuthFailurePayload{message = "invalid client auth signature"},
-		)
-		assert(authFailureBytesOK, "expected auth failure packet encoding to succeed")
-		defer delete(authFailureBytes)
-
-		_, authFailureHandleOK := ClientServerTransport_handleIncomingPacket(
-			transport,
-			server,
-			bridgeConfig,
-			authFailureBytes,
-		)
-		assert(!authFailureHandleOK, "expected auth failure to fail the selected transport")
-
-		ClientServerTransport_handleDisconnect(transport)
-		return {}
-	}
-	defer startupAuthBridge = originalBridge
-
-	defer Config_deinit(&config)
-	state := State_initFromConfig(config)
-	defer State_deinit(&state)
-	transport := state.serverTransports[0]
+	assert(authFailureBytesOK, "expected auth failure packet encoding to succeed")
+	defer delete(authFailureBytes)
+	_, authFailureHandled := ClientServerTransport_handleIncomingPacket(
+		&transport,
+		authFailureBytes,
+	)
+	testing.expect(t, !authFailureHandled, "expected auth failure to fail the transport")
+	ClientServerTransport_handleDisconnect(&transport)
 
 	testing.expect(
 		t,
@@ -1394,9 +1372,6 @@ testStateInitFromConfigClearsPendingAuthStateAfterFailureAndDisconnect :: proc(t
 
 @(test)
 testStateInitFromConfigSurfacesSelectedTransportInitFailure :: proc(t: ^testing.T) {
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
 	config := Config {
 		private_key  = "invalid-private-key",
 		public_key   = "invalid-public-key",
@@ -1427,13 +1402,20 @@ testStateInitFromConfigSurfacesSelectedTransportInitFailure :: proc(t: ^testing.
 	)
 	testing.expect(
 		t,
-		state.serverTransports[0].transport.phase == .Failed,
+		state.serverTransports[0].transport.phase == .Failed &&
+		state.serverTransports[0].connection.status == .Failed,
 		"expected selected/default transport init failures to surface as failed state",
 	)
 	testing.expect(
 		t,
-		state.serverTransports[0].lastError == "client identity keys are missing or invalid",
+		state.serverTransports[0].lastError == CLIENT_INVALID_IDENTITY_MESSAGE,
 		"expected selected/default transport init failures to keep a visible error message",
+	)
+	connection := State_serverConnection(&state, 33)
+	testing.expect(
+		t,
+		connection.status == .Failed && connection.failureKind == .InvalidIdentity,
+		"expected the UI to show the identity failure without retrying",
 	)
 }
 
@@ -1443,90 +1425,65 @@ liveTestUniqueNickname :: proc(prefix: string) -> string {
 	return fmt.aprintf("%s-%x", prefix, time.time_to_unix_nano(time.now()))
 }
 
+// Live proofs. They run the real connect flow: State_initFromConfig queues the server, the
+// network worker connects and signs in, and the test pumps events like the frame loop.
+
 @(test)
 testClientServerTransportCanEstablishLiveStartupAuthOverENet :: proc(t: ^testing.T) {
 	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.temp_allocator) != "1" {
 		return
 	}
 
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
 	config := testConfigWithServers(
-		{
-			Server {
-				id = 66,
-				name = "Live Server",
-				host = "127.0.0.1",
-				port = 12345,
-			},
-		},
+		{Server{id = 66, name = "Live Server", host = "127.0.0.1", port = 12345}},
 	)
-
+	defer Config_deinit(&config)
 	delete(config.display_name)
 	config.display_name = liveTestUniqueNickname("live")
 
-	originalBridge := startupAuthBridge
-	startupAuthBridge = startupAuthBridge_real
-	defer startupAuthBridge = originalBridge
-
 	state := State_initFromConfig(config)
-	transport := &state.serverTransports[0]
-	defer ClientServerTransport_handleDisconnect(transport)
-
-	testing.expect(
-		t,
-		transport.transport.phase == .Established,
-		"expected live startup auth bridge to establish the transport",
-	)
-	testing.expect(
-		t,
-		transport.authenticatedUserID != 0,
-		"expected live startup auth bridge to report a non-zero authenticated user ID",
-	)
-	testing.expect(
-		t,
-		len(transport.lastError) == 0,
-		"expected live startup auth bridge to succeed without setting an error",
-	)
-	testing.expect(
-		t,
-		ClientServerTransport_hasLiveENetSession(transport),
-		"expected startup return to retain the live ENet session",
-	)
-
-	// Startup requested the room list; the background worker must service the session and
-	// queue the server's reply without the UI polling ENet.
-	state.networkWorker = ClientNetworkWorker_start(state.serverTransports[:])
-	roomListReceived := false
-	deadline := time.tick_now()
-	for !roomListReceived && time.tick_since(deadline) < 3 * time.Second {
-		event, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
-		if hasEvent {
-			roomListReceived = event.kind == .RoomListReceived
-			ClientTransportRuntimeEvent_deinit(&event)
-		} else {
-			time.sleep(10 * time.Millisecond)
-		}
+	defer State_deinit(&state)
+	if !liveTestConnect(t, &state, "the live client") {
+		return
 	}
-	ClientNetworkWorker_stop(state.networkWorker)
-	state.networkWorker = nil
+	connection := State_serverConnection(&state, 66)
+	testing.expectf(
+		t,
+		connection.nickname == config.display_name,
+		"expected the connection to report nickname %q, got %q",
+		config.display_name,
+		connection.nickname,
+	)
+	testing.expect(
+		t,
+		len(state.config.servers[0].pinned_server_public_key) > 0,
+		"expected the first connect to pin the server's identity key",
+	)
+
+	// Connected requested the room list; the worker must deliver the server's reply.
+	roomList, roomListReceived := liveTestWaitForEvent(&state, .RoomListReceived, 3 * time.Second)
+	defer if roomListReceived do ClientTransportRuntimeEvent_deinit(&roomList)
 	testing.expect(
 		t,
 		roomListReceived,
-		"expected the network worker to deliver the startup room list from a live server",
+		"expected the network worker to deliver the room list from a live server",
 	)
 
-	postAuthProbeSent := ClientServerTransport_sendENetPacket(
-		transport.enetHost,
-		transport.enetPeer,
-		STARTUP_AUTH_CHANNEL_CHAT,
-		{0x01},
-	)
+	ClientNetworkWorker_lock(state.networkWorker)
+	transport := &state.serverTransports[0]
+	postAuthProbeSent :=
+		ClientServerTransport_isConnected(transport) &&
+		ClientServerTransport_sendENetPacket(
+			transport.enetHost,
+			transport.enetPeer,
+			STARTUP_AUTH_CHANNEL_CHAT,
+			{0x01},
+		)
+	ClientNetworkWorker_unlock(state.networkWorker)
 	testing.expect(
 		t,
 		postAuthProbeSent,
-		"expected retained ENet session to allow a post-auth outbound send",
+		"expected the established session to allow a post-auth outbound send",
 	)
 }
 
@@ -1536,81 +1493,53 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 		return
 	}
 
-	sync.mutex_lock(&startupAuthBridgeTestMutex)
-	defer sync.mutex_unlock(&startupAuthBridgeTestMutex)
-
-	configA := testConfigWithServers(
-		{
-			Server {
-				id = 67,
-				name = "Live Chat Server",
-				host = "127.0.0.1",
-				port = 12345,
-			},
-		},
-	)
-	configB := testConfigWithServers(
-		{
-			Server {
-				id = 67,
-				name = "Live Chat Server",
-				host = "127.0.0.1",
-				port = 12345,
-			},
-		},
-	)
-
+	liveServer := Server {
+		id   = 67,
+		name = "Live Chat Server",
+		host = "127.0.0.1",
+		port = 12345,
+	}
+	configA := testConfigWithServers({liveServer})
+	defer Config_deinit(&configA)
+	configB := testConfigWithServers({liveServer})
+	defer Config_deinit(&configB)
 	delete(configA.display_name)
 	configA.display_name = liveTestUniqueNickname("live-a")
 	delete(configB.display_name)
 	configB.display_name = liveTestUniqueNickname("live-b")
 
-	originalBridge := startupAuthBridge
-	startupAuthBridge = startupAuthBridge_real
-	defer startupAuthBridge = originalBridge
-
 	stateA := State_initFromConfig(configA)
+	defer State_deinit(&stateA)
 	stateB := State_initFromConfig(configB)
-	transportA := &stateA.serverTransports[0]
-	transportB := &stateB.serverTransports[0]
-	defer ClientServerTransport_handleDisconnect(transportA)
-	defer ClientServerTransport_handleDisconnect(transportB)
-
-	liveTestExpectEstablishedTransport(t, transportA, "client A")
-	liveTestExpectEstablishedTransport(t, transportB, "client B")
+	defer State_deinit(&stateB)
+	if !liveTestConnect(t, &stateA, "client A") || !liveTestConnect(t, &stateB, "client B") {
+		return
+	}
+	senderUserID := State_selfUserID(&stateA, liveServer.id)
 
 	messageContent := "live two-client room chat proof"
+	ClientNetworkWorker_lock(stateA.networkWorker)
 	sendOK := ClientServerTransport_sendRoomChatMessage(
-		transportA,
+		&stateA.serverTransports[0],
 		common.GENERAL_ROOM_ID,
 		messageContent,
 	)
-	sendStatus := liveTestTransportStatus(transportA)
-	defer delete(sendStatus)
-	testing.expect(
-		t,
-		sendOK,
-		fmt.aprintf("expected client A to send a live room chat message, got %s", sendStatus),
-	)
+	sendError := strings.clone(stateA.serverTransports[0].lastError, context.temp_allocator)
+	ClientNetworkWorker_unlock(stateA.networkWorker)
+	testing.expectf(t, sendOK, "expected client A to send a live room chat message: %q", sendError)
 
-	runtimeEvent, hasEvent := liveTestWaitForRuntimeEvent(
-		transportB,
-		.RoomChatReceived,
-		2 * time.Second,
-	)
+	// Room lists and other events reach B first; liveTestWaitForEvent applies and skips them.
+	runtimeEvent, hasEvent := liveTestWaitForEvent(&stateB, .RoomChatReceived, 3 * time.Second)
 	defer if hasEvent do ClientTransportRuntimeEvent_deinit(&runtimeEvent)
-	receiverStatus := liveTestTransportStatus(transportB)
-	defer delete(receiverStatus)
 	testing.expectf(
 		t,
 		hasEvent,
 		"expected client B to receive a live room chat message before timeout, got %s",
-		receiverStatus,
+		liveTestConnectionStatus(&stateB, liveServer.id),
 	)
 	if !hasEvent {
 		return
 	}
-
 	testing.expectf(
 		t,
 		runtimeEvent.roomID == common.GENERAL_ROOM_ID,
@@ -1619,10 +1548,10 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 	)
 	testing.expectf(
 		t,
-		runtimeEvent.senderID == transportA.authenticatedUserID,
-		"expected client B runtime event sender to match client A, got sender=%v auth=%v",
+		runtimeEvent.senderID == senderUserID,
+		"expected the sender to be client A (user %v), got %v",
+		senderUserID,
 		runtimeEvent.senderID,
-		transportA.authenticatedUserID,
 	)
 	testing.expectf(
 		t,
@@ -1639,36 +1568,42 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 		runtimeEvent.message,
 	)
 
-	// History must label the stored message with the same nickname as the live fan-out.
+	// History must label the stored message with the same nickname as the live fan-out. A
+	// history page requested at connect time may still be in flight, so skip pages without
+	// the message.
+	ClientNetworkWorker_lock(stateB.networkWorker)
 	historyOK := ClientServerTransport_requestRoomHistory(
-		transportB,
+		&stateB.serverTransports[0],
 		common.GENERAL_ROOM_ID,
 		0,
 		50,
 	)
+	ClientNetworkWorker_unlock(stateB.networkWorker)
 	testing.expect(t, historyOK, "expected client B to request General room history")
-	historyEvent, hasHistory := liveTestWaitForRuntimeEvent(
-		transportB,
-		.RoomHistoryReceived,
-		2 * time.Second,
-	)
-	defer if hasHistory do ClientTransportRuntimeEvent_deinit(&historyEvent)
-	testing.expect(t, hasHistory, "expected client B to receive General room history")
-	if !hasHistory {
-		return
-	}
 	foundInHistory := false
-	for message in historyEvent.messages {
-		if message.id == runtimeEvent.messageID {
-			foundInHistory = true
-			testing.expectf(
-				t,
-				message.senderNickname == configA.display_name,
-				"expected history to name the sender %q, got %q",
-				configA.display_name,
-				message.senderNickname,
-			)
+	historyDeadline := time.tick_now()
+	for !foundInHistory && time.tick_since(historyDeadline) < 3 * time.Second {
+		historyEvent, hasHistory := liveTestWaitForEvent(
+			&stateB,
+			.RoomHistoryReceived,
+			3 * time.Second - time.tick_since(historyDeadline),
+		)
+		if !hasHistory {
+			break
 		}
+		for message in historyEvent.messages {
+			if message.id == runtimeEvent.messageID {
+				foundInHistory = true
+				testing.expectf(
+					t,
+					message.senderNickname == configA.display_name,
+					"expected history to name the sender %q, got %q",
+					configA.display_name,
+					message.senderNickname,
+				)
+			}
+		}
+		ClientTransportRuntimeEvent_deinit(&historyEvent)
 	}
 	testing.expectf(
 		t,

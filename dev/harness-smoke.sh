@@ -5,7 +5,8 @@ set -euo pipefail
 # starts headless clients against a running server, and drives them over named pipes the way
 # an agent would.
 #
-#   1. single client: connect, `status`, `wait room_list`, `rooms`
+#   1. single client: connect, `status`, `wait room_list`, `rooms`, then `reconnect` and wait
+#      for the worker to connect again
 #   2. two clients:   A sends to room 1 and B must print the matching room_chat event
 #
 # dev/live-proof.sh --harness runs it against its throwaway server. It needs bash and
@@ -63,6 +64,7 @@ start_client() {
 	mkfifo "$work_dir/$client.in"
 	"$client_bin" --headless --name "$nickname" --server "$server_address" \
 		--config-dir "$work_dir/profile-$client" \
+		--connect-timeout "$((command_timeout_secs * 1000))" \
 		<"$work_dir/$client.in" >"$work_dir/$client.out" 2>"$work_dir/$client.err" &
 	client_pid[$client]=$!
 	exec {fd}>"$work_dir/$client.in"
@@ -114,12 +116,16 @@ expect_ok() {
 	last_result=$result
 }
 
+# expect_connected CLIENT: waits for the first `connected` line. A retried attempt prints
+# `connecting` and `connect_failed` lines before it; a failure that stops retrying (or the
+# --connect-timeout) ends the client with exit code 2 after its last `connect_failed` line.
 expect_connected() {
-	local client=$1 line
-	line=$(wait_for_line "$client" '"event":"connect' 0) ||
-		fail "client $client never reported connected or connect_failed"
+	local client=$1 line failure
+	if ! line=$(wait_for_line "$client" '{"event":"connected",' 0); then
+		failure=$(grep -F '{"event":"connect_failed",' "$work_dir/$client.out" | tail -n 1 || true)
+		fail "client $client could not connect: ${failure:-no connect_failed line}"
+	fi
 	echo "    $client< $line"
-	[[ "$line" == '{"event":"connected",'* ]] || fail "client $client could not connect: $line"
 }
 
 stop_client() {
@@ -143,6 +149,12 @@ expect_ok a status
 expect_ok a wait room_list 5000
 expect_ok a rooms
 [[ "$last_result" == *'"loaded":true'* ]] || fail "client a rooms are not loaded"
+# The first `connected` is still counted for `wait`; take it so the next wait needs a new one.
+expect_ok a wait connected 0
+expect_ok a reconnect
+expect_ok a wait connected 8000
+expect_ok a status
+[[ "$last_result" == *'"connected":true'* ]] || fail "client a is not connected after reconnect"
 echo "==> [harness] single client passed"
 
 # Needs every user to be a member of room 1. On main before the open-rooms change (work

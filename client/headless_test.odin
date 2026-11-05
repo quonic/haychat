@@ -5,6 +5,7 @@ import "../common"
 import "core:fmt"
 import "core:strings"
 import "core:testing"
+import "core:time"
 
 // A harness over a test state whose output goes to builder. Free with
 // testHeadlessHarnessDeinit.
@@ -87,27 +88,62 @@ testHeadlessParseOptions :: proc(t: ^testing.T) {
 	testing.expect(t, len(err) > 0, "expected a server without a port to be rejected")
 	_, err = headlessParseOptions({"--config-dir="})
 	testing.expect(t, len(err) > 0, "expected an empty config dir to be rejected")
+
+	testing.expect(
+		t,
+		options.connectTimeoutMS == HEADLESS_DEFAULT_CONNECT_TIMEOUT_MS,
+		fmt.tprintf("expected the default connect timeout, got %d", options.connectTimeoutMS),
+	)
+	options, err = headlessParseOptions({"--connect-timeout", "2500"})
+	testing.expect(
+		t,
+		len(err) == 0 && options.connectTimeoutMS == 2500,
+		fmt.tprintf(
+			"expected a 2500 ms connect timeout, got %d (%s)",
+			options.connectTimeoutMS,
+			err,
+		),
+	)
+	for bad in ([]string{"0", "-1", "soon", "600001"}) {
+		_, err = headlessParseOptions({"--connect-timeout", bad})
+		testing.expect(t, len(err) > 0, fmt.tprintf("expected timeout %q to be rejected", bad))
+	}
 }
 
 @(test)
 testHeadlessApplyOptionsKeepsOneServer :: proc(t: ^testing.T) {
-	// A new profile without --server gets the default local server.
+	// A new profile without --server gets no server: there is no built-in default.
 	config := testConfigWithServers({})
 	defer Config_deinit(&config)
 	changed := headlessApplyOptions(&config, HeadlessOptions{name = "alice"})
-	testing.expect(t, changed, "expected the name and default server to change the config")
+	testing.expect(t, changed, "expected the name to change the config")
 	testExpectString(t, config.display_name, "alice", "the display name")
 	testing.expect(
 		t,
-		len(config.servers) == 1 &&
-		config.servers[0].host == "localhost" &&
-		config.servers[0].port == common.DEFAULT_SERVER_PORT,
-		"expected the default localhost server",
+		len(config.servers) == 0,
+		fmt.tprintf("expected no default server, got %d servers", len(config.servers)),
 	)
 	testing.expect(
 		t,
 		!headlessApplyOptions(&config, HeadlessOptions{name = "alice"}),
 		"expected unchanged options to leave the config unchanged",
+	)
+
+	changed = headlessApplyOptions(
+		&config,
+		HeadlessOptions {
+			hasServer = true,
+			serverHost = "localhost",
+			serverPort = common.DEFAULT_SERVER_PORT,
+		},
+	)
+	testing.expect(
+		t,
+		changed &&
+		len(config.servers) == 1 &&
+		config.servers[0].host == "localhost" &&
+		config.servers[0].port == common.DEFAULT_SERVER_PORT,
+		"expected --server to add the localhost server",
 	)
 
 	// A matching entry keeps its pin and becomes the only server.
@@ -291,13 +327,93 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	)
 	delete(line)
 
+	now := time.tick_now()
 	disconnected := ClientTransportRuntimeEvent {
-		kind     = .Disconnected,
+		kind      = .Disconnected,
+		serverID  = 1,
+		message   = "connection lost",
+		retryable = true,
+		retryAt   = time.tick_add(now, 900 * time.Millisecond),
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&disconnected, {now = now})
+	testing.expect(t, ok && kind == .Disconnected, "expected a disconnected event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}`,
+		"the disconnected JSON",
+	)
+	delete(line)
+
+	connecting := ClientTransportRuntimeEvent {
+		kind     = .Connecting,
 		serverID = 1,
 	}
-	line, kind, ok = headlessRenderRuntimeEvent(&disconnected)
-	testing.expect(t, ok && kind == .Disconnected, "expected a disconnected event")
-	testExpectString(t, line, `{"event":"disconnected","serverID":1}`, "the disconnected JSON")
+	line, kind, ok = headlessRenderRuntimeEvent(&connecting, {attempt = 3})
+	testing.expect(t, ok && kind == .Connecting, "expected a connecting event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"connecting","serverID":1,"attempt":3}`,
+		"the connecting JSON",
+	)
+	delete(line)
+
+	connected := ClientTransportRuntimeEvent {
+		kind     = .Connected,
+		serverID = 1,
+		userID   = 3,
+		nickname = "alice-1",
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&connected)
+	testing.expect(t, ok && kind == .Connected, "expected a connected event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}`,
+		"the connected JSON",
+	)
+	delete(line)
+
+	// A retried failure says when the next attempt starts.
+	timedOut := ClientTransportRuntimeEvent {
+		kind        = .ConnectFailed,
+		serverID    = 1,
+		message     = "timed out connecting to the server",
+		failureKind = .Unreachable,
+		retryable   = true,
+		retryAt     = time.tick_add(now, 2 * time.Second),
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&timedOut, {now = now})
+	testing.expect(t, ok && kind == .ConnectFailed, "expected a connect_failed event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server",` +
+		`"detail":"timed out connecting to the server","failure":"Unreachable",` +
+		`"retryable":true,"retryInMS":2000}`,
+		"the retryable connect_failed JSON",
+	)
+	delete(line)
+
+	// A failure that stops retrying carries the explanation the GUI shows.
+	nameTaken := ClientTransportRuntimeEvent {
+		kind        = .ConnectFailed,
+		serverID    = 1,
+		message     = SERVER_IDENTITY_UNAVAILABLE_MESSAGE,
+		failureKind = .NameUnavailable,
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&nameTaken, {displayName = "alice"})
+	testing.expect(t, ok && kind == .ConnectFailed, "expected a connect_failed event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"connect_failed","serverID":1,"message":"The name alice is already in use on ` +
+		`this server (or bound to another device's key). Choose another name in Settings.",` +
+		`"detail":"user identity is unavailable","failure":"NameUnavailable",` +
+		`"retryable":false,"retryInMS":0}`,
+		"the permanent connect_failed JSON",
+	)
 	delete(line)
 
 	none := ClientTransportRuntimeEvent{}
@@ -431,12 +547,25 @@ testHeadlessCommandResults :: proc(t: ^testing.T) {
 		"expected a failed send to leave no draft behind",
 	)
 
+	// No worker runs, so the queued connection never leaves "connecting".
 	headlessHandleLine(&harness, "status")
 	output = testHeadlessTakeOutput(&builder)
 	testing.expect(
 		t,
-		strings.has_prefix(output, `{"ok":true,"cmd":"status","phase":"Failed","connected":false`),
-		fmt.tprintf("expected a disconnected status, got %s", output),
+		strings.has_prefix(
+			output,
+			`{"ok":true,"cmd":"status","connection":"connecting","connected":false,` +
+			`"retryInMS":0,"serverID":802,"server":"localhost:1",`,
+		),
+		fmt.tprintf("expected a connecting status, got %s", output),
+	)
+
+	headlessHandleLine(&harness, "reconnect")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":true,"cmd":"reconnect","serverID":802}` + "\n",
+		"the reconnect result",
 	)
 
 	headlessHandleLine(&harness, "help")
@@ -478,4 +607,133 @@ testHeadlessInputQueueKeepsOrderUntilClosed :: proc(t: ^testing.T) {
 	testing.expect(t, !ok && closed, "expected EOF once the queue is empty")
 
 	HeadlessInput_push(&input, strings.clone("left over"))
+}
+
+// The worker's lifecycle events for one server, as the harness sees them.
+@(test)
+testHeadlessCountsConnectAttemptsUntilConnected :: proc(t: ^testing.T) {
+	builder := strings.builder_make()
+	harness := testHeadlessHarness(&builder, 803)
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+
+	connecting := ClientTransportRuntimeEvent {
+		kind     = .Connecting,
+		serverID = 803,
+	}
+	headlessHandleRuntimeEvent(&harness, &connecting)
+	headlessHandleRuntimeEvent(&harness, &connecting)
+	connected := ClientTransportRuntimeEvent {
+		kind     = .Connected,
+		serverID = 803,
+		userID   = 4,
+		nickname = strings.clone("dora"),
+	}
+	headlessHandleRuntimeEvent(&harness, &connected)
+	ClientTransportRuntimeEvent_deinit(&connected)
+	headlessHandleRuntimeEvent(&harness, &connecting)
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"event":"connecting","serverID":803,"attempt":1}` + "\n" +
+		`{"event":"connecting","serverID":803,"attempt":2}` + "\n" +
+		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora"}` + "\n" +
+		`{"event":"connecting","serverID":803,"attempt":1}` + "\n",
+		"the lifecycle lines",
+	)
+	testing.expect(
+		t,
+		harness.pendingEvents[.Connecting] == 3 && harness.pendingEvents[.Connected] == 1,
+		"expected lifecycle events to be counted for wait",
+	)
+
+	// Status reads State's mirror, which the applied events keep up to date.
+	connectedAgain := ClientTransportRuntimeEvent {
+		kind     = .Connected,
+		serverID = 803,
+		userID   = 4,
+		nickname = strings.clone("dora"),
+	}
+	headlessHandleRuntimeEvent(&harness, &connectedAgain)
+	ClientTransportRuntimeEvent_deinit(&connectedAgain)
+	_ = testHeadlessTakeOutput(&builder)
+	headlessHandleLine(&harness, "status")
+	output := testHeadlessTakeOutput(&builder)
+	testing.expect(
+		t,
+		strings.has_prefix(
+			output,
+			`{"ok":true,"cmd":"status","connection":"connected","connected":true,` +
+			`"retryInMS":0,"serverID":803,"server":"localhost:1","userID":4,"nickname":"dora",`,
+		),
+		fmt.tprintf("expected a connected status, got %s", output),
+	)
+}
+
+@(test)
+testHeadlessConnectFailsWithoutAServer :: proc(t: ^testing.T) {
+	builder := strings.builder_make()
+	harness := HeadlessHarness {
+		out      = strings.to_writer(&builder),
+		commands = HEADLESS_COMMANDS[:],
+		running  = true,
+	}
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+	config := testConfigWithServers({})
+	defer Config_deinit(&config)
+
+	connected := headlessConnectAndWait(&harness, config, time.Second)
+	testing.expect(t, !connected, "expected connecting without a server to fail")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"event":"connect_failed","serverID":0,"message":"no server is configured",` +
+		`"detail":"","failure":"NoServer","retryable":false,"retryInMS":0}` +
+		"\n",
+		"the no-server failure",
+	)
+	testing.expect(t, harness.state.networkWorker == nil, "expected no worker without a server")
+}
+
+// A real ENet attempt to a closed local port: the worker reports the attempt, and the harness
+// gives up when its own timeout passes (well before ENet's 5 s connect timeout).
+@(test)
+testHeadlessConnectTimesOutWhileTheServerIsUnreachable :: proc(t: ^testing.T) {
+	builder := strings.builder_make()
+	harness := HeadlessHarness {
+		out      = strings.to_writer(&builder),
+		commands = HEADLESS_COMMANDS[:],
+		running  = true,
+	}
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+	config := testConfigWithServers(
+		{Server{id = 804, name = "Closed", host = "127.0.0.1", port = 12399}},
+	)
+	defer Config_deinit(&config)
+
+	connected := headlessConnectAndWait(&harness, config, 300 * time.Millisecond)
+	testing.expect(t, !connected, "expected the connect to time out")
+	output := testHeadlessTakeOutput(&builder)
+	testing.expect(
+		t,
+		strings.has_prefix(output, `{"event":"connecting","serverID":804,"attempt":1}` + "\n"),
+		fmt.tprintf("expected a connecting line first, got %s", output),
+	)
+	lastLine := strings.trim_right(output, "\n")
+	lastLine = lastLine[strings.last_index_byte(lastLine, '\n') + 1:]
+	// detail is the last attempt's reason, if one already failed; it is usually empty here.
+	testing.expect(
+		t,
+		strings.has_prefix(
+			lastLine,
+			`{"event":"connect_failed","serverID":804,"message":"timed out after 300 ms ` +
+			`connecting to 127.0.0.1:12399","detail":`,
+		) &&
+		strings.has_suffix(lastLine, `"failure":"Timeout","retryable":false,"retryInMS":0}`),
+		fmt.tprintf("expected a timeout failure last, got %s", output),
+	)
+	testing.expect(
+		t,
+		harness.pendingEvents[.ConnectFailed] == 1,
+		"expected the timeout to be counted for wait",
+	)
 }

@@ -5,23 +5,14 @@ package client
 // for communication with the server.
 
 import "../common"
-import "core:fmt"
 import "core:os"
 import "core:strings"
 
 CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
 DIRECT_MESSAGES_UNSUPPORTED_STATUS :: "Direct messages are not supported yet"
 
-StartupAuthBridge :: proc(
-	transport: ^ClientServerTransport,
-	server: ^Server,
-	config: ^Config,
-	clientHelloPacketBytes: []u8,
-) -> ClientStartupAuthSession
-
 RoomChatSendBridge :: proc(transport: ^ClientServerTransport, roomID: int, content: string) -> bool
 
-startupAuthBridge: StartupAuthBridge = startupAuthBridge_noop
 roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
 
 RoomCache :: struct {
@@ -57,33 +48,6 @@ ServerRoomCache :: struct {
 	roomsLoading: bool,
 }
 
-startupAuthBridge_noop :: proc(
-	transport: ^ClientServerTransport,
-	server: ^Server,
-	config: ^Config,
-	clientHelloPacketBytes: []u8,
-) -> ClientStartupAuthSession {
-	_ = transport
-	_ = server
-	_ = config
-	_ = clientHelloPacketBytes
-	return {}
-}
-
-startupAuthBridge_real :: proc(
-	transport: ^ClientServerTransport,
-	server: ^Server,
-	config: ^Config,
-	clientHelloPacketBytes: []u8,
-) -> ClientStartupAuthSession {
-	return ClientServerTransport_completeStartupAuthOverENet(
-		transport,
-		server,
-		config,
-		clientHelloPacketBytes,
-	)
-}
-
 State :: struct {
 	config:                         Config,
 	serverTransports:               [dynamic]ClientServerTransport,
@@ -100,8 +64,21 @@ State :: struct {
 	chat_status_message:            string,
 	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
 	server_room_caches:             [dynamic]ServerRoomCache,
-	// Services every live server session off the UI thread; nil until init starts it.
+	// Connects and services every server session off the UI thread; nil until
+	// State_startNetwork. Tests that never start it get no network I/O at all.
 	networkWorker:                  ^ClientNetworkWorker,
+	// Wakes the UI loop when the worker queues events; kept so the worker can be restarted
+	// after a settings change.
+	networkWake:                    NetworkWorkerEventQueuedProc,
+	networkWakeData:                rawptr,
+	// The UI thread's view of each server's connection, updated from runtime events, so the
+	// view never reads transport fields the worker writes.
+	serverConnections:              [dynamic]ServerConnection,
+	// Only the real app writes config.json; states built by tests never touch the disk.
+	persistConfig:                  bool,
+	// The settings screen replaces the chat view while open. It opens by itself on first run.
+	settingsOpen:                   bool,
+	settings:                       SettingsForm,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -128,66 +105,20 @@ State_serverForTransport :: proc(
 	return nil, false
 }
 
-State_attemptSelectedServerStartup :: proc(state: ^State) {
-	if state.selected_transport_index < 0 ||
-	   state.selected_transport_index >= len(state.serverTransports) {
-		return
-	}
-
-	transport := &state.serverTransports[state.selected_transport_index]
-	if transport.transport.phase == .Failed {
-		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
-		return
-	}
-
-	packetBytes, ok := ClientServerTransport_beginHandshake(transport)
-	if !ok {
-		ClientServerTransport_fail(transport, "failed to encode client hello packet")
-		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
-		return
-	}
-
-	server, serverOK := State_serverForTransport(state, transport)
-	if !serverOK {
-		delete(packetBytes)
-		ClientServerTransport_fail(transport, "selected transport is missing server config")
-		fmt.println("[Error] Selected server startup attempt failed:", transport.lastError)
-		return
-	}
-
-	session := startupAuthBridge(transport, server, &state.config, packetBytes)
-	if transport.transport.phase == .Established {
-		ClientServerTransport_adoptStartupAuthSession(transport, session)
-		if ClientServerTransport_hasLiveENetSession(transport) {
-			State_requestRoomList(state, transport.serverID)
-		}
-	}
-	delete(packetBytes)
-}
-
-// The state keeps its own deep copy of config, so callers still own (and free) theirs.
+// Builds a state from a deep copy of config, so callers still own (and free) theirs. Every
+// server with a usable config is queued to connect as soon as the network worker starts; no
+// network I/O happens here. The config is used as given: an empty display name or server list
+// opens the first-run settings screen. Tests that want the old built-in profile ("Test User"
+// on localhost) can call Config_fillLocalDefaults first.
 State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	init_state.config = Config_clone(config)
-
-	if len(init_state.config.display_name) == 0 {
-		delete(init_state.config.display_name)
-		init_state.config.display_name = strings.clone("Test User")
-	}
-
-	if len(init_state.config.servers) == 0 {
-		append(
-			&init_state.config.servers,
-			Server {
-				id = 1,
-				name = strings.clone("Test Server"),
-				short_name = getShortServerName("Test Server"),
-				host = strings.clone("localhost"),
-				port = common.DEFAULT_SERVER_PORT,
-			},
-		)
-	}
-
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
+	for index in 0 ..< len(init_state.serverTransports) {
+		transport := &init_state.serverTransports[index]
+		ClientServerTransport_requestConnect(transport, {})
+		State_resetServerConnection(&init_state, transport)
+	}
+
 	init_state.view_dms = false
 	init_state.view_friends_list = false
 	init_state.selected_transport_index = -1
@@ -198,10 +129,43 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 			init_state,
 			init_state.selected_server_id,
 		)
-		State_attemptSelectedServerStartup(&init_state)
 	}
-
+	if State_needsFirstRunSetup(init_state.config) {
+		State_openSettings(&init_state)
+	}
 	return
+}
+
+// Starts the network worker, which connects every queued server. onEventQueued runs on the
+// worker thread whenever events are queued, so the UI loop can wake up and drain them.
+State_startNetwork :: proc(
+	state: ^State,
+	onEventQueued: NetworkWorkerEventQueuedProc = nil,
+	onEventQueuedData: rawptr = nil,
+) {
+	state.networkWake = onEventQueued
+	state.networkWakeData = onEventQueuedData
+	if state.networkWorker != nil {
+		return
+	}
+	state.networkWorker = ClientNetworkWorker_start(
+		state.serverTransports[:],
+		onEventQueued,
+		onEventQueuedData,
+	)
+}
+
+// Stops the network worker without closing any session, applying the events it had already
+// queued so nothing it reported is lost. Used before the transport array is rebuilt.
+State_stopNetwork :: proc(state: ^State) {
+	if state.networkWorker == nil {
+		return
+	}
+	ClientNetworkWorker_stopThread(state.networkWorker)
+	for State_drainNetworkEvents(state) {
+	}
+	ClientNetworkWorker_stop(state.networkWorker)
+	state.networkWorker = nil
 }
 
 State_deinit :: proc(state: ^State) {
@@ -218,6 +182,11 @@ State_deinit :: proc(state: ^State) {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
 	}
 	delete(state.server_room_caches)
+	for index in 0 ..< len(state.serverConnections) {
+		ServerConnection_deinit(&state.serverConnections[index])
+	}
+	delete(state.serverConnections)
+	SettingsForm_deinit(&state.settings)
 	state^ = {}
 }
 
@@ -229,16 +198,13 @@ init :: proc(
 ) -> (
 	init_state: State,
 ) {
-	startupAuthBridge = startupAuthBridge_real
 	config := loadConfig()
 	defer Config_deinit(&config)
 	init_state = State_initFromConfig(config)
-	// Startup auth above runs before the worker exists; from here on the worker owns servicing.
-	init_state.networkWorker = ClientNetworkWorker_start(
-		init_state.serverTransports[:],
-		onEventQueued,
-		onEventQueuedData,
-	)
+	init_state.persistConfig = true
+	// Connecting happens on the worker, so this returns at once and the window can show the
+	// connection status while it runs.
+	State_startNetwork(&init_state, onEventQueued, onEventQueuedData)
 
 	if len(os.args) > 1 {
 		for arg in os.args {

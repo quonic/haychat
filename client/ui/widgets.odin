@@ -60,10 +60,11 @@ divider :: proc(ctx: ^Context, r: Rect) {
 }
 
 ButtonOptions :: struct {
-	selected: bool,
-	align:    Align,
-	font:     FontID,
-	color:    Maybe(Color), // Label color; the theme foreground by default
+	selected:   bool,
+	align:      Align,
+	font:       FontID,
+	color:      Maybe(Color), // Label color; the theme foreground by default
+	background: Maybe(Color), // Fill for a filled button; hover and press lighten it
 }
 
 // A flat button that highlights on hover. Returns true when clicked.
@@ -75,15 +76,26 @@ button :: proc(
 	options: ButtonOptions = {},
 ) -> bool {
 	it := interact(ctx, id, r)
-	background := Color{}
-	if options.selected {
-		background = ctx.theme.selected
-	}
+	radius := dp(ctx, ctx.theme.cornerRadius)
 	if it.hovered {
-		background = it.held ? ctx.theme.pressed : ctx.theme.hover
 		ctx.wantCursor = .POINTER
 	}
-	fillRoundedRect(ctx, r, dp(ctx, ctx.theme.cornerRadius), background)
+	if fill, filled := options.background.?; filled {
+		fillRoundedRect(ctx, r, radius, fill)
+		if it.hovered {
+			// A translucent white overlay keeps the fill's hue while showing feedback.
+			fillRoundedRect(ctx, r, radius, Color{255, 255, 255, it.held ? 56 : 28})
+		}
+	} else {
+		background := Color{}
+		if options.selected {
+			background = ctx.theme.selected
+		}
+		if it.hovered {
+			background = it.held ? ctx.theme.pressed : ctx.theme.hover
+		}
+		fillRoundedRect(ctx, r, radius, background)
+	}
 	color := options.color.? or_else ctx.theme.fg
 	label(ctx, shrinkXY(r, dp(ctx, ctx.theme.padding), 0), text, color, options.font, options.align)
 	return it.clicked

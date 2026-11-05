@@ -102,8 +102,8 @@ runApp :: proc() -> bool {
 		wakeProc = nil
 	}
 
-	// Startup authentication blocks, so show something while it runs.
-	drawStartupFrame(&ctx)
+	// init returns at once: the network worker connects in the background and the first frame
+	// shows the connection status (or the first-run screen).
 	state := init(wakeProc, &wake)
 	// Deferred last so it runs first: the worker stops before the window and SDL go away.
 	defer State_deinit(&state)
@@ -174,12 +174,4 @@ handleAppEvent :: proc(
 		return false
 	}
 	return ui.handleEvent(ctx, event)
-}
-
-@(private = "file")
-drawStartupFrame :: proc(ctx: ^ui.Context) {
-	ui.beginFrame(ctx)
-	ui.label(ctx, ctx.windowRect, "Connecting…", ctx.theme.fgMuted, align = .Center)
-	ui.endFrame(ctx)
-	free_all(context.temp_allocator)
 }
