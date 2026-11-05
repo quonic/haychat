@@ -192,6 +192,12 @@ testDirectCachesAreScopedByServerAndPeer :: proc(t: ^testing.T) {
 		"draft for A/10",
 		"server A's draft",
 	)
+	testExpectString(
+		t,
+		string(testDirectCache(&state, serverB.id, 10).draft[:]),
+		"draft for B/10",
+		"server B's draft",
+	)
 
 	// A message for a server that is not configured is dropped.
 	testApplyDirectMessage(&state, 999, 3, 10, 7, "nowhere")
