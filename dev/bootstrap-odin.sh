@@ -4,9 +4,12 @@ set -euo pipefail
 # Builds Odin and installs the shared libraries HayChat uses, pinned to known-good commits so
 # CI matches the toolchain developers validate against. Update the pins together.
 #
+# Used by dev/Containerfile and the Forgejo CI job. Bumping a pin changes the dev image tag,
+# so `./dev.sh` rebuilds the image on its next run.
+#
 # Usage: bootstrap-odin.sh [odin_root]   (default: $HOME/Odin)
 
-ODIN_COMMIT=6cfdf2bb3a84ff1f6bb29ac45ef58aee3b203eba
+ODIN_COMMIT=b76605be90bb7dceb0a17d93d2e1bfd430a25d92
 PG_COMMIT=9d82bb88e99fd2d47aac57c00e9e6f9aabf48238
 ODIN_HTTP_COMMIT=fac113fbd828aad3d71479a534b5de4358b6a07b
 

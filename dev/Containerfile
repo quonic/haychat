@@ -1,0 +1,18 @@
+# HayChat development image: Fedora 44 with the system libraries, the pinned Odin toolchain,
+# and the Odin shared libraries. It holds no HayChat source; `./dev.sh` copies a snapshot of
+# the working tree into each container it starts.
+#
+# Build it with `./dev.sh image`. The build context is the dev/ directory.
+
+FROM registry.fedoraproject.org/fedora:44
+
+COPY install-packages.sh /usr/local/lib/haychat/install-packages.sh
+RUN /usr/local/lib/haychat/install-packages.sh --gui
+
+COPY bootstrap-odin.sh /usr/local/lib/haychat/bootstrap-odin.sh
+RUN /usr/local/lib/haychat/bootstrap-odin.sh /opt/Odin
+
+ENV ODIN_ROOT=/opt/Odin \
+	PATH=/opt/Odin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+WORKDIR /work
