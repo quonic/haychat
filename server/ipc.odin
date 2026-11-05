@@ -463,16 +463,17 @@ IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^IPC_Message_Queue {
 IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_Kind {
 	switch sender {
 	case .Main:
-		switch typeid_of(type_of(msg)) {
+		// Switch on the variant the union holds. `type_of(msg)` is `Message` itself, so a
+		// typeid switch on it never matched a variant and routed every message to Unknown.
+		#partial switch _ in msg {
 		case NetworkSendData, NetworkBroadcast, NetworkDisconnectPeer:
 			return .Network
 		case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
 			return .WebAdmin
 		case DatabaseQuery:
 			return .Database
-		case ProcessShutdown, ProcessRestart:
-			return .Unknown
 		case:
+			// Main addresses shutdown and restart to each service with IPC_Server_send.
 			return .Unknown
 		}
 	case .Network:
