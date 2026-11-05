@@ -172,7 +172,8 @@ jobs:
             "$image_note" \
             "Checksums are in SHA256SUMS. Deployment: deploy/README.md.")
 
-          # Reuse the release when the job is re-run for the same tag.
+          # Reuse the release when the job is re-run for the same tag, and rewrite its notes
+          # so a re-run after a fixed image job no longer says the image was not pushed.
           release_id=$(curl -fsS "${auth[@]}" "$api/releases/tags/$VERSION" | jq -r .id) \
             || release_id=""
           if [[ -z "$release_id" ]]; then
@@ -181,6 +182,10 @@ jobs:
               | curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
                   -X POST --data @- "$api/releases" \
               | jq -r .id)
+          else
+            jq -n --arg body "$body" '{body: $body}' \
+              | curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
+                  -X PATCH --data @- "$api/releases/$release_id" >/dev/null
           fi
           echo "Release $VERSION has ID $release_id"
 

@@ -378,13 +378,15 @@ to push to the container registry.
 
 **Building images on the runner.** The `image` job runs buildah inside the job container,
 with chroot isolation and the vfs storage driver, so it needs no privileges beyond what the
-runner already grants for CI (`label=disable` from the runner's `config.yml`). The job's
-exact `buildah build` command built the full image inside a rootless podman `fedora:44`
-container started with those options (default capabilities, the io_uring seccomp profile,
-`label=disable`); it has not run on the runner itself yet, and pushing is untested. If the
-runner cannot build images, the `image` job fails, the release is still published with the
-archives (including the server binary), and its notes say the image was not pushed; build the
-image on the server host with `podman build -f deploy/Containerfile .` instead.
+runner already grants for CI (`label=disable` from the runner's `config.yml`). The
+`v0.1.0-rc1` run proved both halves on the runner: the build takes about two and a half
+minutes, and the push works with `RELEASE_TOKEN` but fails with the automatic job token
+("authentication required" on the first blob upload). If the image job fails, the release is
+still published with the archives (including the server binary) and its notes say the image
+was not pushed. Fix the cause (usually the missing secret), re-run the failed job from the
+run's page, and the release job re-runs after it: it reuses the release, replaces the
+archives, and rewrites the notes. Without a working image job, build the image on the
+server host with `podman build -f deploy/Containerfile .` instead.
 
 **The Linux client** is linked against the system SDL3, SDL3_ttf, and ENet rather than
 bundling them: the Fedora 44 builds of SDL3_ttf pull in FreeType, HarfBuzz, PlutoSVG, and
