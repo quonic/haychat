@@ -1665,6 +1665,14 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 
 	adminTransport := routerCompleteHandshake(&h, adminPeerID, 42)
 	otherTransport := routerCompleteHandshake(&h, otherPeerID, 43)
+	// 43's first session announces it to the admin's session before any room traffic.
+	presencePeers := [?]RouterTestPeer{{adminPeerID, &adminTransport}}
+	presencePeerID, presence := routerTestReceivePresence(&h, presencePeers[:])
+	delete(presence.nickname)
+	assert(
+		presencePeerID == adminPeerID && presence.userId == 43 && presence.isOnline,
+		"expected the admin's session to hear that 43 came online",
+	)
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&adminTransport,

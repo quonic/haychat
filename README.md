@@ -42,8 +42,9 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof and the harness smoke test |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof, the harness smoke test, and the server SQL proof |
 | `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
+| `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 
 Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
@@ -168,6 +169,10 @@ Rooms are open: every account is a member of every room. A nickname that connect
 
 The server creates no rooms on its own. Load the fixture (`./dev.sh seed`) for `#general`, or have an admin send `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
 
+#### Direct messages
+
+Any two accounts on a server can message each other directly. Direct messages belong to that one server: they are stored in its `direct_messages` table, survive restarts, and are paged like room history. Like room chat, they are encrypted in transit to the server but are not end-to-end encrypted, so the server and its operator can read them. A sent message is delivered to every connected session of both the sender and the recipient. The server also lists every account with an online flag (online while at least one of its sessions is authenticated) and tells connected sessions when an account comes online or goes offline. Direct messages arrived with protocol version 7; clients and servers on older versions refuse each other with "Unsupported protocol version".
+
 ### Continuous Integration
 
 HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
@@ -203,6 +208,7 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - A fresh server has no rooms until the fixture is loaded or an admin creates one.
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
+- Direct messages are implemented in the server and protocol only; the client does not show or send them yet.
 
 ## License
 

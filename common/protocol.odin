@@ -7,10 +7,14 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 6
+protocolVersion: ProtocolVersion = 7
 GENERAL_ROOM_ID :: int(1)
-// Largest room chat message the server accepts, in bytes of UTF-8 content.
+// Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
+// Largest page a room or direct history request may ask for; limit must be 1..this.
+HISTORY_PAGE_MAX_MESSAGES :: 50
+// Most conversations ServerDirectConversations lists, newest first.
+DIRECT_CONVERSATIONS_MAX :: 100
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.
@@ -194,8 +198,8 @@ MessageType :: enum {
 	ServerVoiceData, // Voice data broadcasted from server to clients
 	ClientVideoData, // Video data sent from client to server
 	ServerVideoData, // Video data broadcasted from server to clients
-	ClientDirectMessage, // Direct message sent from client to server, includes recipient user ID and message content
-	ServerDirectMessage, // Direct message sent from server to client, includes sender user ID and message content
+	ClientDirectMessage, // ClientDirectMessagePayload: send a direct message to one account
+	ServerDirectMessage, // ServerDirectMessagePayload: a stored direct message, to both users
 	ServerNotification, // Server notification (e.g. user joined/left, new message, server shutdown, etc.), includes message string
 
 	// Forum Management
@@ -236,8 +240,8 @@ MessageType :: enum {
 	// Admin Management & Control
 	ClientServerStatus, // Request current server status (e.g. uptime, number of connected clients, etc.)
 	ServerServerStatus, // Response to ClientServerStatus, includes current server status (e.g. uptime, number of connected clients, etc.)
-	ClientUserList, // Request list of currently connected users (e.g. for displaying in the client UI)
-	ServerUserList, // Response to ClientUserList, includes list of currently connected users (e.g. for displaying in the client UI)
+	ClientUserList, // ClientListUsersPayload: request every account on the server
+	ServerUserList, // ServerUserListPayload: every account with its online flag
 	ClientEvents, // Request recent server events (e.g. for displaying in the client UI)
 	ServerEvents, // Response to ClientEvents, includes recent server events (e.g. for displaying in the client UI)
 	ClientKickUser, // Request to kick a user from the server, includes user ID and reason (only allowed for certain admin users)
@@ -279,6 +283,15 @@ MessageType :: enum {
 	ServerInternalError, // Generic internal error message for when something goes wrong on the server, includes error string
 	ServerValidationError, // Generic validation error message for when the client sends invalid data, includes error string
 	ServerAuthenticationError, // Generic authentication error message for when there is an authentication issue (e.g. invalid session token, failed signature verification, etc.), includes error string
+
+	// Direct messages (protocol 7). Appended after every older member so no existing wire
+	// value moves; ClientDirectMessage, ServerDirectMessage, ClientUserList and ServerUserList
+	// above complete the set.
+	ClientFetchDirectHistory, // ClientFetchDirectHistoryPayload: page of a conversation
+	ServerDirectHistory, // ServerDirectHistoryPayload: response to ClientFetchDirectHistory
+	ClientListDirectConversations, // ClientListDirectConversationsPayload: recent conversations
+	ServerDirectConversations, // ServerDirectConversationsPayload: latest message per peer
+	ServerUserPresence, // ServerUserPresencePayload: a user came online or went offline
 }
 
 RoomType :: enum {
@@ -413,6 +426,102 @@ ServerRoomMutationPayload :: struct {
 	changed: bool,
 }
 
+// Direct messages are per server, between any two accounts, and stored server side in plain
+// text (they are not end-to-end encrypted). Every string and dynamic array below is an owned
+// CBOR allocation once decoded; free it or transfer it, as with room chat.
+
+// ClientDirectMessage. The server rejects an empty or oversized message, a message to the
+// sender's own account, and a recipient that does not exist, with ServerProtocolError.
+ClientDirectMessagePayload :: struct {
+	recipientUserId: int,
+	content:         string, // 1..CHAT_MESSAGE_MAX_BYTES bytes of UTF-8
+}
+
+// One persisted direct message. Nicknames are the accounts' current nicknames, joined from
+// users when the message is stored or read. timestamp is PostgreSQL timestamptz text.
+StoredDirectMessage :: struct {
+	id:                int, // Stable, increasing, and the history pagination cursor
+	senderId:          int,
+	senderNickname:    string,
+	recipientId:       int,
+	recipientNickname: string,
+	timestamp:         string,
+	content:           string,
+}
+
+// ServerDirectMessage: sent once the message is stored, to every authenticated session of
+// both the sender and the recipient. The sender sees its own message only through this echo,
+// so a client should not append a sent message locally. The conversation's peer is
+// recipientId when senderId is the viewer's own ID, otherwise senderId.
+ServerDirectMessagePayload :: struct {
+	id:                int,
+	senderId:          int,
+	senderNickname:    string,
+	recipientId:       int,
+	recipientNickname: string,
+	timestamp:         string,
+	content:           string,
+}
+
+// ClientFetchDirectHistory. Paginated exactly like room history: beforeMessageID 0 asks for
+// the newest page, and an older page is requested with the oldest loaded message ID. limit
+// must be 1..HISTORY_PAGE_MAX_MESSAGES. peerUserId must be another existing account.
+ClientFetchDirectHistoryPayload :: struct {
+	peerUserId:      int,
+	beforeMessageID: int,
+	limit:           int,
+}
+
+// ServerDirectHistory: messages in both directions between the requester and peerUserId,
+// oldest first. hasOlder is true when messages older than messages[0] exist.
+ServerDirectHistoryPayload :: struct {
+	peerUserId: int,
+	messages:   [dynamic]StoredDirectMessage,
+	hasOlder:   bool,
+}
+
+// ClientUserList: no fields.
+ClientListUsersPayload :: struct {}
+
+UserSummary :: struct {
+	id:       int,
+	nickname: string,
+	isOnline: bool, // At least one authenticated session for this account is connected
+}
+
+// ServerUserList: every account on the server, the requester included, ordered by nickname.
+ServerUserListPayload :: struct {
+	users: [dynamic]UserSummary,
+}
+
+// ClientListDirectConversations: no fields.
+ClientListDirectConversationsPayload :: struct {}
+
+// The latest message of one conversation, from the requester's point of view.
+DirectConversationSummary :: struct {
+	peerUserId:    int,
+	peerNickname:  string,
+	lastMessageID: int,
+	lastSenderId:  int, // Either the requester's ID or peerUserId
+	lastTimestamp: string,
+	lastContent:   string,
+}
+
+// ServerDirectConversations: the requester's conversations, most recent first, at most
+// DIRECT_CONVERSATIONS_MAX of them.
+ServerDirectConversationsPayload :: struct {
+	conversations: [dynamic]DirectConversationSummary,
+}
+
+// ServerUserPresence: sent to every other authenticated session when an account's first
+// session authenticates (isOnline true) and when its last authenticated session ends
+// (isOnline false). Additional sessions of an already online account send nothing.
+ServerUserPresencePayload :: struct {
+	userId:   int,
+	nickname: string,
+	isOnline: bool,
+}
+
 VoiceData :: struct {
 	senderId:  int,
 	roomId:    int,
@@ -453,6 +562,10 @@ DatabaseQueryRequest :: union {
 	DatabaseDeleteRoomRequest,
 	DatabaseAddRoomMemberRequest,
 	DatabaseRemoveRoomMemberRequest,
+	DatabasePostDirectMessageRequest,
+	DatabaseDirectHistoryRequest,
+	DatabaseDirectConversationListRequest,
+	DatabaseUserDirectoryRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -515,6 +628,30 @@ DatabaseRoomMemberMutationRequest :: struct {
 DatabaseAddRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
 DatabaseRemoveRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
 
+// Checks that the recipient exists and is not the sender, stores the message, and reads both
+// nicknames in one statement, so the check and the insert cannot race.
+DatabasePostDirectMessageRequest :: struct {
+	senderId:    int,
+	recipientId: int,
+	content:     string,
+}
+
+// Returns a page of the conversation between userId and peerUserId, in both directions.
+DatabaseDirectHistoryRequest :: struct {
+	userId:          int,
+	peerUserId:      int,
+	beforeMessageID: int,
+	limit:           int,
+}
+
+// Returns the latest message per peer for userId, newest first.
+DatabaseDirectConversationListRequest :: struct {
+	userId: int,
+}
+
+// Returns every account. Online flags come from the router, not the database.
+DatabaseUserDirectoryRequest :: struct {}
+
 // message holds the error text when success is false. All strings and arrays are owned.
 DatabaseQueryResponse :: struct {
 	success: bool,
@@ -530,6 +667,10 @@ DatabaseQueryResult :: union {
 	DatabaseRoomHistoryResult,
 	DatabaseUserServerAdminResult,
 	DatabaseRoomMutationResult,
+	DatabasePostDirectMessageResult,
+	DatabaseDirectHistoryResult,
+	DatabaseDirectConversationListResult,
+	DatabaseUserDirectoryResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -566,6 +707,29 @@ DatabaseUserServerAdminResult :: struct {
 DatabaseRoomMutationResult :: struct {
 	room:    RoomSummary,
 	changed: bool,
+}
+
+// When recipientExists is false nothing was stored and storedMessage is empty. It is false
+// for an unknown recipient and for a message addressed to the sender.
+DatabasePostDirectMessageResult :: struct {
+	recipientExists: bool,
+	storedMessage:   StoredDirectMessage,
+}
+
+// When peerExists is false the peer account does not exist and messages is empty.
+DatabaseDirectHistoryResult :: struct {
+	peerExists: bool,
+	messages:   [dynamic]StoredDirectMessage,
+	hasOlder:   bool,
+}
+
+DatabaseDirectConversationListResult :: struct {
+	conversations: [dynamic]DirectConversationSummary,
+}
+
+// isOnline is always false here; the router fills it from its live sessions.
+DatabaseUserDirectoryResult :: struct {
+	users: [dynamic]UserSummary,
 }
 
 ProtocolErrorResponse :: struct {

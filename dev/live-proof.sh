@@ -10,11 +10,13 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --sql | test_name...]
 #   (no arguments)  the startup auth proof
-#   --all           also the two-client room chat proof and the headless harness smoke test
-#                   (what CI and `./dev.sh ci` run)
+#   --all           also the two-client room chat proof, the headless harness smoke test, and
+#                   the server SQL proof (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
+#   --sql           only the server SQL proof: database-backed server tests that run the
+#                   direct message statements against this database
 #   test_name...    the given client test procedures, e.g. client.testFoo
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -22,18 +24,25 @@ ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
 
 STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOverENet
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
+SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
+run_sql=false
 if [[ $# -gt 0 ]]; then
 	case "$1" in
 		--all)
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST")
 			run_harness=true
+			run_sql=true
 			;;
 		--harness)
 			tests=()
 			run_harness=true
+			;;
+		--sql)
+			tests=()
+			run_sql=true
 			;;
 		*) tests=("$@") ;;
 	esac
@@ -144,6 +153,19 @@ fi
 if [[ "$run_harness" == true ]]; then
 	echo "==> [live] running dev/harness-smoke.sh"
 	dev/harness-smoke.sh 127.0.0.1:12345
+fi
+
+# Runs last so its accounts (which it deletes again) never meet the client proofs. It shares
+# the running server's database, which is safe: its schema check finds the schema the server
+# just created, and it touches only accounts it created itself.
+if [[ "$run_sql" == true ]]; then
+	echo "==> [live] running server SQL proof ${SQL_TESTS}"
+	HAYCHAT_DATABASE_SQL_TEST=1 odin test server \
+		-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true \
+		-define:ODIN_TEST_FANCY=false \
+		-define:ODIN_TEST_THREADS=1 \
+		-define:ODIN_TEST_NAMES="$SQL_TESTS" \
+		-out:"$runtime_dir/server-sql-test"
 fi
 
 echo "==> [live] passed"

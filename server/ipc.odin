@@ -201,19 +201,31 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseEditRoomRequest:
 		delete(r.name)
 		delete(r.description)
+	case common.DatabasePostDirectMessageRequest:
+		delete(r.content)
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
 	     common.DatabaseUserServerAdminRequest,
 	     common.DatabaseDeleteRoomRequest,
 	     common.DatabaseAddRoomMemberRequest,
-	     common.DatabaseRemoveRoomMemberRequest:
+	     common.DatabaseRemoveRoomMemberRequest,
+	     common.DatabaseDirectHistoryRequest,
+	     common.DatabaseDirectConversationListRequest,
+	     common.DatabaseUserDirectoryRequest:
 	case nil:
 	}
 }
 
 IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
 	delete(message.senderNickname)
+	delete(message.timestamp)
+	delete(message.content)
+}
+
+IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
+	delete(message.senderNickname)
+	delete(message.recipientNickname)
 	delete(message.timestamp)
 	delete(message.content)
 }
@@ -241,6 +253,25 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseRoomMutationResult:
 		delete(r.room.name)
 		delete(r.room.description)
+	case common.DatabasePostDirectMessageResult:
+		IPC__stored_direct_message_deinit(r.storedMessage)
+	case common.DatabaseDirectHistoryResult:
+		for message in r.messages {
+			IPC__stored_direct_message_deinit(message)
+		}
+		delete(r.messages)
+	case common.DatabaseDirectConversationListResult:
+		for conversation in r.conversations {
+			delete(conversation.peerNickname)
+			delete(conversation.lastTimestamp)
+			delete(conversation.lastContent)
+		}
+		delete(r.conversations)
+	case common.DatabaseUserDirectoryResult:
+		for user in r.users {
+			delete(user.nickname)
+		}
+		delete(r.users)
 	case common.DatabaseUserIdentityResult, common.DatabaseUserServerAdminResult:
 	case nil:
 	}
