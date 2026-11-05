@@ -2,7 +2,8 @@
 
 **Date:** 2026-11-05
 **Base:** `main` at `60ea446`
-**Status:** Design only. No production code. Package H implements it.
+**Status:** Design. H0 (server network loop, PR #8) and H1 (per-channel transport keys and
+replay window, protocol 9) are implemented; H2–H8 follow section 7.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport

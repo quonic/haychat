@@ -56,6 +56,13 @@ NetworkChannel :: enum u8 {
 	FileTransfer,
 }
 
+// The transport keys are per channel (common.TransportChannel), numbered as the ENet channels
+// these values name, so both enums must agree. The ENet host allocates channels
+// 0..FileTransfer-1 (network.odin), which includes Voice.
+#assert(u8(NetworkChannel.Chat) == u8(common.TransportChannel.Control))
+#assert(u8(NetworkChannel.Voice) == u8(common.TransportChannel.Voice))
+#assert(NetworkChannel.Voice < NetworkChannel.FileTransfer)
+
 NetworkDataReceived :: struct {
 	peerId:  u32,
 	channel: NetworkChannel,

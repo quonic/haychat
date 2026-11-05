@@ -29,6 +29,13 @@
 - `server/database_direct_messages_test.odin` runs the direct message SQL against a real PostgreSQL when `HAYCHAT_DATABASE_SQL_TEST=1`; it writes and then deletes its own accounts, so point it only at a throwaway database. `server/database_default_room_test.odin` runs the default room statement under the same flag, inside a schema of its own that it rolls back, starting from a protocol 7 `rooms` table. `server/database_user_identity_test.odin` runs the identity statement (new account, unchanged, rename to a free name, rename to a taken name, auto-join only for new accounts, and the admin flag for an admin, a renamed admin, and an account with another role) the same way. `./dev.sh live --sql` (and `--all`) runs them; add new database-backed tests to `SQL_TESTS` in `dev/live-proof.sh`.
 - For deterministic router/database validation, use `odin test server -define:ODIN_TEST_THREADS=1`. Database-backed runtime tests require a role that can create, alter, and drop the server-owned schema in `public`.
 
+## Transport Channels
+
+- `common.TransportState` has four halves with separate keys and counters: `controlSend`, `controlReceive` (strict counter), `voiceSend`, and `voiceReceive` (64-packet replay window). `NetworkChannel.Chat` and `NetworkChannel.Voice` are the same numbers as `common.TransportChannel.Control` and `.Voice` (asserted in `ipc.odin`), and the ENet host allocates channels 0 to 4.
+- Who may touch which half: the router (main thread) owns each `RouterPeerSession.transport`, runs the handshake, and alone uses the control halves (`sealPacketForSession`, `openPacketForSession`). The voice halves are for the network thread: after auth success the router takes them out with `common.TransportState_takeVoiceState`, which zeroes them in the session, and hands them to the network thread's voice relay; from then on only the network thread seals or opens voice datagrams (`sealVoiceDatagram`, `openVoiceDatagram`) and the router never touches voice crypto. Never keep using two copies of one `ChannelSendState`: that reuses voice nonces. Until the relay exists the voice halves stay unused in the session.
+- The router handles only `.Chat` data. Anything on another channel is dropped without a protocol violation, because ENet does not authenticate datagrams. A bad voice datagram is counted in `VoiceReceiveState.stats`, never a reason to disconnect.
+- `RouterPeerSession_deinit` wipes the transport with `common.TransportState_deinit`; whoever owns taken voice halves wipes them with `ChannelSendState_wipe` and `VoiceReceiveState_wipe` when the peer goes away.
+
 ## Network Thread And IPC
 
 - `server/networking.md` describes the threads, the IPC queues, and the network loop.

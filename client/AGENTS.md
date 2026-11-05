@@ -24,6 +24,13 @@
 - Build sidebar rooms from the selected server's joined-room list. The chat view derives its transcript from structured cached messages and only shows pagination when `hasOlder` is true.
 - Add action tests for cache isolation, history page merge/de-duplication, and selected-room removal fallback whenever channel behavior changes.
 
+## Transport Channels
+
+- `common.TransportState` has four halves with separate keys and counters: `controlSend`, `controlReceive` (strict counter), `voiceSend`, and `voiceReceive` (64-packet replay window). Control is ENet channel 1 (`STARTUP_AUTH_CHANNEL_CHAT`), voice is channel 2 (`STARTUP_AUTH_CHANNEL_VOICE`); `transport.odin` asserts both against `common.TransportChannel` at compile time.
+- Who may touch which half: the control halves belong to the network worker, and the UI thread reaches them only through `sealPacketForSession` under `ClientNetworkWorker_lock` (the existing rule). `voiceReceive` belongs to the worker alone (its channel 2 receive path). `voiceSend` belongs to the voice thread alone (it seals with `common.sealVoiceDatagram` and takes the worker lock only around `ENet.peer_send`). Neither thread reads or writes the other's voice half, and nothing copies a `ChannelSendState` and keeps using both copies, which would reuse voice nonces.
+- Nothing is sent or received on channel 2 yet. Until the worker gets its voice receive path, `ClientServerTransport_acceptReceiveChannel` drops every packet that is not on channel 1 and counts it in `droppedNonControlPackets`, so a stray datagram is never parsed as a control packet (a bad control packet ends the session).
+- Keys are wiped, not just dropped: `TransportState_reset` and `TransportState_deinit` zero every half with `crypto.zero_explicit`, and the pending handshake keys are wiped once the transport is activated.
+
 ## Room Management (Admins)
 
 - `room_admin.odin` holds the admin's room form (`State.roomEditor`, a `RoomEditor` with modes `Closed`, `Create`, `Edit`) and the request actions `State_sendCreateRoom`, `State_sendEditRoom`, `State_sendDeleteRoom`, which validate like the server (`validateRoomMetadata`: name 1..`common.ROOM_NAME_MAX_BYTES` with one leading `#` dropped, description up to `common.ROOM_DESCRIPTION_MAX_BYTES`, no duplicate of a cached room name) and send through `roomAdminSendBridge` (tests swap it under `roomAdminSendBridgeTestMutex`). `view_room_admin.odin` draws the form in the main pane while `State_roomEditorVisible`.

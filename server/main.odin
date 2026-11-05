@@ -110,6 +110,7 @@ RouterPeerSession_init :: proc() -> RouterPeerSession {
 
 RouterPeerSession_deinit :: proc(session: ^RouterPeerSession) {
 	delete(session.clientNickname)
+	common.TransportState_deinit(&session.transport)
 	session^ = {}
 }
 
@@ -815,6 +816,7 @@ MainRouterState_handleClientAuthRequest :: proc(
 		transcriptHash,
 	)
 	common.TransportState_activate(&session.transport, session.sessionID, keys, .Trusted)
+	common.DirectionalTransportKeys_wipe(&keys)
 	MainRouterState_setPeerSession(state, peerID, session)
 	MainRouterState_sendDatabaseRequest(
 		pm,
@@ -1277,6 +1279,9 @@ MainRouterState_handleNetworkDataReceived :: proc(
 	state: ^MainRouterState,
 	msg: NetworkDataReceived,
 ) {
+	// Only the control channel reaches the router. Anything else is dropped without a protocol
+	// violation: datagrams on other channels (voice is channel 2) are not authenticated by
+	// ENet, so letting them end a session would hand any spoofer a way to disconnect people.
 	if msg.channel != .Chat {
 		return
 	}

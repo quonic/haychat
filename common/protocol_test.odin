@@ -100,11 +100,16 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsEightForTheAdminFlag :: proc(t: ^testing.T) {
+testProtocolVersionIsNineForTransportChannelKeys :: proc(t: ^testing.T) {
 	_ = t
+	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule (four keys,
+	// channel-bound AAD), so peers on 8 or older cannot talk to this build.
 	assert(
-		protocolVersion == 8,
-		fmt.tprintf("expected protocol version 8 for the admin flag, got %d", protocolVersion),
+		protocolVersion == 9,
+		fmt.tprintf(
+			"expected protocol version 9 for the per-channel transport keys, got %d",
+			protocolVersion,
+		),
 	)
 }
 

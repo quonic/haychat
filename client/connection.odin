@@ -397,6 +397,10 @@ ClientServerTransport_serviceHandshake :: proc(
 		return {}, false
 
 	case .RECEIVE:
+		if !ClientServerTransport_acceptReceiveChannel(transport, event.channelID) {
+			ENet.packet_destroy(event.packet)
+			return {}, false
+		}
 		packetBytes := ClientServerTransport_copyENetPacket(event.packet)
 		result, _ := ClientServerTransport_handleIncomingPacket(transport, packetBytes)
 		delete(packetBytes)

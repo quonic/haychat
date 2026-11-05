@@ -577,3 +577,27 @@ testSendingWhileDisconnectedKeepsTheTransport :: proc(t: ^testing.T) {
 		"expected a not-connected error without failing the queued connection",
 	)
 }
+
+@(test)
+testRuntimeReceiveDropsPacketsOutsideTheControlChannel :: proc(t: ^testing.T) {
+	transport: ClientServerTransport
+	testing.expect(
+		t,
+		ClientServerTransport_acceptReceiveChannel(&transport, STARTUP_AUTH_CHANNEL_CHAT),
+		"expected channel 1 packets to be handled as control packets",
+	)
+	for channelID in ([]u8{0, STARTUP_AUTH_CHANNEL_VOICE, 3, 4}) {
+		testing.expectf(
+			t,
+			!ClientServerTransport_acceptReceiveChannel(&transport, channelID),
+			"expected a packet on channel %d to be dropped, not parsed as control",
+			channelID,
+		)
+	}
+	testing.expectf(
+		t,
+		transport.droppedNonControlPackets == 4,
+		"expected 4 dropped packets counted, got %d",
+		transport.droppedNonControlPackets,
+	)
+}
