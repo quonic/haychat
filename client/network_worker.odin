@@ -1,5 +1,7 @@
 package client
 
+import "base:runtime"
+import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -90,6 +92,7 @@ ClientNetworkWorker_unlock :: proc(worker: ^ClientNetworkWorker) {
 // Services each transport once and queues any events. Exposed separately from the thread loop
 // so tests can drive it deterministically.
 ClientNetworkWorker_servicePass :: proc(worker: ^ClientNetworkWorker) {
+	ClientNetworkWorker_resolveDueAddresses(worker)
 	queued := false
 	sync.mutex_lock(&worker.mutex)
 	for index in 0 ..< len(worker.transports) {
@@ -108,6 +111,48 @@ ClientNetworkWorker_servicePass :: proc(worker: ^ClientNetworkWorker) {
 	if queued && worker.onEventQueued != nil {
 		worker.onEventQueued(worker.onEventQueuedData)
 	}
+}
+
+// Looks up the server address of every attempt that is due, without holding the mutex, so a
+// slow DNS lookup delays only that server's attempt, never the UI thread (which takes the
+// mutex to send) or the other servers' sessions. The transport slice and each transport's
+// host stay fixed while the worker runs, so only the connection state needs the mutex.
+ClientNetworkWorker_resolveDueAddresses :: proc(worker: ^ClientNetworkWorker) {
+	PendingLookup :: struct {
+		index: int,
+		host:  string,
+		port:  i32,
+	}
+	pending := make([dynamic]PendingLookup, context.temp_allocator)
+	now := time.tick_now()
+	sync.mutex_lock(&worker.mutex)
+	for index in 0 ..< len(worker.transports) {
+		transport := &worker.transports[index]
+		if ClientServerTransport_attemptIsDue(transport, now) &&
+		   !transport.connection.resolved.ready {
+			host := strings.clone(transport.serverHost, context.temp_allocator)
+			append(&pending, PendingLookup{index, host, transport.serverPort})
+		}
+	}
+	sync.mutex_unlock(&worker.mutex)
+	if len(pending) == 0 {
+		return
+	}
+
+	results := make([]ClientResolvedAddress, len(pending), context.temp_allocator)
+	for lookup, index in pending {
+		results[index].address, results[index].ok = clientResolveServerAddress(
+			lookup.host,
+			lookup.port,
+		)
+		results[index].ready = true
+	}
+
+	sync.mutex_lock(&worker.mutex)
+	for lookup, index in pending {
+		worker.transports[lookup.index].connection.resolved = results[index]
+	}
+	sync.mutex_unlock(&worker.mutex)
 }
 
 // Moves the oldest queued event to the caller, who then owns it.
@@ -134,6 +179,14 @@ ClientNetworkWorker_popEvent :: proc(
 @(private = "file")
 ClientNetworkWorker_run :: proc(data: rawptr) {
 	worker := cast(^ClientNetworkWorker)data
+	// The thread package gives this thread its own default temp allocator, but because the
+	// thread starts with an explicit context it leaves destroying it to us. Without this every
+	// worker restart (a settings change) would leak the arena.
+	defer if context.temp_allocator.procedure == runtime.default_temp_allocator_proc {
+		runtime.default_temp_allocator_destroy(
+			(^runtime.Default_Temp_Allocator)(context.temp_allocator.data),
+		)
+	}
 	for !sync.atomic_load(&worker.stopping) {
 		ClientNetworkWorker_servicePass(worker)
 		free_all(context.temp_allocator)

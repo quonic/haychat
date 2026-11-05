@@ -73,11 +73,18 @@ validateSettings :: proc(
 	}
 	if len(input.displayName) < DISPLAY_NAME_MIN_BYTES ||
 	   len(input.displayName) > DISPLAY_NAME_MAX_BYTES {
-		return input, "The display name must be 3 to 32 characters long."
+		return input,
+			"The display name must be 3 to 32 bytes long. Most letters take 1 byte; " +
+			"accented letters and emoji take 2 to 4."
 	}
 
 	input.host = strings.trim_space(host)
 	portText := strings.trim_space(port)
+	// ":PORT" has no host to split off. "::1" and other IPv6 addresses also start with a colon,
+	// so only a single colon is rejected.
+	if strings.has_prefix(input.host, ":") && strings.count(input.host, ":") == 1 {
+		return input, "Enter the server's host name or IP address before the port."
+	}
 	// Accept "host:port" pasted into the host field.
 	if colon := strings.last_index_byte(input.host, ':'); colon > 0 &&
 	   strings.count(input.host, ":") == 1 {

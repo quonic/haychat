@@ -18,7 +18,7 @@ odin build client -out:haychat-client
 
 | Option | Meaning |
 | --- | --- |
-| `--name NAME` | Display name, 3 to 32 characters. Saved to the profile. Required for a new profile. |
+| `--name NAME` | Display name, 3 to 32 bytes (UTF-8). Saved to the profile. Required for a new profile. |
 | `--server HOST:PORT` | The profile's only server. Saved to the profile. Required for a new profile: there is no built-in default server. |
 | `--config-dir DIR` | Config root for this profile, like `XDG_CONFIG_HOME` (`APPDATA` on Windows): the profile is `DIR/haychat/config.json`. Without it the harness uses your real client config. |
 | `--connect-timeout MS` | How long startup waits for the first connection, 1 to 600000 ms (default 15000). |

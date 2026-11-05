@@ -40,8 +40,10 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 		viewDMList(state, ctx, sidebar)
 		viewDMChat(state, ctx, root)
 	} else {
-		viewChannelList(state, ctx, sidebar)
-		viewRoomChat(state, ctx, root)
+		// One snapshot per frame, so the footer and the banner always agree.
+		banner := buildConnectionBanner(state, time.tick_now())
+		viewChannelList(state, ctx, sidebar, &banner)
+		viewRoomChat(state, ctx, root, &banner)
 	}
 }
 
@@ -168,8 +170,12 @@ viewServerStatusDot :: proc(state: ^State, ctx: ^ui.Context, button: ui.Rect, se
 
 // The muted one-line status at the bottom of the channel list, e.g. "Connected as alice".
 @(private = "file")
-viewConnectionFooter :: proc(state: ^State, ctx: ^ui.Context, area: ^ui.Rect) {
-	banner := buildConnectionBanner(state, time.tick_now())
+viewConnectionFooter :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	area: ^ui.Rect,
+	banner: ^ConnectionBanner,
+) {
 	if !banner.hasServer {
 		return
 	}
@@ -190,8 +196,12 @@ viewConnectionFooter :: proc(state: ^State, ctx: ^ui.Context, area: ^ui.Rect) {
 // The explanation shown above the room while the selected server is not connected, with the
 // actions that can fix it. Draws nothing while connected.
 @(private = "file")
-viewConnectionBanner :: proc(state: ^State, ctx: ^ui.Context, area: ^ui.Rect) {
-	banner := buildConnectionBanner(state, time.tick_now())
+viewConnectionBanner :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	area: ^ui.Rect,
+	banner: ^ConnectionBanner,
+) {
 	if len(banner.text) == 0 {
 		return
 	}
@@ -314,10 +324,15 @@ listContentHeight :: proc(ctx: ^ui.Context, count: int) -> f32 {
 }
 
 @(private = "file")
-viewChannelList :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
+viewChannelList :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	r: ui.Rect,
+	banner: ^ConnectionBanner,
+) {
 	area := r
 	viewHeader(ctx, &area, selectedServerName(state))
-	viewConnectionFooter(state, ctx, &area)
+	viewConnectionFooter(state, ctx, &area, banner)
 	list := ui.shrink(area, ui.dp(ctx, PANEL_PADDING))
 
 	rooms: []common.RoomSummary
@@ -439,7 +454,7 @@ viewComposer :: proc(
 }
 
 @(private = "file")
-viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
+viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^ConnectionBanner) {
 	view := buildRoomView(state)
 	area := r
 	room, hasRoom := selectedRoom(state)
@@ -448,7 +463,7 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	} else {
 		viewHeader(ctx, &area, selectedServerName(state))
 	}
-	viewConnectionBanner(state, ctx, &area)
+	viewConnectionBanner(state, ctx, &area, banner)
 
 	serverID := state.selected_server_id
 	roomID := state.selected_channel_id

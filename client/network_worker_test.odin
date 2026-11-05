@@ -112,3 +112,55 @@ testNetworkWorkerLockAndPopAreNilSafe :: proc(t: ^testing.T) {
 	testing.expect(t, !hasEvent, "expected a nil worker to have no events")
 	ClientNetworkWorker_stop(nil)
 }
+
+// The worker looks up due attempts' addresses before it takes its mutex; startConnect then
+// uses the result instead of resolving under the lock.
+@(test)
+testNetworkWorkerResolvesDueAddressesBeforeConnecting :: proc(t: ^testing.T) {
+	state := testStateWithServers(
+		{
+			Server{id = 705, name = "Due", host = "127.0.0.1", port = 12399},
+			Server{id = 706, name = "Later", host = "127.0.0.1", port = 12399},
+		},
+	)
+	defer State_deinit(&state)
+	// Queued by State_initFromConfig, so the first is due now; push the second into the future.
+	later := &state.serverTransports[1]
+	later.connection.nextAttemptAt = time.tick_add(time.tick_now(), time.Hour)
+
+	// A worker without a thread lets the test run one step at a time.
+	state.networkWorker = new(ClientNetworkWorker)
+	state.networkWorker.transports = state.serverTransports[:]
+	state.networkWorker.events = make([dynamic]ClientTransportRuntimeEvent)
+	ClientNetworkWorker_resolveDueAddresses(state.networkWorker)
+
+	due := state.serverTransports[0].connection.resolved
+	testing.expectf(
+		t,
+		due.ready && due.ok && due.address.host != 0 && due.address.port == 12399,
+		"expected the due attempt's address to be resolved, got %v",
+		due,
+	)
+	testing.expect(
+		t,
+		!later.connection.resolved.ready,
+		"expected an attempt that is not due to be left alone",
+	)
+
+	event, hasEvent := ClientServerTransport_serviceConnection(
+		&state.serverTransports[0],
+		time.tick_now(),
+	)
+	defer ClientTransportRuntimeEvent_deinit(&event)
+	testing.expectf(
+		t,
+		hasEvent && event.kind == .Connecting,
+		"expected the attempt to start with the resolved address, got %v",
+		event.kind,
+	)
+	testing.expect(
+		t,
+		!state.serverTransports[0].connection.resolved.ready,
+		"expected the attempt to consume the resolved address",
+	)
+}

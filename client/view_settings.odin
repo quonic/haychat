@@ -79,7 +79,8 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	settingsWrapped(
 		ctx,
 		&column,
-		"3 to 32 characters. A server reserves a name for the first device that uses it.",
+		"3 to 32 bytes (accented letters and emoji count as 2 to 4). A server reserves a " +
+		"name for the first device that uses it.",
 		ctx.theme.fgMuted,
 	)
 	_ = ui.cutTop(&column, sectionGap)

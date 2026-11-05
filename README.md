@@ -35,7 +35,7 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 
 The window opens at once; connecting happens in the background.
 
-- **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 characters), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
+- **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 bytes; accented letters and emoji count as 2 to 4), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
 - **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the display name or to add, edit, or remove servers. Changing the name reconnects every server; changing a server's address reconnects only that server and pins its key afresh.
 - **Connection status.** The sidebar footer shows the selected server's status ("Connected as alice", "Connecting…", "Reconnecting in 4 s"), and a dot on each rail button shows every server's status (green connected, amber connecting or waiting, red stopped). While the selected server is not connected, a banner above the room explains why, with a **Retry now** button.
 - **Reconnecting.** After a lost connection or a failed attempt the client retries after 1 s, 2 s, 4 s, and so on, capped at 30 s, each shortened by up to 20% of random jitter so clients do not all return at once. Restarting the server therefore reconnects every client without user action.

@@ -34,7 +34,7 @@ NOT_CONNECTED_MESSAGE :: "Not connected to the server"
 SERVER_IDENTITY_UNAVAILABLE_MESSAGE :: "user identity is unavailable"
 SERVER_UNSUPPORTED_VERSION_MESSAGE :: "Unsupported protocol version"
 SERVER_INVALID_NICKNAME_MESSAGE :: "Invalid nickname length"
-CLIENT_INVALID_NICKNAME_MESSAGE :: "client display name must be between 3 and 32 characters"
+CLIENT_INVALID_NICKNAME_MESSAGE :: "client display name must be between 3 and 32 bytes"
 CLIENT_INVALID_IDENTITY_MESSAGE :: "client identity keys are missing or invalid"
 
 ClientConnectionStatus :: enum u8 {
@@ -66,6 +66,15 @@ ClientConnection :: struct {
 	deadline:       time.Tick,
 	// The server key was pinned on first use during this handshake; Connected reports it.
 	newlyPinned:    bool,
+	// The server address for the next attempt, resolved by the network worker before it takes
+	// its mutex (see ClientNetworkWorker_resolveDueAddresses). startConnect consumes it.
+	resolved:       ClientResolvedAddress,
+}
+
+ClientResolvedAddress :: struct {
+	address: ENet.Address,
+	ok:      bool, // The host name resolved
+	ready:   bool, // A lookup ran for the next attempt
 }
 
 // Delay before reconnect attempt `failedAttempts` (1 for the first retry): 1 s, 2 s, 4 s, …
@@ -208,6 +217,29 @@ ClientServerTransport_requestConnect :: proc(transport: ^ClientServerTransport, 
 	transport.connection.nextAttemptAt = at
 }
 
+// True when the next connect attempt is due, so it needs the server address.
+ClientServerTransport_attemptIsDue :: proc(
+	transport: ^ClientServerTransport,
+	now: time.Tick,
+) -> bool {
+	return transport.connection.status == .Disconnected &&
+		time.tick_diff(transport.connection.nextAttemptAt, now) >= 0
+}
+
+// Resolves host (a name or an IP address). The lookup can block for as long as the system
+// resolver takes, so the network worker runs it without holding its mutex.
+clientResolveServerAddress :: proc(host: string, port: i32) -> (address: ENet.Address, ok: bool) {
+	address.port = u16(port)
+	if len(host) == 0 || !clientEnsureENetInitialized() {
+		return address, false
+	}
+	hostCString := strings.clone_to_cstring(host, context.temp_allocator)
+	// Not folded into the return: its operands are evaluated left to right, so address would
+	// be copied before the lookup fills in its host.
+	ok = ENet.address_set_host(&address, hostCString) == 0
+	return address, ok
+}
+
 // Advances the state machine by one non-blocking step.
 ClientServerTransport_serviceConnection :: proc(
 	transport: ^ClientServerTransport,
@@ -274,12 +306,18 @@ ClientServerTransport_startConnect :: proc(
 		)
 	}
 
-	// Name resolution blocks this worker pass; it is quick for IP addresses and local names.
-	hostCString := strings.clone_to_cstring(transport.serverHost, context.temp_allocator)
-	address := ENet.Address {
-		port = u16(transport.serverPort),
+	// The worker resolves the address before it takes its mutex. Without it (tests driving the
+	// state machine directly) the lookup runs here.
+	resolved := transport.connection.resolved
+	transport.connection.resolved = {}
+	if !resolved.ready {
+		resolved.address, resolved.ok = clientResolveServerAddress(
+			transport.serverHost,
+			transport.serverPort,
+		)
 	}
-	if len(transport.serverHost) == 0 || ENet.address_set_host(&address, hostCString) != 0 {
+	address := resolved.address
+	if !resolved.ok {
 		return ClientServerTransport_connectFailed(
 			transport,
 			now,

@@ -317,7 +317,8 @@ describeConnectFailure :: proc(
 		)
 	case .InvalidName:
 		return strings.clone(
-			"Display names must be 3 to 32 characters long. Choose another name in Settings.",
+			"Display names must be 3 to 32 bytes long (accented letters and emoji count as " +
+			"2 to 4). Choose another name in Settings.",
 			allocator,
 		)
 	case .InvalidIdentity:

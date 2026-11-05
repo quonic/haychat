@@ -145,6 +145,8 @@ testSettingsValidationRejectsUnusableInput :: proc(t: ^testing.T) {
 		{"abcdefghijklmnopqrstuvwxyz0123456", "localhost", "1", true, false, false, "", 0},
 		{"ali\nce", "localhost", "12345", true, false, false, "", 0},
 		{"alice", "bad host", "12345", true, false, false, "", 0},
+		{"alice", ":5000", "12345", true, false, false, "", 0},
+		{"alice", "::1", "12345", true, true, true, "::1", 12345},
 		{"alice", "localhost", "0", true, false, false, "", 0},
 		{"alice", "localhost", "65536", true, false, false, "", 0},
 		{"alice", "localhost", "port", true, false, false, "", 0},

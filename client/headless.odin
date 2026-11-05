@@ -34,7 +34,7 @@ HEADLESS_DISPLAY_NAME_MAX :: 32
 HEADLESS_USAGE ::
 	"usage: client --headless [--name NAME] [--server HOST:PORT] [--config-dir DIR]\n" +
 	"                         [--connect-timeout MS]\n" +
-	"  --name NAME            display name (3-32 characters); saved to the profile\n" +
+	"  --name NAME            display name (3-32 bytes); saved to the profile\n" +
 	"  --server HOST:PORT     the profile's only server; saved to the profile\n" +
 	"  --config-dir DIR       config root for this profile (like XDG_CONFIG_HOME)\n" +
 	"  --connect-timeout MS   how long to wait for the first connection (default 15000)\n" +
@@ -110,7 +110,7 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 		switch flag {
 		case "--name":
 			if len(value) < HEADLESS_DISPLAY_NAME_MIN || len(value) > HEADLESS_DISPLAY_NAME_MAX {
-				return {}, "--name must be between 3 and 32 characters"
+				return {}, "--name must be between 3 and 32 bytes"
 			}
 			options.name = value
 		case "--server":
