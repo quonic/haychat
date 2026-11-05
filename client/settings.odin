@@ -347,4 +347,5 @@ State_reconfigureNetwork :: proc(state: ^State) {
 	if wasRunning {
 		State_startNetwork(state, state.networkWake, state.networkWakeData)
 	}
+	State_voiceResumeAfterReconfigure(state)
 }

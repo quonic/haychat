@@ -24,6 +24,7 @@ package client
 //   - SDL's audio subsystem is initialised only when a device source or sink is opened, so a
 //     headless client never touches SDL unless asked to.
 
+import "../common"
 import "core:c"
 import "core:fmt"
 import "core:math"
@@ -38,9 +39,7 @@ import SDL "vendor:sdl3"
 
 #assert(ODIN_ENDIAN == .Little, "raw F32LE file sources and sinks assume a little-endian host")
 
-VOICE_SAMPLE_RATE :: 48000
-VOICE_FRAME_SAMPLES :: 960
-VOICE_FRAME_BYTES :: VOICE_FRAME_SAMPLES * size_of(f32)
+VOICE_FRAME_BYTES :: common.VOICE_FRAME_SAMPLES * size_of(f32)
 // Above the server's default room size of 25.
 VOICE_MAX_SPEAKERS :: 32
 // About 0.2 s of frames from 25 speakers; the voice thread drains it every few milliseconds.
@@ -143,6 +142,7 @@ VoiceEngineStats :: struct {
 	inboundAccepted: u64,
 	inboundDropped:  u64, // queue full (oldest dropped) or no free speaker slot
 	inboundInvalid:  u64,
+	inboundDeafened: u64, // refused or discarded while deafened
 	loopbackDropped: u64, // simulated loss
 	framesDecoded:   u64,
 	decodeErrors:    u64,
@@ -178,7 +178,7 @@ VoiceInboundFrame :: struct {
 	frameSequence: u32,
 	flags:         u8,
 	length:        int,
-	data:          [VOICE_OPUS_MAX_FRAME_BYTES]u8,
+	data:          [common.VOICE_OPUS_MAX_BYTES]u8,
 }
 
 VoiceSpeaker :: struct {
@@ -199,6 +199,7 @@ VoiceEngine :: struct {
 	opened:              bool, // atomic; inbound frames are accepted only while open
 	// Controls, written by any thread with atomics.
 	muted:               bool,
+	deafened:            bool,
 	pttHeld:             bool,
 	gateMode:            VoiceGateMode,
 	thresholdBits:       u32,
@@ -215,6 +216,7 @@ VoiceEngine :: struct {
 	inboundCount:        int,
 	inboundDropped:      u64, // under inboundMutex
 	inboundInvalid:      u64, // under inboundMutex
+	inboundDeafened:     u64, // under inboundMutex
 	// Voice-thread copy of the queue, so speakers are created without holding inboundMutex.
 	drainBatch:          [VOICE_INBOUND_CAPACITY]VoiceInboundFrame,
 	// Voice-thread state.
@@ -224,9 +226,9 @@ VoiceEngine :: struct {
 	encoderSettings:     opus.EncoderSettings,
 	gate:                VoiceGate,
 	frameSequence:       u32,
-	captureFrame:        [VOICE_FRAME_SAMPLES]f32,
-	decodeFrame:         [VOICE_FRAME_SAMPLES]f32,
-	mixFrame:            [VOICE_FRAME_SAMPLES]f32,
+	captureFrame:        [common.VOICE_FRAME_SAMPLES]f32,
+	decodeFrame:         [common.VOICE_FRAME_SAMPLES]f32,
+	mixFrame:            [common.VOICE_FRAME_SAMPLES]f32,
 	encodeBuffer:        [opus.MAX_PACKET_BYTES]u8,
 	speakers:            [VOICE_MAX_SPEAKERS]VoiceSpeaker,
 	clockStart:          time.Tick,
@@ -248,7 +250,7 @@ VoiceEngine :: struct {
 	faultState:          u64,
 	loopbackCount:       u64,
 	heldFrame:           VoiceOutboundFrame,
-	heldFrameData:       [VOICE_OPUS_MAX_FRAME_BYTES]u8,
+	heldFrameData:       [common.VOICE_OPUS_MAX_BYTES]u8,
 	hasHeldFrame:        bool,
 	errorBuffer:         [VOICE_ERROR_BUFFER_SIZE]u8,
 	errorLength:         int,
@@ -385,7 +387,7 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 		VoiceEngine_close(engine)
 	}
 	code: c.int
-	engine.encoder, code = opus.createVoiceEncoder(VOICE_SAMPLE_RATE, engine.encoderSettings)
+	engine.encoder, code = opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, engine.encoderSettings)
 	if engine.encoder == nil {
 		VoiceEngine_setError(engine, "Opus encoder: %s", opus.errorString(code))
 		return false
@@ -444,6 +446,7 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	engine.inboundCount = 0
 	engine.inboundDropped = 0
 	engine.inboundInvalid = 0
+	engine.inboundDeafened = 0
 	sync.mutex_unlock(&engine.inboundMutex)
 	sync.atomic_store(&engine.opened, true)
 	VoiceEngine_publish(engine)
@@ -536,7 +539,7 @@ VoiceEngine_openCapture :: proc(engine: ^VoiceEngine) -> bool {
 	spec := SDL.AudioSpec {
 		format   = .F32,
 		channels = 1,
-		freq     = VOICE_SAMPLE_RATE,
+		freq     = common.VOICE_SAMPLE_RATE,
 	}
 	engine.captureStream = SDL.OpenAudioDeviceStream(deviceID, &spec, nil, nil)
 	if engine.captureStream == nil {
@@ -555,7 +558,7 @@ VoiceEngine_openCapture :: proc(engine: ^VoiceEngine) -> bool {
 VOICE_PLAYBACK_SPEC :: SDL.AudioSpec {
 	format   = .F32,
 	channels = 2,
-	freq     = VOICE_SAMPLE_RATE,
+	freq     = common.VOICE_SAMPLE_RATE,
 }
 
 @(private = "file")
@@ -577,6 +580,14 @@ VoiceEngine_openPlayback :: proc(engine: ^VoiceEngine) -> bool {
 
 VoiceEngine_setMuted :: proc(engine: ^VoiceEngine, muted: bool) {
 	sync.atomic_store(&engine.muted, muted)
+}
+
+// VoiceEngine_setDeafened stops playback at once: inbound frames are refused, and the voice
+// thread discards what is queued and releases every speaker on its next step, so nothing
+// already buffered plays after the call. The server also stops relaying to a deafened
+// session, but only once ClientVoiceState reaches it.
+VoiceEngine_setDeafened :: proc(engine: ^VoiceEngine, deafened: bool) {
+	sync.atomic_store(&engine.deafened, deafened)
 }
 
 // VoiceEngine_setPushToTalk records whether the push-to-talk key is held. The UI sets it from
@@ -627,8 +638,12 @@ VoiceEngine_pushInbound :: proc(
 	if !sync.atomic_load(&engine.opened) {
 		return false
 	}
-	if senderUserID == 0 || len(opus) == 0 || len(opus) > VOICE_OPUS_MAX_FRAME_BYTES {
+	if senderUserID == 0 || len(opus) == 0 || len(opus) > common.VOICE_OPUS_MAX_BYTES {
 		engine.inboundInvalid += 1
+		return false
+	}
+	if sync.atomic_load(&engine.deafened) {
+		engine.inboundDeafened += 1
 		return false
 	}
 	if engine.inboundCount == VOICE_INBOUND_CAPACITY {
@@ -721,7 +736,7 @@ VoiceEngine_generateFrame :: proc(engine: ^VoiceEngine) {
 	case .Silence, .Device:
 		mem.zero_slice(frame)
 	case .Tone:
-		step := 2 * math.PI * f64(source.toneHz) / VOICE_SAMPLE_RATE
+		step := 2 * math.PI * f64(source.toneHz) / common.VOICE_SAMPLE_RATE
 		for &sample in frame {
 			sample = source.toneAmplitude * f32(math.sin(engine.tonePhase))
 			engine.tonePhase += step
@@ -778,16 +793,16 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		return
 	}
 	length := opus.encodeFloat(engine.encoder, frame, engine.encodeBuffer[:])
-	if length <= 0 || int(length) > VOICE_OPUS_MAX_FRAME_BYTES {
+	if length <= 0 || int(length) > common.VOICE_OPUS_MAX_BYTES {
 		engine.stats.encodeErrors += 1
 		return
 	}
 	flags: u8
 	if result.endOfSpurt {
-		flags |= VOICE_FLAG_END_OF_SPURT
+		flags |= common.VOICE_FRAME_FLAG_END_OF_SPURT
 	}
 	if engine.encoderSettings.inbandFEC {
-		flags |= VOICE_FLAG_FEC_PRESENT
+		flags |= common.VOICE_FRAME_FLAG_FEC_PRESENT
 	}
 	outbound := VoiceOutboundFrame {
 		frameSequence = sequence,
@@ -866,7 +881,7 @@ VoiceEngine_findSpeaker :: proc(engine: ^VoiceEngine, userID: u32, now: f64) -> 
 	if freeSlot == nil {
 		return nil
 	}
-	decoder, _ := opus.createDecoder(VOICE_SAMPLE_RATE)
+	decoder, _ := opus.createDecoder(common.VOICE_SAMPLE_RATE)
 	if decoder == nil {
 		return nil
 	}
@@ -875,7 +890,7 @@ VoiceEngine_findSpeaker :: proc(engine: ^VoiceEngine, userID: u32, now: f64) -> 
 		sourceSpec := SDL.AudioSpec {
 			format   = .F32,
 			channels = 1,
-			freq     = VOICE_SAMPLE_RATE,
+			freq     = common.VOICE_SAMPLE_RATE,
 		}
 		deviceSpec := VOICE_PLAYBACK_SPEC
 		stream = SDL.CreateAudioStream(&sourceSpec, &deviceSpec)
@@ -939,6 +954,18 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 	sync.mutex_unlock(&engine.inboundMutex)
 
 	noSpeaker: u64
+	deafenedDiscards: u64
+	if sync.atomic_load(&engine.deafened) {
+		// Nothing buffered may play once deafened, so drop the speakers and their jitter
+		// buffers; they come back with the next frame after undeafening.
+		for &speaker in engine.speakers {
+			if speaker.active {
+				VoiceEngine_releaseSpeaker(engine, &speaker)
+			}
+		}
+		deafenedDiscards = u64(count)
+		count = 0
+	}
 	for &frame in engine.drainBatch[:count] {
 		speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
 		if speaker == nil {
@@ -958,9 +985,16 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 
 	sync.mutex_lock(&engine.inboundMutex)
 	engine.inboundDropped += noSpeaker
+	engine.inboundDeafened += deafenedDiscards
 	engine.stats.inboundDropped = engine.inboundDropped
 	engine.stats.inboundInvalid = engine.inboundInvalid
+	engine.stats.inboundDeafened = engine.inboundDeafened
 	sync.mutex_unlock(&engine.inboundMutex)
+}
+
+@(private = "file")
+voicePacketIsOneFrame :: proc(packet: []u8) -> bool {
+	return opus.packetSampleCount(packet, common.VOICE_SAMPLE_RATE) == common.VOICE_FRAME_SAMPLES
 }
 
 // VoiceEngine_decode turns one jitter-buffer decision into 20 ms of PCM in decodeFrame.
@@ -977,7 +1011,7 @@ VoiceEngine_decode :: proc(
 		mem.zero_slice(pcm)
 		return pcm
 	case .Decode:
-		if opus.packetSampleCount(output.data, VOICE_SAMPLE_RATE) == VOICE_FRAME_SAMPLES {
+		if voicePacketIsOneFrame(output.data) {
 			decoded = opus.decodeFloat(speaker.decoder, output.data, pcm)
 		} else {
 			// Not a 20 ms packet: conceal rather than desynchronise the decoder.
@@ -985,7 +1019,7 @@ VoiceEngine_decode :: proc(
 			decoded = opus.decodeFloat(speaker.decoder, nil, pcm)
 		}
 	case .DecodeFEC:
-		if opus.packetSampleCount(output.data, VOICE_SAMPLE_RATE) == VOICE_FRAME_SAMPLES {
+		if voicePacketIsOneFrame(output.data) {
 			decoded = opus.decodeFloat(speaker.decoder, output.data, pcm, fec = true)
 		} else {
 			decoded = opus.decodeFloat(speaker.decoder, nil, pcm)
@@ -993,7 +1027,7 @@ VoiceEngine_decode :: proc(
 	case .Conceal:
 		decoded = opus.decodeFloat(speaker.decoder, nil, pcm)
 	}
-	if decoded != VOICE_FRAME_SAMPLES {
+	if decoded != common.VOICE_FRAME_SAMPLES {
 		engine.stats.decodeErrors += 1
 		mem.zero_slice(pcm)
 	} else {

@@ -451,6 +451,8 @@ ClientServerTransport_connected :: proc(
 ) -> ClientTransportRuntimeEvent {
 	transport.connection.status = .Established
 	transport.connection.failedAttempts = 0
+	// A new session: any voice binding from the previous one is dead from here on.
+	transport.sessionGeneration += 1
 	if len(transport.lastError) > 0 {
 		delete(transport.lastError)
 		transport.lastError = ""
@@ -461,6 +463,7 @@ ClientServerTransport_connected :: proc(
 		userID   = transport.authenticatedUserID,
 		nickname = strings.clone(transport.nickname),
 		isAdmin  = transport.authenticatedIsAdmin,
+		sessionGeneration = transport.sessionGeneration,
 	}
 	if transport.connection.newlyPinned {
 		event.serverPublicKey = strings.clone(transport.pinnedServerPublicKey)

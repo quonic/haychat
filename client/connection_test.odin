@@ -579,7 +579,7 @@ testSendingWhileDisconnectedKeepsTheTransport :: proc(t: ^testing.T) {
 }
 
 @(test)
-testRuntimeReceiveDropsPacketsOutsideTheControlChannel :: proc(t: ^testing.T) {
+testHandshakeReceiveDropsPacketsOutsideTheControlChannel :: proc(t: ^testing.T) {
 	transport: ClientServerTransport
 	testing.expect(
 		t,
@@ -594,10 +594,19 @@ testRuntimeReceiveDropsPacketsOutsideTheControlChannel :: proc(t: ^testing.T) {
 			channelID,
 		)
 	}
+	dropped := transport.voiceStats.receiveDropped
 	testing.expectf(
 		t,
-		transport.droppedNonControlPackets == 4,
-		"expected 4 dropped packets counted, got %d",
-		transport.droppedNonControlPackets,
+		dropped[.BeforeSession] == 1 && dropped[.WrongChannel] == 3,
+		"expected 1 early voice datagram and 3 wrong-channel packets, got %d and %d",
+		dropped[.BeforeSession],
+		dropped[.WrongChannel],
+	)
+	testing.expect(
+		t,
+		clientReceiveChannel(STARTUP_AUTH_CHANNEL_VOICE) == .Voice &&
+		clientReceiveChannel(STARTUP_AUTH_CHANNEL_CHAT) == .Control &&
+		clientReceiveChannel(3) == .Other,
+		"expected an established session to route channel 2 to voice and drop the rest",
 	)
 }

@@ -73,6 +73,9 @@ State :: struct {
 	// Whether the window has input focus. Only the GUI sets it; a conversation counts as
 	// viewed (marked read, no new badge) only while it is set (read_state.odin).
 	windowFocused:                  bool,
+	// Voice rooms (voice_state.odin): the session status, the participant lists, and the
+	// running engine.
+	voice:                          ClientVoiceState,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -125,6 +128,7 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	if State_needsFirstRunSetup(init_state.config) {
 		State_openSettings(&init_state)
 	}
+	State_setVoiceEngineTemplate(&init_state, VOICE_DEFAULT_ENGINE_TEMPLATE)
 	return
 }
 
@@ -153,6 +157,8 @@ State_stopNetwork :: proc(state: ^State) {
 	if state.networkWorker == nil {
 		return
 	}
+	// The voice thread sends through the worker's transports, so it stops while they exist.
+	State_voiceSuspendForReconfigure(state)
 	ClientNetworkWorker_stopThread(state.networkWorker)
 	for State_drainNetworkEvents(state) {
 	}
@@ -161,7 +167,9 @@ State_stopNetwork :: proc(state: ^State) {
 }
 
 State_deinit :: proc(state: ^State) {
-	// Stop the worker before freeing the transports it services.
+	// The voice engine sends through the worker and its transports, so it stops first; then
+	// the worker stops before the transports it services are freed.
+	State_voiceShutdown(state)
 	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)
@@ -182,6 +190,7 @@ State_deinit :: proc(state: ^State) {
 	delete(state.serverConnections)
 	SettingsForm_deinit(&state.settings)
 	RoomEditor_deinit(&state.roomEditor)
+	ClientVoiceState_deinit(&state.voice)
 	state^ = {}
 }
 

@@ -236,6 +236,9 @@ HeadlessEventKind :: enum {
 	Presence,
 	RoomCreated,
 	ReadMarker,
+	VoiceParticipants,
+	VoiceJoinRejected,
+	VoiceLeft,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -257,6 +260,9 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.Presence       = "presence",
 	.RoomCreated    = "room_created",
 	.ReadMarker     = "read_marker",
+	.VoiceParticipants = "voice_participants",
+	.VoiceJoinRejected = "voice_join_rejected",
+	.VoiceLeft      = "voice_left",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -433,6 +439,33 @@ HeadlessReadMarkerJSON :: struct {
 	conversationID:    int,
 	lastReadMessageId: int,
 	unreadCount:       int,
+}
+
+// One voice participant. A second device of the same account is a second entry with the
+// same userID.
+HeadlessVoiceParticipantJSON :: struct {
+	userID:   int,
+	nickname: string,
+	muted:    bool,
+	deafened: bool,
+}
+
+// ServerVoiceParticipants: a room's full voice participant set, sent for every room this
+// account is in whenever it changes (an empty list means nobody is in its voice any more).
+HeadlessVoiceParticipantsJSON :: struct {
+	event:        string,
+	serverID:     int,
+	roomID:       int,
+	participants: []HeadlessVoiceParticipantJSON,
+}
+
+// ServerVoiceJoinRejected and ServerVoiceLeft: the server's reason for refusing a join or
+// removing this session from a room's voice.
+HeadlessVoiceReasonJSON :: struct {
+	event:    string,
+	serverID: int,
+	roomID:   int,
+	reason:   string,
 }
 
 HEADLESS_READ_MARKER_KIND_NAMES := [common.ReadMarkerKind]string {
@@ -748,6 +781,42 @@ headlessRenderRuntimeEvent :: proc(
 				conversationID = marker.conversationId,
 				lastReadMessageId = marker.lastReadMessageId,
 				unreadCount = marker.unreadCount,
+			},
+			allocator,
+		)
+	case .VoiceParticipants:
+		kind = .VoiceParticipants
+		participants := make(
+			[]HeadlessVoiceParticipantJSON,
+			len(event.voiceParticipants),
+			allocator,
+		)
+		defer delete(participants, allocator)
+		for participant, index in event.voiceParticipants {
+			participants[index] = {
+				userID   = participant.userId,
+				nickname = participant.nickname,
+				muted    = participant.muted,
+				deafened = participant.deafened,
+			}
+		}
+		line = headlessMarshal(
+			HeadlessVoiceParticipantsJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.roomID,
+				participants = participants,
+			},
+			allocator,
+		)
+	case .VoiceJoinRejected, .VoiceLeft:
+		kind = event.kind == .VoiceLeft ? .VoiceLeft : .VoiceJoinRejected
+		line = headlessMarshal(
+			HeadlessVoiceReasonJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.roomID,
+				reason = event.message,
 			},
 			allocator,
 		)
@@ -1198,6 +1267,12 @@ headlessConnectAndWait :: proc(
 ) -> bool {
 	harness.state = State_initFromConfig(config)
 	state := &harness.state
+	// No audio device unless a script asks for one (H7's voice-source and voice-sink): a
+	// harness client in voice records nothing and plays nothing, and never initialises SDL.
+	State_setVoiceEngineTemplate(
+		state,
+		{source = {kind = .Silence}, sink = {kind = .Null}, gateMode = .VoiceActivity},
+	)
 	serverID := state.selected_server_id
 	_, hasTransport := State_selectedTransport(state)
 	connectionIndex := State_serverConnectionIndex(state^, serverID)

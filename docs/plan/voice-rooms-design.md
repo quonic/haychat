@@ -6,8 +6,14 @@
 replay window, protocol 9), H2 (binary voice frames, TOC check, kind-bound voice AAD and the
 voice control messages, protocol 10), H3 (server voice: router control plane in
 `server/voice.odin`, network-thread relay in `server/voice_relay.odin`, no protocol change) and
-H4 (client voice engine) are implemented; H5–H8 follow section 7. H3 chose the cached member
-list for leave and state fan-out (4.2), and atomics for the `/status` counters (Q9).
+H4 (client voice engine) and H5 (client voice networking: the worker's channel 2 receive path,
+the voice thread's send path under the worker lock, the voice runtime events, `State.voice` and
+its actions, re-join after a reconnect, and a live two-client tone proof through the server
+relay; no protocol change) are implemented; H6–H8 follow section 7. H3 chose the cached member
+list for leave and state fan-out (4.2), and atomics for the `/status` counters (Q9). H5 seals
+and sends voice under the worker lock instead of moving `voiceSend` to the voice thread (1.4),
+because a reconnect rewrites it on the worker, and checks a per-session generation before every
+send and delivery.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport

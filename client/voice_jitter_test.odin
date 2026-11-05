@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:fmt"
 import "core:testing"
 
@@ -215,7 +216,7 @@ testJitterBufferEndsAndRestartsSpurts :: proc(t: ^testing.T) {
 	jb: JitterBuffer
 	JitterBuffer_init(&jb)
 	_ = jitterPush(&jb, 100)
-	_ = jitterPush(&jb, 101, VOICE_FLAG_END_OF_SPURT)
+	_ = jitterPush(&jb, 101, common.VOICE_FRAME_FLAG_END_OF_SPURT)
 	jitterExpectPreroll(&jb, 100)
 	jitterExpect(&jb, .Decode, 100)
 	jitterExpect(&jb, .Decode, 101)
@@ -274,7 +275,7 @@ testJitterBufferAdaptsDepthBetweenSpurts :: proc(t: ^testing.T) {
 	JitterBuffer_init(&jb)
 	// A steady spurt: no jitter, so the next spurt may use the minimum depth.
 	for sequence in u32(0) ..< 20 {
-		flags := sequence == 19 ? VOICE_FLAG_END_OF_SPURT : 0
+		flags := sequence == 19 ? common.VOICE_FRAME_FLAG_END_OF_SPURT : 0
 		_ = jitterPush(&jb, sequence, flags, f64(sequence) * VOICE_FRAME_MS)
 	}
 	for JitterBuffer_next(&jb).action != .Idle {}
@@ -294,7 +295,7 @@ testJitterBufferAdaptsDepthBetweenSpurts :: proc(t: ^testing.T) {
 	for offset in u32(1) ..< 40 {
 		sequence := base + offset
 		swing := offset % 2 == 0 ? 30.0 : -30.0
-		flags := offset == 39 ? VOICE_FLAG_END_OF_SPURT : 0
+		flags := offset == 39 ? common.VOICE_FRAME_FLAG_END_OF_SPURT : 0
 		_ = jitterPush(&jb, sequence, flags, f64(sequence) * VOICE_FRAME_MS + 40 + swing)
 		assert(jb.targetDepth == JITTER_MIN_DEPTH, "expected the depth to hold during a spurt")
 		// Play one frame per arrival, so the playout position keeps pace with the sender.
@@ -319,7 +320,7 @@ testJitterBufferAdaptsDepthBetweenSpurts :: proc(t: ^testing.T) {
 testJitterBufferRejectsInvalidPayloads :: proc(t: ^testing.T) {
 	jb: JitterBuffer
 	JitterBuffer_init(&jb)
-	oversize: [VOICE_OPUS_MAX_FRAME_BYTES + 1]u8
+	oversize: [common.VOICE_OPUS_MAX_BYTES + 1]u8
 	assert(!JitterBuffer_push(&jb, 1, 0, nil, 0), "expected an empty payload to be rejected")
 	assert(
 		!JitterBuffer_push(&jb, 1, 0, oversize[:], 0),

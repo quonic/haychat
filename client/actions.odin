@@ -414,6 +414,7 @@ State_roomMembershipChanged :: proc(state: ^State, serverID, roomID: int, joined
 		ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 		State_fallBackFromRemovedRoom(state, serverID, roomID)
 		State_roomEditorRoomChanged(state, serverID, roomID)
+		State_voiceRoomRemoved(state, serverID, roomID)
 	}
 	State_requestRoomList(state, serverID)
 }
@@ -443,6 +444,7 @@ State_roomDeleted :: proc(state: ^State, serverID, roomID: int) {
 	State_roomEditorRoomChanged(state, serverID, roomID)
 	ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 	State_fallBackFromRemovedRoom(state, serverID, roomID)
+	State_voiceRoomRemoved(state, serverID, roomID)
 	State_requestRoomList(state, serverID)
 }
 
@@ -519,6 +521,17 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_userPresenceChanged(state, event.serverID, &event.user)
 	case .ReadMarkerReceived:
 		State_receiveReadMarker(state, event.serverID, event.readMarker)
+	case .VoiceParticipants:
+		State_receiveVoiceParticipants(
+			state,
+			event.serverID,
+			event.roomID,
+			&event.voiceParticipants,
+		)
+	case .VoiceJoinRejected:
+		State_voiceJoinRejected(state, event.serverID, event.roomID, &event.message)
+	case .VoiceLeft:
+		State_voiceLeft(state, event.serverID, event.roomID, &event.message)
 	case .None:
 	}
 }

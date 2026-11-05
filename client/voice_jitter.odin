@@ -1,5 +1,7 @@
 package client
 
+import "../common"
+
 // Per-speaker jitter buffer (voice-rooms-design.md section 5.2). Pure code with no audio and
 // no allocation, so every loss and reordering case is unit-tested without a device.
 //
@@ -8,7 +10,6 @@ package client
 // All sequence comparisons wrap (voiceSequenceDiff).
 
 JITTER_SLOT_COUNT :: 32
-VOICE_OPUS_MAX_FRAME_BYTES :: 512
 JITTER_DEFAULT_DEPTH :: 3
 JITTER_MIN_DEPTH :: 2
 JITTER_MAX_DEPTH :: 8
@@ -20,9 +21,6 @@ JITTER_MAX_PLC_RUN :: 5
 JITTER_MIN_SAMPLES_TO_ADAPT :: 16
 VOICE_FRAME_MS :: 20.0
 
-VOICE_FLAG_END_OF_SPURT :: u8(0x01)
-VOICE_FLAG_FEC_PRESENT :: u8(0x02)
-
 // Wrapping difference a − b, so sequence 0 comes after 0xFFFF_FFFF.
 voiceSequenceDiff :: proc(a, b: u32) -> i32 {
 	return i32(a - b)
@@ -33,7 +31,7 @@ JitterSlot :: struct {
 	sequence: u32,
 	flags:    u8,
 	length:   int,
-	data:     [VOICE_OPUS_MAX_FRAME_BYTES]u8,
+	data:     [common.VOICE_OPUS_MAX_BYTES]u8,
 }
 
 JitterStats :: struct {
@@ -156,7 +154,7 @@ JitterBuffer_push :: proc(
 	opus: []u8,
 	arrivalMS: f64,
 ) -> bool {
-	if len(opus) == 0 || len(opus) > VOICE_OPUS_MAX_FRAME_BYTES {
+	if len(opus) == 0 || len(opus) > common.VOICE_OPUS_MAX_BYTES {
 		jb.stats.invalid += 1
 		return false
 	}
@@ -235,7 +233,7 @@ JitterBuffer_next :: proc(jb: ^JitterBuffer) -> JitterOutput {
 			sequence = sequence,
 			data     = slot.data[:slot.length],
 		}
-		if slot.flags & VOICE_FLAG_END_OF_SPURT != 0 {
+		if slot.flags & common.VOICE_FRAME_FLAG_END_OF_SPURT != 0 {
 			// The slot's bytes stay in place until the next push, so data is still valid.
 			JitterBuffer_endSpurt(jb)
 		}

@@ -21,6 +21,9 @@ ServerConnection :: struct {
 	// Whether the server said at sign-in that this account is an admin. A role granted or
 	// revoked while connected shows up on the next connection.
 	isAdmin:                  bool,
+	// The transport's session counter from Connected, so a voice engine binds to this
+	// session and no later one (ClientTransportVoiceBinding).
+	sessionGeneration:        u64,
 	// The raw reason from the transport or server.
 	detail:                   string,
 	// The key a server offered that did not match the pin, for "Trust the new key".
@@ -174,6 +177,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	connection.lastAttemptFailed = false
 	connection.userID = event.userID
 	connection.isAdmin = event.isAdmin
+	connection.sessionGeneration = event.sessionGeneration
 	delete(connection.nickname)
 	connection.nickname = event.nickname
 	event.nickname = ""
@@ -192,6 +196,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_resetPendingRequests(state, event.serverID, true)
 	State_requestRoomList(state, event.serverID)
 	State_requestDirectStateAfterConnect(state, event.serverID)
+	State_voiceConnected(state, event.serverID)
 }
 
 // Takes ownership of the event's message and offered key.
@@ -213,6 +218,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 		event.serverFingerprint = ""
 	}
 	State_resetPendingRequests(state, event.serverID, false)
+	State_voiceConnectionLost(state, event.serverID)
 }
 
 // Takes ownership of the event's message.
@@ -227,6 +233,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.isAdmin = false
 	ServerConnection_setDetail(connection, &event.message)
 	State_resetPendingRequests(state, event.serverID, false)
+	State_voiceConnectionLost(state, event.serverID)
 }
 
 // "Retry now": connect immediately instead of waiting for the backoff (or after a failure

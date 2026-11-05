@@ -960,3 +960,82 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		fmt.tprintf("expected help to list the DM commands and events, got %s", output),
 	)
 }
+
+@(test)
+testHeadlessRendersVoiceEvents :: proc(t: ^testing.T) {
+	participants := ClientTransportRuntimeEvent {
+		kind     = .VoiceParticipants,
+		serverID = 1,
+		roomID   = 2,
+	}
+	append(
+		&participants.voiceParticipants,
+		common.VoiceParticipant{userId = 3, nickname = strings.clone("alice"), muted = true},
+		common.VoiceParticipant{userId = 4, nickname = strings.clone("bob"), deafened = true},
+	)
+	defer ClientTransportRuntimeEvent_deinit(&participants)
+	line, kind, ok := headlessRenderRuntimeEvent(&participants)
+	testing.expect(t, ok && kind == .VoiceParticipants, "expected a voice_participants event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"voice_participants","serverID":1,"roomID":2,"participants":[` +
+		`{"userID":3,"nickname":"alice","muted":true,"deafened":false},` +
+		`{"userID":4,"nickname":"bob","muted":false,"deafened":true}]}`,
+		"the voice_participants JSON",
+	)
+	delete(line)
+
+	empty := ClientTransportRuntimeEvent {
+		kind     = .VoiceParticipants,
+		serverID = 1,
+		roomID   = 2,
+	}
+	line, _, _ = headlessRenderRuntimeEvent(&empty)
+	testExpectString(
+		t,
+		line,
+		`{"event":"voice_participants","serverID":1,"roomID":2,"participants":[]}`,
+		"an empty participant list",
+	)
+	delete(line)
+
+	rejected := ClientTransportRuntimeEvent {
+		kind     = .VoiceJoinRejected,
+		serverID = 1,
+		roomID   = 2,
+		message  = "voice room is full",
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&rejected)
+	testing.expect(t, ok && kind == .VoiceJoinRejected, "expected a voice_join_rejected event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"voice_join_rejected","serverID":1,"roomID":2,"reason":"voice room is full"}`,
+		"the voice_join_rejected JSON",
+	)
+	delete(line)
+
+	left := ClientTransportRuntimeEvent {
+		kind     = .VoiceLeft,
+		serverID = 1,
+		roomID   = 2,
+		message  = "the room was deleted",
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&left)
+	testing.expect(t, ok && kind == .VoiceLeft, "expected a voice_left event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"voice_left","serverID":1,"roomID":2,"reason":"the room was deleted"}`,
+		"the voice_left JSON",
+	)
+	delete(line)
+	testing.expect(
+		t,
+		HEADLESS_EVENT_NAMES[.VoiceParticipants] == "voice_participants" &&
+		HEADLESS_EVENT_NAMES[.VoiceJoinRejected] == "voice_join_rejected" &&
+		HEADLESS_EVENT_NAMES[.VoiceLeft] == "voice_left",
+		"expected the voice event names H7 waits on",
+	)
+}

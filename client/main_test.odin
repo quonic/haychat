@@ -1019,51 +1019,39 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 	_ = t
 }
 
-@(private = "file")
-testExpectVoiceControlIsUnexpected :: proc(
+// Seals one server control message for the client and runs it through the runtime packet
+// handler. The caller owns the returned event.
+testDeliverServerControl :: proc(
 	transport: ^ClientServerTransport,
 	serverTransport: ^common.TransportState,
 	messageType: common.MessageType,
 	payload: any,
-) {
+) -> ClientTransportRuntimeEvent {
 	sealedPacket, sealOK := common.sealPacketForSession(serverTransport, messageType, payload)
 	assert(sealOK, fmt.tprintf("expected the server to seal %v", messageType))
 	defer delete(sealedPacket.payload)
 	sealedPacketBytes, bytesOK := common.marshalPacket(sealedPacket)
-	assert(bytesOK, "expected the sealed voice control packet to marshal")
+	assert(bytesOK, "expected the sealed control packet to marshal")
 	defer delete(sealedPacketBytes)
 
 	runtimeEvent, eventOK := ClientServerTransport_handleRuntimePacketBytes(
 		transport,
 		sealedPacketBytes,
 	)
-	assert(eventOK, "expected the packet handler to report the voice control message")
-	defer ClientTransportRuntimeEvent_deinit(&runtimeEvent)
-	assert(
-		runtimeEvent.kind == .ProtocolError,
-		fmt.tprintf(
-			"expected %v to be a protocol error for now, got %v",
-			messageType,
-			runtimeEvent.kind,
-		),
-	)
-	assert(
-		transport.transport.phase == .Established,
-		"expected an unhandled voice control message to keep the session",
-	)
+	assert(eventOK, fmt.tprintf("expected the packet handler to report %v", messageType))
+	return runtimeEvent
 }
 
-// Protocol 10 defines the voice control messages before the client handles them (H5). Until
-// then a server voice message is an unexpected runtime message: a ProtocolError event that
-// keeps the session, with the payload freed by the packet handler (the leak checker covers
-// the owned nickname and reason strings).
+// The three voice control messages become runtime events that own their payloads; the leak
+// checker covers the nicknames and reasons through ClientTransportRuntimeEvent_deinit. A
+// malformed participant list is a ProtocolError that keeps the session.
 @(test)
-testClientServerTransportTreatsVoiceControlAsUnexpectedForNow :: proc(t: ^testing.T) {
+testClientServerTransportDecodesVoiceControlIntoRuntimeEvents :: proc(t: ^testing.T) {
 	server := Server {
-		id         = 77,
-		name       = "Voice Server",
-		host       = "localhost",
-		port       = common.DEFAULT_SERVER_PORT,
+		id   = 77,
+		name = "Voice Server",
+		host = "localhost",
+		port = common.DEFAULT_SERVER_PORT,
 	}
 	config := testConfigWithServers({server})
 	defer Config_deinit(&config)
@@ -1073,33 +1061,87 @@ testClientServerTransportTreatsVoiceControlAsUnexpectedForNow :: proc(t: ^testin
 	defer ClientServerTransport_deinit(&transport)
 
 	participants := make([dynamic]common.VoiceParticipant, context.temp_allocator)
-	append(&participants, common.VoiceParticipant{userId = 3, nickname = "alice"})
-	participantsPayload := common.ServerVoiceParticipantsPayload {
-		roomId       = 1,
-		participants = participants,
-	}
-	rejectedPayload := common.ServerVoiceJoinRejectedPayload {
-		roomId = 1,
-		reason = "voice room is full",
-	}
-	leftPayload := common.ServerVoiceLeftPayload {
-		roomId = 1,
-		reason = "room deleted",
-	}
-	testExpectVoiceControlIsUnexpected(
+	append(&participants, common.VoiceParticipant{userId = 3, nickname = "alice", muted = true})
+	append(&participants, common.VoiceParticipant{userId = 4, nickname = "bob", deafened = true})
+	event := testDeliverServerControl(
 		&transport,
 		&serverTransport,
 		.ServerVoiceParticipants,
-		participantsPayload,
+		common.ServerVoiceParticipantsPayload{roomId = 5, participants = participants},
 	)
-	testExpectVoiceControlIsUnexpected(
+	testing.expectf(
+		t,
+		event.kind == .VoiceParticipants && event.serverID == 77 && event.roomID == 5,
+		"expected VoiceParticipants for server 77 room 5, got %v %d %d",
+		event.kind,
+		event.serverID,
+		event.roomID,
+	)
+	testing.expect(
+		t,
+		len(event.voiceParticipants) == 2 &&
+		event.voiceParticipants[0].userId == 3 &&
+		event.voiceParticipants[0].nickname == "alice" &&
+		event.voiceParticipants[0].muted &&
+		event.voiceParticipants[1].nickname == "bob" &&
+		event.voiceParticipants[1].deafened,
+		"expected both participants with their nicknames and flags",
+	)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	event = testDeliverServerControl(
 		&transport,
 		&serverTransport,
 		.ServerVoiceJoinRejected,
-		rejectedPayload,
+		common.ServerVoiceJoinRejectedPayload{roomId = 5, reason = "voice room is full"},
 	)
-	testExpectVoiceControlIsUnexpected(&transport, &serverTransport, .ServerVoiceLeft, leftPayload)
-	_ = t
+	testing.expectf(
+		t,
+		event.kind == .VoiceJoinRejected &&
+		event.roomID == 5 &&
+		event.message == "voice room is full",
+		"expected VoiceJoinRejected with the reason, got %v %d %q",
+		event.kind,
+		event.roomID,
+		event.message,
+	)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	event = testDeliverServerControl(
+		&transport,
+		&serverTransport,
+		.ServerVoiceLeft,
+		common.ServerVoiceLeftPayload{roomId = 5, reason = "the room was deleted"},
+	)
+	testing.expectf(
+		t,
+		event.kind == .VoiceLeft && event.roomID == 5 && event.message == "the room was deleted",
+		"expected VoiceLeft with the reason, got %v %d %q",
+		event.kind,
+		event.roomID,
+		event.message,
+	)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	// Room 0 is never a voice room: the decoded participants are freed and reported.
+	event = testDeliverServerControl(
+		&transport,
+		&serverTransport,
+		.ServerVoiceParticipants,
+		common.ServerVoiceParticipantsPayload{roomId = 0, participants = participants},
+	)
+	testing.expectf(
+		t,
+		event.kind == .ProtocolError && len(event.voiceParticipants) == 0,
+		"expected an invalid participant list to be a protocol error, got %v",
+		event.kind,
+	)
+	ClientTransportRuntimeEvent_deinit(&event)
+	testing.expect(
+		t,
+		transport.transport.phase == .Established,
+		"expected voice control messages never to end the session",
+	)
 }
 
 @(test)

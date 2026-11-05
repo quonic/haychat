@@ -49,6 +49,12 @@ ClientTransportRuntimeEventKind :: enum {
 	RoomCreated,
 	// ServerReadMarker (protocol 11): readMarker holds the moved marker. Nothing to free.
 	ReadMarkerReceived,
+	// Voice control (protocol 10, voice_state.odin). VoiceParticipants carries roomID and the
+	// room's full participant set in voiceParticipants; VoiceJoinRejected and VoiceLeft carry
+	// roomID and the server's reason in message. Voice frames are never runtime events.
+	VoiceParticipants,
+	VoiceJoinRejected,
+	VoiceLeft,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -88,6 +94,11 @@ ClientTransportRuntimeEvent :: struct {
 	conversations:     [dynamic]common.DirectConversationSummary,
 	user:              common.UserSummary,
 	readMarker:        common.ServerReadMarkerPayload,
+	// Owned participant entries (nicknames included) on VoiceParticipants.
+	voiceParticipants: [dynamic]common.VoiceParticipant,
+	// On Connected: the transport's session counter, which voice bindings are checked against
+	// (see ClientTransportVoiceBinding).
+	sessionGeneration: u64,
 }
 
 ClientServerTransport :: struct {
@@ -122,10 +133,16 @@ ClientServerTransport :: struct {
 	// Set when the server or identity config cannot produce a valid ClientHello at all.
 	configInvalid:             bool,
 	connection:                ClientConnection,
-	// Packets received on any channel but control, dropped unread. Owned by the network
-	// worker. Nothing uses the voice channel yet; this keeps a stray datagram from being
-	// parsed as a control packet, which would end the session.
-	droppedNonControlPackets:  u64,
+	// Counts established sessions; ClientServerTransport_connected bumps it. A voice binding
+	// made for one session is dead in every later one (voice_network.odin).
+	sessionGeneration:         u64,
+	// The running voice engine for this server, set and cleared by the UI thread under the
+	// worker lock (voice_network.odin). The network worker pushes received frames into it and
+	// the voice thread checks it before every send.
+	voice:                     ClientTransportVoiceBinding,
+	// Voice datagrams in and out, and why any were dropped. Under the worker lock; never reset,
+	// so it covers every session of this transport.
+	voiceStats:                ClientVoiceNetworkStats,
 }
 
 ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, message: string) {
@@ -237,6 +254,10 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	UserSummaries_deinit(&event.users)
 	DirectConversationSummaries_deinit(&event.conversations)
 	delete(event.user.nickname)
+	for &participant in event.voiceParticipants {
+		common.VoiceParticipant_deinit(&participant)
+	}
+	delete(event.voiceParticipants)
 	event^ = {}
 }
 
@@ -1150,6 +1171,60 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 			},
 			true
 
+	case .ServerVoiceParticipants:
+		payload: common.ServerVoiceParticipantsPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.roomId <= 0 {
+			common.ServerVoiceParticipantsPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid voice participants payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .VoiceParticipants,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				voiceParticipants = payload.participants,
+			},
+			true
+
+	case .ServerVoiceJoinRejected:
+		payload: common.ServerVoiceJoinRejectedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerVoiceJoinRejectedPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid voice join rejection payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .VoiceJoinRejected,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				message = payload.reason,
+			},
+			true
+
+	case .ServerVoiceLeft:
+		payload: common.ServerVoiceLeftPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerVoiceLeftPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid voice left payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .VoiceLeft,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				message = payload.reason,
+			},
+			true
+
 	case .ServerProtocolError:
 		protocolError: common.ProtocolErrorResponse
 		if cbor.unmarshal(innerPacket.payload, &protocolError) == nil {
@@ -1266,7 +1341,11 @@ ClientServerTransport_serviceRuntime :: proc(
 	return ClientServerTransport_serviceConnection(transport, time.tick_now())
 }
 
-// Reads one ENet event from the established session and decodes it.
+// Reads ENet events from the established session until one decodes into a runtime event or
+// none are left. Voice datagrams are handled in place (they go straight to the voice engine and
+// never become events), so a stream of them cannot hold up the control packets behind it; at
+// most CLIENT_VOICE_DATAGRAMS_PER_SERVICE are handled per call so the worker still gets round
+// to the other servers.
 ClientServerTransport_serviceEstablishedSession :: proc(
 	transport: ^ClientServerTransport,
 	now: time.Tick,
@@ -1274,50 +1353,82 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 	ClientTransportRuntimeEvent,
 	bool,
 ) {
-	event: ENet.Event
-	eventResult := ENet.host_service(transport.enetHost, &event, 0)
-	if eventResult < 0 {
-		return ClientServerTransport_lostConnection(transport, now, "network error")
-	}
-	if eventResult == 0 {
-		return {}, false
-	}
-
-	switch event.type {
-	case .RECEIVE:
-		if !ClientServerTransport_acceptReceiveChannel(transport, event.channelID) {
-			ENet.packet_destroy(event.packet)
+	for _ in 0 ..< CLIENT_VOICE_DATAGRAMS_PER_SERVICE {
+		event: ENet.Event
+		eventResult := ENet.host_service(transport.enetHost, &event, 0)
+		if eventResult < 0 {
+			return ClientServerTransport_lostConnection(transport, now, "network error")
+		}
+		if eventResult == 0 {
 			return {}, false
 		}
-		packetBytes := ClientServerTransport_copyENetPacket(event.packet)
-		defer delete(packetBytes)
-		return ClientServerTransport_handleRuntimePacketBytes(transport, packetBytes)
 
-	case .DISCONNECT:
-		return ClientServerTransport_lostConnection(
-			transport,
-			now,
-			"the server closed the connection",
-		)
+		switch event.type {
+		case .RECEIVE:
+			switch clientReceiveChannel(event.channelID) {
+			case .Voice:
+				ClientServerTransport_receiveVoiceDatagram(
+					transport,
+					event.packet.data[:event.packet.dataLength],
+				)
+				ENet.packet_destroy(event.packet)
+				continue
+			case .Other:
+				transport.voiceStats.receiveDropped[.WrongChannel] += 1
+				ENet.packet_destroy(event.packet)
+				continue
+			case .Control:
+			}
+			packetBytes := ClientServerTransport_copyENetPacket(event.packet)
+			defer delete(packetBytes)
+			return ClientServerTransport_handleRuntimePacketBytes(transport, packetBytes)
 
-	case .CONNECT, .NONE:
-		return {}, false
+		case .DISCONNECT:
+			return ClientServerTransport_lostConnection(
+				transport,
+				now,
+				"the server closed the connection",
+			)
+
+		case .CONNECT, .NONE:
+			return {}, false
+		}
 	}
 	return {}, false
 }
 
-// Reports whether a received packet may be handled as a control packet. Every other channel is
-// counted and dropped: voice datagrams get their own receive path later (they are opened
-// with the voice receive state, never as CBOR), and a datagram ENet does not authenticate
-// must never be able to end the session by failing to parse.
+ClientReceiveChannel :: enum u8 {
+	Control,
+	Voice,
+	Other,
+}
+
+clientReceiveChannel :: proc(channelID: u8) -> ClientReceiveChannel {
+	switch channelID {
+	case STARTUP_AUTH_CHANNEL_CHAT:
+		return .Control
+	case STARTUP_AUTH_CHANNEL_VOICE:
+		return .Voice
+	}
+	return .Other
+}
+
+// Reports whether a packet received during the handshake may be handled as a control packet.
+// Everything else is counted and dropped: there are no voice keys before the session is
+// established, and a datagram ENet does not authenticate must never be able to end the
+// session by failing to parse.
 ClientServerTransport_acceptReceiveChannel :: proc(
 	transport: ^ClientServerTransport,
 	channelID: u8,
 ) -> bool {
-	if channelID == STARTUP_AUTH_CHANNEL_CHAT {
+	switch clientReceiveChannel(channelID) {
+	case .Control:
 		return true
+	case .Voice:
+		transport.voiceStats.receiveDropped[.BeforeSession] += 1
+	case .Other:
+		transport.voiceStats.receiveDropped[.WrongChannel] += 1
 	}
-	transport.droppedNonControlPackets += 1
 	return false
 }
 
