@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 10
+protocolVersion: ProtocolVersion = 11
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -19,6 +19,9 @@ DIRECT_CONVERSATIONS_MAX :: 100
 // ROOM_DESCRIPTION_MAX_BYTES; the server refuses anything else with "Invalid room metadata".
 ROOM_NAME_MAX_BYTES :: 64
 ROOM_DESCRIPTION_MAX_BYTES :: 256
+// Unread counts are capped: a room or conversation with this many unread messages or more may
+// report exactly this many, and clients show it as "99+". It keeps the list queries cheap.
+UNREAD_COUNT_CAP :: 100
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.
@@ -313,6 +316,10 @@ MessageType :: enum {
 	ServerVoiceParticipants, // ServerVoiceParticipantsPayload: a room's full participant set
 	ServerVoiceJoinRejected, // ServerVoiceJoinRejectedPayload: a ClientJoinVoice was refused
 	ServerVoiceLeft, // ServerVoiceLeftPayload: the server removed this session from voice
+
+	// Read state (protocol 11), appended so no existing wire value moves.
+	ClientMarkRead, // ClientMarkReadPayload: mark a room or conversation read up to a message
+	ServerReadMarker, // ServerReadMarkerPayload: a read marker moved, to every session of the user
 }
 
 RoomType :: enum {
@@ -382,10 +389,19 @@ ServerChatMessagePayload :: struct {
 	content:        string,
 }
 
+// lastReadMessageId and unreadCount (protocol 11) are the requester's read state, filled only
+// in ServerListRooms. Every other payload that embeds a RoomSummary (ServerCreateRoom,
+// ServerEditRoom, ServerRoomMutationPayload) carries zero values there; a client keeps the
+// read state it already has for that room.
 RoomSummary :: struct {
-	id:          int,
-	name:        string,
-	description: string,
+	id:                int,
+	name:              string,
+	description:       string,
+	// The newest message ID the requester marked read, 0 when they never marked this room.
+	lastReadMessageId: int,
+	// Messages from other users after the marker (without a marker: created after the
+	// requester joined the room), capped at UNREAD_COUNT_CAP.
+	unreadCount:       int,
 }
 
 ClientListRoomsPayload :: struct {}
@@ -531,6 +547,11 @@ DirectConversationSummary :: struct {
 	lastSenderId:  int, // Either the requester's ID or peerUserId
 	lastTimestamp: string,
 	lastContent:   string,
+	// Read state (protocol 11): the newest message ID the requester marked read in this
+	// conversation (0 when never), and the peer's messages after it, capped at
+	// UNREAD_COUNT_CAP. Without a marker every message from the peer is unread.
+	lastReadMessageId: int,
+	unreadCount:       int,
 }
 
 // ServerDirectConversations: the requester's conversations, most recent first, at most
@@ -625,6 +646,37 @@ ServerVoiceLeftPayload_deinit :: proc(payload: ^ServerVoiceLeftPayload) {
 	payload.reason = ""
 }
 
+// Read state (protocol 11). The server keeps one read marker per user and room and per user
+// and direct conversation, so unread counts survive a restart and follow the account to
+// every device. Clients and servers must be rebuilt together: older peers do not know these
+// members or the read-state fields of RoomSummary and DirectConversationSummary.
+ReadMarkerKind :: enum u8 {
+	Room   = 0, // conversationId is a room ID
+	Direct = 1, // conversationId is the peer's user ID
+}
+
+// ClientMarkRead: the requester has read the conversation up to messageId (> 0). Markers
+// only move forward, and the server clamps messageId to the newest message the conversation
+// holds. A room needs membership and a direct conversation an existing peer that is not the
+// requester; anything else is refused with ServerProtocolError ("Not a room member", "Unknown
+// user") and the session stays up.
+ClientMarkReadPayload :: struct {
+	kind:           ReadMarkerKind,
+	conversationId: int,
+	messageId:      int,
+}
+
+// ServerReadMarker: the requester's marker moved. Sent to every authenticated session of that
+// account, the one that asked included, so reading on one device clears the badge on the
+// others. A mark-read that moves nothing sends nothing. unreadCount is counted after the
+// move, like the list payloads count it.
+ServerReadMarkerPayload :: struct {
+	kind:              ReadMarkerKind,
+	conversationId:    int,
+	lastReadMessageId: int,
+	unreadCount:       int,
+}
+
 VideoData :: struct {
 	senderId:  int,
 	roomId:    int,
@@ -662,6 +714,7 @@ DatabaseQueryRequest :: union {
 	DatabaseDirectHistoryRequest,
 	DatabaseDirectConversationListRequest,
 	DatabaseUserDirectoryRequest,
+	DatabaseMarkReadRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -748,6 +801,14 @@ DatabaseDirectConversationListRequest :: struct {
 // Returns every account. Online flags come from the router, not the database.
 DatabaseUserDirectoryRequest :: struct {}
 
+// Checks membership (or the peer), clamps, and moves the marker forward in one statement.
+DatabaseMarkReadRequest :: struct {
+	userId:         int,
+	kind:           ReadMarkerKind,
+	conversationId: int,
+	messageId:      int,
+}
+
 // message holds the error text when success is false. All strings and arrays are owned.
 DatabaseQueryResponse :: struct {
 	success: bool,
@@ -767,6 +828,7 @@ DatabaseQueryResult :: union {
 	DatabaseDirectHistoryResult,
 	DatabaseDirectConversationListResult,
 	DatabaseUserDirectoryResult,
+	DatabaseMarkReadResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -832,6 +894,16 @@ DatabaseDirectConversationListResult :: struct {
 // isOnline is always false here; the router fills it from its live sessions.
 DatabaseUserDirectoryResult :: struct {
 	users: [dynamic]UserSummary,
+}
+
+// allowed is false when the requester is not a member of the room, or the peer does not exist
+// (or is the requester); nothing changed then. changed is false when the marker was already at
+// or past the clamped message ID. lastReadMessageId and unreadCount are set only when changed.
+DatabaseMarkReadResult :: struct {
+	allowed:           bool,
+	changed:           bool,
+	lastReadMessageId: int,
+	unreadCount:       int,
 }
 
 ProtocolErrorResponse :: struct {

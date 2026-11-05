@@ -304,7 +304,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseRemoveRoomMemberRequest,
 	     common.DatabaseDirectHistoryRequest,
 	     common.DatabaseDirectConversationListRequest,
-	     common.DatabaseUserDirectoryRequest:
+	     common.DatabaseUserDirectoryRequest,
+	     common.DatabaseMarkReadRequest:
 	case nil:
 	}
 }
@@ -366,7 +367,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.users)
 	case common.DatabaseUserIdentityResult:
 		delete(r.previousNickname)
-	case common.DatabaseUserServerAdminResult:
+	case common.DatabaseUserServerAdminResult, common.DatabaseMarkReadResult:
 	case nil:
 	}
 }

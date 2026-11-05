@@ -15,11 +15,16 @@ import "shared:pg"
 // statement that cannot run in a transaction block (CREATE INDEX CONCURRENTLY, VACUUM, CREATE
 // DATABASE, ...) is not supported. server/AGENTS.md describes how to add one.
 
-// One schema change, applied at most once per database, in version order.
+// One schema change, applied at most once per database, in version order. checks holds the
+// rows (`('name', condition)`, comma separated) that DATABASE_SCHEMA_VALIDATION_SQL adds for
+// what this migration creates; the runner validates a list against its own migrations' checks,
+// so a test can stop at an older version. Migration 1 leaves it empty: the baseline checks are
+// DATABASE_BASELINE_SCHEMA_CHECKS.
 DatabaseMigration :: struct {
 	version: int,
 	name:    string,
 	sql:     string,
+	checks:  string,
 }
 
 // What one startup did to the schema version.
@@ -132,9 +137,94 @@ DATABASE_MIGRATION_1_BASELINE_SQL ::
 	"CREATE INDEX IF NOT EXISTS direct_messages_by_recipient_and_sender " +
 	"ON direct_messages (recipient_user_id, sender_user_id, id);"
 
+// Migration 2: per-user read markers for rooms and direct conversations (package B3), so unread
+// counts survive a client restart and follow the account to every device.
+//
+// A marker is the newest message ID the user has read. Unread means (see also the list
+// statements in database.odin and database_direct_messages.odin):
+// - Rooms: messages from other users with an ID above the marker. Without a marker row, the
+//   messages from others created after the user's room_members.joined_at, so a new account or
+//   a newly created room starts with nothing unread.
+// - Direct conversations: messages from the peer with an ID above the marker. Without a row,
+//   every message from the peer.
+// Counts are capped at common.UNREAD_COUNT_CAP.
+//
+// The backfill gives every existing room member a marker at the room's newest message and both
+// sides of every existing conversation a marker at its newest message, so an upgraded rc1
+// database starts with zero unread instead of every old message counting.
+// Never edit it; append a migration instead.
+DATABASE_MIGRATION_2_READ_MARKERS_SQL ::
+	"CREATE TABLE room_read_markers (" +
+	"user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, " +
+	"last_read_message_id BIGINT NOT NULL CHECK (last_read_message_id >= 0), " +
+	"updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"PRIMARY KEY (user_id, room_id)); " +
+	"CREATE TABLE direct_read_markers (" +
+	"user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"peer_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"last_read_message_id BIGINT NOT NULL CHECK (last_read_message_id >= 0), " +
+	"updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"PRIMARY KEY (user_id, peer_user_id), " +
+	"CHECK (user_id <> peer_user_id)); " +
+	// The primary keys serve every lookup by user. These serve the cascades: deleting a room
+	// or an account finds its markers without scanning every marker.
+	"CREATE INDEX room_read_markers_by_room_id ON room_read_markers (room_id); " +
+	"CREATE INDEX direct_read_markers_by_peer_user_id ON direct_read_markers (peer_user_id); " +
+	// A member without a marker counts the messages created after joined_at; this index keeps
+	// that a range scan instead of a walk over the room's whole history.
+	"CREATE INDEX chat_messages_by_room_id_and_created_at " +
+	"ON chat_messages (room_id, created_at); " +
+	"INSERT INTO room_read_markers (user_id, room_id, last_read_message_id) " +
+	"SELECT rm.user_id, rm.room_id, newest.id FROM room_members rm " +
+	"JOIN (SELECT room_id, max(id) AS id FROM chat_messages GROUP BY room_id) newest " +
+	"ON newest.room_id = rm.room_id; " +
+	"INSERT INTO direct_read_markers (user_id, peer_user_id, last_read_message_id) " +
+	"SELECT side.user_id, side.peer_user_id, max(side.id) FROM (" +
+	"SELECT sender_user_id AS user_id, recipient_user_id AS peer_user_id, id " +
+	"FROM direct_messages UNION ALL " +
+	"SELECT recipient_user_id, sender_user_id, id FROM direct_messages) side " +
+	"GROUP BY side.user_id, side.peer_user_id;"
+
+// What migration 2 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_READ_MARKERS_CHECKS ::
+	"('room_read_markers table', to_regclass('room_read_markers') IS NOT NULL), " +
+	"('direct_read_markers table', to_regclass('direct_read_markers') IS NOT NULL), " +
+	"('room_read_markers columns', (SELECT count(*) = 4 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'room_read_markers' " +
+	"AND column_name IN ('user_id', 'room_id', 'last_read_message_id', 'updated_at'))), " +
+	"('direct_read_markers columns', (SELECT count(*) = 4 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'direct_read_markers' " +
+	"AND column_name IN ('user_id', 'peer_user_id', 'last_read_message_id', 'updated_at'))), " +
+	"('room read markers primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_read_markers') AND contype = 'p')), " +
+	"('direct read markers primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_read_markers') AND contype = 'p')), " +
+	"('room read markers cascade', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_read_markers') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('direct read markers cascade', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_read_markers') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('direct read markers self check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_read_markers') AND contype = 'c' " +
+	"AND pg_get_constraintdef(oid) LIKE '%user_id <> peer_user_id%')), " +
+	"('room read markers room index', " +
+	"to_regclass('room_read_markers_by_room_id') IS NOT NULL), " +
+	"('direct read markers peer index', " +
+	"to_regclass('direct_read_markers_by_peer_user_id') IS NOT NULL), " +
+	"('chat messages created_at index', " +
+	"to_regclass('chat_messages_by_room_id_and_created_at') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
+	{
+		version = 2,
+		name = "read markers",
+		sql = DATABASE_MIGRATION_2_READ_MARKERS_SQL,
+		checks = DATABASE_READ_MARKERS_CHECKS,
+	},
 }
 
 DATABASE_SCHEMA_VALIDATION_PREFIX :: "WITH checks(name, valid) AS (VALUES "
@@ -225,15 +315,40 @@ DATABASE_BASELINE_VALIDATION_SQL ::
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The safety net after migrating: the newest schema plus the runner's bookkeeping. A
-// migration that adds objects appends its checks here; one that changes a baseline object
-// replaces DATABASE_BASELINE_SCHEMA_CHECKS here with an edited copy (the frozen constant
-// stays, for adoption).
+// migration that adds objects appends its checks here and sets the same constant as its
+// `checks`; one that changes a baseline object replaces DATABASE_BASELINE_SCHEMA_CHECKS here
+// with an edited copy (the frozen constant stays, for adoption).
+// testDatabaseSchemaValidationMatchesTheMigrationList pins this to
+// databaseSchemaValidationQuery(DATABASE_MIGRATIONS[:]), which is what the runner executes.
 DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_SCHEMA_VALIDATION_PREFIX +
 	DATABASE_BASELINE_SCHEMA_CHECKS +
 	", " +
 	DATABASE_SCHEMA_MIGRATIONS_CHECKS +
+	", " +
+	DATABASE_READ_MARKERS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
+
+// The validation query for the schema migrations builds: the baseline, the runner's
+// bookkeeping, and each later migration's checks. Allocated with allocator.
+databaseSchemaValidationQuery :: proc(
+	migrations: []DatabaseMigration,
+	allocator := context.allocator,
+) -> string {
+	builder := strings.builder_make(allocator)
+	strings.write_string(&builder, DATABASE_SCHEMA_VALIDATION_PREFIX)
+	strings.write_string(&builder, DATABASE_BASELINE_SCHEMA_CHECKS)
+	strings.write_string(&builder, ", ")
+	strings.write_string(&builder, DATABASE_SCHEMA_MIGRATIONS_CHECKS)
+	for migration in migrations {
+		if len(migration.checks) > 0 {
+			strings.write_string(&builder, ", ")
+			strings.write_string(&builder, migration.checks)
+		}
+	}
+	strings.write_string(&builder, DATABASE_SCHEMA_VALIDATION_SUFFIX)
+	return strings.to_string(builder)
+}
 
 // Returns an empty string when the list is usable: versions 1, 2, 3, ... in order, with unique
 // non-empty names and non-empty SQL. The caller frees a non-empty error.
@@ -535,9 +650,11 @@ databaseApplyMigrations :: proc(
 		}
 	}
 
+	validationQuery := databaseSchemaValidationQuery(migrations)
+	defer delete(validationQuery)
 	if validationErr := databaseSchemaValidationError(
 		conn,
-		DATABASE_SCHEMA_VALIDATION_SQL,
+		validationQuery,
 	); len(validationErr) > 0 {
 		defer delete(validationErr)
 		return {}, databaseMigrationRefusal(

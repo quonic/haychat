@@ -140,6 +140,7 @@ State_saveConfig :: proc(state: ^State) {
 @(private = "file")
 State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {
 	State_resetDirectRequests(state, serverID, reloadHistory)
+	State_resetReadMarkerSends(state, serverID)
 	State_roomEditorConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {

@@ -94,6 +94,8 @@ SidebarRow :: struct {
 	description: string, // Channel tooltip; borrowed
 	selected:    bool,
 	isOnline:    bool,
+	// The server's unread count for a Channel or Conversation (read_state.odin), plus the live
+	// messages counted since; the view shows "99+" from 100 on.
 	unreadCount: int,
 }
 
@@ -191,6 +193,7 @@ buildSidebarRows :: proc(
 				label = fmt.aprintf("# %s", room.name, allocator = allocator),
 				description = room.description,
 				selected = inRoom && room.id == state.selected_channel_id,
+				unreadCount = room.unreadCount,
 			},
 		)
 	}
@@ -222,10 +225,6 @@ buildSidebarRows :: proc(
 			continue
 		}
 		peerUserID := conversation.peerUserId
-		unread := 0
-		if index := ServerDirectCache_conversationCacheIndex(cache^, peerUserID); index >= 0 {
-			unread = cache.caches[index].unreadCount
-		}
 		append(
 			&rows,
 			SidebarRow {
@@ -238,7 +237,7 @@ buildSidebarRows :: proc(
 				),
 				selected = state.selected_dm_peer_id == peerUserID,
 				isOnline = ServerDirectCache_peerIsOnline(cache, peerUserID),
-				unreadCount = unread,
+				unreadCount = conversation.unreadCount,
 			},
 		)
 		conversationCount += 1

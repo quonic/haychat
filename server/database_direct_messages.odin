@@ -39,18 +39,29 @@ DATABASE_GET_DIRECT_HISTORY_SQL ::
 	"AND ($3::bigint = 0 OR dm.id < $3::bigint) " +
 	"ORDER BY dm.id DESC LIMIT $4::bigint) d ON true ORDER BY d.id DESC"
 
-// The latest message per peer: DISTINCT ON keeps the highest message ID of each peer, then
-// the outer query orders conversations newest first. $2 caps the list.
+// The latest message per peer with the requester's read state: DISTINCT ON keeps the highest
+// message ID of each peer, the inner query keeps the $2 newest conversations, and only those
+// are counted. Unread is every message from the peer above the marker, or every message from
+// the peer without one (migration 2), counted on direct_messages_by_sender_and_recipient and
+// capped at common.UNREAD_COUNT_CAP ($3).
 DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"SELECT c.peer_id::text, u.nickname, c.id::text, c.sender_user_id::text, " +
-	"c.created_at::text, c.content FROM (" +
+	"c.created_at::text, c.content, COALESCE(m.last_read_message_id, 0)::text, " +
+	"unread.n::text FROM (" +
+	"SELECT * FROM (" +
 	"SELECT DISTINCT ON (peer_id) peer_id, id, sender_user_id, created_at, content FROM (" +
 	"SELECT CASE WHEN sender_user_id = $1::bigint THEN recipient_user_id " +
 	"ELSE sender_user_id END AS peer_id, id, sender_user_id, created_at, content " +
 	"FROM direct_messages " +
 	"WHERE sender_user_id = $1::bigint OR recipient_user_id = $1::bigint) mine " +
-	"ORDER BY peer_id, id DESC) c " +
-	"JOIN users u ON u.id = c.peer_id ORDER BY c.id DESC LIMIT $2::bigint"
+	"ORDER BY peer_id, id DESC) latest ORDER BY id DESC LIMIT $2::bigint) c " +
+	"JOIN users u ON u.id = c.peer_id " +
+	"LEFT JOIN direct_read_markers m ON m.user_id = $1::bigint AND m.peer_user_id = c.peer_id " +
+	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
+	"SELECT 1 FROM direct_messages d WHERE d.sender_user_id = c.peer_id " +
+	"AND d.recipient_user_id = $1::bigint " +
+	"AND d.id > COALESCE(m.last_read_message_id, 0) LIMIT $3::bigint) capped) unread " +
+	"ORDER BY c.id DESC"
 
 // Every account, the requester included. Online flags are not stored; the router adds them.
 DATABASE_LIST_USERS_SQL :: "SELECT id::text, nickname FROM users ORDER BY lower(nickname), id"
@@ -183,7 +194,13 @@ databaseExecuteListDirectConversations :: proc(
 	defer delete(userIDParam)
 	limitParam := databaseIntParam(common.DIRECT_CONVERSATIONS_MAX)
 	defer delete(limitParam)
-	params := [?][^]byte{transmute([^]byte)userIDParam, transmute([^]byte)limitParam}
+	capParam := databaseIntParam(common.UNREAD_COUNT_CAP)
+	defer delete(capParam)
+	params := [?][^]byte {
+		transmute([^]byte)userIDParam,
+		transmute([^]byte)limitParam,
+		transmute([^]byte)capParam,
+	}
 	result := databaseExecParams(conn, DATABASE_LIST_DIRECT_CONVERSATIONS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
@@ -201,6 +218,8 @@ databaseExecuteListDirectConversations :: proc(
 		if !peerUserIDOK || !messageIDOK || !senderIDOK {
 			continue
 		}
+		lastRead, _ := databaseGetInt(result, row, 6)
+		unread, _ := databaseGetInt(result, row, 7)
 		append(
 			&conversations,
 			common.DirectConversationSummary {
@@ -210,6 +229,8 @@ databaseExecuteListDirectConversations :: proc(
 				lastSenderId = senderID,
 				lastTimestamp = databaseGetText(result, row, 4),
 				lastContent = databaseGetText(result, row, 5),
+				lastReadMessageId = lastRead,
+				unreadCount = unread,
 			},
 		)
 	}
