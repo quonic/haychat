@@ -51,7 +51,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 ## Testing
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
-- Full gate (what CI runs): `./dev.sh ci`, which runs `./check.sh` and then `dev/live-proof.sh --all` (startup auth, two-client room chat, headless harness, and server SQL proofs) against a throwaway PostgreSQL. `./dev.sh check` runs only `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
+- Full gate (what CI runs): `./dev.sh ci`, which runs `./check.sh` and then `dev/live-proof.sh --all` (startup auth, two-client room chat, two-client direct message, headless harness, and server SQL proofs) against a throwaway PostgreSQL. `./dev.sh check` runs only `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
 - Prefer component-scoped checks while editing: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`. The serial server suite is the reliable default for router/database tests.
 - Acting as a user: `client --headless` runs the client without a window, reading commands on stdin and printing JSON lines on stdout, so an agent or script can connect, list rooms, send, and wait for events. See `docs/testing-harness.md`; `./dev.sh live --harness` runs its smoke test against a throwaway server.
 - Use the built-in testing library from Odin. `import "core:testing"` and any procedures must have `t: ^testing.T,` as the first parameter.

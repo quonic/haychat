@@ -15,7 +15,6 @@ Config :: struct {
 	public_key:   string,
 	display_name: string,
 	servers:      [dynamic]Server,
-	friends:      [dynamic]Friend,
 }
 
 Server :: struct {
@@ -26,22 +25,6 @@ Server :: struct {
 	port:                      i32,
 	pinned_server_public_key:  string,
 	pinned_server_fingerprint: string,
-}
-
-Friend :: struct {
-	id:           int,
-	display_name: string,
-	public_key:   string,
-	servers:      [dynamic]int, // List of server IDs the friend is associated with, that the client can use to determine which server(s) to connect to when communicating with this friend
-	status:       FriendStatus,
-}
-FriendStatus :: enum {
-	Offline,
-	Online,
-	Busy,
-	Away,
-	DoNotDisturb,
-	Idle,
 }
 
 loadConfig :: proc() -> (config: Config) {
@@ -292,38 +275,15 @@ Server_deinit :: proc(server: ^Server) {
 	server^ = {}
 }
 
-Friend_clone :: proc(friend: Friend) -> Friend {
-	servers := make([dynamic]int, 0, len(friend.servers))
-	append(&servers, ..friend.servers[:])
-	return Friend {
-		id = friend.id,
-		display_name = strings.clone(friend.display_name),
-		public_key = strings.clone(friend.public_key),
-		servers = servers,
-		status = friend.status,
-	}
-}
-
-Friend_deinit :: proc(friend: ^Friend) {
-	delete(friend.display_name)
-	delete(friend.public_key)
-	delete(friend.servers)
-	friend^ = {}
-}
-
 Config_clone :: proc(config: Config) -> Config {
 	clone := Config {
 		private_key  = strings.clone(config.private_key),
 		public_key   = strings.clone(config.public_key),
 		display_name = strings.clone(config.display_name),
 		servers      = make([dynamic]Server, 0, len(config.servers)),
-		friends      = make([dynamic]Friend, 0, len(config.friends)),
 	}
 	for server in config.servers {
 		append(&clone.servers, Server_clone(server))
-	}
-	for friend in config.friends {
-		append(&clone.friends, Friend_clone(friend))
 	}
 	return clone
 }
@@ -336,10 +296,6 @@ Config_deinit :: proc(config: ^Config) {
 		Server_deinit(&config.servers[index])
 	}
 	delete(config.servers)
-	for index in 0 ..< len(config.friends) {
-		Friend_deinit(&config.friends[index])
-	}
-	delete(config.friends)
 	config^ = {}
 }
 

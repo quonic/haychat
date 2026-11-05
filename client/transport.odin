@@ -32,6 +32,12 @@ ClientTransportRuntimeEventKind :: enum {
 	Connected,
 	ConnectFailed,
 	Disconnected,
+	// Direct messages, the user directory, and presence (protocol 7).
+	DirectMessageReceived,
+	DirectHistoryReceived,
+	UserListReceived,
+	DirectConversationsReceived,
+	UserPresenceChanged,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -59,6 +65,16 @@ ClientTransportRuntimeEvent :: struct {
 	// the config should store; on a ServerKeyChanged failure, the key the server offered.
 	serverPublicKey:   string,
 	serverFingerprint: string,
+	// Direct message fields. directMessage is set on DirectMessageReceived; peerUserID,
+	// directMessages and hasOlder on DirectHistoryReceived; users on UserListReceived;
+	// conversations on DirectConversationsReceived; user on UserPresenceChanged. All strings
+	// and arrays are owned by the event until State takes them.
+	directMessage:     common.StoredDirectMessage,
+	peerUserID:        int,
+	directMessages:    [dynamic]common.StoredDirectMessage,
+	users:             [dynamic]common.UserSummary,
+	conversations:     [dynamic]common.DirectConversationSummary,
+	user:              common.UserSummary,
 }
 
 ClientServerTransport :: struct {
@@ -194,7 +210,53 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.nickname)
 	delete(event.serverPublicKey)
 	delete(event.serverFingerprint)
+	StoredDirectMessage_deinit(&event.directMessage)
+	StoredDirectMessages_deinit(&event.directMessages)
+	UserSummaries_deinit(&event.users)
+	DirectConversationSummaries_deinit(&event.conversations)
+	delete(event.user.nickname)
 	event^ = {}
+}
+
+StoredDirectMessage_deinit :: proc(message: ^common.StoredDirectMessage) {
+	delete(message.senderNickname)
+	delete(message.recipientNickname)
+	delete(message.timestamp)
+	delete(message.content)
+	message^ = {}
+}
+
+StoredDirectMessages_deinit :: proc(messages: ^[dynamic]common.StoredDirectMessage) {
+	for index in 0 ..< len(messages) {
+		StoredDirectMessage_deinit(&messages[index])
+	}
+	delete(messages^)
+	messages^ = nil
+}
+
+UserSummaries_deinit :: proc(users: ^[dynamic]common.UserSummary) {
+	for user in users {
+		delete(user.nickname)
+	}
+	delete(users^)
+	users^ = nil
+}
+
+DirectConversationSummary_deinit :: proc(conversation: ^common.DirectConversationSummary) {
+	delete(conversation.peerNickname)
+	delete(conversation.lastTimestamp)
+	delete(conversation.lastContent)
+	conversation^ = {}
+}
+
+DirectConversationSummaries_deinit :: proc(
+	conversations: ^[dynamic]common.DirectConversationSummary,
+) {
+	for index in 0 ..< len(conversations) {
+		DirectConversationSummary_deinit(&conversations[index])
+	}
+	delete(conversations^)
+	conversations^ = nil
 }
 
 ClientServerTransport_makeRuntimeEvent :: proc(
@@ -680,6 +742,65 @@ ClientServerTransport_requestRoomHistory :: proc(
 	)
 }
 
+// Direct messages share the room chat channel and the not-connected handling of every other
+// runtime request.
+ClientServerTransport_sendDirectMessage :: proc(
+	transport: ^ClientServerTransport,
+	recipientUserID: int,
+	content: string,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientDirectMessage,
+		common.ClientDirectMessagePayload{recipientUserId = recipientUserID, content = content},
+	)
+}
+
+ClientServerTransport_requestDirectHistory :: proc(
+	transport: ^ClientServerTransport,
+	peerUserID: int,
+	beforeMessageID: int,
+	limit: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientFetchDirectHistory,
+		common.ClientFetchDirectHistoryPayload {
+			peerUserId = peerUserID,
+			beforeMessageID = beforeMessageID,
+			limit = limit,
+		},
+	)
+}
+
+ClientServerTransport_requestUserList :: proc(transport: ^ClientServerTransport) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientUserList,
+		common.ClientListUsersPayload{},
+	)
+}
+
+ClientServerTransport_requestDirectConversations :: proc(
+	transport: ^ClientServerTransport,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientListDirectConversations,
+		common.ClientListDirectConversationsPayload{},
+	)
+}
+
+// Reports a payload that failed to decode as a ProtocolError event.
+@(private = "file")
+ClientServerTransport_invalidPayloadEvent :: proc(
+	transport: ^ClientServerTransport,
+	message: string,
+) -> ClientTransportRuntimeEvent {
+	ClientServerTransport_runtimeProtocolError(transport, message)
+	return ClientServerTransport_makeRuntimeEvent(transport, .ProtocolError, transport.lastError)
+}
+
 ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	transport: ^ClientServerTransport,
 	innerPacket: common.Packet,
@@ -807,6 +928,110 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				kind = .RoomDeleted,
 				serverID = transport.serverID,
 				roomID = payload.roomId,
+			},
+			true
+
+	// A payload that fails to decode may still hold partial allocations, so each failure
+	// path below frees what was decoded before reporting it.
+	case .ServerDirectMessage:
+		payload: common.ServerDirectMessagePayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			delete(payload.senderNickname)
+			delete(payload.recipientNickname)
+			delete(payload.timestamp)
+			delete(payload.content)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid direct message payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .DirectMessageReceived,
+				serverID = transport.serverID,
+				directMessage = common.StoredDirectMessage {
+					id = payload.id,
+					senderId = payload.senderId,
+					senderNickname = payload.senderNickname,
+					recipientId = payload.recipientId,
+					recipientNickname = payload.recipientNickname,
+					timestamp = payload.timestamp,
+					content = payload.content,
+				},
+			},
+			true
+
+	case .ServerDirectHistory:
+		payload: common.ServerDirectHistoryPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			StoredDirectMessages_deinit(&payload.messages)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid direct history payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .DirectHistoryReceived,
+				serverID = transport.serverID,
+				peerUserID = payload.peerUserId,
+				directMessages = payload.messages,
+				hasOlder = payload.hasOlder,
+			},
+			true
+
+	case .ServerUserList:
+		payload: common.ServerUserListPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			UserSummaries_deinit(&payload.users)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid user list payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .UserListReceived,
+				serverID = transport.serverID,
+				users = payload.users,
+			},
+			true
+
+	case .ServerDirectConversations:
+		payload: common.ServerDirectConversationsPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			DirectConversationSummaries_deinit(&payload.conversations)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid direct conversation list payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .DirectConversationsReceived,
+				serverID = transport.serverID,
+				conversations = payload.conversations,
+			},
+			true
+
+	case .ServerUserPresence:
+		payload: common.ServerUserPresencePayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			delete(payload.nickname)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid user presence payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .UserPresenceChanged,
+				serverID = transport.serverID,
+				user = common.UserSummary {
+					id = payload.userId,
+					nickname = payload.nickname,
+					isOnline = payload.isOnline,
+				},
 			},
 			true
 

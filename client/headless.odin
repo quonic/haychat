@@ -229,6 +229,11 @@ HeadlessEventKind :: enum {
 	RoomDeleted,
 	ProtocolError,
 	Disconnected,
+	DirectMessage,
+	DirectHistory,
+	UserList,
+	Conversations,
+	Presence,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -243,6 +248,11 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RoomDeleted    = "room_deleted",
 	.ProtocolError  = "protocol_error",
 	.Disconnected   = "disconnected",
+	.DirectMessage  = "direct_message",
+	.DirectHistory  = "direct_history",
+	.UserList       = "user_list",
+	.Conversations  = "conversations",
+	.Presence       = "presence",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -347,6 +357,88 @@ HeadlessRoomEventJSON :: struct {
 	event:    string,
 	serverID: int,
 	roomID:   int,
+}
+
+// A direct message, live or from history. The conversation's peer is recipientID when
+// senderID is the viewer's own userID (from `connected`), otherwise senderID.
+HeadlessDirectMessageJSON :: struct {
+	event:             string,
+	serverID:          int,
+	id:                int,
+	senderID:          int,
+	senderNickname:    string,
+	recipientID:       int,
+	recipientNickname: string,
+	timestamp:         string,
+	content:           string,
+}
+
+HeadlessDirectHistoryMessageJSON :: struct {
+	id:                int,
+	senderID:          int,
+	senderNickname:    string,
+	recipientID:       int,
+	recipientNickname: string,
+	timestamp:         string,
+	content:           string,
+}
+
+HeadlessDirectHistoryJSON :: struct {
+	event:      string,
+	serverID:   int,
+	peerUserID: int,
+	hasOlder:   bool,
+	messages:   []HeadlessDirectHistoryMessageJSON,
+}
+
+// common.UserSummary already marshals as {"id","nickname","isOnline"}.
+HeadlessUserListJSON :: struct {
+	event:    string,
+	serverID: int,
+	users:    []common.UserSummary,
+}
+
+HeadlessConversationJSON :: struct {
+	peerUserID:    int,
+	peerNickname:  string,
+	lastMessageID: int,
+	lastSenderID:  int,
+	lastTimestamp: string,
+	lastContent:   string,
+}
+
+HeadlessConversationsJSON :: struct {
+	event:         string,
+	serverID:      int,
+	conversations: []HeadlessConversationJSON,
+}
+
+HeadlessPresenceJSON :: struct {
+	event:    string,
+	serverID: int,
+	userID:   int,
+	nickname: string,
+	isOnline: bool,
+}
+
+// Converts conversation summaries to their JSON shape. Strings stay borrowed; free the slice
+// with allocator.
+headlessConversationsJSON :: proc(
+	conversations: []common.DirectConversationSummary,
+	allocator := context.allocator,
+) -> []HeadlessConversationJSON {
+	result := make([]HeadlessConversationJSON, len(conversations), allocator)
+	for conversation, index in conversations {
+		result[index] = {
+			peerUserID    = conversation.peerUserId,
+			peerNickname  = conversation.peerNickname,
+			lastMessageID = conversation.lastMessageID,
+			lastSenderID  = conversation.lastSenderId,
+			lastTimestamp = conversation.lastTimestamp,
+			lastContent   = conversation.lastContent,
+		}
+	}
+	return result
 }
 
 // What rendering needs beyond the event itself. The harness fills it in; zero values are fine
@@ -539,6 +631,82 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
+	case .DirectMessageReceived:
+		kind = .DirectMessage
+		message := event.directMessage
+		line = headlessMarshal(
+			HeadlessDirectMessageJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				id = message.id,
+				senderID = message.senderId,
+				senderNickname = message.senderNickname,
+				recipientID = message.recipientId,
+				recipientNickname = message.recipientNickname,
+				timestamp = message.timestamp,
+				content = message.content,
+			},
+			allocator,
+		)
+	case .DirectHistoryReceived:
+		kind = .DirectHistory
+		messages := make([]HeadlessDirectHistoryMessageJSON, len(event.directMessages), allocator)
+		defer delete(messages, allocator)
+		for message, index in event.directMessages {
+			messages[index] = {
+				id                = message.id,
+				senderID          = message.senderId,
+				senderNickname    = message.senderNickname,
+				recipientID       = message.recipientId,
+				recipientNickname = message.recipientNickname,
+				timestamp         = message.timestamp,
+				content           = message.content,
+			}
+		}
+		line = headlessMarshal(
+			HeadlessDirectHistoryJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				peerUserID = event.peerUserID,
+				hasOlder = event.hasOlder,
+				messages = messages,
+			},
+			allocator,
+		)
+	case .UserListReceived:
+		kind = .UserList
+		line = headlessMarshal(
+			HeadlessUserListJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				users = event.users[:],
+			},
+			allocator,
+		)
+	case .DirectConversationsReceived:
+		kind = .Conversations
+		conversations := headlessConversationsJSON(event.conversations[:], allocator)
+		defer delete(conversations, allocator)
+		line = headlessMarshal(
+			HeadlessConversationsJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				conversations = conversations,
+			},
+			allocator,
+		)
+	case .UserPresenceChanged:
+		kind = .Presence
+		line = headlessMarshal(
+			HeadlessPresenceJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				userID = event.user.id,
+				nickname = event.user.nickname,
+				isOnline = event.user.isOnline,
+			},
+			allocator,
+		)
 	}
 	return line, kind, true
 }
@@ -602,6 +770,39 @@ HeadlessSendJSON :: struct {
 	roomID:   int,
 }
 
+HeadlessUsersJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
+	loaded:   bool,
+	loading:  bool,
+	users:    []common.UserSummary,
+}
+
+HeadlessConversationsResultJSON :: struct {
+	ok:            bool,
+	cmd:           string,
+	serverID:      int,
+	loaded:        bool,
+	loading:       bool,
+	conversations: []HeadlessConversationJSON,
+}
+
+HeadlessDirectSendJSON :: struct {
+	ok:         bool,
+	cmd:        string,
+	serverID:   int,
+	peerUserID: int,
+}
+
+HeadlessDirectHistoryRequestJSON :: struct {
+	ok:              bool,
+	cmd:             string,
+	serverID:        int,
+	peerUserID:      int,
+	beforeMessageID: int,
+}
+
 HeadlessWaitJSON :: struct {
 	ok:       bool,
 	cmd:      string,
@@ -643,9 +844,7 @@ HeadlessCommand :: struct {
 	run:          HeadlessCommandProc,
 }
 
-// Every command the harness understands. Adding one is a row here plus its handler, e.g. for
-// direct messages (package B): {"users", 0, 0, false, ...}, {"dm", 1, 0, true, "dm USER_ID
-// TEXT...", ...} and {"dm-history", 1, 1, false, ...}, plus their event kinds above.
+// Every command the harness understands. Adding one is a row here plus its handler.
 HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"status", 0, 0, false, "status", "connection status, user, nickname, selected server",
 		headlessCommandStatus},
@@ -658,6 +857,17 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"requests a history page; it arrives as a room_history event", headlessCommandHistory},
 	{"send", 1, 0, true, "send ROOM_ID TEXT...", "sends the rest of the line to a room",
 		headlessCommandSend},
+	{"users", 0, 0, false, "users",
+		"every account with its online flag, from the cache; requests it if not loaded",
+		headlessCommandUsers},
+	{"conversations", 0, 0, false, "conversations",
+		"recent direct conversations, newest first; requests them if not loaded",
+		headlessCommandConversations},
+	{"dm", 1, 0, true, "dm USER_ID TEXT...", "sends the rest of the line as a direct message",
+		headlessCommandDirectMessage},
+	{"dm-history", 1, 1, false, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
+		"requests a page of a direct conversation; it arrives as a direct_history event",
+		headlessCommandDirectHistory},
 	{"wait", 1, 1, false, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
 	{"sleep", 1, 0, false, "sleep MS", "keeps servicing the connection for MS milliseconds",
@@ -1084,7 +1294,7 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 		return
 	}
 	state := &harness.state
-	state.view_dms = false
+	state.selected_dm_peer_id = 0
 	state.selected_channel_id = roomID
 	draft := State_selectedRoomDraft(state)
 	clear(draft)
@@ -1109,6 +1319,152 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 			cmd = command.name,
 			serverID = state.selected_server_id,
 			roomID = roomID,
+		},
+	)
+}
+
+headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	state := &harness.state
+	serverID := state.selected_server_id
+	cache := State_serverDirectCache(state, serverID)
+	if !cache.usersLoaded && !cache.usersLoading {
+		State_requestUserList(state, serverID)
+		cache = State_serverDirectCache(state, serverID)
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessUsersJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			loaded = cache.usersLoaded,
+			loading = cache.usersLoading,
+			users = cache.users[:],
+		},
+	)
+}
+
+headlessCommandConversations :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+) {
+	state := &harness.state
+	serverID := state.selected_server_id
+	cache := State_serverDirectCache(state, serverID)
+	if !cache.conversationsLoaded && !cache.conversationsLoading {
+		State_requestDirectConversations(state, serverID)
+		cache = State_serverDirectCache(state, serverID)
+	}
+	conversations := headlessConversationsJSON(cache.conversations[:])
+	defer delete(conversations)
+	headlessWriteJSON(
+		harness,
+		HeadlessConversationsResultJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			loaded = cache.conversationsLoaded,
+			loading = cache.conversationsLoading,
+			conversations = conversations,
+		},
+	)
+}
+
+// Sends through State_sendDirectMessageTo, the action behind the GUI's DM composer: the text
+// goes into that conversation's draft. The open conversation does not change.
+headlessCommandDirectMessage :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+) {
+	peerUserID, peerOK := headlessParseNumber(command.args[0])
+	if !peerOK || peerUserID == 0 {
+		headlessWriteError(harness, command.name, "usage: dm USER_ID TEXT...")
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	draft := &ServerDirectCache_conversationCache(
+		State_serverDirectCache(state, serverID),
+		peerUserID,
+	).draft
+	clear(draft)
+	append(draft, ..transmute([]u8)command.args[1])
+	State_clearChatStatus(state)
+	State_sendDirectMessageTo(state, serverID, peerUserID)
+
+	draft = &ServerDirectCache_conversationCache(
+		State_serverDirectCache(state, serverID),
+		peerUserID,
+	).draft
+	if len(draft) > 0 {
+		// Leave nothing behind for the next message to the same user.
+		clear(draft)
+		message := state.chat_status_message
+		if len(message) == 0 {
+			message = "failed to send direct message"
+		}
+		headlessWriteError(harness, command.name, message)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessDirectSendJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			peerUserID = peerUserID,
+		},
+	)
+}
+
+headlessCommandDirectHistory :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+) {
+	peerUserID, peerOK := headlessParseNumber(command.args[0])
+	beforeMessageID, beforeOK := 0, true
+	if command.argCount > 1 {
+		beforeMessageID, beforeOK = headlessParseNumber(command.args[1])
+	}
+	if !peerOK || peerUserID == 0 || !beforeOK {
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: dm-history USER_ID [BEFORE_MESSAGE_ID]",
+		)
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	conversation := ServerDirectCache_conversationCache(
+		State_serverDirectCache(state, serverID),
+		peerUserID,
+	)
+	// As with `history`, an explicit request always goes out: error replies do not name the
+	// request, so the in-flight guard could otherwise stay set.
+	conversation.isLoadingHistory = false
+	State_clearChatStatus(state)
+	State_requestDirectHistory(state, serverID, peerUserID, beforeMessageID)
+	conversation = ServerDirectCache_conversationCache(
+		State_serverDirectCache(state, serverID),
+		peerUserID,
+	)
+	if !conversation.isLoadingHistory {
+		message := state.chat_status_message
+		if len(message) == 0 {
+			message = "failed to request direct history"
+		}
+		headlessWriteError(harness, command.name, message)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessDirectHistoryRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			peerUserID = peerUserID,
+			beforeMessageID = beforeMessageID,
 		},
 	)
 }

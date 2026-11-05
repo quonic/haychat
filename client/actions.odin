@@ -214,22 +214,9 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 	return &ServerRoomCache_roomCache(cache, state.selected_channel_id).draft
 }
 
-State_showDMs :: proc(state: ^State) {
-	state.view_dms = true
-	state.view_friends_list = false
-	State_clearChatStatus(state)
-}
-
-State_showFriend :: proc(state: ^State, friendID: int) {
-	state.view_dms = true
-	state.view_friends_list = true
-	state.selected_friend_id = friendID
-	State_clearChatStatus(state)
-}
-
+// Peer user IDs belong to one server, so switching servers closes any open conversation.
 State_switchToServer :: proc(state: ^State, serverID: int) {
-	state.view_dms = false
-	state.view_friends_list = false
+	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
 	state.selected_channel_id = 0
@@ -238,8 +225,7 @@ State_switchToServer :: proc(state: ^State, serverID: int) {
 }
 
 State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
-	state.view_dms = false
-	state.view_friends_list = false
+	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
 	if roomID == 0 {
@@ -253,11 +239,6 @@ State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
 		State_requestRoomHistory(state, state.selected_server_id, state.selected_channel_id, 0)
 	}
 	State_clearChatStatus(state)
-}
-
-// Direct messages have no transport yet; the draft is kept so nothing the user typed is lost.
-State_sendDirectMessage :: proc(state: ^State) {
-	State_setChatStatus(state, DIRECT_MESSAGES_UNSUPPORTED_STATUS)
 }
 
 // Sends the selected room's draft. The draft is cleared only once the transport accepted it;
@@ -440,6 +421,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	if state.selected_channel_id != 0 {
 		ServerRoomCache_roomCache(cache, state.selected_channel_id).isLoadingHistory = false
 	}
+	State_directProtocolError(state, serverID)
 	State_setChatStatus(state, message)
 }
 
@@ -484,6 +466,22 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_connectionFailed(state, event)
 	case .Disconnected:
 		State_connectionLost(state, event)
+	case .DirectMessageReceived:
+		State_receiveDirectMessage(state, event.serverID, event.directMessage)
+	case .DirectHistoryReceived:
+		State_receiveDirectHistory(
+			state,
+			event.serverID,
+			event.peerUserID,
+			event.directMessages[:],
+			event.hasOlder,
+		)
+	case .UserListReceived:
+		State_receiveUserList(state, event.serverID, &event.users)
+	case .DirectConversationsReceived:
+		State_receiveDirectConversations(state, event.serverID, &event.conversations)
+	case .UserPresenceChanged:
+		State_userPresenceChanged(state, event.serverID, &event.user)
 	case .None:
 	}
 }
@@ -503,27 +501,4 @@ State_drainNetworkEvents :: proc(state: ^State) -> bool {
 		applied = true
 	}
 	return applied
-}
-
-State_newConversation :: proc(state: ^State) {
-	DMLines_deinit(&state.current_dm_chat)
-	state.selected_server_id = 0
-	state.selected_transport_index = -1
-	state.selected_channel_id = 0
-	state.view_dms = true
-	state.view_friends_list = false
-	State_clearChatStatus(state)
-}
-
-// Adds a placeholder friend until a real add-friend flow exists.
-State_addFriend :: proc(state: ^State) {
-	append(
-		&state.config.friends,
-		Friend {
-			id = len(state.config.friends) + 1,
-			display_name = strings.clone("New Friend"),
-			public_key = strings.clone("new_friend_public_key"),
-			status = .Online,
-		},
-	)
 }

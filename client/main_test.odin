@@ -148,12 +148,10 @@ buildEstablishedTransportPair :: proc(
 
 testUpdateStateForServer :: proc(server: Server) -> State {
 	state := testStateWithServers({server})
-	state.view_dms = false
 	state.selected_server_id = server.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, server.id)
 	state.selected_channel_id = common.GENERAL_ROOM_ID
 	append(State_selectedRoomDraft(&state), "pending channel draft")
-	append(&state.dm_chat_draft, "pending dm draft")
 	return state
 }
 
@@ -280,8 +278,8 @@ testStateInitFromConfigStartsInServerChatForFirstRelease :: proc(t: ^testing.T) 
 
 	testing.expect(
 		t,
-		!state.view_dms,
-		"expected first-release startup to open the selected server chat instead of DMs",
+		state.selected_dm_peer_id == 0,
+		"expected startup to open the selected server's room instead of a conversation",
 	)
 	testing.expect(
 		t,
@@ -494,37 +492,6 @@ testReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T) {
 
 	delete(roomChatSendBridgeTestContent)
 	roomChatSendBridgeTestContent = ""
-}
-
-@(test)
-testSendDirectMessageSurfacesUnsupportedStatusWithoutLocalAppend :: proc(t: ^testing.T) {
-	server := Server {
-		id         = 503,
-		name       = "DM Server",
-		host       = "localhost",
-		port       = common.DEFAULT_SERVER_PORT,
-	}
-	state := testUpdateStateForServer(server)
-	defer State_deinit(&state)
-	State_showDMs(&state)
-
-	State_sendDirectMessage(&state)
-
-	testing.expect(
-		t,
-		len(state.current_dm_chat) == 0,
-		"expected unsupported DM submit to avoid locally appending visible chat",
-	)
-	testing.expect(
-		t,
-		string(state.dm_chat_draft[:]) == "pending dm draft",
-		"expected unsupported DM submit to keep the draft intact",
-	)
-	testing.expect(
-		t,
-		state.chat_status_message == DIRECT_MESSAGES_UNSUPPORTED_STATUS,
-		"expected unsupported DM submit to surface a visible status message",
-	)
 }
 
 @(test)
@@ -881,7 +848,6 @@ testRoomViewFollowsSelectedRoomAcrossSwitches :: proc(t: ^testing.T) {
 	}
 	state := testStateWithServers({serverA, serverB})
 	defer State_deinit(&state)
-	state.view_dms = false
 	state.selected_server_id = serverA.id
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state, serverA.id)
 	state.selected_channel_id = common.GENERAL_ROOM_ID
@@ -912,31 +878,6 @@ testRoomViewFollowsSelectedRoomAcrossSwitches :: proc(t: ^testing.T) {
 		t,
 		len(buildRoomView(&state).lines) == 0,
 		"expected switching servers to hide the previous server's room messages",
-	)
-}
-
-@(test)
-testRailTogglesBetweenDMsAndServers :: proc(t: ^testing.T) {
-	server := Server {
-		id   = 509,
-		name = "Rail",
-		host = "localhost",
-		port = 1,
-	}
-	state := testUpdateStateForServer(server)
-	defer State_deinit(&state)
-	State_setChatStatus(&state, "stale status")
-
-	State_showDMs(&state)
-	testing.expect(t, state.view_dms, "expected the DM toggle to open direct messages")
-	testing.expect(t, len(state.chat_status_message) == 0, "expected switching to clear status")
-
-	State_switchToServer(&state, server.id)
-	testing.expect(t, !state.view_dms, "expected selecting a server to leave direct messages")
-	testing.expect(
-		t,
-		state.selected_server_id == server.id,
-		"expected selecting a server to select it",
 	)
 }
 
@@ -1610,5 +1551,234 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 		foundInHistory,
 		"expected General room history to contain message %d",
 		runtimeEvent.messageID,
+	)
+}
+
+// Waits for an event of `kind` that `matches` accepts, applying every other event (including
+// non-matching ones of the same kind) the way the frame loop does. The returned event is
+// unapplied and owned by the caller.
+liveTestWaitForMatchingEvent :: proc(
+	state: ^State,
+	kind: ClientTransportRuntimeEventKind,
+	timeout: time.Duration,
+	matches: proc(event: ^ClientTransportRuntimeEvent, wanted: int) -> bool,
+	wanted: int,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	start := time.tick_now()
+	for time.tick_since(start) < timeout {
+		event, ok := liveTestWaitForEvent(state, kind, timeout - time.tick_since(start))
+		if !ok {
+			break
+		}
+		if matches(&event, wanted) {
+			return event, true
+		}
+		State_applyRuntimeEvent(state, &event)
+		ClientTransportRuntimeEvent_deinit(&event)
+	}
+	return {}, false
+}
+
+@(test)
+testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(t: ^testing.T) {
+	if os.get_env("HAYCHAT_LIVE_STARTUP_AUTH", context.temp_allocator) != "1" {
+		return
+	}
+	sync.mutex_lock(&directMessageSendBridgeTestMutex)
+	defer sync.mutex_unlock(&directMessageSendBridgeTestMutex)
+
+	liveServer := Server {
+		id   = 68,
+		name = "Live DM Server",
+		host = "127.0.0.1",
+		port = 12345,
+	}
+	configA := testConfigWithServers({liveServer})
+	defer Config_deinit(&configA)
+	configB := testConfigWithServers({liveServer})
+	defer Config_deinit(&configB)
+	delete(configA.display_name)
+	configA.display_name = liveTestUniqueNickname("live-dm-a")
+	delete(configB.display_name)
+	configB.display_name = liveTestUniqueNickname("live-dm-b")
+
+	stateA := State_initFromConfig(configA)
+	defer State_deinit(&stateA)
+	stateB := State_initFromConfig(configB)
+	defer State_deinit(&stateB)
+	if !liveTestConnect(t, &stateA, "client A") || !liveTestConnect(t, &stateB, "client B") {
+		return
+	}
+	serverID := liveServer.id
+	userA := State_selfUserID(&stateA, serverID)
+	userB := State_selfUserID(&stateB, serverID)
+
+	// B's first session going online is announced to A.
+	presenceFor :: proc(event: ^ClientTransportRuntimeEvent, userID: int) -> bool {
+		return event.user.id == userID
+	}
+	presence, hasPresence := liveTestWaitForMatchingEvent(
+		&stateA,
+		.UserPresenceChanged,
+		3 * time.Second,
+		presenceFor,
+		userB,
+	)
+	testing.expectf(t, hasPresence, "expected client A to see user %d come online", userB)
+	if !hasPresence {
+		return
+	}
+	testing.expectf(
+		t,
+		presence.user.isOnline && presence.user.nickname == configB.display_name,
+		"expected an online presence for %q, got %v",
+		configB.display_name,
+		presence.user,
+	)
+	State_applyRuntimeEvent(&stateA, &presence)
+	ClientTransportRuntimeEvent_deinit(&presence)
+
+	// A sends through the same actions as the GUI composer.
+	content := "live two-client direct message proof"
+	State_openDirectConversation(&stateA, serverID, userB)
+	testSetDraft(State_selectedDirectDraft(&stateA), content)
+	State_sendDirectMessage(&stateA)
+	testing.expectf(
+		t,
+		len(State_selectedDirectDraft(&stateA)) == 0,
+		"expected the accepted send to clear A's draft, status %q",
+		stateA.chat_status_message,
+	)
+
+	messageWithContent :: proc(event: ^ClientTransportRuntimeEvent, _: int) -> bool {
+		return event.directMessage.content == "live two-client direct message proof"
+	}
+	received, hasReceived := liveTestWaitForMatchingEvent(
+		&stateB,
+		.DirectMessageReceived,
+		3 * time.Second,
+		messageWithContent,
+		0,
+	)
+	testing.expectf(
+		t,
+		hasReceived,
+		"expected client B to receive the direct message, got %s",
+		liveTestConnectionStatus(&stateB, serverID),
+	)
+	if !hasReceived {
+		return
+	}
+	messageID := received.directMessage.id
+	testing.expectf(
+		t,
+		received.directMessage.senderId == userA &&
+		received.directMessage.recipientId == userB &&
+		received.directMessage.senderNickname == configA.display_name &&
+		received.directMessage.recipientNickname == configB.display_name &&
+		messageID > 0,
+		"expected the message from %d (%q) to %d (%q), got %v",
+		userA,
+		configA.display_name,
+		userB,
+		configB.display_name,
+		received.directMessage,
+	)
+	State_applyRuntimeEvent(&stateB, &received)
+	ClientTransportRuntimeEvent_deinit(&received)
+	conversationB := testDirectCache(&stateB, serverID, userA)
+	testing.expect(
+		t,
+		len(conversationB.messages) == 1 && conversationB.unreadCount == 1,
+		"expected B's conversation with A to hold the message as unread",
+	)
+	cacheB := State_serverDirectCache(&stateB, serverID)
+	testing.expect(
+		t,
+		len(cacheB.conversations) > 0 && cacheB.conversations[0].peerUserId == userA,
+		"expected A's conversation at the top of B's list",
+	)
+
+	// The sender sees its own message only through the server's echo.
+	echo, hasEcho := liveTestWaitForMatchingEvent(
+		&stateA,
+		.DirectMessageReceived,
+		3 * time.Second,
+		messageWithContent,
+		0,
+	)
+	testing.expect(t, hasEcho, "expected client A to receive the echo of its own message")
+	if hasEcho {
+		testing.expect(t, echo.directMessage.id == messageID, "expected the echo's ID to match")
+		State_applyRuntimeEvent(&stateA, &echo)
+		ClientTransportRuntimeEvent_deinit(&echo)
+		conversationA := testDirectCache(&stateA, serverID, userB)
+		testing.expect(
+			t,
+			len(conversationA.messages) == 1 && conversationA.unreadCount == 0,
+			"expected A's open conversation to show the echo as read",
+		)
+	}
+
+	// History pages include the stored message.
+	historyHas :: proc(event: ^ClientTransportRuntimeEvent, messageID: int) -> bool {
+		for message in event.directMessages {
+			if message.id == messageID {
+				return true
+			}
+		}
+		return false
+	}
+	testDirectCache(&stateB, serverID, userA).isLoadingHistory = false
+	State_requestDirectHistory(&stateB, serverID, userA, 0)
+	history, hasHistory := liveTestWaitForMatchingEvent(
+		&stateB,
+		.DirectHistoryReceived,
+		3 * time.Second,
+		historyHas,
+		messageID,
+	)
+	testing.expectf(t, hasHistory, "expected B's history with A to contain %d", messageID)
+	if hasHistory {
+		testing.expect(t, history.peerUserID == userA, "expected the page to name peer A")
+		ClientTransportRuntimeEvent_deinit(&history)
+	}
+
+	// The conversation list names A with the message as the latest one.
+	conversationHas :: proc(event: ^ClientTransportRuntimeEvent, messageID: int) -> bool {
+		return len(event.conversations) > 0 && event.conversations[0].lastMessageID == messageID
+	}
+	State_serverDirectCache(&stateB, serverID).conversationsLoading = false
+	State_requestDirectConversations(&stateB, serverID)
+	conversations, hasConversations := liveTestWaitForMatchingEvent(
+		&stateB,
+		.DirectConversationsReceived,
+		3 * time.Second,
+		conversationHas,
+		messageID,
+	)
+	testing.expect(t, hasConversations, "expected B's conversation list to lead with A")
+	if hasConversations {
+		testing.expectf(
+			t,
+			conversations.conversations[0].peerUserId == userA &&
+			conversations.conversations[0].peerNickname == configA.display_name,
+			"expected the latest conversation to be with %q, got %v",
+			configA.display_name,
+			conversations.conversations[0],
+		)
+		ClientTransportRuntimeEvent_deinit(&conversations)
+	}
+
+	// The directory B fetched at connect lists A as online.
+	cacheB = State_serverDirectCache(&stateB, serverID)
+	userIndex := ServerDirectCache_userIndex(cacheB^, userA)
+	testing.expect(
+		t,
+		cacheB.usersLoaded && userIndex >= 0 && cacheB.users[userIndex].isOnline,
+		"expected B's directory to list A as online",
 	)
 }

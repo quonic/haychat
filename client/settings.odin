@@ -263,6 +263,8 @@ State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
 		ordered_remove(&state.server_room_caches, index)
 	}
+	// A different address or name is a different account, so its conversations go too.
+	State_removeServerDirectCache(state, serverID)
 }
 
 // A live transport can be kept across a settings change only if nothing it connects with
@@ -327,6 +329,7 @@ State_reconfigureNetwork :: proc(state: ^State) {
 	if _, ok := State_serverConfig(state, state.selected_server_id); !ok {
 		state.selected_server_id = 0
 		state.selected_channel_id = 0
+		state.selected_dm_peer_id = 0
 		if len(state.config.servers) > 0 {
 			state.selected_server_id = state.config.servers[0].id
 			state.selected_channel_id = common.GENERAL_ROOM_ID

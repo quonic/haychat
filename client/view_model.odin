@@ -1,6 +1,8 @@
 package client
 
+import "../common"
 import "core:fmt"
+import "core:slice"
 
 // View models are pure snapshots of State that the immediate-mode view draws from. Keeping
 // them free of SDL lets tests check what the UI would show without opening a window.
@@ -63,19 +65,256 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	return
 }
 
-// Status indicator shown before a friend's name in the DM list.
-friendStatusLabel :: proc(status: FriendStatus) -> string {
-	switch status {
-	case .Online:
-		return "🟢"
-	case .Offline:
-		return "🔴"
-	case .Idle:
-		return "🟡"
-	case .DoNotDisturb:
-		return "⛔"
-	case .Busy, .Away:
-		return "⚪"
+// One row of the selected server's sidebar, top to bottom: the channels, then the
+// "Direct Messages" section (recent conversations), then the "Members" section (every other
+// account, online first, then alphabetical).
+SidebarRowKind :: enum u8 {
+	SectionHeader,
+	Channel,
+	Conversation,
+	Member,
+	Placeholder, // A muted line such as "No conversations yet"
+}
+
+SidebarRow :: struct {
+	kind:        SidebarRowKind,
+	id:          int, // Room ID for Channel, peer user ID for Conversation and Member
+	label:       string, // Borrowed from State, or allocated with the view allocator
+	description: string, // Channel tooltip; borrowed
+	selected:    bool,
+	isOnline:    bool,
+	unreadCount: int,
+}
+
+// Fallback label for an account the client has no nickname for.
+userLabel :: proc(nickname: string, userID: int, allocator := context.temp_allocator) -> string {
+	if len(nickname) > 0 {
+		return nickname
 	}
-	return "⚪"
+	return fmt.aprintf("User %d", userID, allocator = allocator)
+}
+
+// ASCII case-insensitive ordering, so "bob" and "Bob" sort together without allocating.
+@(private = "file")
+lessFolded :: proc(a, b: string) -> bool {
+	for index in 0 ..< min(len(a), len(b)) {
+		ca, cb := a[index], b[index]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return ca < cb
+		}
+	}
+	return len(a) < len(b)
+}
+
+// Online members first, then alphabetical by nickname, then by ID for equal names.
+memberLess :: proc(a, b: common.UserSummary) -> bool {
+	if a.isOnline != b.isOnline {
+		return a.isOnline
+	}
+	if a.nickname != b.nickname {
+		if lessFolded(a.nickname, b.nickname) {
+			return true
+		}
+		if lessFolded(b.nickname, a.nickname) {
+			return false
+		}
+		return a.nickname < b.nickname
+	}
+	return a.id < b.id
+}
+
+// Every account in the directory except selfUserID, sorted for the Members section. The
+// summaries borrow their nicknames from the directory.
+sortedMembers :: proc(
+	users: []common.UserSummary,
+	selfUserID: int,
+	allocator := context.temp_allocator,
+) -> []common.UserSummary {
+	members := make([dynamic]common.UserSummary, 0, len(users), allocator)
+	for user in users {
+		if user.id != selfUserID {
+			append(&members, user)
+		}
+	}
+	slice.sort_by(members[:], memberLess)
+	return members[:]
+}
+
+// Builds the selected server's sidebar rows. Labels borrow from State, so the result is only
+// valid until State next changes.
+buildSidebarRows :: proc(
+	state: ^State,
+	allocator := context.temp_allocator,
+) -> (
+	rows: [dynamic]SidebarRow,
+) {
+	rows = make([dynamic]SidebarRow, allocator)
+	serverID := state.selected_server_id
+	connected := State_isServerConnected(state, serverID)
+	inRoom := state.selected_dm_peer_id == 0
+
+	append(&rows, SidebarRow{kind = .SectionHeader, label = "Channels"})
+	rooms: []common.RoomSummary
+	roomsLoading := false
+	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
+		rooms = state.server_room_caches[index].rooms[:]
+		roomsLoading = state.server_room_caches[index].roomsLoading
+	}
+	for room in rooms {
+		append(
+			&rows,
+			SidebarRow {
+				kind = .Channel,
+				id = room.id,
+				label = fmt.aprintf("# %s", room.name, allocator = allocator),
+				description = room.description,
+				selected = inRoom && room.id == state.selected_channel_id,
+			},
+		)
+	}
+	if len(rooms) == 0 {
+		text := roomsLoading ? "Loading channels…" : "No channels"
+		if !connected {
+			text = "Waiting for the server…"
+		}
+		append(&rows, SidebarRow{kind = .Placeholder, label = text})
+	}
+
+	// No cache yet means nothing was requested yet: the server is not connected.
+	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
+	if cacheIndex < 0 {
+		waiting := connected ? "Loading…" : "Waiting for the server…"
+		append(&rows, SidebarRow{kind = .SectionHeader, label = "Direct Messages"})
+		append(&rows, SidebarRow{kind = .Placeholder, label = waiting})
+		append(&rows, SidebarRow{kind = .SectionHeader, label = "Members"})
+		append(&rows, SidebarRow{kind = .Placeholder, label = waiting})
+		return
+	}
+	cache := &state.serverDirectCaches[cacheIndex]
+	selfUserID := State_selfUserID(state, serverID)
+
+	append(&rows, SidebarRow{kind = .SectionHeader, label = "Direct Messages"})
+	conversationCount := 0
+	for conversation in cache.conversations {
+		if conversation.peerUserId == selfUserID {
+			continue
+		}
+		peerUserID := conversation.peerUserId
+		unread := 0
+		if index := ServerDirectCache_conversationCacheIndex(cache^, peerUserID); index >= 0 {
+			unread = cache.caches[index].unreadCount
+		}
+		append(
+			&rows,
+			SidebarRow {
+				kind = .Conversation,
+				id = peerUserID,
+				label = userLabel(
+					ServerDirectCache_peerNickname(cache, peerUserID),
+					peerUserID,
+					allocator,
+				),
+				selected = state.selected_dm_peer_id == peerUserID,
+				isOnline = ServerDirectCache_peerIsOnline(cache, peerUserID),
+				unreadCount = unread,
+			},
+		)
+		conversationCount += 1
+	}
+	if conversationCount == 0 {
+		text := cache.conversationsLoading ? "Loading…" : "No conversations yet"
+		append(&rows, SidebarRow{kind = .Placeholder, label = text})
+	}
+
+	append(&rows, SidebarRow{kind = .SectionHeader, label = "Members"})
+	members := sortedMembers(cache.users[:], selfUserID, allocator)
+	for member in members {
+		append(
+			&rows,
+			SidebarRow {
+				kind = .Member,
+				id = member.id,
+				label = userLabel(member.nickname, member.id, allocator),
+				selected = state.selected_dm_peer_id == member.id,
+				isOnline = member.isOnline,
+			},
+		)
+	}
+	if len(members) == 0 {
+		text := cache.usersLoading ? "Loading members…" : "No other members yet"
+		append(&rows, SidebarRow{kind = .Placeholder, label = text})
+	}
+	return
+}
+
+DirectConversationView :: struct {
+	hasPeer:          bool,
+	peerUserID:       int,
+	peerLabel:        string,
+	peerOnline:       bool,
+	hasOlder:         bool,
+	isLoadingHistory: bool,
+	lines:            []TranscriptLine,
+	status:           string, // Borrowed from State
+}
+
+// Builds the open conversation's view without creating caches. Lines borrow from the cache,
+// so the result is only valid until State next changes.
+buildDirectConversationView :: proc(
+	state: ^State,
+	allocator := context.temp_allocator,
+) -> (
+	view: DirectConversationView,
+) {
+	view.status = state.chat_status_message
+	peerUserID := state.selected_dm_peer_id
+	if peerUserID == 0 {
+		return
+	}
+	view.hasPeer = true
+	view.peerUserID = peerUserID
+	serverID := state.selected_server_id
+	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
+	if cacheIndex < 0 {
+		view.peerLabel = userLabel("", peerUserID, allocator)
+		return
+	}
+	cache := &state.serverDirectCaches[cacheIndex]
+	view.peerLabel = userLabel(
+		ServerDirectCache_peerNickname(cache, peerUserID),
+		peerUserID,
+		allocator,
+	)
+	view.peerOnline = ServerDirectCache_peerIsOnline(cache, peerUserID)
+	conversationIndex := ServerDirectCache_conversationCacheIndex(cache^, peerUserID)
+	if conversationIndex < 0 {
+		return
+	}
+	conversation := &cache.caches[conversationIndex]
+	view.hasOlder = conversation.hasOlder
+	view.isLoadingHistory = conversation.isLoadingHistory
+
+	selfUserID := State_selfUserID(state, serverID)
+	lines := make([]TranscriptLine, len(conversation.messages), allocator)
+	for message, index in conversation.messages {
+		isSelf := selfUserID != 0 && message.senderId == selfUserID
+		senderLabel := "You"
+		if !isSelf {
+			senderLabel = userLabel(message.senderNickname, message.senderId, allocator)
+		}
+		lines[index] = TranscriptLine {
+			messageID   = message.id,
+			senderLabel = senderLabel,
+			isSelf      = isSelf,
+			content     = message.content,
+		}
+	}
+	view.lines = lines
+	return
 }

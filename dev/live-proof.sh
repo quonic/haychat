@@ -12,8 +12,9 @@ set -euo pipefail
 #
 # Usage: dev/live-proof.sh [--all | --harness | --sql | test_name...]
 #   (no arguments)  the startup auth proof
-#   --all           also the two-client room chat proof, the headless harness smoke test, and
-#                   the server SQL proof (what CI and `./dev.sh ci` run)
+#   --all           also the two-client room chat and direct message proofs, the headless
+#                   harness smoke test, and the server SQL proof (what CI and `./dev.sh ci`
+#                   run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
 #   --sql           only the server SQL proof: database-backed server tests that run the
 #                   direct message and default room statements against this database
@@ -24,6 +25,7 @@ ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
 
 STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOverENet
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
+DIRECT_MESSAGE_TEST=client.testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients
 SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 
@@ -33,7 +35,7 @@ run_sql=false
 if [[ $# -gt 0 ]]; then
 	case "$1" in
 		--all)
-			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST")
+			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST")
 			run_harness=true
 			run_sql=true
 			;;
