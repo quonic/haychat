@@ -50,3 +50,32 @@ testParseOptionsRejectsBadArguments :: proc(t: ^testing.T) {
 		testing.expectf(t, err != "", "expected %v to be rejected", args)
 	}
 }
+
+// PR #23: the analyser scans only SCAN_MIN_HZ to SCAN_MAX_HZ, so a check outside that band is
+// a usage error (exit 2), never a FAIL (exit 1). Writing a tone has no such limit.
+@(test)
+testParseOptionsLimitsACheckToTheScanRange :: proc(t: ^testing.T) {
+	inside := [?]string{"50", "440", "4050"}
+	for freq in inside {
+		_, err := parseOptions({"b.f32", "--freq", freq})
+		testing.expectf(t, err == "", "expected --freq %s to be accepted, got %q", freq, err)
+	}
+	outside := [?]string{"49.9", "4050.1", "5000", "12000"}
+	for freq in outside {
+		_, err := parseOptions({"b.f32", "--freq", freq})
+		testing.expectf(
+			t,
+			err == FREQ_RANGE_ERROR,
+			"expected --freq %s to be a usage error, got %q",
+			freq,
+			err,
+		)
+	}
+	options, err := parseOptions({"--write-tone", "in.f32", "--freq", "5000", "--seconds", "1"})
+	testing.expectf(
+		t,
+		err == "" && options.freq == 5000,
+		"expected a 5000 Hz tone to be writable, got %q",
+		err,
+	)
+}
