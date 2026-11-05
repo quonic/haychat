@@ -1,0 +1,144 @@
+# HayChat: after the first tester round (2026-11-05)
+
+Follows `docs/plan/2026-11-05-user-testing-readiness.md`, whose packages A–G all merged and
+produced the pre-release `v0.1.0-rc1`. Testers followed `docs/tester-guide.md` against an rc1
+server and reported no significant problems. Text rooms and direct messages work.
+
+That changes one thing about every later change: **the tester server now holds data that
+people care about.** Today a server whose schema check fails drops every HayChat table and
+recreates them empty (`databaseEnsureSchema` in `server/database.odin`), so the first schema
+change would wipe the testers' accounts, rooms and history. Migrations therefore come before
+any change to the schema.
+
+Read this whole file, `AGENTS.md`, `client/AGENTS.md` and `server/AGENTS.md` before starting
+a package. Voice packages also read `docs/plan/voice-rooms-design.md` in full.
+
+## Goals for this phase
+
+1. Upgrades keep data: schema migrations, no automatic drops (M1).
+2. Unread state that survives a restart and follows the user across devices, for rooms and
+   direct messages (B3). The tester guide currently has to explain that unread counts reset.
+3. Voice rooms, the stretch goal of the last plan, built in the PR-sized steps H1–H8 of
+   `docs/plan/voice-rooms-design.md` section 7. H0 already landed as PR #8.
+4. Fix the latent `IPC__route_to` bug noted in PR #8 before voice depends on that path.
+
+## Decisions taken for the voice design's open questions
+
+The lead adopted the recommendation of every question in `voice-rooms-design.md` section 8.
+The maintainer can overturn any of them; packages follow these until then.
+
+| # | Decision |
+| --- | --- |
+| Q1 | Every room carries voice. No schema change, no room type, no admin toggle in v1. |
+| Q2 | A voice session belongs to a client session (device). The participant list shows a user once and marks a second device. |
+| Q3 | Push-to-talk works while the window has focus. Voice activity is the default mode. No global hotkeys. |
+| Q4 | Opus DTX off; the VAD gate covers silence. |
+| Q5 | Constrained VBR. |
+| Q6 | No noise suppression or echo cancellation in v1. The tester guide recommends headphones. |
+| Q7 | Hop-by-hop encryption, as for chat. The binary envelope leaves room for end-to-end keys later. |
+| Q8 | The network thread owns each peer's voice crypto state and relays frames (`VoiceRelay`). Voice frames never pass through the router, the IPC queues or the database. |
+| Q9 | Voice counters (frames in, out and dropped; rooms; participants) on web admin `/status`. |
+| Q10 | Windows release archives ship `libopus-0.dll` and its licence from `$ODIN_ROOT/vendor/sdl3/mixer/`, next to `SDL3.dll`. |
+
+## Coordination rules
+
+- **Protocol version.** `common.protocolVersion` is 8 on `main`. H1 takes 9. Every later
+  package that changes a payload or `MessageType` takes the next free number when it is
+  rebased for merge, and keeps `common/protocol_test.odin` green (append enum members at the
+  end, pin every member put on the wire, never renumber).
+- **Schema version.** M1 introduces the migration list. Migration 1 is the schema `main` has
+  today (identical to `v0.1.0-rc1`). B3 adds migration 2. Voice adds no migration (Q1). Never
+  edit a migration that has merged; add a new one.
+- **One PR per package** on Forgejo `jim/haychat`, from the package's own worktree and branch.
+  Agents do not merge; the lead reviews, waits for CI and the `proval` review bot, merges and
+  closes the PR.
+- **Dev pod.** The lead owns the shared dev pod (`./dev.sh up`, `down`, `reset`, `restart`,
+  `seed`, `client`). Agents use only throwaway containers: `./dev.sh check`, `live`, `ci` and
+  `shell`, which are safe to run concurrently.
+- **Verification.** `./dev.sh check` while editing, `./dev.sh live --all` for anything that
+  touches the wire or the database, and `./dev.sh ci` on the final tree before the PR.
+- **Commits.** Imperative subject, a body that explains why, and the trailer
+  `Co-Authored-By: <the model that wrote it> <noreply@anthropic.com>`. PR descriptions end
+  with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+
+## Work packages
+
+### M1. Server: schema migrations (`server-schema-migrations`, first)
+
+- A `schema_migrations` table (one row per applied migration: version, name, applied time)
+  and an ordered, append-only list of migrations in the server. Migration 1 is today's schema.
+- Startup, in one transaction under a PostgreSQL advisory lock so two servers cannot migrate
+  at once:
+  - An empty database gets every migration.
+  - A database with HayChat tables but no `schema_migrations` (every rc1 and dev database) is
+    adopted: migration 1's idempotent statements run (they already upgrade protocol 7
+    databases in place), the schema is validated, and version 1 is recorded. No row is lost.
+  - A recorded version below the newest known one gets the missing migrations in order.
+  - A recorded version above the newest known one, or a database that fails validation,
+    stops startup with a `[Startup]` error and exit status 1 that says what is wrong and how
+    to restore a backup or reset. **The server never drops tables on its own again.**
+- Validation after migrating stays, as a safety net, checked against the newest schema.
+- Tests: the migration list is gapless and ordered; SQL tests (gated like the existing ones
+  and added to `SQL_TESTS` in `dev/live-proof.sh`) for a fresh database, an rc1-shaped
+  database full of rows (accounts, roles, rooms, members, room messages, direct messages)
+  that keeps every row, a protocol 7 `rooms` table, a second start being a no-op, a future
+  version being refused, and an unrecognisable database being refused with its tables and
+  rows intact.
+- Docs: README Database section and Known Limitations, `deploy/README.md` (Upgrades,
+  Backup), `server/AGENTS.md` (how to add a migration), `docs/tester-guide.md` if it mentions
+  data loss.
+
+### H1. Transport: per-channel keys and replay window (`transport-channel-crypto`)
+
+`voice-rooms-design.md` section 3.2 and the `common` rows of section 6.1: four HKDF keys,
+per-channel send and receive state, the 64-packet replay window, channel-bound AAD, the
+deterministic voice nonce, `sealVoiceDatagram`/`openVoiceDatagram`,
+`TransportState_takeVoiceState`, and check-then-commit for the control channel. Protocol 9.
+Client and server compile against the new `TransportState` with the control path unchanged
+in behaviour; nothing is sent on the Voice channel yet.
+
+### H4. Client: audio and Opus foundation (`client-voice-audio`)
+
+`voice-rooms-design.md` sections 1, 2, 5.2 and 6.1 (client rows): the `client/opus` binding
+loaded with `core:dynlib`, `VoiceEngine` with device, file and tone sources and device, file
+and null sinks, the jitter buffer, VAD and push-to-talk gate, a local loopback mode, and the
+test-only frequency check. No networking. `opus` joins `dev/install-packages.sh`; release
+archives get the Windows DLL (Q10) and the Linux runtime dependency note.
+
+### L1. Server: `IPC__route_to` for `Main` senders (lead)
+
+`IPC__route_to` switches on `typeid_of(type_of(msg))`, which is always `Message`, so a `Main`
+endpoint that uses `IPC_Client_send` routes nothing. Use a type switch on the union and add a
+test.
+
+### B3. Read state for rooms and direct messages (`read-state`, after M1)
+
+- Migration 2: per-user read markers for rooms and for direct conversations (last read
+  message ID), with foreign keys that cascade when a room or an account goes away.
+- Protocol: the client marks a conversation read up to a message ID (markers only move
+  forward); the server stores it and tells the user's other sessions. The room list and the
+  direct conversation list carry each conversation's unread count (messages from others
+  after the marker) and marker, so a client starts with correct badges.
+- Client: unread badges for rooms as well as direct messages; opening a conversation, or
+  receiving a message while it is open, marks it read; a read on another device clears the
+  badge here. Harness commands and events for read state, and a live proof that a badge
+  survives a reconnect and clears on a second session.
+- Docs: README, `docs/tester-guide.md` (remove "unread counts start at zero"),
+  `docs/testing-harness.md`.
+
+### Voice H2–H8 (in order; see `voice-rooms-design.md` section 7)
+
+| Step | Branch | Starts after |
+| --- | --- | --- |
+| H2 voice wire format and control protocol | `voice-wire-protocol` | H1 |
+| H3 server voice: router control plane and network-thread relay | `server-voice-relay` | H2, L1 |
+| H5 client voice networking and actions | `client-voice-networking` | H3, H4 |
+| H6 client voice UI | `client-voice-ui` | H5 |
+| H7 harness commands and live voice proof | `voice-live-proof` | H5 |
+| H8 manual test kit and tuning | `voice-manual-test-kit` | H6, H7 |
+
+## Release
+
+When M1 and B3 have merged, the maintainer can tag `v0.1.0-rc2`. That server adopts an rc1
+database in place. Protocol 9 and later need every tester to update the client too; the
+release notes must say so.
