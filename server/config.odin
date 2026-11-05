@@ -56,7 +56,9 @@ ServerConfig :: struct {
 	// Network server settings
 	listenAddr:             string, // IP address to listen on (e.g., "0.0.0.0", "127.0.0.1")
 	listenPort:             u16, // Port to listen on for client connections
-	maxNetworkThreads:      int, // Number of threads in the network thread pool
+	// ENet peer capacity hint: the host accepts 16 peers per unit. The name is historical; the
+	// network worker pool it once sized was removed because it did no work.
+	maxNetworkThreads:      int,
 
 	// Server identity settings
 	serverIdentityFilePath: string,
@@ -134,6 +136,11 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		return config, tokenErr
 	}
 	return config, ""
+}
+
+// serverLogLevelIsDebug reports whether HAYCHAT_LOG_LEVEL asks for per-packet debug lines.
+serverLogLevelIsDebug :: proc(logLevel: string) -> bool {
+	return strings.equal_fold(strings.trim_space(logLevel), "debug")
 }
 
 validateAndNormalizeConfig :: proc(config: ^ServerConfig) {

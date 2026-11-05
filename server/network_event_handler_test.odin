@@ -48,9 +48,6 @@ testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
 	peerManager := PeerManager_init()
 	defer PeerManager_deinit(&peerManager)
 
-	threadPool := NetworkThreadPool_init(0, &peerManager, int(mainFd))
-	defer delete(threadPool.threads)
-
 	packetBytes := []u8{1, 2, 3, 4}
 	packet := networkTestCreatePacket(packetBytes)
 
@@ -59,7 +56,6 @@ testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
 
 	handlePeerData(
 		&peerManager,
-		&threadPool,
 		&enetPeer,
 		packet,
 		u8(NetworkChannel.Voice),
@@ -79,85 +75,6 @@ testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
 		assert(false, "expected NetworkDataReceived IPC message")
 	}
 	_ = networkFd
-}
-
-// Test WorkerEventQueue enqueue/dequeue
-@(test)
-testWorkerEventQueueEnqueue :: proc(t: ^testing.T) {
-	queue := WorkerEventQueue_init(10)
-	defer WorkerEventQueue_deinit(&queue)
-
-	// Create some test events
-	event1 := ENetEventData {
-		peerId = 1,
-	}
-	event2 := ENetEventData {
-		peerId = 2,
-	}
-	event3 := ENetEventData {
-		peerId = 3,
-	}
-
-	// Test enqueue
-	result1 := WorkerEventQueue_enqueue(&queue, event1)
-	result2 := WorkerEventQueue_enqueue(&queue, event2)
-	result3 := WorkerEventQueue_enqueue(&queue, event3)
-
-	testing.expect(t, result1 == true, "First enqueue should succeed")
-	testing.expect(t, result2 == true, "Second enqueue should succeed")
-	testing.expect(t, result3 == true, "Third enqueue should succeed")
-	testing.expect(t, queue.count == 3, "Queue should have 3 items")
-}
-
-// Test WorkerEventQueue dequeue
-@(test)
-testWorkerEventQueueDequeue :: proc(t: ^testing.T) {
-	queue := WorkerEventQueue_init(10)
-	defer WorkerEventQueue_deinit(&queue)
-
-	// Enqueue some events
-	event1 := ENetEventData {
-		peerId = 1,
-	}
-	event2 := ENetEventData {
-		peerId = 2,
-	}
-
-	WorkerEventQueue_enqueue(&queue, event1)
-	WorkerEventQueue_enqueue(&queue, event2)
-
-	// Dequeue and verify FIFO order
-	dequeued1, ok1 := WorkerEventQueue_dequeue(&queue)
-	testing.expect(t, ok1 == true, "First dequeue should succeed")
-
-	dequeued2, ok2 := WorkerEventQueue_dequeue(&queue)
-	testing.expect(t, ok2 == true, "Second dequeue should succeed")
-
-	// Verify empty
-	_, ok3 := WorkerEventQueue_dequeue(&queue)
-	testing.expect(t, ok3 == false, "Dequeue from empty queue should fail")
-}
-
-// Test WorkerEventQueue overflow detection
-@(test)
-testWorkerEventQueueOverflow :: proc(t: ^testing.T) {
-	queue := WorkerEventQueue_init(3) // Small capacity
-	defer WorkerEventQueue_deinit(&queue)
-
-	// Fill queue to capacity
-	event := ENetEventData {
-		peerId = 1,
-	}
-	r1 := WorkerEventQueue_enqueue(&queue, event)
-	r2 := WorkerEventQueue_enqueue(&queue, event)
-	r3 := WorkerEventQueue_enqueue(&queue, event)
-	r4 := WorkerEventQueue_enqueue(&queue, event) // This should fail (overflow)
-
-	testing.expect(t, r1 == true, "First enqueue should succeed")
-	testing.expect(t, r2 == true, "Second enqueue should succeed")
-	testing.expect(t, r3 == true, "Third enqueue should succeed")
-	testing.expect(t, r4 == false, "Fourth enqueue should fail (overflow)")
-	testing.expect(t, queue.overflowCount == 1, "Overflow count should be 1")
 }
 
 // Test PeerManager_setChannelState
