@@ -1,9 +1,11 @@
 # Deploying HayChat
 
+<!-- This file also ships as DEPLOY.md in the server release archive, so links are absolute. -->
+
 This guide is for the person who runs a HayChat server for testers. It covers the production
 server image, running it with PostgreSQL under podman, first-time setup, backups, upgrades,
 and the release builds that produce the image and the client downloads. Testers need only
-[docs/tester-guide.md](../docs/tester-guide.md).
+[docs/tester-guide.md](https://git.spyingwind.com/jim/haychat/src/branch/main/docs/tester-guide.md).
 
 > [!WARNING]
 > HayChat is unreleased. When a new server version changes the database schema, the server
@@ -182,8 +184,8 @@ and waits for the graceful shutdown. Leave out `--env-file` when you have no ove
 
 ## Environment Variables
 
-Every server setting is a `HAYCHAT_*` environment variable; README.md "Server Configuration"
-lists them all with defaults, and `.env.example` documents the optional ones. In this
+Every server setting is a `HAYCHAT_*` environment variable; [README.md "Server Configuration"](https://git.spyingwind.com/jim/haychat/src/branch/main/README.md#server-configuration)
+lists them all with defaults, and [`.env.example`](https://git.spyingwind.com/jim/haychat/src/branch/main/.env.example) documents the optional ones. In this
 deployment:
 
 | Set by | Variables |

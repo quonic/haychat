@@ -84,8 +84,11 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # The tag name reaches the shell through the environment, never spliced into the script.
       - name: Build the archives
-        run: deploy/release-artifacts.sh "${{ steps.version.outputs.version }}" dist --windows
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: deploy/release-artifacts.sh "$VERSION" dist --windows
 
       # v3: Forgejo does not support the v4 artifact actions (actionlint warns that v3 is too
       # old for GitHub, which does not apply here).

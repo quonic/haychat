@@ -8,7 +8,8 @@
 # or `./dev.sh release-image`. See deploy/README.md for running it.
 #
 # The build stage uses the same package script and Odin pins as the dev image and CI. The
-# runtime stage holds only the server binary and the libraries it links.
+# runtime stage holds only the server binary and the libraries it links. x86-64 (amd64) only:
+# the link check below names the x86-64 loader.
 
 # ── Build ─────────────────────────────────────────────────────────
 
