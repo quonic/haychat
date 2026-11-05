@@ -487,6 +487,73 @@ testMainRouterRejectsUnsupportedApplicationMessage :: proc(t: ^testing.T) {
 	assert(databaseErr != nil, "expected unsupported application message to reach no database")
 }
 
+// Protocol 10 defines the voice control messages before the router handles them (H3). Until
+// then each one gets the "Unsupported message type" protocol error, keeps the session, and
+// reaches neither the database nor anything else.
+@(test)
+testMainRouterAnswersVoiceControlAsUnsupportedForNow :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	joinPayload := common.ClientJoinVoicePayload {
+		roomId = common.GENERAL_ROOM_ID,
+	}
+	leavePayload := common.ClientLeaveVoicePayload{}
+	statePayload := common.ClientVoiceStatePayload {
+		muted = true,
+	}
+	payloads := [3]any{joinPayload, leavePayload, statePayload}
+	messageTypes := [3]common.MessageType{.ClientJoinVoice, .ClientLeaveVoice, .ClientVoiceState}
+	for messageType, index in messageTypes {
+		sealedPacket, sealOK := common.sealPacketForSession(
+			&clientTransport,
+			messageType,
+			payloads[index],
+		)
+		assert(sealOK, fmt.tprintf("expected sealing %v to succeed", messageType))
+		defer delete(sealedPacket.payload)
+		sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+		defer delete(sealedPacketBytes)
+
+		MainRouterState_handleNetworkDataReceived(
+			&h.pm,
+			&h.state,
+			NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
+		)
+
+		responseSend := routerPollNetworkSend(&h)
+		defer delete(responseSend.data)
+		responseOuterPacket := routerDecodePacketBytes(responseSend.data)
+		defer delete(responseOuterPacket.payload)
+		responseInnerPacket, openOK := common.openPacketForSession(
+			&clientTransport,
+			responseOuterPacket,
+		)
+		assert(openOK, "expected the client to decrypt the unsupported message response")
+		defer delete(responseInnerPacket.payload)
+		assert(
+			responseInnerPacket.messageType == .ServerProtocolError,
+			fmt.tprintf("expected %v to produce ServerProtocolError", messageType),
+		)
+		session, sessionOK := MainRouterState_getPeerSession(&h.state, peerID)
+		assert(
+			sessionOK && session.isAuthenticated,
+			fmt.tprintf("expected %v to keep the session", messageType),
+		)
+	}
+
+	_, databaseErr := IPC_Client_poll(h.databaseFd)
+	assert(databaseErr != nil, "expected voice control messages to reach no database")
+}
+
 @(test)
 testMainRouterInitParsesConfiguredAdminPublicKey :: proc(t: ^testing.T) {
 	_ = t

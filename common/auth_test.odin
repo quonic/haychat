@@ -1,5 +1,6 @@
 package common
 
+import "core:crypto/chacha20poly1305"
 import "core:crypto/ecdh"
 import "core:encoding/endian"
 import "core:encoding/cbor"
@@ -274,6 +275,24 @@ testOpenVoice :: proc(
 	return openVoiceDatagram(&state.voiceReceive, state.sessionID, datagram, dst)
 }
 
+// Opens voice ciphertext with an explicit nonce and AAD, bypassing openVoiceDatagram, so tests
+// can show which inputs the tag binds.
+@(private = "file")
+testOpenVoiceRaw :: proc(
+	key: TransportKey,
+	nonce: TransportNonce,
+	aad: []u8,
+	ciphertext: []u8,
+	tag: []u8,
+) -> bool {
+	keyCopy, nonceCopy := key, nonce
+	opened: [128]u8
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, keyCopy[:])
+	defer chacha20poly1305.reset(&ctx)
+	return chacha20poly1305.open(&ctx, opened[:len(ciphertext)], nonceCopy[:], aad, ciphertext, tag)
+}
+
 @(test)
 testTransportKeyDerivationVector :: proc(t: ^testing.T) {
 	_ = t
@@ -397,6 +416,20 @@ testTransportNonceAndAADLayout :: proc(t: ^testing.T) {
 			fmt.tprintf("expected AAD sequence byte %d to be little-endian", index),
 		)
 	}
+
+	// The voice AAD is the transport AAD with the datagram's kind byte appended (protocol 10).
+	assert(VOICE_AAD_SIZE == 26, "expected a 26-byte voice AAD (session, channel, sequence, kind)")
+	voiceAAD := makeVoiceAAD(sessionID, .Voice, 0x0807060504030201, VOICE_DATAGRAM_KIND_FRAME)
+	assert(
+		string(voiceAAD[:TRANSPORT_AAD_SIZE]) == string(aad[:]),
+		"expected the voice AAD to start with the transport AAD",
+	)
+	assert(
+		voiceAAD[TRANSPORT_AAD_SIZE] == VOICE_DATAGRAM_KIND_FRAME,
+		"expected the voice AAD to end with the kind byte",
+	)
+	otherKind := makeVoiceAAD(sessionID, .Voice, 0x0807060504030201, 0x02)
+	assert(otherKind[TRANSPORT_AAD_SIZE] == 0x02, "expected the kind byte to come from the caller")
 }
 
 @(test)
@@ -716,27 +749,70 @@ testVoiceTamperingBreaksTag :: proc(t: ^testing.T) {
 
 	// Channel byte: the receiver derives the nonce and AAD with channel 2. With channel 1 in
 	// the nonce (and the right AAD), or channel 1 in the AAD (and the right nonce), it fails.
-	wrongNonce, wrongNonceOK := openTransportPayload(
-		server.voiceReceive.key,
-		server.sessionID,
-		.Voice,
-		0,
-		makeVoiceNonce(.Control, 0),
-		tag,
-		ciphertext,
+	voiceAAD := makeVoiceAAD(server.sessionID, .Voice, 0, VOICE_DATAGRAM_KIND_FRAME)
+	controlChannelAAD := makeVoiceAAD(server.sessionID, .Control, 0, VOICE_DATAGRAM_KIND_FRAME)
+	assert(
+		!testOpenVoiceRaw(
+			server.voiceReceive.key,
+			makeVoiceNonce(.Control, 0),
+			voiceAAD[:],
+			ciphertext,
+			tag[:],
+		),
+		"expected the nonce channel byte to bind the tag",
 	)
-	assert(!wrongNonceOK && wrongNonce == nil, "expected the nonce channel byte to bind the tag")
-	rightNonce, rightNonceOK := openTransportPayload(
-		server.voiceReceive.key,
-		server.sessionID,
-		.Voice,
-		0,
-		makeVoiceNonce(.Voice, 0),
-		tag,
-		ciphertext,
+	assert(
+		!testOpenVoiceRaw(
+			server.voiceReceive.key,
+			makeVoiceNonce(.Voice, 0),
+			controlChannelAAD[:],
+			ciphertext,
+			tag[:],
+		),
+		"expected the AAD channel byte to bind the tag",
 	)
-	assert(rightNonceOK, "expected the datagram to open with the channel 2 nonce and AAD")
-	delete(rightNonce)
+	// The kind byte: the protocol 9 AAD without it, or another kind, fails.
+	transportAAD := makeTransportAAD(server.sessionID, .Voice, 0)
+	assert(
+		!testOpenVoiceRaw(
+			server.voiceReceive.key,
+			makeVoiceNonce(.Voice, 0),
+			transportAAD[:],
+			ciphertext,
+			tag[:],
+		),
+		"expected the AAD without the kind byte to fail the tag",
+	)
+	otherKindAAD := makeVoiceAAD(server.sessionID, .Voice, 0, 0x02)
+	assert(
+		!testOpenVoiceRaw(
+			server.voiceReceive.key,
+			makeVoiceNonce(.Voice, 0),
+			otherKindAAD[:],
+			ciphertext,
+			tag[:],
+		),
+		"expected another kind byte in the AAD to fail the tag",
+	)
+	assert(
+		testOpenVoiceRaw(
+			server.voiceReceive.key,
+			makeVoiceNonce(.Voice, 0),
+			voiceAAD[:],
+			ciphertext,
+			tag[:],
+		),
+		"expected the datagram to open with the channel 2 nonce and the kind-bound voice AAD",
+	)
+
+	// The kind byte itself: an unknown kind is refused before the AEAD.
+	unknownKind := datagram
+	unknownKind[0] ~= 0x01
+	_, unknownKindResult := testOpenVoice(&server, unknownKind[:length], opened[:])
+	assert(
+		unknownKindResult == .Malformed,
+		fmt.tprintf("expected kind 0x00 to be malformed, got %v", unknownKindResult),
+	)
 
 	// Every other byte the receiver checks: sequence, ciphertext, tag.
 	tagStart := length - TRANSPORT_TAG_SIZE
@@ -765,6 +841,52 @@ testVoiceTamperingBreaksTag :: proc(t: ^testing.T) {
 	n, result := testOpenVoice(&server, datagram[:length], opened[:])
 	assert(result == .Ok, "expected the untouched datagram to open after the tampering")
 	assert(n == len(payload), "expected the plaintext length to match")
+}
+
+// Only kind 0x01 is accepted today, so the relabelling attack needs a second kind: seal a
+// datagram as kind 0x02 with the package-private sealer, then relabel it 0x01. It passes the
+// kind check and must fail on the tag, which proves the kind byte is authenticated.
+@(test)
+testVoiceKindByteIsBoundIntoTheTag :: proc(t: ^testing.T) {
+	_ = t
+	client, server := testActivatedTransportPair()
+	payload := []u8{0x08, 1, 2, 3}
+	datagram: [128]u8
+	n, ok := sealVoiceDatagramOfKind(
+		&client.voiceSend,
+		client.sessionID,
+		0x02,
+		payload,
+		datagram[:],
+	)
+	assert(ok && datagram[0] == 0x02, "expected the test sealer to write kind 0x02")
+	opened: [128]u8
+
+	_, result := testOpenVoice(&server, datagram[:n], opened[:])
+	assert(result == .Malformed, fmt.tprintf("expected kind 0x02 to be refused, got %v", result))
+
+	relabelled := datagram
+	relabelled[0] = VOICE_DATAGRAM_KIND_FRAME
+	_, result = testOpenVoice(&server, relabelled[:n], opened[:])
+	assert(
+		result == .BadTag,
+		fmt.tprintf("expected a datagram relabelled 0x02 -> 0x01 to fail its tag, got %v", result),
+	)
+	assert(!server.voiceReceive.window.hasAny, "expected the relabelled datagram to move nothing")
+
+	// The control: the same sealer with kind 0x01 is exactly sealVoiceDatagram, and opens.
+	n, ok = sealVoiceDatagramOfKind(
+		&client.voiceSend,
+		client.sessionID,
+		VOICE_DATAGRAM_KIND_FRAME,
+		payload,
+		datagram[:],
+	)
+	assert(ok, "expected sealing kind 0x01 to succeed")
+	length: int
+	length, result = testOpenVoice(&server, datagram[:n], opened[:])
+	assert(result == .Ok, fmt.tprintf("expected kind 0x01 to open, got %v", result))
+	assert(string(opened[:length]) == string(payload), "expected the payload to match")
 }
 
 @(test)

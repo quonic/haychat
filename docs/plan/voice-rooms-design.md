@@ -2,8 +2,9 @@
 
 **Date:** 2026-11-05
 **Base:** `main` at `60ea446`
-**Status:** Design. H0 (server network loop, PR #8) and H1 (per-channel transport keys and
-replay window, protocol 9) are implemented; H2–H8 follow section 7.
+**Status:** Design. H0 (server network loop, PR #8), H1 (per-channel transport keys and
+replay window, protocol 9) and H2 (binary voice frames, TOC check, kind-bound voice AAD and the
+voice control messages, protocol 10) are implemented; H3–H8 follow section 7.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport
@@ -545,7 +546,7 @@ Voice datagram (both directions)
  0       1     kind          0x01 = voice frame (other values reserved; drop unknown kinds)
  1       8     sequence      transport sequence for this direction's voice channel
  9       n     ciphertext    XChaCha20-Poly1305(voiceKey, nonce(channel, sequence),
-                             aad = sessionID || 0x02 || sequence)
+                             aad = sessionID || 0x02 || sequence || kind)
  9+n     16    tag
 
 Plaintext, client → server (ClientVoiceFrame)
@@ -582,9 +583,11 @@ Overhead: 25 bytes of envelope plus 9 (c→s) or 13 (s→c) bytes of header.
 
 ### 3.4 Control messages (CBOR, reliable channel 1)
 
-Add these to `MessageType` at the end of the voice block, or replace the two existing
-`ClientVoiceData`/`ServerVoiceData` values in place. Either way `protocolVersion` changes. If
-package A's numbering-pin test has landed, update the pinned values on purpose.
+As implemented in H2 (protocol 10): the six new members are appended at the end of
+`MessageType` and pinned (`ClientJoinVoice` 141 through `ServerVoiceLeft` 146).
+`ClientVoiceData`/`ServerVoiceData` stay as retired placeholders that are never sent, because
+`ClientDirectMessage` and `ServerDirectMessage` follow them on the wire. The voice AAD also
+binds the datagram's kind byte (`makeVoiceAAD`), so a later second kind cannot be relabelled.
 
 ```odin
 ClientJoinVoicePayload :: struct {
@@ -629,8 +632,9 @@ ServerVoiceLeftPayload :: struct {
 
 New `MessageType` values: `ClientJoinVoice`, `ClientLeaveVoice`, `ClientVoiceState`,
 `ServerVoiceParticipants`, `ServerVoiceJoinRejected`, `ServerVoiceLeft`. Retire the
-datetime-based `VoiceData` struct and the unused `ClientVoiceData`/`ServerVoiceData` values;
-binary frames don't need a `MessageType`.
+datetime-based `VoiceData` struct (H2 deleted it). Binary frames don't need a `MessageType`, so
+`ClientVoiceData`/`ServerVoiceData` are never sent; they keep their place only to hold the wire
+values after them.
 
 **Speaking indicators are not a protocol message.** Each client derives them: a remote
 participant is "speaking" when a frame from them was played in the last 250 ms, or until a
@@ -641,6 +645,9 @@ describes.
 Ownership follows `AGENTS.md`: `nickname` and `reason` are owned by the decoded payload and
 moved into the runtime event, then into `State`. Each of them needs a case in
 `ClientTransportRuntimeEvent_deinit`.
+`common/protocol.odin` has `VoiceParticipant_deinit`, `ServerVoiceParticipantsPayload_deinit`,
+`ServerVoiceJoinRejectedPayload_deinit` and `ServerVoiceLeftPayload_deinit` for payloads that
+are decoded and then dropped.
 
 ### 3.5 Changes to `MainRouterState_handleNetworkDataReceived`
 
@@ -807,8 +814,12 @@ Per inbound datagram on channel 2 (in `handlePeerData`, before any IPC):
 4. Parse `ClientVoiceFrame`. Drop if `roomId != peer.roomId`, if the peer is muted, if the
    Opus length is 0 or over `HAYCHAT_VOICE_MAX_FRAME_BYTES` (default 512), or if the TOC byte
    says the packet isn't 20 ms. The relay checks the TOC byte itself (RFC 6716 §3.1), so the
-   server needs no libopus.
-5. Build `ServerVoiceFrame{roomId, senderUserId = peer.userId, frameSequence, flags, opus}`.
+   server needs no libopus: `decodeClientVoiceFrame` gives `.Truncated`, `.EmptyOpus` or
+   `.OpusTooLarge` for the length cases, and `opusPacketIsVoiceFrameDuration(frame.opus)` is
+   the TOC check.
+5. Build `ServerVoiceFrame{roomId, senderUserId = peer.userId, frameSequence, flags, opus}`
+   with `encodeServerVoiceFrame`, which may write over the buffer the client frame was
+   decoded from.
 6. For each other peer in `rooms[roomId]` that is not deafened: `sealVoiceDatagram` with
    that peer's `send`, then `ENet.packet_create(…, {.UNSEQUENCED})` and `peer_send(…, 2, …)`.
    Don't echo the frame back to the sender.
