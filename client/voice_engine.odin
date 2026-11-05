@@ -147,6 +147,7 @@ VoiceEngineStats :: struct {
 	framesDecoded:   u64,
 	decodeErrors:    u64,
 	framesPlayed:    u64, // mixed frames written to a file or null sink
+	sinkWriteErrors: u64, // file sink writes that failed (a full disk truncates the file)
 	speakersCreated: u64,
 	speakersExpired: u64,
 }
@@ -214,6 +215,8 @@ VoiceEngine :: struct {
 	inboundCount:        int,
 	inboundDropped:      u64, // under inboundMutex
 	inboundInvalid:      u64, // under inboundMutex
+	// Voice-thread copy of the queue, so speakers are created without holding inboundMutex.
+	drainBatch:          [VOICE_INBOUND_CAPACITY]VoiceInboundFrame,
 	// Voice-thread state.
 	stats:               VoiceEngineStats,
 	retiredJitter:       JitterStats,
@@ -922,17 +925,24 @@ jitterStatsAdd :: proc(total: ^JitterStats, add: JitterStats) {
 
 @(private = "file")
 VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
+	// Move the queued frames out under the lock and work on the copy without it. A frame
+	// from a new speaker creates an Opus decoder and an SDL stream, which must never stall
+	// the network worker waiting in VoiceEngine_pushInbound.
 	sync.mutex_lock(&engine.inboundMutex)
-	defer sync.mutex_unlock(&engine.inboundMutex)
-	// Pushing into a jitter buffer is a bounded copy, so holding the lock here costs the
-	// network worker microseconds at most.
-	for engine.inboundCount > 0 {
-		frame := &engine.inbound[engine.inboundHead]
-		engine.inboundHead = (engine.inboundHead + 1) % VOICE_INBOUND_CAPACITY
-		engine.inboundCount -= 1
+	count := engine.inboundCount
+	for index in 0 ..< count {
+		slot := (engine.inboundHead + index) % VOICE_INBOUND_CAPACITY
+		engine.drainBatch[index] = engine.inbound[slot]
+	}
+	engine.inboundHead = (engine.inboundHead + count) % VOICE_INBOUND_CAPACITY
+	engine.inboundCount = 0
+	sync.mutex_unlock(&engine.inboundMutex)
+
+	noSpeaker: u64
+	for &frame in engine.drainBatch[:count] {
 		speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
 		if speaker == nil {
-			engine.inboundDropped += 1
+			noSpeaker += 1
 			continue
 		}
 		speaker.lastArrivalMS = now
@@ -945,8 +955,12 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 			now,
 		)
 	}
+
+	sync.mutex_lock(&engine.inboundMutex)
+	engine.inboundDropped += noSpeaker
 	engine.stats.inboundDropped = engine.inboundDropped
 	engine.stats.inboundInvalid = engine.inboundInvalid
+	sync.mutex_unlock(&engine.inboundMutex)
 }
 
 // VoiceEngine_decode turns one jitter-buffer decision into 20 ms of PCM in decodeFrame.
@@ -1047,7 +1061,9 @@ VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine) {
 	}
 	engine.stats.framesPlayed += 1
 	if engine.sinkFile != nil {
-		_, _ = os.write(engine.sinkFile, mem.slice_to_bytes(mix))
+		if _, writeErr := os.write(engine.sinkFile, mem.slice_to_bytes(mix)); writeErr != nil {
+			engine.stats.sinkWriteErrors += 1
+		}
 	}
 }
 

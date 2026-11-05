@@ -352,6 +352,17 @@ voiceTestFreeSamples :: proc(samples: []f32) {
 	delete(mem.slice_to_bytes(samples))
 }
 
+// The size of the file at path in bytes, or 0 while it does not exist yet.
+@(private = "file")
+voiceTestFileBytes :: proc(path: string) -> i64 {
+	info, err := os.stat(path, context.allocator)
+	if err != nil {
+		return 0
+	}
+	defer os.file_info_delete(info, context.allocator)
+	return info.size
+}
+
 @(private = "file")
 voiceTestLoopbackToFile :: proc(
 	faults: VoiceLoopbackFaults,
@@ -819,8 +830,22 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 		{source = {kind = .Device}, sink = {kind = .Device}, loopback = true},
 	)
 	started := VoiceEngine_start(engine)
+	// Wait until audio has really flowed through both devices instead of sleeping a fixed
+	// time, so a loaded CI runner gets as long as it needs, up to the deadline. The checks
+	// below need over 1 s of stereo F32 from the disk driver with a steady tone in its last
+	// 0.5 s, so wait for 1.25 s to leave room for the device and jitter pre-roll.
+	minOutputBytes := i64(VOICE_SAMPLE_RATE) * 5 / 4 * 2 * size_of(f32)
 	if started {
-		time.sleep(1500 * time.Millisecond)
+		waitStart := time.tick_now()
+		for time.tick_since(waitStart) < 15 * time.Second {
+			progress := VoiceEngine_snapshot(engine)
+			if progress.stats.framesCaptured >= 40 &&
+			   progress.stats.framesDecoded >= 30 &&
+			   voiceTestFileBytes(outputPath) > minOutputBytes {
+				break
+			}
+			time.sleep(50 * time.Millisecond)
+		}
 	}
 	snapshot := VoiceEngine_snapshot(engine)
 	errorText := strings.clone(VoiceEngine_lastError(engine), context.temp_allocator)
