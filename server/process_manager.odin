@@ -317,7 +317,8 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 			return
 		}
 		sync.mutex_unlock(&pm.processMutex)
-		thread.yield()
+		// The exit flags have no condition variable; a short sleep keeps this off the CPU.
+		time.sleep(1 * time.Millisecond)
 	}
 
 	fmt.println("[Shutdown] Timed out waiting for all service threads to stop")

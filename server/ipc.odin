@@ -1,9 +1,11 @@
 package server
 
 import "../common"
+import "core:mem"
 import "core:strings"
 import "core:sync"
 import "core:sys/linux"
+import "core:time"
 import "vendor:ENet"
 
 SERVER_SOCKET :: "haychat"
@@ -60,15 +62,19 @@ NetworkDataReceived :: struct {
 	data:    []u8,
 }
 
+// unreliable is false by default, so every existing send stays reliable. Odin has no field
+// defaults, and a `reliable` flag would make a forgotten field silently drop chat packets.
 NetworkSendData :: struct {
-	peerId:  u32,
-	channel: NetworkChannel,
-	data:    []u8,
+	peerId:     u32,
+	channel:    NetworkChannel,
+	data:       []u8,
+	unreliable: bool,
 }
 
 NetworkBroadcast :: struct {
-	channel: NetworkChannel,
-	data:    []u8,
+	channel:    NetworkChannel,
+	data:       []u8,
+	unreliable: bool,
 }
 
 NetworkDisconnectPeer :: struct {
@@ -161,15 +167,94 @@ IPC_Endpoint :: struct {
 	kind: IPC_Endpoint_Kind,
 }
 
+// IPC_Ring is a growable FIFO ring buffer. Push and pop are O(1); a full ring doubles its
+// capacity and keeps the order. It never drops items: the queues carry reliable chat traffic,
+// so back-pressure, if it is ever needed, belongs to the producer.
+IPC_Ring :: struct($T: typeid) {
+	items:     []T,
+	head:      int, // Index of the oldest item
+	count:     int,
+	allocator: mem.Allocator,
+}
+
+IPC_RING_MIN_CAPACITY :: 16
+
+IPC_Ring_init :: proc(
+	ring: ^IPC_Ring($T),
+	capacity := IPC_RING_MIN_CAPACITY,
+	allocator := context.allocator,
+) {
+	ring.allocator = allocator
+	ring.items = make([]T, max(capacity, 1), allocator)
+	ring.head = 0
+	ring.count = 0
+}
+
+IPC_Ring_deinit :: proc(ring: ^IPC_Ring($T)) {
+	delete(ring.items, ring.allocator)
+	ring^ = {}
+}
+
+IPC_Ring_len :: proc(ring: ^IPC_Ring($T)) -> int {
+	return ring.count
+}
+
+IPC_Ring_capacity :: proc(ring: ^IPC_Ring($T)) -> int {
+	return len(ring.items)
+}
+
+// IPC_Ring__grow copies the items into a buffer twice as large, oldest first, so head is 0.
+IPC_Ring__grow :: proc(ring: ^IPC_Ring($T)) {
+	if ring.allocator.procedure == nil {
+		ring.allocator = context.allocator
+	}
+	newCapacity := max(len(ring.items) * 2, IPC_RING_MIN_CAPACITY)
+	newItems := make([]T, newCapacity, ring.allocator)
+	for i in 0 ..< ring.count {
+		newItems[i] = ring.items[(ring.head + i) % len(ring.items)]
+	}
+	delete(ring.items, ring.allocator)
+	ring.items = newItems
+	ring.head = 0
+}
+
+IPC_Ring_push :: proc(ring: ^IPC_Ring($T), item: T) {
+	if ring.count == len(ring.items) {
+		IPC_Ring__grow(ring)
+	}
+	ring.items[(ring.head + ring.count) % len(ring.items)] = item
+	ring.count += 1
+}
+
+IPC_Ring_pop :: proc(ring: ^IPC_Ring($T)) -> (T, bool) {
+	if ring.count == 0 {
+		return {}, false
+	}
+	item := ring.items[ring.head]
+	// Clear the slot so the ring never holds a second reference to popped, owned data.
+	ring.items[ring.head] = {}
+	ring.head = (ring.head + 1) % len(ring.items)
+	ring.count -= 1
+	if ring.count == 0 {
+		ring.head = 0
+	}
+	return item, true
+}
+
+IPC_Message_Queue :: IPC_Ring(IPC_Queue_Message)
+
 IPC_State :: struct {
 	next_fd:        linux.Fd,
 	initialized:    bool,
 	state_mutex:    sync.Mutex,
 	endpoints:      [dynamic]IPC_Endpoint,
-	main_queue:     [dynamic]IPC_Queue_Message,
-	network_queue:  [dynamic]IPC_Queue_Message,
-	webadmin_queue: [dynamic]IPC_Queue_Message,
-	database_queue: [dynamic]IPC_Queue_Message,
+	main_queue:     IPC_Message_Queue,
+	network_queue:  IPC_Message_Queue,
+	webadmin_queue: IPC_Message_Queue,
+	database_queue: IPC_Message_Queue,
+	// One condition per queue, signalled on every push, so a consumer can sleep in
+	// IPC_Client_wait instead of polling. All of them pair with state_mutex.
+	queue_ready:    [IPC_Endpoint_Kind]sync.Cond,
 }
 
 ipcState := IPC_State {
@@ -182,10 +267,10 @@ IPC__state_init :: proc() {
 	}
 	ipcState.initialized = true
 	ipcState.endpoints = make([dynamic]IPC_Endpoint)
-	ipcState.main_queue = make([dynamic]IPC_Queue_Message)
-	ipcState.network_queue = make([dynamic]IPC_Queue_Message)
-	ipcState.webadmin_queue = make([dynamic]IPC_Queue_Message)
-	ipcState.database_queue = make([dynamic]IPC_Queue_Message)
+	IPC_Ring_init(&ipcState.main_queue)
+	IPC_Ring_init(&ipcState.network_queue)
+	IPC_Ring_init(&ipcState.webadmin_queue)
+	IPC_Ring_init(&ipcState.database_queue)
 }
 
 // Exhaustive on purpose: a new request variant must decide what it owns.
@@ -307,11 +392,15 @@ IPC__message_deinit :: proc(msg: ^Message) {
 	msg^ = Message{}
 }
 
-IPC__queue_deinit :: proc(queue: ^[dynamic]IPC_Queue_Message) {
-	for i in 0 ..< len(queue^) {
-		IPC__message_deinit(&queue^[i].msg)
+IPC__queue_deinit :: proc(queue: ^IPC_Message_Queue) {
+	for {
+		entry, ok := IPC_Ring_pop(queue)
+		if !ok {
+			break
+		}
+		IPC__message_deinit(&entry.msg)
 	}
-	delete(queue^)
+	IPC_Ring_deinit(queue)
 }
 
 IPC__state_deinit :: proc() {
@@ -352,7 +441,7 @@ IPC__find_endpoint_kind :: proc(fd: linux.Fd) -> IPC_Endpoint_Kind {
 	return .Unknown
 }
 
-IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^[dynamic]IPC_Queue_Message {
+IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^IPC_Message_Queue {
 	switch kind {
 	case .Main:
 		return &ipcState.main_queue
@@ -433,19 +522,54 @@ IPC_Server_poll :: proc(ctx: ^IPC_Server_Context) {
 	// In-memory coordinator does not need active polling for accept/read.
 }
 
+// IPC__push appends to the destination queue and wakes its consumer. Hold state_mutex.
+IPC__push :: proc(destination: IPC_Endpoint_Kind, entry: IPC_Queue_Message) -> bool {
+	queue := IPC__queue_for_kind(destination)
+	if queue == nil {
+		return false
+	}
+	IPC_Ring_push(queue, entry)
+	sync.cond_broadcast(&ipcState.queue_ready[destination])
+	return true
+}
+
 IPC_Client_poll :: proc(client_fd: linux.Fd) -> (Message, linux.Errno) {
 	sync.mutex_lock(&ipcState.state_mutex)
 	defer sync.mutex_unlock(&ipcState.state_mutex)
 
 	kind := IPC__find_endpoint_kind(client_fd)
 	queue := IPC__queue_for_kind(kind)
-	if queue == nil || len(queue^) == 0 {
+	if queue == nil {
 		return Message{}, linux.Errno(-1)
 	}
 
-	entry := queue^[0]
-	ordered_remove(queue, 0)
+	entry, ok := IPC_Ring_pop(queue)
+	if !ok {
+		return Message{}, linux.Errno(-1)
+	}
 	return entry.msg, nil
+}
+
+// IPC_Client_wait blocks until the endpoint's queue holds a message or the timeout passes,
+// and reports whether a message is waiting. Consumers call it when a poll came back empty,
+// so they sleep instead of spinning and still wake as soon as a producer pushes.
+IPC_Client_wait :: proc(client_fd: linux.Fd, timeout: time.Duration) -> bool {
+	sync.mutex_lock(&ipcState.state_mutex)
+	defer sync.mutex_unlock(&ipcState.state_mutex)
+
+	kind := IPC__find_endpoint_kind(client_fd)
+	queue := IPC__queue_for_kind(kind)
+	if queue == nil {
+		return false
+	}
+	if IPC_Ring_len(queue) > 0 {
+		return true
+	}
+	if timeout > 0 {
+		// A spurious or early wake-up is fine: callers poll again and wait again.
+		sync.cond_wait_with_timeout(&ipcState.queue_ready[kind], &ipcState.state_mutex, timeout)
+	}
+	return IPC_Ring_len(queue) > 0
 }
 
 IPC_Client_send :: proc(client_fd: linux.Fd, msg: Message) -> linux.Errno {
@@ -458,12 +582,9 @@ IPC_Client_send :: proc(client_fd: linux.Fd, msg: Message) -> linux.Errno {
 		return linux.Errno(-1)
 	}
 
-	queue := IPC__queue_for_kind(destination)
-	if queue == nil {
+	if !IPC__push(destination, IPC_Queue_Message{sender = sender, msg = msg}) {
 		return linux.Errno(-1)
 	}
-
-	append(queue, IPC_Queue_Message{sender = sender, msg = msg})
 	return nil
 }
 
@@ -472,16 +593,11 @@ IPC_Server_send :: proc(ctx: ^IPC_Server_Context, client_fd: linux.Fd, msg: Mess
 	defer sync.mutex_unlock(&ipcState.state_mutex)
 
 	destination := IPC__find_endpoint_kind(client_fd)
-	queue := IPC__queue_for_kind(destination)
-	if queue == nil {
-		return
-	}
-
 	sender := ctx.endpoint_kind
 	if sender == .Unknown {
 		sender = .Main
 	}
-	append(queue, IPC_Queue_Message{sender = sender, msg = msg})
+	IPC__push(destination, IPC_Queue_Message{sender = sender, msg = msg})
 }
 
 IPC_Server_deinit :: proc(ctx: ^IPC_Server_Context) -> linux.Errno {

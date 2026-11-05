@@ -144,3 +144,12 @@ testDatabaseErrorResponsesOwnTheirStrings :: proc(t: ^testing.T) {
 	)
 	IPC__database_query_response_deinit(response)
 }
+
+@(test)
+testConfigLogLevelDebugGatesPerPacketLogs :: proc(t: ^testing.T) {
+	_ = t
+	assert(serverLogLevelIsDebug("debug"), "expected log level debug to enable debug lines")
+	assert(serverLogLevelIsDebug(" DEBUG "), "expected level matching to ignore case and spaces")
+	assert(!serverLogLevelIsDebug("info"), "expected the default level info to hide debug lines")
+	assert(!serverLogLevelIsDebug(""), "expected an empty log level to disable debug lines")
+}

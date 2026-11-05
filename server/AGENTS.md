@@ -22,6 +22,16 @@
 - `server/database_direct_messages_test.odin` runs the direct message SQL against a real PostgreSQL when `HAYCHAT_DATABASE_SQL_TEST=1`; it writes and then deletes its own accounts, so point it only at a throwaway database. `./dev.sh live --sql` (and `--all`) runs it.
 - For deterministic router/database validation, use `odin test server -define:ODIN_TEST_THREADS=1`. Database-backed runtime tests require a role that can create, alter, and drop the server-owned schema in `public`.
 
+## Network Thread And IPC
+
+- `server/networking.md` describes the threads, the IPC queues, and the network loop.
+- The network loop drains every queued IPC message (up to `NETWORK_IPC_DRAIN_LIMIT`) before it services ENet, flushes once per pass, and waits at most `NETWORK_SERVICE_TIMEOUT_MS` (2 ms) in `host_service`. Do not add per-send `host_flush` calls or longer service timeouts: fan-out depends on the drain keeping up.
+- `networkDrainIPC` takes the IPC fd and a `NetworkIPCHandlers` callback set, so tests drive it through the real queue without ENet (`network_throughput_test.odin`). Handlers borrow `msg.data`; the drain frees it.
+- IPC queues are `IPC_Ring` ring buffers. A consumer that finds its queue empty calls `IPC_Client_wait` with a timeout instead of `thread.yield()` or a fixed sleep; every push signals the destination's condition variable.
+- Per-packet logging goes behind `serverLogLevelIsDebug(config.logLevel)` (`HAYCHAT_LOG_LEVEL=debug`). Never log every packet at the default level.
+- `NetworkSendData.unreliable` and `NetworkBroadcast.unreliable` default to `false`, which is reliable delivery. Only real-time media should set it.
+- There is no network worker pool. Do work that must happen on the network thread in the loop itself, or design a pool that parks on a condition variable.
+
 ## Dev Workflow
 
 - `./dev.sh up` starts the dev pod: PostgreSQL 17 and a server built from the working tree. `./dev.sh restart` rebuilds and restarts the server; a compile error leaves the running one up.

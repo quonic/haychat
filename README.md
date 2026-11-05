@@ -147,7 +147,7 @@ Runtime (configurable in `.env`):
 - `HAYCHAT_MAX_RESTARTS` (default `5`)
 - `HAYCHAT_RESTART_BACKOFF_MIN` (seconds, default `0.1`)
 - `HAYCHAT_RESTART_BACKOFF_MAX` (seconds, default `10.0`)
-- `HAYCHAT_MAX_NETWORK_THREADS` (default `4`)
+- `HAYCHAT_MAX_NETWORK_THREADS` (default `4`): ENet peer capacity, 16 connections per unit (64 by default). It no longer starts threads; the network worker pool it once sized was removed.
 - `HAYCHAT_MAX_FILE_SIZE` (bytes, default `10485760`)
 - `HAYCHAT_MAX_STORAGE_CAPACITY` (bytes, default `1073741824`)
 - `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`: fixed server identity. When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE`.

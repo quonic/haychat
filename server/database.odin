@@ -866,6 +866,8 @@ databaseOpenRuntimeConnection :: proc(config: ServerConfig) -> (pg.Conn, string)
 	)
 }
 
+DATABASE_IDLE_WAIT :: 100 * time.Millisecond
+
 // Database process entry point
 // Manages PostgreSQL connection pool and handles database queries from main process
 databaseServerLoop :: proc(pm: ^ProcessManager) {
@@ -907,7 +909,8 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 	for running {
 		message, err := IPC_Client_poll(pm.config.databaseFd)
 		if err != nil {
-			time.sleep(1 * time.Millisecond)
+			// Shutdown and restart arrive as messages, so a long wait is safe.
+			IPC_Client_wait(pm.config.databaseFd, DATABASE_IDLE_WAIT)
 			continue
 		}
 

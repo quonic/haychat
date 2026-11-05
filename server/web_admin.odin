@@ -76,14 +76,17 @@ WEB_ADMIN_POLL_TIMEOUT :: 250 * time.Millisecond
 
 awaitWebAdminMessage :: proc(clientFd: linux.Fd, timeout: time.Duration) -> (Message, bool) {
 	start := time.now()
-	for time.since(start) < timeout {
+	for {
 		message, err := IPC_Client_poll(clientFd)
 		if err == nil {
 			return message, true
 		}
-		time.sleep(1 * time.Millisecond)
+		remaining := timeout - time.since(start)
+		if remaining <= 0 {
+			return Message{}, false
+		}
+		IPC_Client_wait(clientFd, remaining)
 	}
-	return Message{}, false
 }
 
 statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
