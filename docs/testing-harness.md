@@ -19,8 +19,9 @@ odin build client -out:haychat-client
 | Option | Meaning |
 | --- | --- |
 | `--name NAME` | Display name, 3 to 32 characters. Saved to the profile. Required for a new profile. |
-| `--server HOST:PORT` | The profile's only server. Saved to the profile. A new profile without it uses `localhost:12345`. |
+| `--server HOST:PORT` | The profile's only server. Saved to the profile. Required for a new profile: there is no built-in default server. |
 | `--config-dir DIR` | Config root for this profile, like `XDG_CONFIG_HOME` (`APPDATA` on Windows): the profile is `DIR/haychat/config.json`. Without it the harness uses your real client config. |
+| `--connect-timeout MS` | How long startup waits for the first connection, 1 to 600000 ms (default 15000). |
 
 Options also accept the `--name=NAME` form.
 
@@ -33,9 +34,26 @@ scripted run unique names, for example by appending a timestamp.
 `--server` makes the profile hold exactly that one server. An existing entry for the same
 address keeps its pinned server key; a different address replaces the entry and its pin.
 
-Connecting blocks until the client is connected or has failed, then the harness prints a
-`connected` or `connect_failed` event. After that the network worker keeps the session
-alive while the harness waits for commands.
+A profile with neither a saved server nor `--server` prints `connect_failed` with
+`"message":"no server is configured"` and exits with code 2.
+
+At startup the harness starts the network worker, which connects in the background exactly as
+the GUI does, and waits for the selected server to sign in. Every attempt prints a
+`connecting` event. An attempt that fails for a reason that can go away (the server is down or
+unreachable) prints `connect_failed` with `"retryable":true` and is retried after 1, 2, 4, …
+seconds, capped at 30 s. Startup ends with:
+
+- `connected`: commands are read from then on.
+- `connect_failed` with `"retryable":false`: a failure retrying cannot fix (the name is taken,
+  the server key changed, a protocol version mismatch, an invalid name or identity key).
+  `message` explains it in the GUI's words; exit code 2.
+- `connect_failed` with `"failure":"Timeout"` when `--connect-timeout` passes first; exit
+  code 2.
+
+After that the worker keeps the session alive while the harness waits for commands. If the
+session drops (for example the server restarts) the harness prints `disconnected`, and the
+worker reconnects by itself, printing `connecting` and then `connected` (or `connect_failed`)
+again, so an agent can `wait connected` to see it come back.
 
 ### Exit Codes
 
@@ -43,7 +61,7 @@ alive while the harness waits for commands.
 | --- | --- |
 | 0 | `quit`, or EOF on stdin |
 | 1 | Bad arguments, or the config and identity key could not be loaded or created |
-| 2 | Connecting or authenticating failed (a `connect_failed` event says why) |
+| 2 | No server is configured, connecting failed for a reason retrying cannot fix, or `--connect-timeout` passed (a `connect_failed` event says why) |
 
 Closing stdin counts as `quit`. A script that wants a client to stay online between commands
 must keep its stdin open (a named pipe held open on a file descriptor, or a coprocess).
@@ -57,7 +75,8 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 
 | Command | Result |
 | --- | --- |
-| `status` | `phase` (the handshake phase, `Established` when online), `connected`, `serverID`, `server` (`host:port`), `userID`, `nickname`, `selectedRoomID`, `lastError` |
+| `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
+| `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
 | `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms`. When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
@@ -80,8 +99,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 
 | Event | Example |
 | --- | --- |
+| `connecting` | `{"event":"connecting","serverID":1,"attempt":1}` (`attempt` counts from 1 since the last `connected` or `disconnected`) |
 | `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}` |
-| `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to server"}` |
+| `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}` |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
 | `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
@@ -89,16 +109,24 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"..."}` |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
-| `disconnected` | `{"event":"disconnected","serverID":1}` |
+| `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 
-After `disconnected` the harness keeps running so an agent can still run `status`; it does not
-reconnect yet.
+In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
+the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
+`NameUnavailable`, `ServerKeyChanged`, `ProtocolMismatch`, `InvalidName`, `InvalidIdentity`, or
+the harness's own `NoServer` and `Timeout`. `retryable` is true when the worker will try again
+in `retryInMS`; when it is false nothing retries until `reconnect` (or, at startup, the harness
+exits with code 2).
+
+After `disconnected` the worker reconnects with the same backoff; `retryInMS` is the delay
+before its first attempt.
 
 ## Example: Two Agents Chatting
 
 Each agent runs its own client with its own profile. Alice's side (`>` is stdin, `<` stdout):
 
 ```text
+< {"event":"connecting","serverID":1,"attempt":1}
 < {"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}
 < {"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}
 > wait room_list
@@ -140,7 +168,8 @@ grep -F '"cmd":"send"' alice.out
 `./dev.sh live --harness` builds and starts a server against a throwaway PostgreSQL (see
 `dev/live-proof.sh`) and runs `dev/harness-smoke.sh`, which builds the client and checks:
 
-1. One client connects, reports `status`, receives its room list, and lists `rooms`.
+1. One client connects, reports `status`, receives its room list, and lists `rooms`. It then
+   sends `reconnect` and waits for the worker to sign in again.
 2. A second client connects; the first sends a unique message to room 1 and the second must
    print a `room_chat` event with that text.
 
