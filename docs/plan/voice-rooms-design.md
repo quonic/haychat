@@ -9,11 +9,17 @@ voice control messages, protocol 10), H3 (server voice: router control plane in
 H4 (client voice engine) and H5 (client voice networking: the worker's channel 2 receive path,
 the voice thread's send path under the worker lock, the voice runtime events, `State.voice` and
 its actions, re-join after a reconnect, and a live two-client tone proof through the server
-relay; no protocol change) are implemented; H6–H8 follow section 7. H3 chose the cached member
-list for leave and state fan-out (4.2), and atomics for the `/status` counters (Q9). H5 seals
-and sends voice under the worker lock instead of moving `voiceSend` to the voice thread (1.4),
-because a reconnect rewrites it on the worker, and checks a per-session generation before every
-send and delivery.
+relay; no protocol change) and H6 (client voice UI: participants in the channel list, the
+room header's join and leave button, the voice bar, Settings → Voice with device lists, mode,
+push-to-talk key, threshold over a live meter, gain, volume, bitrate and a microphone test, the
+eight client config keys of 5.3, and push-to-talk while the window has focus; no protocol
+change) are implemented; H7–H8 follow section 7. H3 chose the cached member list for leave and
+state fan-out (4.2), and atomics for the `/status` counters (Q9). H5 seals and sends voice under
+the worker lock instead of moving `voiceSend` to the voice thread (1.4), because a reconnect
+rewrites it on the worker, and checks a per-session generation before every send and delivery.
+H6 reopens the engine for a device change instead of a command queue to a running engine
+(1.2, 1.4): the session stays joined and the gap is a few tens of milliseconds, and every other
+setting reaches the running engine through its atomic controls.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport

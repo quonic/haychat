@@ -174,6 +174,9 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		if SDL.WaitEventTimeout(&event, timeout) {
 			for {
 				appTrackWindowFocus(&state, &event, script != nil)
+				if appHandleVoiceEvent(&state, &event) {
+					redraw = true
+				}
 				if handleAppEvent(&ctx, &event, &wake, &running) {
 					redraw = true
 				}
@@ -221,6 +224,32 @@ appTrackWindowFocus :: proc(state: ^State, event: ^SDL.Event, scripted: bool) {
 		}
 		state.windowFocused = scripted
 	}
+}
+
+// Push-to-talk and audio hotplug. The push-to-talk key is read from the window's own key
+// events, so it works only while the window has focus (Q3: no global hotkeys), and losing
+// focus releases it, because the key-up then goes to another window. Returns true when the
+// event needs a new frame.
+@(private = "file")
+appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event) -> bool {
+	#partial switch event.type {
+	case .KEY_DOWN, .KEY_UP:
+		if event.key.repeat || state.voicePanel.capturingKey {
+			return false
+		}
+		key := State_voicePushToTalkKeycode(state)
+		if key != 0 && event.key.key == key {
+			State_voicePushToTalkChanged(state, event.type == .KEY_DOWN)
+		}
+	case .WINDOW_FOCUS_LOST:
+		if state.voice.pushToTalkHeld {
+			State_voicePushToTalkChanged(state, false)
+		}
+	case .AUDIO_DEVICE_ADDED, .AUDIO_DEVICE_REMOVED:
+		State_voiceAudioDevicesChanged(state)
+		return true
+	}
+	return false
 }
 
 // Returns true when the event needs a new frame.

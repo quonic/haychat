@@ -403,6 +403,18 @@ State_voiceStopEngine :: proc(state: ^State) {
 	state.voice.link = nil
 }
 
+// Reopens the joined engine from the current template (a new device, or a device that came
+// or went), keeping the session joined: the server is not told, and mute, deafen and
+// push-to-talk carry over. If the new engine cannot start, voice becomes Unavailable exactly
+// as on a join.
+State_voiceRestartEngine :: proc(state: ^State) {
+	if state.voice.status != .Joined || state.voice.engine == nil {
+		return
+	}
+	State_voiceStopEngine(state)
+	State_voiceStartEngine(state)
+}
+
 // Stops the engine without telling the server, for shutdown.
 State_voiceShutdown :: proc(state: ^State) {
 	State_voiceStopEngine(state)

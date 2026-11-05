@@ -19,6 +19,19 @@ COMPOSER_PADDING :: 12
 PANEL_PADDING :: 8
 
 viewApp :: proc(state: ^State, ctx: ^ui.Context) {
+	// The Voice settings section holds the device lists and the microphone test only while
+	// it is on screen.
+	voicePanelVisible :=
+		state.settingsOpen &&
+		!State_needsFirstRunSetup(state.config) &&
+		state.settings.tab == .Voice
+	State_setVoiceSettingsVisible(state, voicePanelVisible)
+	State_voiceSettingsFrame(state)
+	// Meters and speaking indicators change without any event, so they need redraws; nothing
+	// else wakes the loop for voice.
+	if State_voiceNeedsRedraws(state) {
+		ui.requestFrameAt(ctx, ctx.nowMS + VOICE_REDRAW_INTERVAL_MS)
+	}
 	root := ctx.windowRect
 	// First run has nothing to show beside the form, so it takes the whole window.
 	if state.settingsOpen && State_needsFirstRunSetup(state.config) {
@@ -55,6 +68,13 @@ viewVerticalBorder :: proc(ctx: ^ui.Context, r: ui.Rect) {
 	ui.fillRect(ctx, ui.Rect{r.x + r.w - width, r.y, width, r.h}, ctx.theme.border)
 }
 
+// A button at the right end of a panel header. Empty text draws nothing.
+HeaderAction :: struct {
+	text:    string,
+	id:      ui.ID,
+	primary: bool,
+}
+
 // Draws a panel header with a title and optional muted subtitle, then a divider under it.
 // With actionText, a button sits at the right end; returns whether it was clicked.
 viewHeader :: proc(
@@ -65,12 +85,28 @@ viewHeader :: proc(
 	actionText: string = "",
 	actionID: ui.ID = 0,
 ) -> bool {
+	actions := [1]HeaderAction{{text = actionText, id = actionID}}
+	return viewHeaderWithActions(ctx, area, title, subtitle, actions[:]) == 0
+}
+
+// viewHeader with several buttons, laid out from the right end in order. Returns the index of
+// the one clicked, or -1.
+viewHeaderWithActions :: proc(
+	ctx: ^ui.Context,
+	area: ^ui.Rect,
+	title: string,
+	subtitle: string,
+	actions: []HeaderAction,
+) -> int {
 	header := ui.cutTop(area, ui.dp(ctx, HEADER_HEIGHT))
 	content := ui.shrinkXY(header, ui.dp(ctx, 16), 0)
-	actionClicked := false
-	if len(actionText) > 0 {
+	actionClicked := -1
+	for action, index in actions {
+		if len(action.text) == 0 {
+			continue
+		}
 		buttonH := ui.dp(ctx, ROW_HEIGHT)
-		buttonW := ui.textSize(ui.textGet(ctx, 0, .Regular, actionText)).x
+		buttonW := ui.textSize(ui.textGet(ctx, 0, .Regular, action.text)).x
 		buttonW += ui.dp(ctx, ctx.theme.padding * 4)
 		slot := ui.cutRight(&content, buttonW)
 		_ = ui.cutRight(&content, ui.dp(ctx, PANEL_PADDING))
@@ -80,7 +116,13 @@ viewHeader :: proc(
 			color      = ctx.theme.fgMuted,
 			background = ctx.theme.hover,
 		}
-		actionClicked = ui.button(ctx, actionID, button, actionText, actionOptions)
+		if action.primary {
+			actionOptions.color = ctx.theme.onPrimary
+			actionOptions.background = ctx.theme.primary
+		}
+		if ui.button(ctx, action.id, button, action.text, actionOptions) {
+			actionClicked = index
+		}
 	}
 	{
 		// A long title or subtitle must not run under the action button.
@@ -343,6 +385,8 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 	area := r
 	viewHeader(ctx, &area, selectedServerName(state))
 	viewConnectionFooter(state, ctx, &area, banner)
+	// Voice can be active on another server than the one shown, so the bar is always drawn.
+	viewVoiceBar(state, ctx, &area)
 	list := ui.shrink(area, ui.dp(ctx, PANEL_PADDING))
 	if !banner.hasServer {
 		return
@@ -389,7 +433,7 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 		if clickedAction == .NewRoom {
 			State_openRoomCreator(state)
 		}
-	case .Placeholder:
+	case .Placeholder, .VoiceParticipant:
 	}
 }
 
@@ -416,6 +460,8 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		return clicked
 	case .Placeholder:
 		ui.label(ctx, ui.shrinkXY(rect, inset, 0), row.label, ctx.theme.fgMuted)
+	case .VoiceParticipant:
+		viewVoiceParticipantRow(ctx, serverID, row, rect)
 	case .Channel:
 		id := ui.idOf("channel", serverID, row.id)
 		if row.unreadCount <= 0 {
@@ -423,7 +469,11 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 				selected = row.selected,
 				color    = row.selected ? ctx.theme.fg : ctx.theme.fgMuted,
 			}
+			// The label is drawn by the button over the full row; the voice indicator goes on
+			// top at the right end.
 			clicked := ui.button(ctx, id, rect, row.label, options)
+			content := ui.shrinkXY(rect, inset, 0)
+			viewChannelVoiceIndicator(ctx, &content, row.voiceUsers)
 			if len(row.description) > 0 {
 				ui.tooltip(ctx, id, rect, row.description)
 			}
@@ -433,6 +483,7 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		clicked := ui.button(ctx, id, rect, "", {selected = row.selected})
 		content := ui.shrinkXY(rect, inset, 0)
 		viewSidebarUnreadBadge(ctx, &content, row.unreadCount)
+		viewChannelVoiceIndicator(ctx, &content, row.voiceUsers)
 		ui.label(ctx, content, row.label, ctx.theme.fg, .Bold)
 		tooltip := fmt.tprintf("%d unread", row.unreadCount)
 		if len(row.description) > 0 {
@@ -567,12 +618,35 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	view := buildRoomView(state)
 	area := r
 	room, hasRoom := selectedRoom(state)
-	editClicked := false
+	editClicked, joinVoiceClicked, leaveVoiceClicked := false, false, false
 	if hasRoom {
 		editText := view.canEditRoom ? "Edit room" : ""
 		editID := ui.idOf("edit-room", state.selected_server_id, room.id)
 		title := fmt.tprintf("# %s", room.name)
-		editClicked = viewHeader(ctx, &area, title, room.description, editText, editID)
+		voiceAction := roomVoiceHeaderAction(state, state.selected_server_id, room.id)
+		voiceText := ""
+		switch voiceAction {
+		case .Join:
+			voiceText = VOICE_JOIN_TEXT
+		case .Leave:
+			voiceText = VOICE_LEAVE_TEXT
+		case .None:
+		}
+		actions := [2]HeaderAction {
+			{
+				text = voiceText,
+				id = ui.idOf("room-voice", state.selected_server_id, room.id),
+				primary = voiceAction == .Join,
+			},
+			{text = editText, id = editID},
+		}
+		switch viewHeaderWithActions(ctx, &area, title, room.description, actions[:]) {
+		case 0:
+			joinVoiceClicked = voiceAction == .Join
+			leaveVoiceClicked = voiceAction == .Leave
+		case 1:
+			editClicked = true
+		}
 	} else {
 		viewHeader(ctx, &area, selectedServerName(state))
 	}
@@ -631,8 +705,13 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	)
 
 	// Last, so the form replaces the room only from the next frame on.
-	if editClicked {
+	switch {
+	case editClicked:
 		State_openRoomEditor(state, roomID)
+	case joinVoiceClicked:
+		State_joinVoice(state, serverID, roomID)
+	case leaveVoiceClicked:
+		State_leaveVoice(state)
 	}
 }
 

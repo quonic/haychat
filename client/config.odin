@@ -11,10 +11,23 @@ APP_DATA: string = "" // Global variable to store the APPDATA directory path on 
 haychatFolder: string = "haychat" // Global variable to store the name of the haychat configuration folder, initialized to "haychat"
 
 Config :: struct {
-	private_key:  string,
-	public_key:   string,
-	display_name: string,
-	servers:      [dynamic]Server,
+	private_key:            string,
+	public_key:             string,
+	display_name:           string,
+	servers:                [dynamic]Server,
+	// Voice settings (voice_settings.odin). Read them through Config_voiceSettings, which
+	// validates them and fills in the defaults: an empty string or a missing number means the
+	// default, so a config written before voice existed, or a Config literal, behaves the
+	// same as a new one. The numbers are Maybe so that 0, a valid gain and threshold, is not
+	// mistaken for "not set". omitempty keeps unset keys out of config.json.
+	voice_input_device:     string `json:"voice_input_device,omitempty"`,
+	voice_output_device:    string `json:"voice_output_device,omitempty"`,
+	voice_mode:             string `json:"voice_mode,omitempty"`,
+	voice_ptt_key:          string `json:"voice_ptt_key,omitempty"`,
+	voice_vad_threshold_db: Maybe(f32) `json:"voice_vad_threshold_db,omitempty"`,
+	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
+	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
+	voice_bitrate:          Maybe(int) `json:"voice_bitrate,omitempty"`,
 }
 
 Server :: struct {
@@ -281,6 +294,14 @@ Config_clone :: proc(config: Config) -> Config {
 		public_key   = strings.clone(config.public_key),
 		display_name = strings.clone(config.display_name),
 		servers      = make([dynamic]Server, 0, len(config.servers)),
+		voice_input_device = strings.clone(config.voice_input_device),
+		voice_output_device = strings.clone(config.voice_output_device),
+		voice_mode = strings.clone(config.voice_mode),
+		voice_ptt_key = strings.clone(config.voice_ptt_key),
+		voice_vad_threshold_db = config.voice_vad_threshold_db,
+		voice_input_gain = config.voice_input_gain,
+		voice_output_volume = config.voice_output_volume,
+		voice_bitrate = config.voice_bitrate,
 	}
 	for server in config.servers {
 		append(&clone.servers, Server_clone(server))
@@ -296,6 +317,10 @@ Config_deinit :: proc(config: ^Config) {
 		Server_deinit(&config.servers[index])
 	}
 	delete(config.servers)
+	delete(config.voice_input_device)
+	delete(config.voice_output_device)
+	delete(config.voice_mode)
+	delete(config.voice_ptt_key)
 	config^ = {}
 }
 

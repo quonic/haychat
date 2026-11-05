@@ -225,3 +225,26 @@ testAutomationSkipsClippedTextAndKeepsVisiblePart :: proc(t: ^testing.T) {
 	assert(len(automation.widgets) == 0, "expected a clipped widget dropped")
 	assert(len(automation.textBytes) == len("edge"), "expected only recorded text copied")
 }
+
+@(test)
+testRangeFractionClampsAndHandlesEmptyRanges :: proc(t: ^testing.T) {
+	testing.expect(t, rangeFraction(-45, -80, 0) == 35.0 / 80.0, "expected -45 in -80..0 at 35/80")
+	testing.expect(t, rangeFraction(-100, -80, 0) == 0, "expected values below the range at 0")
+	testing.expect(t, rangeFraction(10, -80, 0) == 1, "expected values above the range at 1")
+	testing.expect(t, rangeFraction(5, 3, 3) == 0, "expected an empty range to give 0")
+}
+
+@(test)
+testSliderValueAtMapsSnapsAndClamps :: proc(t: ^testing.T) {
+	track := Rect{100, 0, 200, 10}
+	value := sliderValueAt(track, 200, 0, 2, 0)
+	testing.expectf(t, value == 1, "expected the middle of 0..2 to be 1, got %v", value)
+	value = sliderValueAt(track, 151, -80, 0, 1)
+	testing.expectf(t, value == -60, "expected a quarter of -80..0 snapped to -60, got %v", value)
+	value = sliderValueAt(track, 0, 12000, 64000, 1000)
+	testing.expectf(t, value == 12000, "expected left of the track to clamp to low, got %v", value)
+	value = sliderValueAt(track, 1000, 12000, 64000, 1000)
+	testing.expectf(t, value == 64000, "expected right of the track to clamp, got %v", value)
+	value = sliderValueAt(Rect{0, 0, 0, 10}, 5, 1, 2, 0)
+	testing.expectf(t, value == 1, "expected an empty track to give low, got %v", value)
+}

@@ -120,10 +120,16 @@ VoiceEngineConfig :: struct {
 	// A zero value means opus.VOICE_ENCODER_SETTINGS.
 	encoder:          opus.EncoderSettings,
 	gateMode:         VoiceGateMode,
-	// 0 means VOICE_VAD_DEFAULT_THRESHOLD_DB.
+	// 0 means VOICE_VAD_DEFAULT_THRESHOLD_DB, unless explicitLevels is set.
 	vadThresholdDB:   f32,
-	// 0 means 1.
+	// 0 means 1, unless explicitLevels is set.
 	inputGain:        f32,
+	// Linear gain on everything played (the playback device's gain, or the file and null
+	// mix). 0 means 1, unless explicitLevels is set.
+	outputVolume:     f32,
+	// Use inputGain, outputVolume and vadThresholdDB as given, zeros included. Configs built
+	// from the user's settings set it, because 0 is a valid gain and threshold there.
+	explicitLevels:   bool,
 	loopback:         bool,
 	loopbackFaults:   VoiceLoopbackFaults,
 	// Advance the media clock by one 20 ms frame per step instead of following the wall
@@ -203,6 +209,9 @@ VoiceEngine :: struct {
 	pttHeld:             bool,
 	gateMode:            VoiceGateMode,
 	thresholdBits:       u32,
+	inputGainBits:       u32,
+	outputVolumeBits:    u32,
+	bitrateRequest:      i32,
 	// Level meter, written by the voice thread with atomics.
 	inputLevelBits:      u32,
 	transmitting:        bool,
@@ -224,6 +233,8 @@ VoiceEngine :: struct {
 	retiredJitter:       JitterStats,
 	encoder:             ^opus.Encoder,
 	encoderSettings:     opus.EncoderSettings,
+	// The output volume last applied to the playback device or mix.
+	appliedOutputVolume: f32,
 	gate:                VoiceGate,
 	frameSequence:       u32,
 	captureFrame:        [common.VOICE_FRAME_SAMPLES]f32,
@@ -275,18 +286,24 @@ VoiceEngine_create :: proc(
 	if engine.encoderSettings == {} {
 		engine.encoderSettings = opus.VOICE_ENCODER_SETTINGS
 	}
-	if engine.config.inputGain == 0 {
+	if engine.config.inputGain == 0 && !config.explicitLevels {
 		engine.config.inputGain = 1
+	}
+	if engine.config.outputVolume == 0 && !config.explicitLevels {
+		engine.config.outputVolume = 1
 	}
 	if engine.config.source.toneAmplitude == 0 {
 		engine.config.source.toneAmplitude = VOICE_DEFAULT_TONE_AMPLITUDE
 	}
 	threshold := config.vadThresholdDB
-	if threshold == 0 {
+	if threshold == 0 && !config.explicitLevels {
 		threshold = VOICE_VAD_DEFAULT_THRESHOLD_DB
 	}
 	engine.gateMode = config.gateMode
 	engine.thresholdBits = transmute(u32)threshold
+	engine.inputGainBits = transmute(u32)engine.config.inputGain
+	engine.outputVolumeBits = transmute(u32)engine.config.outputVolume
+	engine.bitrateRequest = engine.encoderSettings.bitrate
 	engine.inputLevelBits = transmute(u32)VOICE_LEVEL_FLOOR_DB
 	return engine
 }
@@ -429,6 +446,9 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	}
 
 	engine.gate = {}
+	if sink.kind != .Device {
+		engine.appliedOutputVolume = transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
+	}
 	engine.frameSequence = 0
 	engine.stats = {}
 	engine.retiredJitter = {}
@@ -573,6 +593,8 @@ VoiceEngine_openPlayback :: proc(engine: ^VoiceEngine) -> bool {
 		return false
 	}
 	_ = SDL.ResumeAudioDevice(engine.playbackDevice)
+	engine.appliedOutputVolume = transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
+	_ = SDL.SetAudioDeviceGain(engine.playbackDevice, engine.appliedOutputVolume)
 	return true
 }
 
@@ -602,6 +624,38 @@ VoiceEngine_setGateMode :: proc(engine: ^VoiceEngine, mode: VoiceGateMode) {
 
 VoiceEngine_setVADThreshold :: proc(engine: ^VoiceEngine, thresholdDB: f32) {
 	sync.atomic_store(&engine.thresholdBits, transmute(u32)thresholdDB)
+}
+
+// VoiceEngine_setInputGain sets the linear gain applied to every captured frame before the
+// level meter and the gate see it, from the next frame on.
+VoiceEngine_setInputGain :: proc(engine: ^VoiceEngine, gain: f32) {
+	sync.atomic_store(&engine.inputGainBits, transmute(u32)max(gain, 0))
+}
+
+// VoiceEngine_setOutputVolume sets the linear gain on everything the engine plays. The voice
+// thread applies it on its next step: as the playback device's gain (SDL mixes every speaker
+// into that device), or to the mixed frame of a file or null sink.
+VoiceEngine_setOutputVolume :: proc(engine: ^VoiceEngine, volume: f32) {
+	sync.atomic_store(&engine.outputVolumeBits, transmute(u32)max(volume, 0))
+}
+
+// VoiceEngine_setBitrate asks for a new Opus bitrate in bit/s. The voice thread owns the
+// encoder, so it applies the change (OPUS_SET_BITRATE) on its next step; the stream goes on
+// without a restart.
+VoiceEngine_setBitrate :: proc(engine: ^VoiceEngine, bitrate: i32) {
+	sync.atomic_store(&engine.bitrateRequest, bitrate)
+}
+
+// VoiceEngine_bitrate is the bitrate the encoder uses now. Only meaningful on the voice
+// thread or while no thread runs (tests driving VoiceEngine_step).
+VoiceEngine_bitrate :: proc(engine: ^VoiceEngine) -> i32 {
+	return engine.encoderSettings.bitrate
+}
+
+// VoiceEngine_usedDeviceFallback says whether the last open could not find a named device and
+// used the system default instead, so the UI can say so. Written only by VoiceEngine_open.
+VoiceEngine_usedDeviceFallback :: proc(engine: ^VoiceEngine) -> bool {
+	return engine.deviceFallback
 }
 
 // VoiceEngine_inputLevel is the latest captured frame's level in dBFS and whether that frame
@@ -682,11 +736,34 @@ VoiceEngine_step :: proc(engine: ^VoiceEngine) {
 		engine.mediaClockMS += VOICE_FRAME_MS
 	}
 	now := VoiceEngine_clockMS(engine)
+	VoiceEngine_applyControls(engine)
 	VoiceEngine_capture(engine, now)
 	VoiceEngine_drainInbound(engine, now)
 	VoiceEngine_playout(engine, now)
 	VoiceEngine_expireSpeakers(engine, now)
 	VoiceEngine_publish(engine)
+}
+
+// Applies the controls that need the voice thread's own objects: the encoder's bitrate and
+// the playback device's gain.
+@(private = "file")
+VoiceEngine_applyControls :: proc(engine: ^VoiceEngine) {
+	bitrate := sync.atomic_load(&engine.bitrateRequest)
+	if bitrate > 0 && bitrate != engine.encoderSettings.bitrate && engine.encoder != nil {
+		if opus.encoderSetBitrate(engine.encoder, bitrate) == opus.OK {
+			engine.encoderSettings.bitrate = bitrate
+		} else {
+			// Refused (out of libopus's range): keep the current rate and stop asking.
+			sync.atomic_store(&engine.bitrateRequest, engine.encoderSettings.bitrate)
+		}
+	}
+	volume := transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
+	if volume != engine.appliedOutputVolume {
+		engine.appliedOutputVolume = volume
+		if engine.playbackDevice != 0 {
+			_ = SDL.SetAudioDeviceGain(engine.playbackDevice, volume)
+		}
+	}
 }
 
 @(private = "file")
@@ -763,7 +840,7 @@ VoiceEngine_generateFrame :: proc(engine: ^VoiceEngine) {
 @(private = "file")
 VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 	frame := engine.captureFrame[:]
-	gain := engine.config.inputGain
+	gain := transmute(f32)sync.atomic_load(&engine.inputGainBits)
 	if gain != 1 {
 		for &sample in frame {
 			sample = clamp(sample * gain, -1, 1)
@@ -1090,8 +1167,9 @@ VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine) {
 			mix[index] += sample
 		}
 	}
+	volume := engine.appliedOutputVolume
 	for &sample in mix {
-		sample = clamp(sample, -1, 1)
+		sample = clamp(sample * volume, -1, 1)
 	}
 	engine.stats.framesPlayed += 1
 	if engine.sinkFile != nil {

@@ -15,7 +15,14 @@ DISPLAY_NAME_MAX_BYTES :: 32
 SERVER_HOST_MAX_BYTES :: 253
 SERVER_PORT_MAX_BYTES :: 5
 
+// The settings screen's sections. First run shows only General.
+SettingsTab :: enum u8 {
+	General,
+	Voice,
+}
+
 SettingsForm :: struct {
+	tab:             SettingsTab,
 	displayName:     [dynamic]u8, // Edited in place by the text inputs
 	serverHost:      [dynamic]u8,
 	serverPort:      [dynamic]u8,
@@ -125,9 +132,10 @@ serverLabel :: proc(host: string, port: i32) -> string {
 	return fmt.aprintf("%s:%d", host, port)
 }
 
-State_openSettings :: proc(state: ^State) {
+State_openSettings :: proc(state: ^State, tab := SettingsTab.General) {
 	state.settingsOpen = true
 	form := &state.settings
+	form.tab = tab
 	setBuffer(&form.displayName, state.config.display_name)
 	delete(form.error)
 	form.error = ""
@@ -136,6 +144,13 @@ State_openSettings :: proc(state: ^State) {
 		editID = len(state.config.servers) > 0 ? state.config.servers[0].id : 0
 	}
 	State_settingsEditServer(state, editID)
+}
+
+State_selectSettingsTab :: proc(state: ^State, tab: SettingsTab) {
+	if State_needsFirstRunSetup(state.config) {
+		return
+	}
+	state.settings.tab = tab
 }
 
 // Closing is refused until first-run setup is complete, since there is nothing to show.
