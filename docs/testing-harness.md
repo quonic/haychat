@@ -80,6 +80,10 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms`. When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
+| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline"}]`, ordered by nickname). The list is fetched when the client connects and kept current by `presence` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
+| `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
+| `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
+| `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
 | `sleep MS` | Keeps servicing the connection for `MS` milliseconds, printing events. |
 | `help` | Lists the commands and event kinds. |
@@ -110,6 +114,11 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
+| `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
+| `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}]}` |
+| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true}]}` |
+| `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi"}]}` |
+| `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
@@ -120,6 +129,13 @@ exits with code 2).
 
 After `disconnected` the worker reconnects with the same backoff; `retryInMS` is the delay
 before its first attempt.
+
+Every `connected` is followed by `room_list`, `user_list`, and `conversations` events, because
+the client fetches all three for a new session. A `direct_message` belongs to the conversation
+with `recipientID` when `senderID` is your own `userID` (from `connected`), and with `senderID`
+otherwise. `presence` arrives when another account's first session signs in (`isOnline` true)
+or its last one ends (false); other sessions of an account that is already online send none.
+Direct messages belong to one server: user IDs from different servers are unrelated.
 
 ## Example: Two Agents Chatting
 
@@ -150,6 +166,36 @@ has been printed, so her first `wait room_chat` is satisfied at once by that ech
 `--name bob-1 --config-dir ./profiles/bob`, waits for `room_chat`, and replies with
 `send 1 hi alice`.
 
+## Example: Two Agents Exchanging a Direct Message
+
+Alice is online first, so she hears Bob come online. She finds his user ID with `users` and
+messages him:
+
+```text
+< {"event":"presence","serverID":1,"userID":4,"nickname":"bob-1","isOnline":true}
+> users
+< {"ok":true,"cmd":"users","serverID":1,"loaded":true,"loading":false,"users":[{"id":3,"nickname":"alice-1","isOnline":true},{"id":4,"nickname":"bob-1","isOnline":true}]}
+> dm 4 hello bob
+< {"ok":true,"cmd":"dm","serverID":1,"peerUserID":4}
+< {"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice-1","recipientID":4,"recipientNickname":"bob-1","timestamp":"...","content":"hello bob"}
+```
+
+The `direct_message` Alice sees is the server's echo of her own message. Bob's side:
+
+```text
+> wait direct_message 30000
+< {"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice-1","recipientID":4,"recipientNickname":"bob-1","timestamp":"...","content":"hello bob"}
+< {"ok":true,"cmd":"wait","event":"direct_message","waitedMS":1730}
+> dm-history 3
+< {"ok":true,"cmd":"dm-history","serverID":1,"peerUserID":3,"beforeMessageID":0}
+< {"event":"direct_history","serverID":1,"peerUserID":3,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice-1","recipientID":4,"recipientNickname":"bob-1","timestamp":"...","content":"hello bob"}]}
+> dm 3 hi alice
+< {"ok":true,"cmd":"dm","serverID":1,"peerUserID":3}
+```
+
+As with rooms, Alice's own echo already counts for `wait direct_message`, so she takes it with
+one `wait direct_message` before a second one waits for Bob's reply.
+
 From a shell script, give each client a named pipe for stdin and a file for stdout:
 
 ```sh
@@ -172,6 +218,9 @@ grep -F '"cmd":"send"' alice.out
    sends `reconnect` and waits for the worker to sign in again.
 2. A second client connects; the first sends a unique message to room 1 and the second must
    print a `room_chat` event with that text.
+3. The first client prints a `presence` event for the second, finds its user ID with `users`,
+   and sends it a unique direct message with `dm`; the second must print a `direct_message`
+   event with that text, and its `dm-history` with the first must contain it.
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before

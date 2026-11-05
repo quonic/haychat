@@ -8,6 +8,9 @@ set -euo pipefail
 #   1. single client: connect, `status`, `wait room_list`, `rooms`, then `reconnect` and wait
 #      for the worker to connect again
 #   2. two clients:   A sends to room 1 and B must print the matching room_chat event
+#   3. direct message: A sees B come online (presence), finds B's ID with `users`, and sends
+#      it a direct message; B must print the matching direct_message event, and B's
+#      `dm-history` with A must contain it
 #
 # dev/live-proof.sh --harness runs it against its throwaway server. It needs bash and
 # coreutils only; JSON lines are matched as text because the harness prints compact JSON
@@ -93,6 +96,27 @@ wait_for_line() {
 	return 1
 }
 
+# wait_for_match CLIENT REGEX [START_LINE]: like wait_for_line, for an extended regex.
+wait_for_match() {
+	local client=$1 pattern=$2 start=${3:-0} line
+	local deadline=$((SECONDS + command_timeout_secs))
+	while ((SECONDS < deadline)); do
+		line=$(tail -n "+$((start + 1))" "$work_dir/$client.out" | grep -E -m1 -- "$pattern" |
+			grep '}$' || true)
+		if [[ -n "$line" ]]; then
+			printf '%s\n' "$line"
+			return 0
+		fi
+		if ! kill -0 "${client_pid[$client]}" 2>/dev/null; then
+			echo "client $client exited while waiting for: $pattern" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+	echo "client $client timed out after ${command_timeout_secs}s waiting for: $pattern" >&2
+	return 1
+}
+
 # client_command CLIENT COMMAND...: sends one command line and prints its result line. Results
 # are the only lines that start with {"ok": and commands run in order, so the first result
 # after the send belongs to this command.
@@ -175,6 +199,40 @@ chat_line=$(wait_for_line b "\"content\":\"$message\"" 0) ||
 	fail "[two-client] client b received a room_chat event without the sent text"
 echo "    b< $chat_line"
 echo "==> [harness] two clients passed"
+
+echo "==> [harness] direct message: A finds B with \`users\`, B receives A's message"
+nickname_b="harness-b-$run_tag"
+# B's first session signing in is announced to every other session, so A hears of it.
+presence_line=$(wait_for_match a \
+	"^\\{\"event\":\"presence\",.*\"nickname\":\"$nickname_b\",\"isOnline\":true\\}$") ||
+	fail "[dm] client a did not receive a presence event for $nickname_b"
+echo "    a< $presence_line"
+expect_ok a users
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_b\",\"isOnline\":true\} ]] ||
+	fail "[dm] client a's users do not list $nickname_b as online"
+user_b=${BASH_REMATCH[1]}
+dm_message="harness dm $run_tag"
+expect_ok a dm "$user_b" "$dm_message"
+if ! received=$(client_command b wait direct_message 5000) ||
+	[[ "$received" != '{"ok":true,'* ]]; then
+	fail "[dm] client b did not receive a direct_message event within 5 s (${received:-no result})"
+fi
+dm_line=$(wait_for_match b \
+	"^\\{\"event\":\"direct_message\",.*\"content\":\"$dm_message\"\\}$") ||
+	fail "[dm] client b received a direct_message event without the sent text"
+echo "    b< $dm_line"
+[[ "$dm_line" =~ \"senderID\":([0-9]+), ]] || fail "[dm] the direct_message has no senderID"
+user_a=${BASH_REMATCH[1]}
+[[ "$dm_line" == *"\"recipientID\":$user_b,"* ]] ||
+	fail "[dm] the direct_message is not addressed to user $user_b"
+history_start=$(wc -l <"$work_dir/b.out")
+expect_ok b dm-history "$user_a"
+history_line=$(wait_for_match b "^\\{\"event\":\"direct_history\",.*\"peerUserID\":$user_a," \
+	"$history_start") || fail "[dm] client b did not receive a direct_history page"
+[[ "$history_line" == *"\"content\":\"$dm_message\""* ]] ||
+	fail "[dm] client b's history with user $user_a does not contain the message: $history_line"
+echo "    b< $history_line"
+echo "==> [harness] direct message passed"
 
 stop_client a
 stop_client b

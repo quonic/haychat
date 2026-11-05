@@ -4,6 +4,7 @@ package client
 import "../common"
 import "core:fmt"
 import "core:strings"
+import "core:sync"
 import "core:testing"
 import "core:time"
 
@@ -473,6 +474,10 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 
 @(test)
 testHeadlessCommandResults :: proc(t: ^testing.T) {
+	// `send` must go through the real transport, but other tests swap the room chat send
+	// bridge for a stub while they run, so hold their lock.
+	sync.mutex_lock(&roomChatSendBridgeTestMutex)
+	defer sync.mutex_unlock(&roomChatSendBridgeTestMutex)
 	builder := strings.builder_make()
 	harness := testHeadlessHarness(&builder, 802)
 	defer testHeadlessHarnessDeinit(&harness, &builder)
@@ -735,5 +740,210 @@ testHeadlessConnectTimesOutWhileTheServerIsUnreachable :: proc(t: ^testing.T) {
 		t,
 		harness.pendingEvents[.ConnectFailed] == 1,
 		"expected the timeout to be counted for wait",
+	)
+}
+
+@(test)
+testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
+	direct := ClientTransportRuntimeEvent {
+		kind = .DirectMessageReceived,
+		serverID = 1,
+		directMessage = {
+			id = 12,
+			senderId = 3,
+			senderNickname = "alice",
+			recipientId = 4,
+			recipientNickname = "bob",
+			timestamp = "t",
+			content = "hi bob",
+		},
+	}
+	line, kind, ok := headlessRenderRuntimeEvent(&direct)
+	testing.expect(t, ok && kind == .DirectMessage, "expected a direct_message event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"direct_message","serverID":1,"id":12,"senderID":3,"senderNickname":"alice",` +
+		`"recipientID":4,"recipientNickname":"bob","timestamp":"t","content":"hi bob"}`,
+		"the direct_message JSON",
+	)
+	delete(line)
+
+	history := ClientTransportRuntimeEvent {
+		kind       = .DirectHistoryReceived,
+		serverID   = 1,
+		peerUserID = 4,
+		hasOlder   = true,
+	}
+	append(
+		&history.directMessages,
+		common.StoredDirectMessage {
+			id = 9,
+			senderId = 4,
+			senderNickname = strings.clone("bob"),
+			recipientId = 3,
+			recipientNickname = strings.clone("alice"),
+			timestamp = strings.clone("t"),
+			content = strings.clone("old"),
+		},
+	)
+	defer ClientTransportRuntimeEvent_deinit(&history)
+	line, kind, ok = headlessRenderRuntimeEvent(&history)
+	testing.expect(t, ok && kind == .DirectHistory, "expected a direct_history event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":true,"messages":[` +
+		`{"id":9,"senderID":4,"senderNickname":"bob","recipientID":3,` +
+		`"recipientNickname":"alice","timestamp":"t","content":"old"}]}`,
+		"the direct_history JSON",
+	)
+	delete(line)
+
+	users := ClientTransportRuntimeEvent {
+		kind     = .UserListReceived,
+		serverID = 1,
+	}
+	append(&users.users, common.UserSummary{id = 4, nickname = strings.clone("bob")})
+	defer ClientTransportRuntimeEvent_deinit(&users)
+	line, kind, ok = headlessRenderRuntimeEvent(&users)
+	testing.expect(t, ok && kind == .UserList, "expected a user_list event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"user_list","serverID":1,"users":[{"id":4,"nickname":"bob","isOnline":false}]}`,
+		"the user_list JSON",
+	)
+	delete(line)
+
+	conversations := ClientTransportRuntimeEvent {
+		kind     = .DirectConversationsReceived,
+		serverID = 1,
+	}
+	append(
+		&conversations.conversations,
+		common.DirectConversationSummary {
+			peerUserId = 4,
+			peerNickname = strings.clone("bob"),
+			lastMessageID = 12,
+			lastSenderId = 3,
+			lastTimestamp = strings.clone("t"),
+			lastContent = strings.clone("hi bob"),
+		},
+	)
+	defer ClientTransportRuntimeEvent_deinit(&conversations)
+	line, kind, ok = headlessRenderRuntimeEvent(&conversations)
+	testing.expect(t, ok && kind == .Conversations, "expected a conversations event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,` +
+		`"peerNickname":"bob","lastMessageID":12,"lastSenderID":3,"lastTimestamp":"t",` +
+		`"lastContent":"hi bob"}]}`,
+		"the conversations JSON",
+	)
+	delete(line)
+
+	presence := ClientTransportRuntimeEvent {
+		kind = .UserPresenceChanged,
+		serverID = 1,
+		user = {id = 4, nickname = "bob", isOnline = true},
+	}
+	line, kind, ok = headlessRenderRuntimeEvent(&presence)
+	testing.expect(t, ok && kind == .Presence, "expected a presence event")
+	testExpectString(
+		t,
+		line,
+		`{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}`,
+		"the presence JSON",
+	)
+	delete(line)
+}
+
+@(test)
+testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
+	// Another test swaps the send bridge for a stub; this one needs the real transport.
+	sync.mutex_lock(&directMessageSendBridgeTestMutex)
+	defer sync.mutex_unlock(&directMessageSendBridgeTestMutex)
+	builder := strings.builder_make()
+	harness := testHeadlessHarness(&builder, 803)
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+	testApplyConnected(&harness.state, 803, 3)
+	testApplyUserList(
+		&harness.state,
+		803,
+		{id = 3, nickname = "alice", isOnline = true},
+		{id = 4, nickname = "bob"},
+	)
+
+	headlessHandleLine(&harness, "users")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":true,"cmd":"users","serverID":803,"loaded":true,"loading":false,"users":[` +
+		`{"id":3,"nickname":"alice","isOnline":true},{"id":4,"nickname":"bob",` +
+		`"isOnline":false}]}` +
+		"\n",
+		"the users result",
+	)
+
+	// The test transport has no live session, so the list request fails and stays unloaded.
+	headlessHandleLine(&harness, "conversations")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":true,"cmd":"conversations","serverID":803,"loaded":false,"loading":false,` +
+		`"conversations":[]}` +
+		"\n",
+		"the conversations result",
+	)
+
+	headlessHandleLine(&harness, "dm 4")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":false,"cmd":"dm","error":"usage: dm USER_ID TEXT..."}` + "\n",
+		"the dm usage error",
+	)
+
+	headlessHandleLine(&harness, "dm 4 hello bob")
+	output := testHeadlessTakeOutput(&builder)
+	testing.expect(
+		t,
+		strings.has_prefix(output, `{"ok":false,"cmd":"dm","error":`),
+		fmt.tprintf("expected a dm failure without a live session, got %s", output),
+	)
+	testing.expect(
+		t,
+		len(testDirectCache(&harness.state, 803, 4).draft) == 0,
+		"expected a failed dm to leave no draft behind",
+	)
+
+	headlessHandleLine(&harness, "dm-history x")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":false,"cmd":"dm-history","error":"usage: dm-history USER_ID ` +
+		`[BEFORE_MESSAGE_ID]"}` +
+		"\n",
+		"the dm-history usage error",
+	)
+
+	headlessHandleLine(&harness, "dm-history 4 10")
+	output = testHeadlessTakeOutput(&builder)
+	testing.expect(
+		t,
+		strings.has_prefix(output, `{"ok":false,"cmd":"dm-history","error":`),
+		fmt.tprintf("expected a dm-history failure without a live session, got %s", output),
+	)
+
+	headlessHandleLine(&harness, "help")
+	output = testHeadlessTakeOutput(&builder)
+	testing.expect(
+		t,
+		strings.contains(output, `{"usage":"dm USER_ID TEXT...",`) &&
+		strings.contains(output, `"direct_message"`) &&
+		strings.contains(output, `"presence"`),
+		fmt.tprintf("expected help to list the DM commands and events, got %s", output),
 	)
 }

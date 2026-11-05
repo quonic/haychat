@@ -12,7 +12,7 @@ HayChat is a self-hosted alternative to Discord. It features encrypted client-se
 - Encrypted transport between client and server: Ed25519 identities, X25519 key exchange, and XChaCha20-Poly1305 packets, with the server key pinned on first connect. The server decrypts messages and stores them unencrypted in its PostgreSQL database; end-to-end encryption is not implemented yet.
 - Real-time messaging with low latency
 - User-friendly interface with customizable themes
-- Support for server chat in shared rooms, with direct messages planned for a later release
+- Server chat in shared rooms, and direct messages between any two accounts on a server
 - Cross-platform compatibility (Windows, Linux, macOS(planned))
 - Modular architecture for easy addition of new features
 - Comprehensive testing suite for reliability
@@ -53,7 +53,6 @@ Client config keys (`config.json`):
 | `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
 | `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
 | `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes; replaced by **Trust the new key** |
-| `friends[]` | Placeholder direct-message contacts (direct messages are not implemented yet) |
 
 ### Development Environment
 
@@ -66,7 +65,7 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof, the harness smoke test, and the server SQL proof |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat and direct message proofs, the harness smoke test, and the server SQL proof |
 | `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
@@ -197,6 +196,8 @@ On startup, a server whose `rooms` table is empty creates `#general` ("General d
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one server: they are stored in its `direct_messages` table, survive restarts, and are paged like room history. Like room chat, they are encrypted in transit to the server but are not end-to-end encrypted, so the server and its operator can read them. A sent message is delivered to every connected session of both the sender and the recipient. The server also lists every account with an online flag (online while at least one of its sessions is authenticated) and tells connected sessions when an account comes online or goes offline. Direct messages arrived with protocol version 7; clients and servers on older versions refuse each other with "Unsupported protocol version".
 
+In the client, the selected server's sidebar lists its channels, then **Direct Messages** (recent conversations, newest first) and **Members** (every other account, online first, then alphabetical). A green dot marks an account that is online. Clicking a conversation or a member opens the conversation in the main pane, with the person's name and online state in the header, the transcript (your own messages are labelled "You"), **Load older messages** while older ones exist, and a composer like the room one; clicking a channel goes back to it. A message that arrives for a conversation that is not open moves it to the top of **Direct Messages** and shows an unread count until you open it. The server keeps no read state, so unread counts start at zero each time the client starts. Conversations belong to one server; the rail has no separate direct-message button.
+
 ### Continuous Integration
 
 HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
@@ -231,7 +232,7 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - Private rooms are not implemented. Every account joins every room (see Rooms), and the client has no UI to create rooms or manage members; admins can do both only through the protocol messages.
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
-- Direct messages are implemented in the server and protocol only; the client does not show or send them yet.
+- Direct messages have no read receipts or server-side unread state; the client counts unread messages only while it is running.
 
 ## License
 

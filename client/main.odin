@@ -9,7 +9,6 @@ import "core:os"
 import "core:strings"
 
 CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
-DIRECT_MESSAGES_UNSUPPORTED_STATUS :: "Direct messages are not supported yet"
 
 RoomChatSendBridge :: proc(transport: ^ClientServerTransport, roomID: int, content: string) -> bool
 
@@ -23,21 +22,6 @@ RoomCache :: struct {
 	isLoadingHistory:     bool,
 	oldestMessageID:      int,
 	hasOlder:             bool,
-}
-
-// One line of a direct-message transcript. Both strings are owned.
-DMLine :: struct {
-	senderName: string,
-	text:       string,
-}
-
-DMLines_deinit :: proc(lines: ^[dynamic]DMLine) {
-	for line in lines {
-		delete(line.senderName)
-		delete(line.text)
-	}
-	delete(lines^)
-	lines^ = nil
 }
 
 ServerRoomCache :: struct {
@@ -54,16 +38,17 @@ State :: struct {
 	should_join_server_from_scheme: bool,
 	joinServerFromScheme_host:      string,
 	joinServerFromScheme_port:      string,
-	view_dms:                       bool,
-	view_friends_list:              bool,
-	selected_server_id:             int, // ID of the currently selected server, used for determining which server's channels and friends to display in the UI
+	// The server whose channels, conversations, and members the sidebar shows.
+	selected_server_id:             int,
 	selected_transport_index:       int,
-	selected_friend_id:             int,
-	current_dm_chat:                [dynamic]DMLine,
-	dm_chat_draft:                  [dynamic]u8, // Edited in place by the DM chat input
 	chat_status_message:            string,
 	selected_channel_id:            int, // ID of the currently selected channel within the selected server, used for determining which channel's messages to display in the UI
+	// The peer of the open direct conversation on the selected server, or 0 while a room is
+	// shown. Kept apart from selected_channel_id so closing the conversation restores the room.
+	selected_dm_peer_id:            int,
 	server_room_caches:             [dynamic]ServerRoomCache,
+	// Directory, conversation list, and conversation caches per server (direct_messages.odin).
+	serverDirectCaches:             [dynamic]ServerDirectCache,
 	// Connects and services every server session off the UI thread; nil until
 	// State_startNetwork. Tests that never start it get no network I/O at all.
 	networkWorker:                  ^ClientNetworkWorker,
@@ -119,8 +104,6 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 		State_resetServerConnection(&init_state, transport)
 	}
 
-	init_state.view_dms = false
-	init_state.view_friends_list = false
 	init_state.selected_transport_index = -1
 	init_state.selected_channel_id = common.GENERAL_ROOM_ID
 	if len(init_state.config.servers) > 0 {
@@ -175,13 +158,15 @@ State_deinit :: proc(state: ^State) {
 	ClientTransportCatalog_deinit(&state.serverTransports)
 	delete(state.joinServerFromScheme_host)
 	delete(state.joinServerFromScheme_port)
-	DMLines_deinit(&state.current_dm_chat)
-	delete(state.dm_chat_draft)
 	delete(state.chat_status_message)
 	for index in 0 ..< len(state.server_room_caches) {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
 	}
 	delete(state.server_room_caches)
+	for index in 0 ..< len(state.serverDirectCaches) {
+		ServerDirectCache_deinit(&state.serverDirectCaches[index])
+	}
+	delete(state.serverDirectCaches)
 	for index in 0 ..< len(state.serverConnections) {
 		ServerConnection_deinit(&state.serverConnections[index])
 	}

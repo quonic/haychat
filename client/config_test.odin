@@ -176,7 +176,6 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigToCurrentXdgPath :: proc(t: ^te
 	legacyConfig := Config {
 		display_name = "Legacy Linux Tester",
 		servers      = {},
-		friends      = {},
 	}
 	legacyJSON, legacyJSONErr := json.marshal(legacyConfig, allocator = context.temp_allocator)
 	assert(legacyJSONErr == nil, "expected legacy config JSON encode to succeed")
@@ -261,7 +260,6 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigFromDefaultConfigHome :: proc(t
 	legacyConfig := Config {
 		display_name = "Default Linux Tester",
 		servers      = {},
-		friends      = {},
 	}
 	legacyJSON, legacyJSONErr := json.marshal(legacyConfig, allocator = context.temp_allocator)
 	assert(legacyJSONErr == nil, "expected legacy config JSON encode to succeed")
@@ -289,5 +287,27 @@ testLoadConfigMigratesHistoricalLegacyLinuxConfigFromDefaultConfigHome :: proc(t
 		"expected migrated config to be written to the default XDG path",
 	)
 
+	_ = t
+}
+
+// Configs written before direct messages existed carry a placeholder `friends` list. The key
+// is no longer part of Config, so loading must skip it and keep everything else.
+@(test)
+testConfigWithRemovedFriendsKeyStillLoads :: proc(t: ^testing.T) {
+	data := `{"display_name":"Old Tester","servers":[{"id":3,"name":"Old","short_name":"O",` +
+		`"host":"example.org","port":12345}],"friends":[{"id":1,"display_name":"New Friend",` +
+		`"public_key":"x","servers":[3],"status":"Online"}]}`
+	config: Config
+	err := json.unmarshal(transmute([]u8)data, &config)
+	defer Config_deinit(&config)
+	assert(err == nil, fmt.tprintf("expected the old config to load, got %v", err))
+	assert(
+		config.display_name == "Old Tester",
+		fmt.tprintf("expected display name Old Tester, got %q", config.display_name),
+	)
+	assert(
+		len(config.servers) == 1 && config.servers[0].host == "example.org",
+		fmt.tprintf("expected the one saved server, got %v", config.servers),
+	)
 	_ = t
 }

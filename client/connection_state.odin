@@ -125,6 +125,7 @@ State_saveConfig :: proc(state: ^State) {
 // Requests in flight died with the session, so their loading flags must not block new ones.
 @(private = "file")
 State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {
+	State_resetDirectRequests(state, serverID, reloadHistory)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return
@@ -173,6 +174,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 
 	State_resetPendingRequests(state, event.serverID, true)
 	State_requestRoomList(state, event.serverID)
+	State_requestDirectStateAfterConnect(state, event.serverID)
 }
 
 // Takes ownership of the event's message and offered key.
