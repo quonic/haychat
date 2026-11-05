@@ -132,19 +132,36 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	"WHERE conrelid = 'public.direct_messages'::regclass AND contype = 'p')) " +
 	") SELECT COALESCE(string_agg(name, ', ' ORDER BY name), '') FROM checks WHERE NOT valid;"
 
-// Binds a client identity key to a nickname. A keyless account can be claimed on first
-// connect only when it holds no server roles; privileged keyless accounts (such as the
-// seeded admin) can only be claimed by the configured HAYCHAT_ADMIN_PUBLIC_KEY ($3).
+// Binds a client identity key to a nickname. The key is the identity; the nickname is the
+// account's current display name. One statement, so the checks and the write cannot race:
 //
-// Rooms are open: an account created by this statement joins every existing room in the
-// same statement, so it can chat as soon as it authenticates. `existing` reads the snapshot
-// from before the upsert, so only a brand-new nickname joins; returning or claimed accounts
-// keep whatever membership an admin gave them. The membership insert reads from `resolved`,
-// which is empty when the identity is not claimable, so a refused login joins nothing.
+// - The key owns an account (`by_key`) under this nickname: resolve to it.
+// - The key owns an account under another nickname: `renamed` renames it when no other
+//   account holds the new nickname, and returns no row (a refused login) when one does.
+// - The key owns no account: `inserted` creates one, or claims the nickname's keyless account.
+//   A keyless account can be claimed only when it holds no server roles; privileged keyless
+//   accounts (such as the seeded admin) can only be claimed by HAYCHAT_ADMIN_PUBLIC_KEY ($3).
+//   A nickname bound to another key is refused.
+//
+// Rooms are open: an account created by this statement joins every existing room in the same
+// statement, so it can chat as soon as it authenticates. `existing` reads the snapshot from
+// before the write, so only a brand-new nickname joins; a rename, a returning account, or a
+// claimed account keeps whatever membership it had. The membership insert reads from
+// `inserted`, which is empty when the key already owns an account or the identity is not
+// claimable, so a refused login joins nothing.
+//
+// Columns: user ID, whether this was a rename, and the nickname before the rename.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
-	"WITH existing AS (SELECT id FROM users WHERE nickname = $1), " +
-	"resolved AS (" +
-	"INSERT INTO users (nickname, public_key) VALUES ($1, decode($2, 'hex')) " +
+	"WITH by_key AS (SELECT id, nickname FROM users WHERE public_key = decode($2, 'hex')), " +
+	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
+	"renamed AS (" +
+	"UPDATE users SET nickname = $1 FROM by_key " +
+	"WHERE users.id = by_key.id AND by_key.nickname <> $1 " +
+	"AND NOT EXISTS (SELECT 1 FROM existing) " +
+	"RETURNING users.id, by_key.nickname::text AS previous_nickname), " +
+	"inserted AS (" +
+	"INSERT INTO users (nickname, public_key) " +
+	"SELECT $1, decode($2, 'hex') WHERE NOT EXISTS (SELECT 1 FROM by_key) " +
 	"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
 	"WHERE users.public_key = EXCLUDED.public_key OR (users.public_key IS NULL AND (" +
 	"NOT EXISTS (SELECT 1 FROM user_server_roles usr WHERE usr.user_id = users.id) " +
@@ -152,9 +169,14 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"RETURNING id), " +
 	"joined AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
-	"SELECT r.id, resolved.id FROM rooms r CROSS JOIN resolved " +
-	"WHERE NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING) " +
-	"SELECT id::text FROM resolved"
+	"SELECT r.id, inserted.id FROM rooms r CROSS JOIN inserted " +
+	"WHERE NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING), " +
+	"resolved AS (" +
+	"SELECT id, false AS is_rename, ''::text AS previous_nickname FROM by_key " +
+	"WHERE nickname = $1 " +
+	"UNION ALL SELECT id, true, previous_nickname FROM renamed " +
+	"UNION ALL SELECT id, false, '' FROM inserted) " +
+	"SELECT id::text, is_rename::text, previous_nickname FROM resolved"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
 // loading a fixture. Rooms are open, so every existing account joins it. On an empty table
@@ -418,12 +440,16 @@ databaseExecuteUserIdentityResolution :: proc(
 		return databaseResultError(&result)
 	}
 
-	// No row means the nickname is bound to a different key or is not claimable.
-	userID := 0
+	// No row means the nickname is bound to a different account or is not claimable.
+	identity: common.DatabaseUserIdentityResult
 	if pg.n_tuples(result) == 1 {
-		userID, _ = databaseGetInt(result, 0, 0)
+		identity.userId, _ = databaseGetInt(result, 0, 0)
+		identity.renamed = databaseGetBool(result, 0, 1)
+		if identity.renamed {
+			identity.previousNickname = databaseGetText(result, 0, 2)
+		}
 	}
-	return databaseSuccess(common.DatabaseUserIdentityResult{userId = userID})
+	return databaseSuccess(identity)
 }
 
 databaseExecuteListRoomsForUser :: proc(

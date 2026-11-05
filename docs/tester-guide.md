@@ -93,10 +93,12 @@ two names, for example `alice` and `alice-laptop`.
 To add, edit, or remove a server later, open **Settings** with the gear button at the bottom
 of the narrow server bar on the left.
 
-**Choose your name carefully: you cannot change it yet.** A server keeps exactly one name for
-each identity, so after you have connected once, the server refuses any other name from your
-client with "The name … is already in use on this server", even when nobody else has that
-name. If you see that after editing your name in Settings, change it back.
+**You can change your name later** in **Settings**. The client reconnects, and each server
+renames your account: you keep the same rooms and direct messages, and other people see the
+new name straight away. The new name must be free; if another account has it, you get "The
+name … is already in use on this server" and should pick another one. Messages other people
+already have on screen keep the name you sent them with until their client loads that
+history again (for example after a restart).
 
 ### Your Identity
 
@@ -130,7 +132,7 @@ While the selected server is not connected, a **banner** above the room explains
 | --- | --- | --- |
 | "Connecting to …" | The client is trying to reach the server | Wait a few seconds |
 | "Could not connect to …" / "Disconnected from …", with a countdown | The server cannot be reached or the connection dropped. The client tries again after 1, 2, 4, … seconds, up to every 30 seconds | Nothing; it reconnects by itself when the server is back. **Retry now** skips the wait. If it never connects, check the host and port with the maintainer |
-| "The name … is already in use on this server" | Someone else, or another of your computers, already has that name. You also see this after changing your own name: see [First Run](#first-run) | Open **Settings** and choose another name (or your original one) |
+| "The name … is already in use on this server" | Someone else, or another of your computers, already has that name | Open **Settings** and choose another name |
 | "The server's identity key does not match the one pinned for it" | The server presents a different identity than the first time you connected. That is expected after the maintainer reset or reinstalled the server, but it could also mean someone is pretending to be the server | Ask the maintainer whether the server was reset. Only then press **Trust the new key** |
 | "This client and the server speak different protocol versions" | Your client is older or newer than the server | Download the client version that matches the server |
 | "Display names must be 3 to 32 bytes long" | The name in Settings is too short or too long | Change it in **Settings** |
@@ -151,7 +153,10 @@ Use HayChat as you would use any chat app, and keep an eye on these:
 - **Reconnecting:** put your computer to sleep, switch networks, or ask the maintainer to
   restart the server. The client should reconnect without you doing anything, and no
   messages should be missing or doubled.
-- **Names:** try a name somebody else already uses; you should get a clear message.
+- **Names:** try a name somebody else already uses; you should get a clear message. Change
+  your own name in **Settings**; the others should see the new name under **Members** and
+  **Direct Messages** without restarting, and your rooms and conversations should still be
+  there.
 - **Direct messages:** click another tester under **Members** and message them. Check that
   both of you see the conversation, that it moves to the top of **Direct Messages** with an
   unread count when you are looking at something else, and that it is still there after

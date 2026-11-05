@@ -177,9 +177,10 @@ podman run -d --pod haychat --name haychat-server --init \
 podman logs -f haychat-server       # "=== Server Running ===" means it is ready
 ```
 
-Start PostgreSQL first: the server exits when it cannot reach the database at startup, and
-it exits with status 0, so `--restart on-failure` would not bring it back. The quadlet units
-start the server only after PostgreSQL reports healthy and restart it on any exit. `podman stop haychat-server` sends SIGINT
+Start PostgreSQL first: the server exits when it cannot reach the database at startup. Every
+failed start prints a line starting with `[Startup]` and exits with status 1, so
+`--restart on-failure` brings it back; a clean shutdown exits 0. The quadlet units start the
+server only after PostgreSQL reports healthy and restart it on any exit. `podman stop haychat-server` sends SIGINT
 and waits for the graceful shutdown. Leave out `--env-file` when you have no overrides.
 
 ## Environment Variables

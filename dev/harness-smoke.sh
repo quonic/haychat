@@ -11,6 +11,9 @@ set -euo pipefail
 #   3. direct message: A sees B come online (presence), finds B's ID with `users`, and sends
 #      it a direct message; B must print the matching direct_message event, and B's
 #      `dm-history` with A must contain it
+#   4. rename:         B quits and comes back from the same profile (the same identity key)
+#      under a new name; A must see the same user ID come online with the new nickname, and
+#      A's `users` must list it under that name
 #
 # dev/live-proof.sh --harness runs it against its throwaway server. It needs bash and
 # coreutils only; JSON lines are matched as text because the harness prints compact JSON
@@ -59,14 +62,15 @@ fail() {
 	exit 1
 }
 
-# start_client NAME NICKNAME: starts a headless client with its own profile directory. Its
-# stdin is a named pipe held open on a file descriptor, so the client keeps running between
+# start_client NAME NICKNAME [PROFILE]: starts a headless client with its own profile
+# directory (profile-NAME, or profile-PROFILE to reuse another client's identity). Its stdin
+# is a named pipe held open on a file descriptor, so the client keeps running between
 # commands; closing it would be EOF, which the harness treats as quit.
 start_client() {
-	local client=$1 nickname=$2 fd
+	local client=$1 nickname=$2 profile=${3:-$1} fd
 	mkfifo "$work_dir/$client.in"
 	"$client_bin" --headless --name "$nickname" --server "$server_address" \
-		--config-dir "$work_dir/profile-$client" \
+		--config-dir "$work_dir/profile-$profile" \
 		--connect-timeout "$((command_timeout_secs * 1000))" \
 		<"$work_dir/$client.in" >"$work_dir/$client.out" 2>"$work_dir/$client.err" &
 	client_pid[$client]=$!
@@ -234,6 +238,24 @@ history_line=$(wait_for_match b "^\\{\"event\":\"direct_history\",.*\"peerUserID
 echo "    b< $history_line"
 echo "==> [harness] direct message passed"
 
-stop_client a
+# The identity is the key, so the same profile under a new name renames user B rather than
+# creating an account or being refused as a taken name.
+echo "==> [harness] rename: B returns from the same profile under a new name"
+renamed_b="harness-r-$run_tag"
+rename_start=$(wc -l <"$work_dir/a.out")
 stop_client b
+start_client b2 "$renamed_b" b
+expect_connected b2
+rename_pattern="^\\{\"event\":\"presence\",.*\"userID\":$user_b,"
+rename_pattern+="\"nickname\":\"$renamed_b\",\"isOnline\":true\\}$"
+rename_line=$(wait_for_match a "$rename_pattern" "$rename_start") ||
+	fail "[rename] client a did not see user $user_b come back as $renamed_b"
+echo "    a< $rename_line"
+expect_ok a users
+[[ "$last_result" == *"{\"id\":$user_b,\"nickname\":\"$renamed_b\",\"isOnline\":true}"* ]] ||
+	fail "[rename] client a's users do not list user $user_b as $renamed_b"
+echo "==> [harness] rename passed"
+
+stop_client a
+stop_client b2
 echo "==> [harness] passed"

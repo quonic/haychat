@@ -6,6 +6,7 @@ import "core:c/libc"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sync"
 
@@ -382,11 +383,16 @@ MainRouterState_sendAuthSuccess :: proc(
 // the flag). Marking it first would let a failed send reach MainRouterState_protocolViolation
 // as an authenticated session, which announces offline a user nobody heard come online.
 // sendAuthSuccess exists so router tests can make the send fail.
+//
+// renamed means this login gave the account a new nickname. Presence normally goes out only
+// for a user's first session, but a rename must reach everyone who already sees the user
+// online, so it is announced even when another session of the user is authenticated.
 MainRouterState_completeAuthentication :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	peerID: u32,
 	userID: int,
+	renamed := false,
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
 	if session, sessionOK := MainRouterState_getPeerSession(state, peerID);
@@ -404,7 +410,10 @@ MainRouterState_completeAuthentication :: proc(
 	session.isAuthenticated = true
 	session.authenticatedUserID = userID
 	MainRouterState_setPeerSession(state, peerID, session)
-	if !wasOnline {
+	if renamed {
+		MainRouterState_renameUserSessions(state, userID, session.clientNickname)
+	}
+	if !wasOnline || renamed {
 		MainRouterState_broadcastPresence(
 			pm,
 			state,
@@ -413,6 +422,23 @@ MainRouterState_completeAuthentication :: proc(
 			true,
 			peerID,
 		)
+	}
+}
+
+// Gives every authenticated session of userID the account's new nickname, so the offline
+// notice sent when the last of them ends carries the current name rather than the old one.
+MainRouterState_renameUserSessions :: proc(
+	state: ^MainRouterState,
+	userID: int,
+	nickname: string,
+) {
+	for _, &session in state.peerSessions {
+		if session.isAuthenticated &&
+		   session.authenticatedUserID == userID &&
+		   session.clientNickname != nickname {
+			delete(session.clientNickname)
+			session.clientNickname = strings.clone(nickname)
+		}
 	}
 }
 
@@ -1335,7 +1361,21 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 
-		MainRouterState_completeAuthentication(pm, state, request.peerID, identity.userId)
+		if identity.renamed {
+			fmt.printfln(
+				"[Main] User %d renamed from %q on peer %d",
+				identity.userId,
+				identity.previousNickname,
+				request.peerID,
+			)
+		}
+		MainRouterState_completeAuthentication(
+			pm,
+			state,
+			request.peerID,
+			identity.userId,
+			identity.renamed,
+		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
 		if MainRouterState_databaseFailed(pm, state, request.peerID, response, roomListOK) {
@@ -1690,6 +1730,15 @@ MainRouterState_handleDatabaseResult :: proc(
 	}
 }
 
+// Exit status for a server that could not start: non-zero, so a service manager
+// (systemd Restart=on-failure) or a script can tell a failed start from a clean shutdown.
+MAIN_STARTUP_FAILURE_EXIT_CODE :: 1
+
+// Ends a failed startup after the caller has printed why and released what it started.
+mainExitStartupFailure :: proc() -> ! {
+	os.exit(MAIN_STARTUP_FAILURE_EXIT_CODE)
+}
+
 main :: proc() {
 
 	fmt.println("=== HayChat Server - Threaded Architecture ===")
@@ -1698,7 +1747,7 @@ main :: proc() {
 	if len(configErr) > 0 {
 		fmt.eprintfln("[Startup] %s", configErr)
 		delete(configErr)
-		return
+		mainExitStartupFailure()
 	}
 	fmt.println("Configuration loaded:")
 	fmt.printfln("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
@@ -1728,29 +1777,29 @@ main :: proc() {
 
 	fmt.println("=== Starting Service Threads ===")
 	if !spawnProcess(&pm, .Database) {
-		fmt.println("[Database] Failed to start database service thread")
+		fmt.eprintln("[Startup] failed to start the database service thread")
 		pm.shouldShutdown = true
 		shutdownAllProcesses(&pm)
-		return
+		mainExitStartupFailure()
 	}
 	if databaseStartupErr := waitForDatabaseStartupAck(&pm); len(databaseStartupErr) > 0 {
 		fmt.eprintfln("[Startup] %s", databaseStartupErr)
 		pm.shouldShutdown = true
 		shutdownAllProcesses(&pm)
 		delete(databaseStartupErr)
-		return
+		mainExitStartupFailure()
 	}
 	if !spawnProcess(&pm, .Network) {
-		fmt.println("[Network] Failed to start network service thread")
+		fmt.eprintln("[Startup] failed to start the network service thread")
 		pm.shouldShutdown = true
 		shutdownAllProcesses(&pm)
-		return
+		mainExitStartupFailure()
 	}
 	if !spawnProcess(&pm, .WebAdmin) {
-		fmt.println("[WebAdmin] Failed to start web admin service thread")
+		fmt.eprintln("[Startup] failed to start the web admin service thread")
 		pm.shouldShutdown = true
 		shutdownAllProcesses(&pm)
-		return
+		mainExitStartupFailure()
 	}
 
 	fmt.println("=== Server Running ===")

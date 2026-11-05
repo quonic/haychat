@@ -730,6 +730,67 @@ testMainRouterAnnouncesPresenceOnFirstSessionAndLastDisconnect :: proc(t: ^testi
 }
 
 @(test)
+testMainRouterRenameAnnouncesNewNicknameToOtherSessions :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	watcherPeerID := u32(1)
+	firstPeerID := u32(2)
+	renamedPeerID := u32(3)
+	for peerID in ([]u32{firstPeerID, renamedPeerID}) {
+		h.state.connectedPeers[peerID] = true
+	}
+
+	watcherTransport := routerCompleteHandshake(&h, watcherPeerID, 42)
+	peers := [?]RouterTestPeer{{watcherPeerID, &watcherTransport}, {firstPeerID, nil}}
+	firstTransport := routerCompleteHandshake(&h, firstPeerID, 43)
+	peers[1].transport = &firstTransport
+	routerTestSkipPresence(&h, peers[:])
+
+	// A second session of 43 renames the account. 43 is already online, but everyone else,
+	// including 43's first session, must still learn the new name; the renamed session itself
+	// must not, so its transport is left out of peers and a message to it fails the test.
+	_ = routerCompleteHandshake(&h, renamedPeerID, 43, "renamed-tester", renamed = true)
+	notified: [2]bool
+	for _ in 0 ..< 2 {
+		peerID, presence := routerTestReceivePresence(&h, peers[:])
+		defer delete(presence.nickname)
+		assert(
+			presence.userId == 43 && presence.isOnline && presence.nickname == "renamed-tester",
+			fmt.tprintf("expected 43 online as renamed-tester, got %v", presence),
+		)
+		assert(peerID == watcherPeerID || peerID == firstPeerID, "expected another session")
+		notified[peerID == watcherPeerID ? 0 : 1] = true
+	}
+	assert(notified[0] && notified[1], "expected the watcher and 43's first session notified")
+	routerTestExpectNoNetworkMessage(&h, "expected no notice to the renamed session")
+
+	firstSession := h.state.peerSessions[firstPeerID]
+	assert(
+		firstSession.clientNickname == "renamed-tester",
+		fmt.tprintf("expected 43's first session renamed, got %q", firstSession.clientNickname),
+	)
+
+	// The offline notice after 43's last session ends carries the new name, even when the
+	// session that ends last is the one that connected under the old name.
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, renamedPeerID)
+	routerTestExpectNoNetworkMessage(&h, "expected 43 to stay online while a session remains")
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, firstPeerID)
+	offlinePeerID, offline := routerTestReceivePresence(&h, peers[:])
+	defer delete(offline.nickname)
+	assert(offlinePeerID == watcherPeerID, "expected the watcher to hear 43 left")
+	assert(
+		offline.userId == 43 && !offline.isOnline && offline.nickname == "renamed-tester",
+		fmt.tprintf("expected 43 offline as renamed-tester, got %v", offline),
+	)
+}
+
+@(test)
 testMainRouterFailedAuthSuccessAnnouncesNoPresence :: proc(t: ^testing.T) {
 	_ = t
 
@@ -752,7 +813,13 @@ testMainRouterFailedAuthSuccessAnnouncesNoPresence :: proc(t: ^testing.T) {
 	failingSend :: proc(_: ^ProcessManager, _: ^MainRouterState, _: u32, _: int) -> bool {
 		return false
 	}
-	MainRouterState_completeAuthentication(&h.pm, &h.state, failingPeerID, 43, failingSend)
+	MainRouterState_completeAuthentication(
+		&h.pm,
+		&h.state,
+		failingPeerID,
+		43,
+		sendAuthSuccess = failingSend,
+	)
 
 	// The session was never announced online, so the violation must not announce it offline:
 	// the only messages are its own protocol error and its disconnect.

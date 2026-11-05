@@ -32,8 +32,8 @@ HealthInterval=30s
 HealthStartPeriod=60s
 
 [Service]
-# The server exits with status 0 when it cannot reach PostgreSQL at startup, so restart on
-# any exit. `systemctl stop` still stops it.
+# A failed start (PostgreSQL not reachable yet, for example) exits with status 1. Restart on
+# any exit, so the server also comes back after a clean exit. `systemctl stop` still stops it.
 Restart=always
 RestartSec=5
 TimeoutStartSec=300

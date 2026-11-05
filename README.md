@@ -39,11 +39,11 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 The window opens at once; connecting happens in the background.
 
 - **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 bytes; accented letters and emoji count as 2 to 4), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
-- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the display name or to add, edit, or remove servers. Changing the name reconnects every server; changing a server's address reconnects only that server and pins its key afresh.
+- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the display name or to add, edit, or remove servers. Changing the name reconnects every server, and each server renames your account (see Display names); changing a server's address reconnects only that server and pins its key afresh.
 - **Connection status.** The sidebar footer shows the selected server's status ("Connected as alice", "Connecting…", "Reconnecting in 4 s"), and a dot on each rail button shows every server's status (green connected, amber connecting or waiting, red stopped). While the selected server is not connected, a banner above the room explains why, with a **Retry now** button.
 - **Reconnecting.** After a lost connection or a failed attempt the client retries after 1 s, 2 s, 4 s, and so on, capped at 30 s, each shortened by up to 20% of random jitter so clients do not all return at once. Restarting the server therefore reconnects every client without user action.
 - **Failures that stop retrying.** Some causes cannot fix themselves, so the client stops and says what to do:
-  - the name is taken, or bound to another device's key, on that server: choose another name in Settings;
+  - the name belongs to another account (another person, or another device's key) on that server: choose another name in Settings;
   - the server's identity key does not match the pinned one (expected after a server reset or reinstall): **Trust the new key** replaces the pin, saves the config, and reconnects;
   - the client and server speak different protocol versions;
   - the display name is too short or too long, or the identity key in the config is corrupt.
@@ -52,7 +52,7 @@ Client config keys (`config.json`):
 
 | Key | Purpose |
 | --- | --- |
-| `display_name` | The nickname sent to every server. The server binds it to the first identity key that uses it |
+| `display_name` | The nickname sent to every server. A server's account belongs to the identity key: a new key gets an account under this name, and a new name renames that key's account (see Display names) |
 | `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
 | `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
 | `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes; replaced by **Trust the new key** |
@@ -122,7 +122,7 @@ The UI fonts (Inter, under the SIL Open Font License, and Twemoji, under CC-BY 4
 
 ### Server Configuration
 
-The server reads its configuration from environment variables. In the dev pod, `./dev.sh` sets the database, listen, and path settings itself. Every other key can be set in `.env` (`cp .env.example .env`), which `./dev.sh up` and `./dev.sh restart` pass to the server. Running `odin run server` directly reads the same keys from the process environment.
+The server reads its configuration from environment variables. In the dev pod, `./dev.sh` sets the database, listen, and path settings itself. Every other key can be set in `.env` (`cp .env.example .env`), which `./dev.sh up` and `./dev.sh restart` pass to the server. Running `odin run server` directly reads the same keys from the process environment. When startup fails (invalid configuration, an unreachable or incompatible database, or a service thread that cannot start), the server prints a line starting with `[Startup]` and exits with status 1, so a service manager's `Restart=on-failure` and scripts can tell a failed start from a clean shutdown, which exits 0.
 
 Database (set by `./dev.sh` in the pod):
 
@@ -195,6 +195,10 @@ Rooms are open: every account is a member of every room. A nickname that connect
 
 On startup, a server whose `rooms` table is empty creates `#general` ("General discussion", room ID `1` on a new database) and makes every existing account a member, so a fresh server is ready to chat with no fixture. It logs `Created default room #general` when it does. Once any room exists it creates nothing, so an admin who renames or deletes `#general` keeps that change across restarts, as long as another room remains. A room the server creates has no creator (`rooms.created_by_user_id` is `NULL`); servers that ran protocol 7 drop that column's `NOT NULL` in place, keeping their data. Admins create further rooms with `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
 
+#### Display names
+
+An account is its client identity key; the nickname is only its current name. The first time a key connects, the server creates an account under the client's display name (or, for a keyless fixture account such as `haypeer`, binds the key to it). When the same key later connects with a different display name, the server renames that account in place: same user ID, same rooms, same direct messages. The rename succeeds only while no other account holds the new name; otherwise the login is refused and the client says the name is already in use. A renamed account does not join any rooms it was not already in. Connected users learn the new name at once, through the same online notice used for presence, and their clients update the Members and Direct Messages lists. Messages a client has already loaded keep the name they were sent with until it fetches that history again (on its next start, for example): fetched history shows each sender's current name, because the server reads it when the history is requested. The server logs `[Main] User N renamed from "old-name" on peer P` for each rename. The old name is free for anyone after a rename.
+
 #### Direct messages
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one server: they are stored in its `direct_messages` table, survive restarts, and are paged like room history. Like room chat, they are encrypted in transit to the server but are not end-to-end encrypted, so the server and its operator can read them. A sent message is delivered to every connected session of both the sender and the recipient. The server also lists every account with an online flag (online while at least one of its sessions is authenticated) and tells connected sessions when an account comes online or goes offline. Direct messages arrived with protocol version 7; clients and servers on older versions refuse each other with "Unsupported protocol version".
@@ -245,10 +249,10 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 ### Known Limitations
 
 - Private rooms are not implemented. Every account joins every room (see Rooms), and the client has no UI to create rooms or manage members; admins can do both only through the protocol messages.
-- Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
+- Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
+- A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
 - Direct messages have no read receipts or server-side unread state; the client counts unread messages only while it is running.
-- A display name cannot be changed on a server after the first connection: the server keeps one name per identity key and refuses a new name from the same key with "user identity is unavailable", which the client shows as "The name … is already in use".
 - The server has no schema migrations: a server version with an incompatible schema rebuilds the database empty (see deploy/README.md "Upgrades").
 
 ## License

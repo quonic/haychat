@@ -357,7 +357,9 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(user.nickname)
 		}
 		delete(r.users)
-	case common.DatabaseUserIdentityResult, common.DatabaseUserServerAdminResult:
+	case common.DatabaseUserIdentityResult:
+		delete(r.previousNickname)
+	case common.DatabaseUserServerAdminResult:
 	case nil:
 	}
 }

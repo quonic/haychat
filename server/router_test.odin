@@ -193,10 +193,13 @@ routerEncodePacketBytes :: proc(packet: common.Packet) -> []u8 {
 	return packetBytes
 }
 
+// renamed makes the stubbed identity resolution report that this login renamed the account.
 routerCompleteHandshake :: proc(
 	h: ^RouterTestHarness,
 	peerID: u32,
 	userID := 42,
+	nickname := "router-tester",
+	renamed := false,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -208,7 +211,7 @@ routerCompleteHandshake :: proc(
 
 	clientHello := common.ClientHello {
 			version                  = common.protocolVersion,
-			nickname                 = "router-tester",
+			nickname                 = nickname,
 			clientIdentityPublicKey  = clientPublicKey,
 			clientEphemeralPublicKey = clientEphemeralPublicKey,
 		}
@@ -297,7 +300,11 @@ routerCompleteHandshake :: proc(
 		identityQuery.request_id,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabaseUserIdentityResult{userId = userID},
+			result = common.DatabaseUserIdentityResult {
+				userId = userID,
+				renamed = renamed,
+				previousNickname = renamed ? strings.clone("router-previous") : "",
+			},
 		},
 	)
 
@@ -1628,8 +1635,13 @@ testOpenRoomSQLJoinsEveryAccount :: proc(t: ^testing.T) {
 	_ = t
 	assert(
 		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "INSERT INTO room_members") &&
-		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "CROSS JOIN resolved"),
-		"expected identity resolution to join the resolved account to rooms in one statement",
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "CROSS JOIN inserted"),
+		"expected identity resolution to join the created account to rooms in one statement",
+	)
+	assert(
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "UPDATE users SET nickname = $1") &&
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "WHERE public_key = decode($2"),
+		"expected identity resolution to rename the key's account in the same statement",
 	)
 	assert(
 		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "NOT EXISTS (SELECT 1 FROM existing)"),

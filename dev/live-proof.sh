@@ -13,11 +13,12 @@ set -euo pipefail
 # Usage: dev/live-proof.sh [--all | --harness | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat and direct message proofs, the headless
-#                   harness smoke test, and the server SQL proof (what CI and `./dev.sh ci`
-#                   run)
+#                   harness smoke test, the server SQL proof, and the startup failure exit
+#                   check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
-#   --sql           only the server SQL proof: database-backed server tests that run the
-#                   direct message and default room statements against this database
+#   --sql           only the server proofs: database-backed server tests that run the
+#                   user identity, direct message, and default room statements against this
+#                   database, and the check that a failed startup exits with status 1
 #   test_name...    the given client test procedures, e.g. client.testFoo
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -28,16 +29,19 @@ ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuth
 DIRECT_MESSAGE_TEST=client.testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients
 SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
+SQL_TESTS+=,server.testUserIdentityStatementAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
 run_sql=false
+run_startup_failure=false
 if [[ $# -gt 0 ]]; then
 	case "$1" in
 		--all)
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST")
 			run_harness=true
 			run_sql=true
+			run_startup_failure=true
 			;;
 		--harness)
 			tests=()
@@ -46,6 +50,7 @@ if [[ $# -gt 0 ]]; then
 		--sql)
 			tests=()
 			run_sql=true
+			run_startup_failure=true
 			;;
 		*) tests=("$@") ;;
 	esac
@@ -95,15 +100,17 @@ trap on_exit EXIT
 wait_for_server_ready() {
 	local deadline=$((SECONDS + ready_timeout_secs))
 	while ((SECONDS < deadline)); do
-		if ! kill -0 "$server_pid" 2>/dev/null; then
-			echo "Server exited before reporting readiness" >&2
-			return 1
-		fi
 		if grep -Fq "=== Server Running ===" "$server_log"; then
 			return 0
 		fi
+		# Checked before the exit test: a failed start prints [Startup] and then exits with
+		# status 1, and the log line says more than the exit does.
 		if grep -Fq "[Startup]" "$server_log"; then
 			echo "Server failed during startup" >&2
+			return 1
+		fi
+		if ! kill -0 "$server_pid" 2>/dev/null; then
+			echo "Server exited before reporting readiness" >&2
 			return 1
 		fi
 		sleep 0.1
@@ -181,6 +188,23 @@ if [[ "$run_sql" == true ]]; then
 		-define:ODIN_TEST_THREADS=1 \
 		-define:ODIN_TEST_NAMES="$SQL_TESTS" \
 		-out:"$runtime_dir/server-sql-test"
+fi
+
+# A server that cannot start must exit non-zero (systemd Restart=on-failure and scripts depend
+# on it) after printing a [Startup] line (what wait_for_server_ready and ./dev.sh look for).
+# Nothing listens on port 1, so the database connect fails before any listener starts and this
+# second server never meets the running one.
+if [[ "$run_startup_failure" == true ]]; then
+	echo "==> [live] checking that a failed startup exits with status 1"
+	failed_log="$runtime_dir/failed-startup.log"
+	failed_status=0
+	HAYCHAT_DATABASE_PORT=1 HAYCHAT_LOG_DIR="$runtime_dir/failed-startup-logs" \
+		timeout 60 "$server_bin" >"$failed_log" 2>&1 || failed_status=$?
+	if [[ $failed_status -ne 1 ]] || ! grep -aFq "[Startup]" "$failed_log"; then
+		echo "Expected a failed startup to print [Startup] and exit 1, got $failed_status" >&2
+		cat "$failed_log" >&2 || true
+		exit 1
+	fi
 fi
 
 echo "==> [live] passed"
