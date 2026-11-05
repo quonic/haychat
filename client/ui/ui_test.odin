@@ -174,3 +174,54 @@ testTranscriptSelectionTextJoinsUnitsInOrder :: proc(t: ^testing.T) {
 	)
 	free_all(context.temp_allocator)
 }
+
+@(test)
+testAutomationFindsDrawnTextOnWidgetsFirst :: proc(t: ^testing.T) {
+	automation := new(Automation)
+	defer Automation_destroy(automation)
+	window := Rect{0, 0, 800, 600}
+
+	// A sidebar row (a button) and a header that repeats its label, drawn after it.
+	rowID := idOf("channel", 1, 1)
+	row := Rect{70, 60, 200, 30}
+	Automation_recordWidget(automation, rowID, row, window)
+	Automation_recordText(automation, shrinkXY(row, 8, 0), window, "# general")
+	Automation_recordText(automation, Rect{320, 10, 300, 30}, window, "# general")
+	Automation_recordText(automation, Rect{320, 50, 300, 30}, window, "hello")
+
+	found, ok := Automation_findText(automation, "# general")
+	assert(ok, "expected '# general' to be found")
+	assert(contains(row, rectCentre(found)), "expected the sidebar row, not the later header")
+	found, ok = Automation_findText(automation, "hello")
+	assert(ok && found == Rect{320, 50, 300, 30}, "expected text off widgets as a fallback")
+	_, ok = Automation_findText(automation, "missing")
+	assert(!ok, "expected an undrawn text not to be found")
+	assert(Automation_countText(automation, "# general") == 2, "expected two '# general'")
+
+	widget, widgetOK := Automation_findWidget(automation, idOf("channel", 1, 1))
+	assert(widgetOK && widget == row, "expected the widget rect by its idOf name")
+	_, widgetOK = Automation_findWidget(automation, idOf("channel", 1, 2))
+	assert(!widgetOK, "expected another ID not to match")
+
+	Automation_clearFrame(automation)
+	assert(Automation_countText(automation, "hello") == 0, "expected a new frame to start empty")
+}
+
+@(test)
+testAutomationSkipsClippedTextAndKeepsVisiblePart :: proc(t: ^testing.T) {
+	automation := new(Automation)
+	defer Automation_destroy(automation)
+	list := Rect{0, 100, 200, 100}
+
+	// A row scrolled out of the list is not on screen.
+	Automation_recordText(automation, Rect{0, 20, 200, 30}, list, "hidden")
+	// A row half out of the list keeps only its visible part.
+	Automation_recordText(automation, Rect{0, 180, 200, 40}, list, "edge")
+	Automation_recordWidget(automation, 7, Rect{0, 0, 10, 10}, list)
+
+	assert(Automation_countText(automation, "hidden") == 0, "expected clipped text dropped")
+	edge, ok := Automation_findText(automation, "edge")
+	assert(ok && edge == Rect{0, 180, 200, 20}, "expected the visible part of the row")
+	assert(len(automation.widgets) == 0, "expected a clipped widget dropped")
+	assert(len(automation.textBytes) == len("edge"), "expected only recorded text copied")
+}

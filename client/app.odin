@@ -43,12 +43,23 @@ main :: proc() {
 	if headlessRequested(os.args[1:]) {
 		os.exit(headlessMain(os.args[1:]))
 	}
+	// UI script mode (ui_script.odin) drives this same window from a script.
+	if uiScriptRequested(os.args[1:]) {
+		os.exit(uiScriptMain(os.args[1:]))
+	}
 	if !runApp() {
 		os.exit(1)
 	}
 }
 
-runApp :: proc() -> bool {
+AppOptions :: struct {
+	// Set by --ui-script: the loop runs one script step per iteration and ends with the script.
+	script:       ^UIScriptRunner,
+	windowWidth:  i32, // 0 means WINDOW_DEFAULT_WIDTH
+	windowHeight: i32, // 0 means WINDOW_DEFAULT_HEIGHT
+}
+
+runApp :: proc(options: AppOptions = {}) -> bool {
 	_ = SDL.SetAppMetadata("HayChat", nil, "chat.haychat.client")
 	// The text input draws IME composition itself.
 	_ = SDL.SetHint(SDL.HINT_IME_IMPLEMENTED_UI, "composition")
@@ -67,8 +78,8 @@ runApp :: proc() -> bool {
 
 	window := SDL.CreateWindow(
 		"HayChat",
-		WINDOW_DEFAULT_WIDTH,
-		WINDOW_DEFAULT_HEIGHT,
+		options.windowWidth > 0 ? options.windowWidth : WINDOW_DEFAULT_WIDTH,
+		options.windowHeight > 0 ? options.windowHeight : WINDOW_DEFAULT_HEIGHT,
 		{.RESIZABLE, .HIGH_PIXEL_DENSITY},
 	)
 	if window == nil {
@@ -92,6 +103,16 @@ runApp :: proc() -> bool {
 		return false
 	}
 	defer ui.destroy(&ctx)
+	script := options.script
+	if script != nil {
+		ui.enableAutomation(&ctx)
+		fmt.eprintln(
+			"[Info] UI script: video driver",
+			SDL.GetCurrentVideoDriver(),
+			"renderer",
+			SDL.GetRendererName(renderer),
+		)
+	}
 
 	wake := AppWake {
 		eventType = SDL.RegisterEvents(1),
@@ -110,6 +131,13 @@ runApp :: proc() -> bool {
 
 	running := true
 	for running {
+		if script != nil {
+			// Between frames, so pushed input reaches the next frame like real input.
+			UIScriptRunner_step(script, &ctx, window)
+			if script.finished {
+				break
+			}
+		}
 		ui.Input_reset(&ctx.input)
 		redraw := ctx.needsFrame
 		timeout := i32(0)
@@ -121,6 +149,9 @@ runApp :: proc() -> bool {
 			}
 			if wakeProc == nil {
 				waitMS = min(waitMS, WAKE_FALLBACK_POLL_MS)
+			}
+			if script != nil {
+				waitMS = min(waitMS, UI_SCRIPT_TICK_MS)
 			}
 			timeout = i32(waitMS)
 		}
@@ -151,6 +182,9 @@ runApp :: proc() -> bool {
 			ui.endFrame(&ctx)
 		}
 		free_all(context.temp_allocator)
+	}
+	if script != nil {
+		UIScriptRunner_stop(script, "the window was closed before the script finished")
 	}
 	return true
 }

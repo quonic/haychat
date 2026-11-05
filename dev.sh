@@ -61,8 +61,9 @@ Usage: ./dev.sh <command> [args]
 
 Checks (each run uses fresh containers and a throwaway database):
   check                 compile checks and leak-checked test suites (./check.sh)
-  live [--all|--harness|NAME...]
-                        live server + client proof against a throwaway database
+  live [--all|--harness|--ui|NAME...]
+                        live server + client proof against a throwaway database; --ui
+                        drives the real window offscreen (screenshots: see below)
   ci                    check, then live: exactly what Forgejo CI runs
 
 Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):
@@ -95,6 +96,8 @@ Environment:
   HAYCHAT_DEV_PORT          host UDP port for client connections (default 12345)
   HAYCHAT_DEV_ENV_FILE      server overrides file (default .env, see .env.example)
   HAYCHAT_DEV_POSTGRES_IMAGE  PostgreSQL image (default docker.io/library/postgres:17)
+  HAYCHAT_DEV_UI_SCREENSHOTS  host directory that keeps \`live --ui\` screenshots (BMP);
+                            without it they vanish with the throwaway container
 EOF
 }
 
@@ -413,7 +416,15 @@ cmd_live() {
 }
 
 run_live_proof() {
-	run_snapshot_in_pod "$throwaway_pod" -- 'dev/live-proof.sh "$@"' "$@"
+	local run_args=()
+	# The GUI smoke test's screenshots live in the container unless a host directory is
+	# mounted for them.
+	if [[ -n "${HAYCHAT_DEV_UI_SCREENSHOTS:-}" ]]; then
+		mkdir -p -- "$HAYCHAT_DEV_UI_SCREENSHOTS"
+		run_args+=(-v "$(cd -- "$HAYCHAT_DEV_UI_SCREENSHOTS" && pwd):/screenshots")
+		run_args+=(-e HAYCHAT_UI_SCREENSHOT_DIR=/screenshots)
+	fi
+	run_snapshot_in_pod "$throwaway_pod" "${run_args[@]}" -- 'dev/live-proof.sh "$@"' "$@"
 }
 
 cmd_ci() {

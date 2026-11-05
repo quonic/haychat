@@ -34,6 +34,7 @@ label :: proc(
 	case .Right:
 		x += r.w - size.x
 	}
+	automationText(ctx, r, str)
 	pushClip(ctx, r)
 	drawText(ctx, text, Vec2{x, r.y + (r.h - height) / 2}, color)
 	popClip(ctx)
@@ -49,6 +50,7 @@ wrappedLabel :: proc(ctx: ^Context, r: Rect, str: string, color: Color, font: Fo
 	if len(str) == 0 {
 		return
 	}
+	automationText(ctx, r, str)
 	pushClip(ctx, r)
 	drawText(ctx, textGet(ctx, 0, font, str, r.w), Vec2{r.x, r.y}, color)
 	popClip(ctx)

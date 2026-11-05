@@ -137,6 +137,10 @@ transcript :: proc(
 			}
 		}
 		drawText(ctx, layout.text, position, unit.color)
+		if ctx.automation != nil {
+			drawn := Rect{position.x, position.y, max(1, textSize(layout.text).x), layout.h}
+			automationText(ctx, drawn, unit.text)
+		}
 	}
 
 	scrollEnd(ctx, id, r)

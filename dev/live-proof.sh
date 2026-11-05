@@ -10,12 +10,15 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --sql | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat and direct message proofs, the headless
-#                   harness smoke test, the server SQL proof, and the startup failure exit
-#                   check (what CI and `./dev.sh ci` run)
+#                   harness smoke test, the GUI automation smoke test, the server SQL proofs,
+#                   and the startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
+#   --ui            only the GUI automation smoke test (dev/ui-smoke.sh): the real window on
+#                   SDL's offscreen video driver, driven by --ui-script; screenshots go to
+#                   HAYCHAT_UI_SCREENSHOT_DIR when it is set
 #   --sql           only the server proofs: database-backed server tests that run the
 #                   user identity, direct message, and default room statements against this
 #                   database, and the check that a failed startup exits with status 1
@@ -33,6 +36,7 @@ SQL_TESTS+=,server.testUserIdentityStatementAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
+run_ui=false
 run_sql=false
 run_startup_failure=false
 if [[ $# -gt 0 ]]; then
@@ -40,12 +44,17 @@ if [[ $# -gt 0 ]]; then
 		--all)
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST")
 			run_harness=true
+			run_ui=true
 			run_sql=true
 			run_startup_failure=true
 			;;
 		--harness)
 			tests=()
 			run_harness=true
+			;;
+		--ui)
+			tests=()
+			run_ui=true
 			;;
 		--sql)
 			tests=()
@@ -175,6 +184,11 @@ fi
 if [[ "$run_harness" == true ]]; then
 	echo "==> [live] running dev/harness-smoke.sh"
 	dev/harness-smoke.sh 127.0.0.1:12345
+fi
+
+if [[ "$run_ui" == true ]]; then
+	echo "==> [live] running dev/ui-smoke.sh"
+	dev/ui-smoke.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

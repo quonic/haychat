@@ -64,6 +64,7 @@ Context :: struct {
 	currentCursor:     SDL.SystemCursor,
 	nextDeadlineMS:    u64, // When the next frame must be drawn without new input
 	needsFrame:        bool, // Draw another frame immediately
+	automation:        ^Automation, // Scripted-driver records; nil unless enableAutomation ran
 }
 
 init :: proc(
@@ -111,6 +112,7 @@ destroy :: proc(ctx: ^Context) {
 	delete(ctx.clipStack)
 	delete(ctx.input.events)
 	delete(ctx.preedit)
+	Automation_destroy(ctx.automation)
 	ctx^ = {}
 }
 
@@ -216,6 +218,9 @@ beginFrame :: proc(ctx: ^Context) {
 	ctx.tooltip = {}
 	ctx.wantCursor = .DEFAULT
 	clear(&ctx.clipStack)
+	if ctx.automation != nil {
+		Automation_clearFrame(ctx.automation)
+	}
 
 	w, h: i32
 	_ = SDL.GetRenderOutputSize(ctx.renderer, &w, &h)
@@ -246,6 +251,9 @@ endFrame :: proc(ctx: ^Context) {
 	updateTextInput(ctx)
 	updateCursor(ctx)
 	evictCaches(ctx)
+	if ctx.automation != nil {
+		automationCapture(ctx)
+	}
 	_ = SDL.RenderPresent(ctx.renderer)
 
 	// Hover and press state settle one frame after input, so draw once more after any input.
@@ -336,6 +344,7 @@ Interaction :: struct {
 // Tracks mouse interaction for a widget occupying r.
 interact :: proc(ctx: ^Context, id: ID, r: Rect) -> (result: Interaction) {
 	input := &ctx.input
+	automationWidget(ctx, id, r)
 	result.hovered = mouseOver(ctx, r) && (ctx.active == 0 || ctx.active == id)
 	if result.hovered && input.mousePressed[.Left] && !ctx.pressConsumed {
 		ctx.active = id
