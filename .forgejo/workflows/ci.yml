@@ -12,7 +12,7 @@ permissions:
 # includes the Windows client check), and dev/live-proof.sh against PostgreSQL 17.
 jobs:
   linux:
-    name: Checks, tests, and live auth proof
+    name: Checks, tests, and live proofs
     runs-on: ubuntu-latest
     # The live proof needs io_uring in the job container, which the default seccomp profile
     # and SELinux container_t both block. forgejo-runner ignores --security-opt in workflow
@@ -62,5 +62,5 @@ jobs:
       - name: Compile checks and leak-checked tests
         run: ./check.sh
 
-      - name: Live startup auth proof
-        run: dev/live-proof.sh
+      - name: Live startup auth and two-client chat proofs
+        run: dev/live-proof.sh --all

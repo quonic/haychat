@@ -1289,11 +1289,12 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 		chatPayload := common.ServerChatMessagePayload {
-			id        = posted.storedMessage.id,
-			senderId  = posted.storedMessage.senderId,
-			roomId    = posted.storedMessage.roomId,
-			timestamp = posted.storedMessage.timestamp,
-			content   = posted.storedMessage.content,
+			id             = posted.storedMessage.id,
+			senderId       = posted.storedMessage.senderId,
+			senderNickname = posted.storedMessage.senderNickname,
+			roomId         = posted.storedMessage.roomId,
+			timestamp      = posted.storedMessage.timestamp,
+			content        = posted.storedMessage.content,
 		}
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if recipientSession.isAuthenticated &&
@@ -1371,13 +1372,22 @@ MainRouterState_handleDatabaseResult :: proc(
 				changed = mutation.changed,
 			},
 		)
-		MainRouterState_sendMessageToUserID(
-			pm,
-			state,
-			request.targetUserID,
-			.ServerRoomMembershipChanged,
-			common.ServerRoomMembershipChangedPayload{roomId = mutation.room.id, joined = true},
-		)
+		// The create statement made every account a member, so every connected session must
+		// refresh its room list, not only the creator's.
+		for recipientPeerID, recipientSession in state.peerSessions {
+			if recipientSession.isAuthenticated {
+				MainRouterState_sendPeerMessage(
+					pm,
+					state,
+					recipientPeerID,
+					.ServerRoomMembershipChanged,
+					common.ServerRoomMembershipChangedPayload {
+						roomId = mutation.room.id,
+						joined = true,
+					},
+				)
+			}
+		}
 	case .CheckAdminEditRoom:
 		if !MainRouterState_isAdminResponse(response) {
 			MainRouterState_sendAdminRequired(pm, state, request.peerID)

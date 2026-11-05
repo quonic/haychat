@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Live end-to-end proof: builds the server, starts it against the PostgreSQL database named by
-# HAYCHAT_DATABASE_*, waits until it reports readiness, runs the live client tests against it
-# on 127.0.0.1:12345, and stops the server again.
+# HAYCHAT_DATABASE_*, waits until it reports readiness, loads the server/sql/auth_bootstrap.sql
+# fixture (which creates #general, room 1), runs the live client tests against it on
+# 127.0.0.1:12345, and stops the server again.
 #
 # It runs inside the dev image (`./dev.sh live`, `./dev.sh ci`) or the Forgejo CI job
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
@@ -11,7 +12,7 @@ set -euo pipefail
 #
 # Usage: dev/live-proof.sh [--all | test_name...]
 #   (no arguments)  the startup auth proof
-#   --all           also the two-client room chat proof (see README "Known Limitations")
+#   --all           also the two-client room chat proof (what CI and `./dev.sh ci` run)
 #   test_name...    the given client test procedures, e.g. client.testFoo
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -114,6 +115,14 @@ echo "==> [live] starting server against $database_target"
 server_pid=$!
 wait_for_server_ready
 echo "==> [live] server is ready"
+
+# The server creates the schema but no rooms, and the chat proof posts to #general. The
+# fixture is loaded before any live client connects, so their new accounts join #general.
+echo "==> [live] loading server/sql/auth_bootstrap.sql"
+PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
+	-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+	-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
+	-f server/sql/auth_bootstrap.sql >/dev/null
 
 test_names=$(IFS=,; echo "${tests[*]}")
 echo "==> [live] running ${test_names}"

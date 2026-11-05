@@ -42,8 +42,8 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, then runs the live startup auth proof. `--all` adds the two-client chat proof (see Known Limitations) |
-| `./dev.sh ci` | `check`, then `live`: the same steps Forgejo CI runs |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof |
+| `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 
 Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
 
@@ -159,10 +159,17 @@ Seeded test identities:
 
 - `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
 - `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
+- `#general` is room ID `1`. Loading the fixture makes every existing account a member of it.
+
+### Rooms
+
+Rooms are open: every account is a member of every room. A nickname that connects for the first time joins every existing room, and a new room includes every account, so testers can chat as soon as they connect. Membership is still stored per account in `room_members`, which the server checks for every send and history request; that is where private rooms will plug in.
+
+The server creates no rooms on its own. Load the fixture (`./dev.sh seed`) for `#general`, or have an admin send `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
 
 ### Continuous Integration
 
-HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
+HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
 
 The live proof needs io_uring in the job container (see Dev Environment), which takes two changes on a podman-backed runner host. Both apply to every container that runner starts.
 
@@ -191,7 +198,8 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 
 ### Known Limitations
 
-- New accounts are not added to any room. The seed fixture creates the `general` room with only `admin` as a member, so other users cannot chat until an admin adds them (`ClientAddRoomMember`). The two-client live chat proof (`./dev.sh live --all`) fails for the same reason, so CI runs only the startup auth proof.
+- Private rooms are not implemented. Every account joins every room (see Rooms), and the client has no UI to create rooms or manage members; admins can do both only through the protocol messages.
+- A fresh server has no rooms until the fixture is loaded or an admin creates one.
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
 

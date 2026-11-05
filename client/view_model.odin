@@ -7,7 +7,7 @@ import "core:fmt"
 
 TranscriptLine :: struct {
 	messageID:   int,
-	senderLabel: string, // Allocated with the view model's allocator
+	senderLabel: string, // Borrowed from the room cache, or allocated with the view allocator
 	isSelf:      bool,
 	content:     string, // Borrowed from the room cache
 }
@@ -48,9 +48,13 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	lines := make([]TranscriptLine, len(roomCache.messages), allocator)
 	for message, index in roomCache.messages {
 		isSelf := selfUserID != 0 && message.senderId == selfUserID
+		// A sender without a user row has no nickname; fall back to the user ID.
 		senderLabel := "You"
 		if !isSelf {
-			senderLabel = fmt.aprintf("User %d", message.senderId, allocator = allocator)
+			senderLabel = message.senderNickname
+			if len(senderLabel) == 0 {
+				senderLabel = fmt.aprintf("User %d", message.senderId, allocator = allocator)
+			}
 		}
 		lines[index] = TranscriptLine {
 			messageID   = message.id,

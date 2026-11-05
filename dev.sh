@@ -415,8 +415,8 @@ cmd_ci() {
 }
 
 run_ci() {
-	log_step "Running ./check.sh and dev/live-proof.sh"
-	run_snapshot_in_pod "$throwaway_pod" -- './check.sh && dev/live-proof.sh'
+	log_step "Running ./check.sh and dev/live-proof.sh --all"
+	run_snapshot_in_pod "$throwaway_pod" -- './check.sh && dev/live-proof.sh --all'
 }
 
 cmd_up() {

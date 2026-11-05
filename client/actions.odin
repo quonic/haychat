@@ -33,6 +33,7 @@ State_selectedTransport :: proc(state: ^State) -> (^ClientServerTransport, bool)
 
 RoomCache_deinit :: proc(cache: ^RoomCache) {
 	for message in cache.messages {
+		delete(message.senderNickname)
 		delete(message.timestamp)
 		delete(message.content)
 	}
@@ -129,11 +130,12 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 		}
 	}
 	clone := common.StoredChatMessage {
-		id        = message.id,
-		senderId  = message.senderId,
-		roomId    = message.roomId,
-		timestamp = strings.clone(message.timestamp),
-		content   = strings.clone(message.content),
+		id             = message.id,
+		senderId       = message.senderId,
+		senderNickname = strings.clone(message.senderNickname),
+		roomId         = message.roomId,
+		timestamp      = strings.clone(message.timestamp),
+		content        = strings.clone(message.content),
 	}
 	insertIndex := len(cache.messages)
 	for index in 0 ..< len(cache.messages) {
@@ -309,11 +311,11 @@ State_loadOlderRoomHistory :: proc(state: ^State) {
 	}
 }
 
-// Content is borrowed; the room cache keeps its own copy.
+// Strings are borrowed; the room cache keeps its own copies.
 State_receiveRoomChat :: proc(
 	state: ^State,
 	serverID, roomID, senderID, messageID: int,
-	timestamp, content: string,
+	senderNickname, timestamp, content: string,
 ) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		return
@@ -325,6 +327,7 @@ State_receiveRoomChat :: proc(
 		common.StoredChatMessage {
 			id = messageID,
 			senderId = senderID,
+			senderNickname = senderNickname,
 			roomId = roomID,
 			timestamp = timestamp,
 			content = content,
@@ -441,6 +444,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.roomID,
 			event.senderID,
 			event.messageID,
+			event.senderNickname,
 			event.timestamp,
 			event.message,
 		)
