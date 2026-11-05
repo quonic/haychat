@@ -18,6 +18,7 @@ package client
 import "../common"
 import "core:fmt"
 import "core:strings"
+import "core:time"
 import "opus"
 
 VoiceSessionStatus :: enum u8 {
@@ -337,8 +338,14 @@ State_setVoicePushToTalk :: proc(state: ^State, held: bool) {
 // Creates and starts the engine for the joined room and binds it to the server's transport.
 // On failure voice becomes Unavailable with the engine's error and the server is told to
 // drop the session from voice; chat is unaffected.
+// resumeSequence and resumeAt continue a stopped engine's media clock (see
+// VoiceEngineConfig.resumeSequence); a fresh join leaves them zero.
 @(private = "file")
-State_voiceStartEngine :: proc(state: ^State) {
+State_voiceStartEngine :: proc(
+	state: ^State,
+	resumeSequence: u32 = 0,
+	resumeAt: time.Tick = {},
+) {
 	serverID := state.voice.serverID
 	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
 	connectionIndex := State_serverConnectionIndex(state^, serverID)
@@ -357,6 +364,8 @@ State_voiceStartEngine :: proc(state: ^State) {
 	config := state.voice.engineTemplate
 	config.onOutbound = clientVoiceOutbound
 	config.outboundUserdata = link
+	config.resumeSequence = resumeSequence
+	config.resumeSequenceAt = resumeAt
 	engine := VoiceEngine_create(config)
 	link.engine = engine
 	VoiceEngine_setMuted(engine, state.voice.muted)
@@ -386,8 +395,9 @@ State_voiceStartEngine :: proc(state: ^State) {
 // Unbinds and destroys the engine. The binding is cleared under the worker lock first, so
 // once the lock is released neither the worker nor the voice thread can reach the engine
 // through the transport; VoiceEngine_destroy then joins the voice thread, and only after that
-// is the link it sends through freed.
-State_voiceStopEngine :: proc(state: ^State) {
+// is the link it sends through freed. Returns the stopped engine's next frameSequence and
+// when it stopped, for State_voiceRestartEngine.
+State_voiceStopEngine :: proc(state: ^State) -> (nextSequence: u32, stoppedAt: time.Tick) {
 	engine := state.voice.engine
 	link := state.voice.link
 	if engine == nil {
@@ -398,22 +408,28 @@ State_voiceStopEngine :: proc(state: ^State) {
 		link.transport.voice = {}
 	}
 	ClientNetworkWorker_unlock(link.worker)
+	VoiceEngine_stop(engine)
+	nextSequence = VoiceEngine_nextSequence(engine)
+	stoppedAt = time.tick_now()
 	VoiceEngine_destroy(engine)
 	free(link)
 	state.voice.engine = nil
 	state.voice.link = nil
+	return
 }
 
 // Reopens the joined engine from the current template (a new device, or a device that came
 // or went), keeping the session joined: the server is not told, and mute, deafen and
 // push-to-talk carry over. If the new engine cannot start, voice becomes Unavailable exactly
-// as on a join.
+// as on a join. The new engine continues the old one's frameSequence: listeners are still in
+// its spurt, and a sender that started over at 0 would have its frames dropped as late until
+// that spurt timed out.
 State_voiceRestartEngine :: proc(state: ^State) {
 	if state.voice.status != .Joined || state.voice.engine == nil {
 		return
 	}
-	State_voiceStopEngine(state)
-	State_voiceStartEngine(state)
+	nextSequence, stoppedAt := State_voiceStopEngine(state)
+	State_voiceStartEngine(state, nextSequence, stoppedAt)
 }
 
 // Stops the engine without telling the server, for shutdown.

@@ -458,6 +458,8 @@ testVoiceSettingsReapplyToTheJoinedEngine :: proc(t: ^testing.T) {
 		"expected push-to-talk released when the mode leaves push-to-talk",
 	)
 
+	// Let the engine count a few frames, so the restart has a sequence to carry.
+	sequenceBefore := testVoiceUIWaitForSequence(engine, 5)
 	settings.inputDevice = "Other Mic"
 	State_applyVoiceSettings(&state, settings)
 	reopened := state.voice.engine
@@ -485,6 +487,18 @@ testVoiceSettingsReapplyToTheJoinedEngine :: proc(t: ^testing.T) {
 		transmute(f32)sync.atomic_load(&reopened.inputGainBits) == 2 &&
 		sync.atomic_load(&reopened.bitrateRequest) == 40000,
 		"expected the reopened engine to carry the device, the mute and the settings",
+	)
+	// Listeners are still in the old engine's spurt: a new engine that counted from 0 again
+	// would have its frames dropped as late.
+	sequenceAfter := VoiceEngine_snapshot(reopened).frameSequence
+	testing.expect(
+		t,
+		sequenceBefore >= 5 && sequenceAfter > sequenceBefore,
+		fmt.tprintf(
+			"expected the restart to continue frameSequence past %d, got %d",
+			sequenceBefore,
+			sequenceAfter,
+		),
 	)
 	testing.expect(
 		t,
@@ -744,4 +758,18 @@ testVoiceEngineAppliesGainVolumeAndBitrate :: proc(t: ^testing.T) {
 		fmt.tprintf("expected gain 0 and threshold 0 kept as given, got %v dBFS", silentLevel),
 	)
 	_ = t
+}
+
+// Polls the engine's published frameSequence until it reaches atLeast (or 5 s pass) and
+// returns the last value seen.
+@(private = "file")
+testVoiceUIWaitForSequence :: proc(engine: ^VoiceEngine, atLeast: u32) -> u32 {
+	started := time.tick_now()
+	for {
+		sequence := VoiceEngine_snapshot(engine).frameSequence
+		if sequence >= atLeast || time.tick_since(started) > 5 * time.Second {
+			return sequence
+		}
+		time.sleep(5 * time.Millisecond)
+	}
 }

@@ -137,6 +137,13 @@ VoiceEngineConfig :: struct {
 	unpaced:          bool,
 	onOutbound:       VoiceOutboundProc,
 	outboundUserdata: rawptr,
+	// Where frameSequence starts. A restarted engine (State_voiceRestartEngine) continues
+	// the old one's media clock, so listeners keep their place instead of dropping its frames
+	// as late. resumeSequenceAt is when resumeSequence was the next sequence: VoiceEngine_open
+	// adds the 20 ms ticks since then, because the clock ran on while no device captured.
+	// Zero values start at 0.
+	resumeSequence:   u32,
+	resumeSequenceAt: time.Tick,
 }
 
 VoiceEngineStats :: struct {
@@ -368,6 +375,13 @@ VoiceEngine_stop :: proc(engine: ^VoiceEngine) {
 	VoiceEngine_close(engine)
 }
 
+// VoiceEngine_nextSequence is the frameSequence the engine would give its next captured
+// frame. Only meaningful once VoiceEngine_stop has joined the voice thread, which owns it.
+VoiceEngine_nextSequence :: proc(engine: ^VoiceEngine) -> u32 {
+	assert(engine.thread == nil, "VoiceEngine_nextSequence needs a stopped engine")
+	return engine.frameSequence
+}
+
 VoiceEngine_isRunning :: proc(engine: ^VoiceEngine) -> bool {
 	return engine.thread != nil
 }
@@ -453,7 +467,13 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	if sink.kind != .Device {
 		engine.appliedOutputVolume = transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
 	}
-	engine.frameSequence = 0
+	engine.frameSequence = engine.config.resumeSequence
+	if engine.config.resumeSequenceAt != {} {
+		// Round up: a skipped tick looks like one lost frame to a listener, while a reused
+		// sequence would be dropped as a duplicate or a late frame.
+		elapsedMS := time.duration_milliseconds(time.tick_since(engine.config.resumeSequenceAt))
+		engine.frameSequence += u32(math.ceil(max(elapsedMS, 0) / VOICE_FRAME_MS))
+	}
 	engine.stats = {}
 	engine.retiredJitter = {}
 	engine.mediaClockMS = 0
