@@ -66,7 +66,7 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof, the harness smoke test, and the server SQL proof |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof, the harness smoke test, and the server SQL proof |
 | `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
@@ -154,7 +154,7 @@ Runtime (configurable in `.env`):
 - `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key.
 - `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
 
-The server owns table creation and validation. It creates or reconciles its schema before it reports readiness; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. The configured role must be able to create, alter, and drop objects in `public`. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
+The server owns table creation and validation. It creates or reconciles its schema before it reports readiness; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. The configured role must be able to create, alter, and drop objects in `public`. When the `rooms` table is empty, startup then creates `#general` (see Rooms). `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
 ### Web Admin
 
@@ -174,7 +174,7 @@ curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:
 ### Typical Workflow
 
 1. `./dev.sh up` to start PostgreSQL and the server.
-2. `./dev.sh seed` to load the fixture users and the `#general` room.
+2. Optionally, `./dev.sh seed` to load the fixture users. You only need it for the `admin` account; the server creates `#general` by itself.
 3. To connect as `admin`: run `./dev.sh client admin` once to create the profile (it cannot claim `admin` yet) and close it. Put the output of `./dev.sh key admin` in `.env` as `HAYCHAT_ADMIN_PUBLIC_KEY=...`, run `./dev.sh restart`, then run `./dev.sh client admin` again.
 4. Open more clients with `./dev.sh client alice`, `./dev.sh client bob`, and so on. A profile's display name is its profile name, so each profile is a distinct user.
 5. After code changes, `./dev.sh restart` for the server and reopen clients to rebuild them.
@@ -185,13 +185,13 @@ Seeded test identities:
 
 - `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
 - `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
-- `#general` is room ID `1`. Loading the fixture makes every existing account a member of it.
+- `#general` is room ID `1`. The server creates it; loading the fixture restores its name and description and makes every existing account a member of it.
 
 ### Rooms
 
 Rooms are open: every account is a member of every room. A nickname that connects for the first time joins every existing room, and a new room includes every account, so testers can chat as soon as they connect. Membership is still stored per account in `room_members`, which the server checks for every send and history request; that is where private rooms will plug in.
 
-The server creates no rooms on its own. Load the fixture (`./dev.sh seed`) for `#general`, or have an admin send `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
+On startup, a server whose `rooms` table is empty creates `#general` ("General discussion", room ID `1` on a new database) and makes every existing account a member, so a fresh server is ready to chat with no fixture. It logs `Created default room #general` when it does. Once any room exists it creates nothing, so an admin who renames or deletes `#general` keeps that change across restarts, as long as another room remains. A room the server creates has no creator (`rooms.created_by_user_id` is `NULL`); servers that ran protocol 7 drop that column's `NOT NULL` in place, keeping their data. Admins create further rooms with `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
 
 #### Direct messages
 
@@ -229,7 +229,6 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 ### Known Limitations
 
 - Private rooms are not implemented. Every account joins every room (see Rooms), and the client has no UI to create rooms or manage members; admins can do both only through the protocol messages.
-- A fresh server has no rooms until the fixture is loaded or an admin creates one.
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
 - Direct messages are implemented in the server and protocol only; the client does not show or send them yet.

@@ -356,6 +356,67 @@ MainRouterState_protocolViolation :: proc(
 	MainRouterState_disconnectPeer(pm, peerID)
 }
 
+MainRouterAuthSuccessSender :: #type proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	userID: int,
+) -> bool
+
+MainRouterState_sendAuthSuccess :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	userID: int,
+) -> bool {
+	return MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		peerID,
+		common.MessageType.ServerAuthSuccess,
+		common.ServerAuthSuccessPayload{userId = userID, message = "ok"},
+	)
+}
+
+// Finishes a handshake whose identity resolved to userID. The session counts as authenticated
+// only once ServerAuthSuccess is out (it is a plaintext handshake response, so it does not need
+// the flag). Marking it first would let a failed send reach MainRouterState_protocolViolation
+// as an authenticated session, which announces offline a user nobody heard come online.
+// sendAuthSuccess exists so router tests can make the send fail.
+MainRouterState_completeAuthentication :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	userID: int,
+	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
+) {
+	if session, sessionOK := MainRouterState_getPeerSession(state, peerID);
+	   !sessionOK || session.isAuthenticated {
+		return
+	}
+	if !sendAuthSuccess(pm, state, peerID, userID) {
+		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
+		return
+	}
+
+	session, _ := MainRouterState_getPeerSession(state, peerID)
+	// Counted before this session joins, so only a user's first session announces them.
+	wasOnline := MainRouterState_isUserOnline(state, userID)
+	session.isAuthenticated = true
+	session.authenticatedUserID = userID
+	MainRouterState_setPeerSession(state, peerID, session)
+	if !wasOnline {
+		MainRouterState_broadcastPresence(
+			pm,
+			state,
+			userID,
+			session.clientNickname,
+			true,
+			peerID,
+		)
+	}
+}
+
 MainRouterState_sendAuthFailure :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -1275,40 +1336,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 
-		session, sessionOK := MainRouterState_getPeerSession(state, request.peerID)
-		if !sessionOK || session.isAuthenticated {
-			return
-		}
-		// Counted before this session joins, so only a user's first session announces them.
-		wasOnline := MainRouterState_isUserOnline(state, identity.userId)
-		session.isAuthenticated = true
-		session.authenticatedUserID = identity.userId
-		MainRouterState_setPeerSession(state, request.peerID, session)
-		if !MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			request.peerID,
-			common.MessageType.ServerAuthSuccess,
-			common.ServerAuthSuccessPayload{userId = session.authenticatedUserID, message = "ok"},
-		) {
-			MainRouterState_protocolViolation(
-				pm,
-				state,
-				request.peerID,
-				"Failed to send auth success",
-			)
-			return
-		}
-		if !wasOnline {
-			MainRouterState_broadcastPresence(
-				pm,
-				state,
-				identity.userId,
-				session.clientNickname,
-				true,
-				request.peerID,
-			)
-		}
+		MainRouterState_completeAuthentication(pm, state, request.peerID, identity.userId)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
 		if MainRouterState_databaseFailed(pm, state, request.peerID, response, roomListOK) {
