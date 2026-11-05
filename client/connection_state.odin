@@ -18,6 +18,9 @@ ServerConnection :: struct {
 	lastAttemptFailed:        bool,
 	userID:                   int,
 	nickname:                 string,
+	// Whether the server said at sign-in that this account is an admin. A role granted or
+	// revoked while connected shows up on the next connection.
+	isAdmin:                  bool,
 	// The raw reason from the transport or server.
 	detail:                   string,
 	// The key a server offered that did not match the pin, for "Trust the new key".
@@ -106,6 +109,17 @@ State_selfUserID :: proc(state: ^State, serverID: int) -> int {
 	return state.serverConnections[index].userID
 }
 
+// Whether the account signed in on serverID is an admin there, per its ServerAuthSuccess.
+// False while not signed in. Only decides which controls the view offers.
+State_isServerAdmin :: proc(state: ^State, serverID: int) -> bool {
+	index := State_serverConnectionIndex(state^, serverID)
+	return(
+		index >= 0 &&
+		state.serverConnections[index].status == .Established &&
+		state.serverConnections[index].isAdmin \
+	)
+}
+
 State_serverConfig :: proc(state: ^State, serverID: int) -> (^Server, bool) {
 	for index in 0 ..< len(state.config.servers) {
 		if state.config.servers[index].id == serverID {
@@ -126,6 +140,7 @@ State_saveConfig :: proc(state: ^State) {
 @(private = "file")
 State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {
 	State_resetDirectRequests(state, serverID, reloadHistory)
+	State_roomEditorConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return
@@ -157,6 +172,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	connection.retryable = false
 	connection.lastAttemptFailed = false
 	connection.userID = event.userID
+	connection.isAdmin = event.isAdmin
 	delete(connection.nickname)
 	connection.nickname = event.nickname
 	event.nickname = ""
@@ -186,6 +202,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = true
 	connection.userID = 0
+	connection.isAdmin = false
 	ServerConnection_setDetail(connection, &event.message)
 	ServerConnection_clearOfferedKey(connection)
 	if event.failureKind == .ServerKeyChanged {
@@ -206,6 +223,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = false
 	connection.userID = 0
+	connection.isAdmin = false
 	ServerConnection_setDetail(connection, &event.message)
 	State_resetPendingRequests(state, event.serverID, false)
 }

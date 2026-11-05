@@ -234,6 +234,7 @@ HeadlessEventKind :: enum {
 	UserList,
 	Conversations,
 	Presence,
+	RoomCreated,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -253,6 +254,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.UserList       = "user_list",
 	.Conversations  = "conversations",
 	.Presence       = "presence",
+	.RoomCreated    = "room_created",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -264,11 +266,14 @@ headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
 	return {}, false
 }
 
+// isAdmin is the server's ServerAuthSuccess flag for this session: whether room management
+// is offered. A role granted while connected shows on the next connection (`reconnect`).
 HeadlessConnectedJSON :: struct {
 	event:    string,
 	serverID: int,
 	userID:   int,
 	nickname: string,
+	isAdmin:  bool,
 }
 
 HeadlessConnectingJSON :: struct {
@@ -557,6 +562,18 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
+	case .RoomCreated:
+		kind = .RoomCreated
+		line = headlessMarshal(
+			HeadlessRoomEditedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.room.id,
+				name = event.room.name,
+				description = event.room.description,
+			},
+			allocator,
+		)
 	case .RoomDeleted:
 		kind = .RoomDeleted
 		line = headlessMarshal(
@@ -595,6 +612,7 @@ headlessRenderRuntimeEvent :: proc(
 				serverID = event.serverID,
 				userID = event.userID,
 				nickname = event.nickname,
+				isAdmin = event.isAdmin,
 			},
 			allocator,
 		)
@@ -736,6 +754,7 @@ HeadlessStatusJSON :: struct {
 	server:         string,
 	userID:         int,
 	nickname:       string,
+	isAdmin:        bool,
 	selectedRoomID: int,
 	lastError:      string,
 }
@@ -788,6 +807,18 @@ HeadlessConversationsResultJSON :: struct {
 	conversations: []HeadlessConversationJSON,
 }
 
+// The result of room-create, room-edit, and room-delete: the request went out. roomID is 0 for
+// room-create; the server's answer arrives as a room_created, room_edited, or room_deleted
+// event, or as a protocol_error (for example "Admin permission required").
+HeadlessRoomRequestJSON :: struct {
+	ok:          bool,
+	cmd:         string,
+	serverID:    int,
+	roomID:      int,
+	name:        string,
+	description: string,
+}
+
 HeadlessDirectSendJSON :: struct {
 	ok:         bool,
 	cmd:        string,
@@ -832,13 +863,19 @@ HeadlessHelpJSON :: struct {
 
 HeadlessCommandProc :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand)
 
+// Whether the rest of the line after the positional arguments is one more argument, kept
+// verbatim (inner spaces included). Not combined with optionalArgs.
+HeadlessTextArgument :: enum u8 {
+	None,
+	Required,
+	Optional,
+}
+
 HeadlessCommand :: struct {
 	name:         string,
 	args:         int, // Required positional arguments
 	optionalArgs: int, // Optional positional arguments after the required ones
-	// The rest of the line after the required arguments is one more required argument, kept
-	// verbatim (inner spaces included). Not combined with optionalArgs.
-	takesText:    bool,
+	text:         HeadlessTextArgument,
 	usage:        string,
 	summary:      string,
 	run:          HeadlessCommandProc,
@@ -846,34 +883,42 @@ HeadlessCommand :: struct {
 
 // Every command the harness understands. Adding one is a row here plus its handler.
 HEADLESS_COMMANDS := [?]HeadlessCommand {
-	{"status", 0, 0, false, "status", "connection status, user, nickname, selected server",
-		headlessCommandStatus},
-	{"reconnect", 0, 0, false, "reconnect",
+	{"status", 0, 0, .None, "status",
+		"connection status, user, nickname, admin flag, selected server", headlessCommandStatus},
+	{"reconnect", 0, 0, .None, "reconnect",
 		"connects again now, without waiting for the next retry (also after a failure)",
 		headlessCommandReconnect},
-	{"rooms", 0, 0, false, "rooms", "joined rooms from the cache; requests them if not loaded",
+	{"rooms", 0, 0, .None, "rooms", "joined rooms from the cache; requests them if not loaded",
 		headlessCommandRooms},
-	{"history", 1, 1, false, "history ROOM_ID [BEFORE_MESSAGE_ID]",
+	{"history", 1, 1, .None, "history ROOM_ID [BEFORE_MESSAGE_ID]",
 		"requests a history page; it arrives as a room_history event", headlessCommandHistory},
-	{"send", 1, 0, true, "send ROOM_ID TEXT...", "sends the rest of the line to a room",
+	{"send", 1, 0, .Required, "send ROOM_ID TEXT...", "sends the rest of the line to a room",
 		headlessCommandSend},
-	{"users", 0, 0, false, "users",
+	{"users", 0, 0, .None, "users",
 		"every account with its online flag, from the cache; requests it if not loaded",
 		headlessCommandUsers},
-	{"conversations", 0, 0, false, "conversations",
+	{"conversations", 0, 0, .None, "conversations",
 		"recent direct conversations, newest first; requests them if not loaded",
 		headlessCommandConversations},
-	{"dm", 1, 0, true, "dm USER_ID TEXT...", "sends the rest of the line as a direct message",
-		headlessCommandDirectMessage},
-	{"dm-history", 1, 1, false, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
+	{"dm", 1, 0, .Required, "dm USER_ID TEXT...",
+		"sends the rest of the line as a direct message", headlessCommandDirectMessage},
+	{"dm-history", 1, 1, .None, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
-	{"wait", 1, 1, false, "wait EVENT_KIND [TIMEOUT_MS]",
+	{"room-create", 1, 0, .Optional, "room-create NAME [DESCRIPTION...]",
+		"admins: creates a room; it arrives as room_created", headlessCommandRoomCreate},
+	{"room-edit", 2, 0, .Optional, "room-edit ROOM_ID NAME [DESCRIPTION...]",
+		"admins: renames a room and sets its description (empty without one)",
+		headlessCommandRoomEdit},
+	{"room-delete", 1, 0, .None, "room-delete ROOM_ID",
+		"admins: deletes a room and its history; it arrives as room_deleted",
+		headlessCommandRoomDelete},
+	{"wait", 1, 1, .None, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
-	{"sleep", 1, 0, false, "sleep MS", "keeps servicing the connection for MS milliseconds",
+	{"sleep", 1, 0, .None, "sleep MS", "keeps servicing the connection for MS milliseconds",
 		headlessCommandSleep},
-	{"help", 0, 0, false, "help", "lists commands and event kinds", headlessCommandHelp},
-	{"quit", 0, 0, false, "quit", "disconnects and exits with code 0", headlessCommandQuit},
+	{"help", 0, 0, .None, "help", "lists commands and event kinds", headlessCommandHelp},
+	{"quit", 0, 0, .None, "quit", "disconnects and exits with code 0", headlessCommandQuit},
 }
 
 HeadlessParseError :: enum {
@@ -930,7 +975,10 @@ headlessParseCommand :: proc(
 	}
 	command := parsed.command
 	positional := command.args + command.optionalArgs
-	assert(positional + int(command.takesText) <= HEADLESS_MAX_ARGS, "too many command args")
+	assert(
+		positional + int(command.text != .None) <= HEADLESS_MAX_ARGS,
+		"too many command args",
+	)
 	for parsed.argCount < positional {
 		word := headlessNextWord(&rest)
 		if len(word) == 0 {
@@ -943,12 +991,13 @@ headlessParseCommand :: proc(
 	if parsed.argCount < command.args {
 		return parsed, .BadArguments
 	}
-	if command.takesText {
-		if len(rest) == 0 {
+	if command.text != .None {
+		if len(rest) > 0 {
+			parsed.args[parsed.argCount] = rest
+			parsed.argCount += 1
+		} else if command.text == .Required {
 			return parsed, .BadArguments
 		}
-		parsed.args[parsed.argCount] = rest
-		parsed.argCount += 1
 	} else if len(rest) > 0 {
 		return parsed, .BadArguments
 	}
@@ -1186,6 +1235,7 @@ headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParse
 			result.connected = true
 			result.userID = connection.userID
 			result.nickname = connection.nickname
+			result.isAdmin = connection.isAdmin
 		case .Disconnected:
 			result.connection = "retrying"
 			result.retryInMS = headlessMillisecondsUntil(connection.retryAt, time.tick_now())
@@ -1467,6 +1517,67 @@ headlessCommandDirectHistory :: proc(
 			beforeMessageID = beforeMessageID,
 		},
 	)
+}
+
+// Room management goes through the same actions as the GUI's room form, minus the form: the
+// harness does not check the admin flag, so an agent can see the server refuse a non-admin.
+@(private = "file")
+headlessWriteRoomRequest :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	errorMessage: string,
+	roomID: int,
+	name, description: string,
+) {
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessRoomRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = harness.state.selected_server_id,
+			roomID = roomID,
+			name = name,
+			description = description,
+		},
+	)
+}
+
+headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	name := command.args[0]
+	description := command.argCount > 1 ? command.args[1] : ""
+	state := &harness.state
+	errorMessage := State_sendCreateRoom(state, state.selected_server_id, name, description)
+	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
+	headlessWriteRoomRequest(harness, command, errorMessage, 0, cleanName, cleanDescription)
+}
+
+headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	if !roomOK || roomID == 0 {
+		headlessWriteError(harness, command.name, "usage: room-edit ROOM_ID NAME [DESCRIPTION...]")
+		return
+	}
+	name := command.args[1]
+	description := command.argCount > 2 ? command.args[2] : ""
+	state := &harness.state
+	errorMessage := State_sendEditRoom(state, state.selected_server_id, roomID, name, description)
+	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
+	headlessWriteRoomRequest(harness, command, errorMessage, roomID, cleanName, cleanDescription)
+}
+
+headlessCommandRoomDelete :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	if !roomOK || roomID == 0 {
+		headlessWriteError(harness, command.name, "usage: room-delete ROOM_ID")
+		return
+	}
+	state := &harness.state
+	errorMessage := State_sendDeleteRoom(state, state.selected_server_id, roomID)
+	headlessWriteRoomRequest(harness, command, errorMessage, roomID, "", "")
 }
 
 headlessCommandWait :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {

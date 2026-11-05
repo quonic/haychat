@@ -150,7 +150,12 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 // `inserted`, which is empty when the key already owns an account or the identity is not
 // claimable, so a refused login joins nothing.
 //
-// Columns: user ID, whether this was a rename, and the nickname before the rename.
+// The final select also reports whether the resolved account holds the `admin` server role,
+// for ServerAuthSuccess.isAdmin. user_server_roles is not written here, so the statement's
+// snapshot is current: a claimed seeded admin reads true, a brand-new account false.
+//
+// Columns: user ID, whether this was a rename, the nickname before the rename, and whether the
+// account is an admin.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WITH by_key AS (SELECT id, nickname FROM users WHERE public_key = decode($2, 'hex')), " +
 	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
@@ -176,7 +181,9 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WHERE nickname = $1 " +
 	"UNION ALL SELECT id, true, previous_nickname FROM renamed " +
 	"UNION ALL SELECT id, false, '' FROM inserted) " +
-	"SELECT id::text, is_rename::text, previous_nickname FROM resolved"
+	"SELECT resolved.id::text, is_rename::text, previous_nickname, EXISTS (" +
+	"SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
+	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text FROM resolved"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
 // loading a fixture. Rooms are open, so every existing account joins it. On an empty table
@@ -448,6 +455,7 @@ databaseExecuteUserIdentityResolution :: proc(
 		if identity.renamed {
 			identity.previousNickname = databaseGetText(result, 0, 2)
 		}
+		identity.isAdmin = databaseGetBool(result, 0, 3)
 	}
 	return databaseSuccess(identity)
 }

@@ -221,7 +221,8 @@ creates `#general` as room 1, and every account joins every room. The log shows
 `Created default room #general`. Testers only need the host and port.
 
 Optionally, give your own account the admin role, which lets it create, rename, and delete
-rooms and manage members through the protocol (the client has no UI for that yet):
+rooms from the client (**+ New room** next to the room list, **Edit room** in a room's
+header):
 
 1. Connect once with the client, using the display name that should own the server (for
    example `jim`). The server creates the account and binds the name to your client's key.
@@ -248,6 +249,9 @@ rooms and manage members through the protocol (the client has no UI for that yet
    	SELECT u.id, r.id FROM users u, server_roles r WHERE u.nickname = 'jim' AND r.name = 'admin'
    	ON CONFLICT DO NOTHING;
    ```
+
+3. Reconnect: the client learns that it is an admin when it signs in, so close and reopen
+   it (or wait for its next reconnect). The room controls then appear.
 
 `server/sql/auth_bootstrap.sql` (also in the image) is the **test fixture** the dev
 environment uses. It creates the accounts `admin` (ID 1) and `haypeer` (ID 2) and resets `#general`,

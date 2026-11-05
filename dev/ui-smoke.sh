@@ -10,6 +10,9 @@ set -euo pipefail
 #   2. bob finds alice with `users` and sends her a direct message; alice waits until bob's
 #      row appears in the Direct Messages section, clicks it, and asserts the message is shown
 #   3. alice types a reply and presses Return; bob must receive it as a direct_message
+#   4. alice is an admin (her profile connects once headlessly first, so the account exists
+#      for deploy/sql/make-admin.sql): she clicks "+ New room", types a name, clicks Create,
+#      and waits until the room is drawn; bob must receive room_membership and list it
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -79,6 +82,7 @@ nickname_bob="ui-bob-$run_tag"
 room_message="ui smoke room $run_tag"
 dm_message="ui smoke dm from bob $run_tag"
 reply_message="ui smoke reply from alice $run_tag"
+admin_room="ui-room-$run_tag"
 
 echo "==> [ui] starting headless bob"
 start_client bob "$nickname_bob"
@@ -89,6 +93,14 @@ fi
 user_bob=${BASH_REMATCH[1]}
 echo "    bob< $connected_line"
 expect_ok bob wait room_list 5000
+
+# The admin role needs an account to grant it to, so alice's profile signs in once headlessly
+# (creating the account under her key) before her window opens with the same profile.
+echo "==> [ui] creating alice's account and making her an admin"
+start_client alice-setup "$nickname_alice" alice
+expect_connected alice-setup
+stop_client alice-setup
+make_admin "$nickname_alice"
 
 # alice's profile is fresh, so its only server gets ID 1; the DM composer's widget ID is
 # idOf("dm-input", serverID, peerUserID).
@@ -116,6 +128,14 @@ type "$reply_message"
 key Return
 wait-text "$reply_message" 10000
 screenshot $screenshot_dir/06-dm-replied.bmp
+# alice signed in as an admin, so the Channels header offers "+ New room".
+click "+ New room"
+click "e.g. random"
+type "$admin_room"
+screenshot $screenshot_dir/07-new-room-form.bmp
+click-id room-editor-submit
+wait-text "# $admin_room" 10000
+screenshot $screenshot_dir/08-room-created.bmp
 quit
 EOF
 
@@ -151,6 +171,17 @@ reply_line=$(wait_for_match bob "$reply_pattern") ||
 	fail "[dm] bob did not receive alice's reply"
 echo "    bob< $reply_line"
 
+echo "==> [ui] alice creates a room from the window, bob sees it"
+membership_line=$(wait_for_match bob \
+	'^\{"event":"room_membership",.*"joined":true\}$') ||
+	fail "[admin] bob did not receive room_membership for alice's new room"
+echo "    bob< $membership_line"
+wait_for_match bob "^\\{\"event\":\"room_list\",.*\"name\":\"$admin_room\"" >/dev/null ||
+	fail "[admin] bob's room list never listed $admin_room"
+expect_ok bob rooms
+[[ "$last_result" == *"\"name\":\"$admin_room\""* ]] ||
+	fail "[admin] bob's rooms do not list $admin_room"
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -168,5 +199,5 @@ for shot in "$screenshot_dir"/0*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 6 ]] || fail "expected 6 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 8 ]] || fail "expected 8 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

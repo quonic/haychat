@@ -119,6 +119,29 @@ testUserIdentityStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		)
 	}
 
+	// The statement reports the admin role: false for a new account, true once the account
+	// holds the role (as make-admin.sql grants it), and true again on a rename.
+	assert(!alice.isAdmin, fmt.tprintf("expected a new account not to be an admin: %v", alice))
+	databaseDefaultRoomTestExec(
+		conn,
+		"make id-alice an admin",
+		fmt.tprintf(
+			"INSERT INTO server_roles (name) VALUES ('admin') ON CONFLICT DO NOTHING; " +
+			"INSERT INTO server_roles (name) VALUES ('moderator') ON CONFLICT DO NOTHING; " +
+			"INSERT INTO user_server_roles (user_id, role_id) " +
+			"SELECT %d, id FROM server_roles WHERE name = 'admin'",
+			alice.userId,
+		),
+	)
+	{
+		admin := databaseIdentityTestResolve(conn, "id-alice", aliceKey)
+		defer delete(admin.previousNickname)
+		assert(
+			admin.userId == alice.userId && admin.isAdmin,
+			fmt.tprintf("expected id-alice to resolve as an admin, got %v", admin),
+		)
+	}
+
 	// The same key with a free nickname renames its account and reports the old name.
 	{
 		renamed := databaseIdentityTestResolve(conn, "id-alice-2", aliceKey)
@@ -126,8 +149,9 @@ testUserIdentityStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		assert(
 			renamed.userId == alice.userId &&
 			renamed.renamed &&
-			renamed.previousNickname == "id-alice",
-			fmt.tprintf("expected %d renamed from id-alice, got %v", alice.userId, renamed),
+			renamed.previousNickname == "id-alice" &&
+			renamed.isAdmin,
+			fmt.tprintf("expected admin %d renamed from id-alice, got %v", alice.userId, renamed),
 		)
 		nickname := databaseIdentityTestNickname(conn, alice.userId)
 		defer delete(nickname)
@@ -143,6 +167,24 @@ testUserIdentityStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 	bob := databaseIdentityTestResolve(conn, "id-bob", bobKey)
 	defer delete(bob.previousNickname)
 	assert(bob.userId > 0 && bob.userId != alice.userId, "expected a new account for id-bob")
+	// Holding some other role does not make an account an admin.
+	databaseDefaultRoomTestExec(
+		conn,
+		"make id-bob a moderator",
+		fmt.tprintf(
+			"INSERT INTO user_server_roles (user_id, role_id) " +
+			"SELECT %d, id FROM server_roles WHERE name = 'moderator'",
+			bob.userId,
+		),
+	)
+	{
+		moderator := databaseIdentityTestResolve(conn, "id-bob", bobKey)
+		defer delete(moderator.previousNickname)
+		assert(
+			moderator.userId == bob.userId && !moderator.isAdmin,
+			fmt.tprintf("expected a moderator not to be an admin, got %v", moderator),
+		)
+	}
 	{
 		rooms := databaseIdentityTestMemberships(conn, bob.userId)
 		defer delete(rooms)

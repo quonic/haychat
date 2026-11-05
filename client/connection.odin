@@ -456,6 +456,7 @@ ClientServerTransport_connected :: proc(
 		serverID = transport.serverID,
 		userID   = transport.authenticatedUserID,
 		nickname = strings.clone(transport.nickname),
+		isAdmin  = transport.authenticatedIsAdmin,
 	}
 	if transport.connection.newlyPinned {
 		event.serverPublicKey = strings.clone(transport.pinnedServerPublicKey)

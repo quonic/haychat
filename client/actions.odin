@@ -214,8 +214,10 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 	return &ServerRoomCache_roomCache(cache, state.selected_channel_id).draft
 }
 
-// Peer user IDs belong to one server, so switching servers closes any open conversation.
+// Peer user IDs belong to one server, so switching servers closes any open conversation and
+// the room editor.
 State_switchToServer :: proc(state: ^State, serverID: int) {
+	State_closeRoomEditor(state)
 	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
@@ -224,7 +226,9 @@ State_switchToServer :: proc(state: ^State, serverID: int) {
 	State_clearChatStatus(state)
 }
 
+// Showing a room replaces whatever the main pane showed, the room editor included.
 State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
+	State_closeRoomEditor(state)
 	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
@@ -373,14 +377,17 @@ State_receiveRoomHistory :: proc(
 	roomCache.hasOlder = hasOlder
 }
 
-// Falls back to another joined room when the selected room goes away.
+// Falls back to another joined room when the selected room goes away: #general while it
+// exists, otherwise the first room in the list.
 State_fallBackFromRemovedRoom :: proc(state: ^State, serverID, roomID: int) {
 	if serverID != state.selected_server_id || roomID != state.selected_channel_id {
 		return
 	}
 	cache := State_serverRoomCache(state, serverID)
 	state.selected_channel_id = 0
-	if len(cache.rooms) > 0 {
+	if ServerRoomCache_roomIsJoined(cache, common.GENERAL_ROOM_ID) {
+		state.selected_channel_id = common.GENERAL_ROOM_ID
+	} else if len(cache.rooms) > 0 {
 		state.selected_channel_id = cache.rooms[0].id
 	}
 }
@@ -389,6 +396,7 @@ State_roomMembershipChanged :: proc(state: ^State, serverID, roomID: int, joined
 	if !joined {
 		ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 		State_fallBackFromRemovedRoom(state, serverID, roomID)
+		State_roomEditorRoomChanged(state, serverID, roomID)
 	}
 	State_requestRoomList(state, serverID)
 }
@@ -396,6 +404,8 @@ State_roomMembershipChanged :: proc(state: ^State, serverID, roomID: int, joined
 // Takes ownership of room when it replaces a joined room and clears the caller's copy;
 // otherwise the caller still owns it.
 State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.RoomSummary) {
+	// The form would otherwise save over a change it never showed.
+	State_roomEditorRoomChanged(state, serverID, roomID)
 	cache := State_serverRoomCache(state, serverID)
 	for index in 0 ..< len(cache.rooms) {
 		if cache.rooms[index].id == roomID {
@@ -409,6 +419,7 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 }
 
 State_roomDeleted :: proc(state: ^State, serverID, roomID: int) {
+	State_roomEditorRoomChanged(state, serverID, roomID)
 	ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 	State_fallBackFromRemovedRoom(state, serverID, roomID)
 	State_requestRoomList(state, serverID)
@@ -422,6 +433,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 		ServerRoomCache_roomCache(cache, state.selected_channel_id).isLoadingHistory = false
 	}
 	State_directProtocolError(state, serverID)
+	State_roomEditorProtocolError(state, serverID, message)
 	State_setChatStatus(state, message)
 }
 
@@ -456,6 +468,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_roomEdited(state, event.serverID, event.roomID, &event.room)
 	case .RoomDeleted:
 		State_roomDeleted(state, event.serverID, event.roomID)
+	case .RoomCreated:
+		State_roomCreated(state, event.serverID, &event.room)
 	case .ProtocolError:
 		State_transportProtocolError(state, event.serverID, event.message)
 	case .Connecting:

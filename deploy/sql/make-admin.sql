@@ -1,8 +1,8 @@
 -- Gives one existing account the server's admin role.
 --
 -- The server creates #general by itself on first start, so a fresh server needs no SQL to be
--- usable. An admin can create, rename, and delete rooms and manage members through the
--- protocol (the client has no UI for that yet). Connect once with the client, using the
+-- usable. An admin can create, rename, and delete rooms from the client ("+ New room" beside
+-- the room list, "Edit room" in a room's header). Connect once with the client, using the
 -- display name that should own the server, then run (see deploy/README.md):
 --
 --   psql -v owner=NICKNAME -f make-admin.sql
