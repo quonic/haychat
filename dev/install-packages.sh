@@ -17,6 +17,8 @@ build_packages=(
 	lld
 	pkgconf-pkg-config
 	libpq-devel
+	# psql: dev/live-proof.sh loads the room fixture into its throwaway database.
+	postgresql
 	enet-devel
 	SDL3-devel
 	SDL3_ttf-devel

@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 5
+protocolVersion: ProtocolVersion = 6
 GENERAL_ROOM_ID :: int(1)
 // Largest room chat message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -340,11 +340,12 @@ ClientChatMessagePayload :: struct {
 }
 
 ServerChatMessagePayload :: struct {
-	id:        int,
-	senderId:  int,
-	roomId:    int,
-	timestamp: string,
-	content:   string,
+	id:             int,
+	senderId:       int,
+	senderNickname: string, // Sender's nickname when the message was stored or read
+	roomId:         int,
+	timestamp:      string,
+	content:        string,
 }
 
 RoomSummary :: struct {
@@ -366,11 +367,12 @@ ClientFetchRoomHistoryPayload :: struct {
 }
 
 StoredChatMessage :: struct {
-	id:        int,
-	senderId:  int,
-	roomId:    int,
-	timestamp: string,
-	content:   string,
+	id:             int,
+	senderId:       int,
+	senderNickname: string, // Joined from users; empty if the sender has no row
+	roomId:         int,
+	timestamp:      string,
+	content:        string,
 }
 
 ServerRoomHistoryPayload :: struct {

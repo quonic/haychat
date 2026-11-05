@@ -102,13 +102,26 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 // Binds a client identity key to a nickname. A keyless account can be claimed on first
 // connect only when it holds no server roles; privileged keyless accounts (such as the
 // seeded admin) can only be claimed by the configured HAYCHAT_ADMIN_PUBLIC_KEY ($3).
+//
+// Rooms are open: an account created by this statement joins every existing room in the
+// same statement, so it can chat as soon as it authenticates. `existing` reads the snapshot
+// from before the upsert, so only a brand-new nickname joins; returning or claimed accounts
+// keep whatever membership an admin gave them. The membership insert reads from `resolved`,
+// which is empty when the identity is not claimable, so a refused login joins nothing.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
+	"WITH existing AS (SELECT id FROM users WHERE nickname = $1), " +
+	"resolved AS (" +
 	"INSERT INTO users (nickname, public_key) VALUES ($1, decode($2, 'hex')) " +
 	"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
 	"WHERE users.public_key = EXCLUDED.public_key OR (users.public_key IS NULL AND (" +
 	"NOT EXISTS (SELECT 1 FROM user_server_roles usr WHERE usr.user_id = users.id) " +
 	"OR EXCLUDED.public_key = decode(NULLIF($3, ''), 'hex'))) " +
-	"RETURNING id::text"
+	"RETURNING id), " +
+	"joined AS (" +
+	"INSERT INTO room_members (room_id, user_id) " +
+	"SELECT r.id, resolved.id FROM rooms r CROSS JOIN resolved " +
+	"WHERE NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING) " +
+	"SELECT id::text FROM resolved"
 
 databaseSchemaExecute :: proc(conn: pg.Conn, operation: string, query: string) -> string {
 	queryCString, queryCStringErr := strings.clone_to_cstring(query)
@@ -407,13 +420,15 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 }
 
 // One statement checks membership, stores the message only for members, and lists the room's
-// recipients from the same snapshot. It always returns exactly one row.
+// recipients and the sender's nickname from the same snapshot. It always returns exactly one
+// row.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
 	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content) " +
 	"SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM member) RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
-	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), '') " +
+	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
+	"COALESCE((SELECT nickname FROM users WHERE id = $2), '') " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
@@ -455,6 +470,7 @@ databaseExecutePostRoomChatMessage :: proc(
 			storedMessage = {
 				id = messageID,
 				senderId = request.senderId,
+				senderNickname = databaseGetText(result, 0, 4),
 				roomId = request.roomId,
 				timestamp = databaseGetText(result, 0, 2),
 				content = strings.clone(request.content),
@@ -465,14 +481,17 @@ databaseExecutePostRoomChatMessage :: proc(
 }
 
 // Returns the membership flag on every row, with message columns NULL when the requester is
-// not a member or the page is empty. Fetches one extra row to detect older messages.
+// not a member or the page is empty. Fetches one extra row to detect older messages. The
+// sender's current nickname is joined in so clients can label history without a user lookup.
 DATABASE_GET_ROOM_HISTORY_SQL ::
 	"WITH member AS (SELECT EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $1 AND user_id = $2) AS ok) " +
-	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content " +
-	"FROM member m LEFT JOIN LATERAL (SELECT id, sender_user_id, created_at, content " +
-	"FROM chat_messages WHERE m.ok AND room_id = $1 AND ($3::bigint = 0 OR id < $3::bigint) " +
-	"ORDER BY id DESC LIMIT $4) c ON true ORDER BY c.id DESC"
+	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
+	"c.nickname FROM member m LEFT JOIN LATERAL (" +
+	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname " +
+	"FROM chat_messages cm JOIN users u ON u.id = cm.sender_user_id " +
+	"WHERE m.ok AND cm.room_id = $1 AND ($3::bigint = 0 OR cm.id < $3::bigint) " +
+	"ORDER BY cm.id DESC LIMIT $4) c ON true ORDER BY c.id DESC"
 
 databaseExecuteGetRoomHistory :: proc(
 	conn: pg.Conn,
@@ -529,6 +548,7 @@ databaseExecuteGetRoomHistory :: proc(
 			common.StoredChatMessage {
 				id = messageID,
 				senderId = senderID,
+				senderNickname = databaseGetText(result, row, 5),
 				roomId = request.roomId,
 				timestamp = databaseGetText(result, row, 3),
 				content = databaseGetText(result, row, 4),
@@ -570,6 +590,19 @@ databaseExecuteCheckUserServerAdmin :: proc(
 	)
 }
 
+// Rooms are open: a new room includes every account, the creator among them, so nobody has
+// to be added by hand. The database worker runs one statement at a time on one connection,
+// so an account created concurrently either sees this room or is seen by it.
+DATABASE_CREATE_ROOM_SQL ::
+	"WITH created_room AS (" +
+	"INSERT INTO rooms (name, description, created_by_user_id) VALUES ($2, $3, $1) " +
+	"RETURNING id, name, description" +
+	"), all_members AS (" +
+	"INSERT INTO room_members (room_id, user_id) " +
+	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
+	"ON CONFLICT DO NOTHING" +
+	") SELECT id::text, name, description FROM created_room"
+
 databaseExecuteCreateRoom :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseCreateRoomRequest,
@@ -585,17 +618,7 @@ databaseExecuteCreateRoom :: proc(
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
 	}
-	result := databaseExecParams(
-		conn,
-		"WITH created_room AS (" +
-		"INSERT INTO rooms (name, description, created_by_user_id) VALUES ($2, $3, $1) " +
-		"RETURNING id, name, description" +
-		"), creator_membership AS (" +
-		"INSERT INTO room_members (room_id, user_id) " +
-		"SELECT id, $1 FROM created_room ON CONFLICT DO NOTHING" +
-		") SELECT id::text, name, description FROM created_room",
-		params[:],
-	)
+	result := databaseExecParams(conn, DATABASE_CREATE_ROOM_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}

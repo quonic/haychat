@@ -164,15 +164,17 @@ testApplyRoomChat :: proc(
 	state: ^State,
 	serverID, roomID, senderID, messageID: int,
 	content: string,
+	senderNickname := "",
 ) {
 	event := ClientTransportRuntimeEvent {
-		kind      = .RoomChatReceived,
-		serverID  = serverID,
-		roomID    = roomID,
-		senderID  = senderID,
-		messageID = messageID,
-		timestamp = strings.clone("t"),
-		message   = strings.clone(content),
+		kind           = .RoomChatReceived,
+		serverID       = serverID,
+		roomID         = roomID,
+		senderID       = senderID,
+		senderNickname = strings.clone(senderNickname),
+		messageID      = messageID,
+		timestamp      = strings.clone("t"),
+		message        = strings.clone(content),
 	}
 	State_applyRuntimeEvent(state, &event)
 	ClientTransportRuntimeEvent_deinit(&event)
@@ -221,8 +223,12 @@ liveTestExpectEstablishedTransport :: proc(
 	)
 }
 
-liveTestWaitForRoomChatEvent :: proc(
+// Services the transport until an event of the wanted kind arrives. Other events, such as the
+// room list that startup requested, are freed and skipped, so the result does not depend on
+// the order the server's replies arrive in.
+liveTestWaitForRuntimeEvent :: proc(
 	transport: ^ClientServerTransport,
+	kind: ClientTransportRuntimeEventKind,
 	timeout: time.Duration,
 ) -> (
 	ClientTransportRuntimeEvent,
@@ -231,10 +237,14 @@ liveTestWaitForRoomChatEvent :: proc(
 	start := time.now()
 	for time.since(start) < timeout {
 		runtimeEvent, hasEvent := ClientServerTransport_serviceRuntime(transport)
-		if hasEvent {
+		if !hasEvent {
+			time.sleep(1 * time.Millisecond)
+			continue
+		}
+		if runtimeEvent.kind == kind {
 			return runtimeEvent, true
 		}
-		time.sleep(1 * time.Millisecond)
+		ClientTransportRuntimeEvent_deinit(&runtimeEvent)
 	}
 
 	return {}, false
@@ -432,12 +442,36 @@ testReceiveRoomChatAppendsOnlyOnAuthoritativeReceive :: proc(t: ^testing.T) {
 		testing.expect(
 			t,
 			afterOther.lines[1].senderLabel == "User 42",
-			"expected non-self echoes to use the sender ID label",
+			"expected non-self echoes without a nickname to fall back to the sender ID label",
 		)
 		testing.expect(
 			t,
 			!afterOther.lines[1].isSelf,
 			"expected non-self echoes to use the standard sender styling",
+		)
+	}
+
+	testApplyRoomChat(&state, server.id, common.GENERAL_ROOM_ID, 43, 3, "named", "hay-user")
+	testApplyRoomChat(&state, server.id, common.GENERAL_ROOM_ID, 77, 4, "self named", "me")
+	afterNamed := buildRoomView(&state)
+	testing.expectf(
+		t,
+		len(afterNamed.lines) == 4,
+		"expected named receives to append two more lines, got %d",
+		len(afterNamed.lines),
+	)
+	if len(afterNamed.lines) == 4 {
+		testing.expectf(
+			t,
+			afterNamed.lines[2].senderLabel == "hay-user",
+			"expected non-self lines to show the sender nickname, got %q",
+			afterNamed.lines[2].senderLabel,
+		)
+		testing.expectf(
+			t,
+			afterNamed.lines[3].senderLabel == "You",
+			"expected self lines to keep the self label over the nickname, got %q",
+			afterNamed.lines[3].senderLabel,
 		)
 	}
 
@@ -636,6 +670,7 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 		&firstPage.messages,
 		common.StoredChatMessage {
 			id = 2,
+			senderNickname = strings.clone("page-one"),
 			roomId = 12,
 			timestamp = strings.clone("t2"),
 			content = strings.clone("two"),
@@ -685,6 +720,12 @@ testRoomHistoryMergesPagesByMessageID :: proc(t: ^testing.T) {
 	testing.expect(t, len(room.messages) == 3, "expected overlapping history pages to deduplicate")
 	testing.expect(t, room.messages[0].id == 1, "expected older messages to prepend in ID order")
 	testing.expect(t, room.messages[2].id == 3, "expected newest messages to remain after merge")
+	testing.expectf(
+		t,
+		room.messages[1].senderNickname == "page-one",
+		"expected the first page's copy of message 2 to keep its nickname, got %q",
+		room.messages[1].senderNickname,
+	)
 	testing.expect(
 		t,
 		room.oldestMessageID == 1,
@@ -977,6 +1018,7 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 		.ServerChatMessage,
 		common.ServerChatMessagePayload {
 			senderId = 42,
+			senderNickname = "hay-user",
 			roomId = common.GENERAL_ROOM_ID,
 			content = "authoritative chat",
 		},
@@ -1007,6 +1049,10 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 		"expected room chat event to preserve roomId metadata",
 	)
 	assert(runtimeEvent.senderID == 42, "expected room chat event to preserve senderId metadata")
+	assert(
+		runtimeEvent.senderNickname == "hay-user",
+		"expected room chat event to carry the sender nickname",
+	)
 	assert(
 		runtimeEvent.message == "authoritative chat",
 		"expected room chat event to preserve chat content",
@@ -1547,55 +1593,87 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 		fmt.aprintf("expected client A to send a live room chat message, got %s", sendStatus),
 	)
 
-	runtimeEvent, hasEvent := liveTestWaitForRoomChatEvent(transportB, 2 * time.Second)
+	runtimeEvent, hasEvent := liveTestWaitForRuntimeEvent(
+		transportB,
+		.RoomChatReceived,
+		2 * time.Second,
+	)
 	defer if hasEvent do ClientTransportRuntimeEvent_deinit(&runtimeEvent)
 	receiverStatus := liveTestTransportStatus(transportB)
 	defer delete(receiverStatus)
-	testing.expect(
+	testing.expectf(
 		t,
 		hasEvent,
-		fmt.aprintf(
-			"expected client B to receive a live room chat message before timeout, got %s",
-			receiverStatus,
-		),
+		"expected client B to receive a live room chat message before timeout, got %s",
+		receiverStatus,
 	)
 	if !hasEvent {
 		return
 	}
 
-	testing.expect(
-		t,
-		runtimeEvent.kind == .RoomChatReceived,
-		fmt.aprintf(
-			"expected client B runtime event to be room chat, got kind=%v message=%q",
-			runtimeEvent.kind,
-			runtimeEvent.message,
-		),
-	)
-	testing.expect(
+	testing.expectf(
 		t,
 		runtimeEvent.roomID == common.GENERAL_ROOM_ID,
-		fmt.aprintf(
-			"expected client B runtime event to preserve the General room ID, got %v",
-			runtimeEvent.roomID,
-		),
+		"expected client B runtime event to preserve the General room ID, got %v",
+		runtimeEvent.roomID,
 	)
-	testing.expect(
+	testing.expectf(
 		t,
 		runtimeEvent.senderID == transportA.authenticatedUserID,
-		fmt.aprintf(
-			"expected client B runtime event sender to match client A authenticated user ID, got sender=%v auth=%v",
-			runtimeEvent.senderID,
-			transportA.authenticatedUserID,
-		),
+		"expected client B runtime event sender to match client A, got sender=%v auth=%v",
+		runtimeEvent.senderID,
+		transportA.authenticatedUserID,
 	)
-	testing.expect(
+	testing.expectf(
+		t,
+		runtimeEvent.senderNickname == configA.display_name,
+		"expected client B runtime event to name the sender %q, got %q",
+		configA.display_name,
+		runtimeEvent.senderNickname,
+	)
+	testing.expectf(
 		t,
 		runtimeEvent.message == messageContent,
-		fmt.aprintf(
-			"expected client B runtime event to preserve chat content %q, got %q",
-			messageContent,
-			runtimeEvent.message,
-		),
+		"expected client B runtime event to preserve chat content %q, got %q",
+		messageContent,
+		runtimeEvent.message,
+	)
+
+	// History must label the stored message with the same nickname as the live fan-out.
+	historyOK := ClientServerTransport_requestRoomHistory(
+		transportB,
+		common.GENERAL_ROOM_ID,
+		0,
+		50,
+	)
+	testing.expect(t, historyOK, "expected client B to request General room history")
+	historyEvent, hasHistory := liveTestWaitForRuntimeEvent(
+		transportB,
+		.RoomHistoryReceived,
+		2 * time.Second,
+	)
+	defer if hasHistory do ClientTransportRuntimeEvent_deinit(&historyEvent)
+	testing.expect(t, hasHistory, "expected client B to receive General room history")
+	if !hasHistory {
+		return
+	}
+	foundInHistory := false
+	for message in historyEvent.messages {
+		if message.id == runtimeEvent.messageID {
+			foundInHistory = true
+			testing.expectf(
+				t,
+				message.senderNickname == configA.display_name,
+				"expected history to name the sender %q, got %q",
+				configA.display_name,
+				message.senderNickname,
+			)
+		}
+	}
+	testing.expectf(
+		t,
+		foundInHistory,
+		"expected General room history to contain message %d",
+		runtimeEvent.messageID,
 	)
 }

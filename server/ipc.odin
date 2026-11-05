@@ -213,6 +213,7 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 }
 
 IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
+	delete(message.senderNickname)
 	delete(message.timestamp)
 	delete(message.content)
 }

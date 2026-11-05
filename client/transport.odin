@@ -33,18 +33,19 @@ ClientTransportRuntimeEventKind :: enum {
 }
 
 ClientTransportRuntimeEvent :: struct {
-	kind:      ClientTransportRuntimeEventKind,
-	serverID:  int,
-	senderID:  int,
-	roomID:    int,
-	messageID: int,
-	timestamp: string,
-	message:   string,
-	rooms:     [dynamic]common.RoomSummary,
-	messages:  [dynamic]common.StoredChatMessage,
-	hasOlder:  bool,
-	joined:    bool,
-	room:      common.RoomSummary,
+	kind:           ClientTransportRuntimeEventKind,
+	serverID:       int,
+	senderID:       int,
+	senderNickname: string, // Set for .RoomChatReceived
+	roomID:         int,
+	messageID:      int,
+	timestamp:      string,
+	message:        string,
+	rooms:          [dynamic]common.RoomSummary,
+	messages:       [dynamic]common.StoredChatMessage,
+	hasOlder:       bool,
+	joined:         bool,
+	room:           common.RoomSummary,
 }
 
 ClientStartupAuthSession :: struct {
@@ -167,6 +168,7 @@ ClientServerTransport_handleDisconnect :: proc(transport: ^ClientServerTransport
 }
 
 ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) {
+	delete(event.senderNickname)
 	delete(event.timestamp)
 	delete(event.message)
 	for room in event.rooms {
@@ -175,6 +177,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	}
 	delete(event.rooms)
 	for message in event.messages {
+		delete(message.senderNickname)
 		delete(message.timestamp)
 		delete(message.content)
 	}
@@ -818,6 +821,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				kind = .RoomChatReceived,
 				serverID = transport.serverID,
 				senderID = chatPayload.senderId,
+				senderNickname = chatPayload.senderNickname,
 				roomID = chatPayload.roomId,
 				messageID = chatPayload.id,
 				timestamp = chatPayload.timestamp,

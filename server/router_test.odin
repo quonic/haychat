@@ -193,7 +193,11 @@ routerEncodePacketBytes :: proc(packet: common.Packet) -> []u8 {
 	return packetBytes
 }
 
-routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.TransportState {
+routerCompleteHandshake :: proc(
+	h: ^RouterTestHarness,
+	peerID: u32,
+	userID := 42,
+) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
 
@@ -293,7 +297,7 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 		identityQuery.request_id,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabaseUserIdentityResult{userId = 42},
+			result = common.DatabaseUserIdentityResult{userId = userID},
 		},
 	)
 
@@ -310,7 +314,10 @@ routerCompleteHandshake :: proc(h: ^RouterTestHarness, peerID: u32) -> common.Tr
 	authSuccessErr := cbor.unmarshal(authSuccessPacket.payload, &authSuccess)
 	assert(authSuccessErr == nil, "expected auth success payload decode to succeed")
 	defer delete(authSuccess.message)
-	assert(authSuccess.userId == 42, "expected authenticated user ID from database resolution")
+	assert(
+		authSuccess.userId == userID,
+		"expected authenticated user ID from database resolution",
+	)
 
 	sharedSecret, sharedSecretOK := common.deriveSharedSecret(
 		&clientEphemeralPrivateKey,
@@ -596,6 +603,7 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 				storedMessage = {
 					id = 17,
 					senderId = senderSession.authenticatedUserID,
+					senderNickname = strings.clone("router-tester"),
 					roomId = 1,
 					timestamp = strings.clone("2026-07-14T00:00:00Z"),
 					content = strings.clone("hello haychat"),
@@ -639,9 +647,14 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 		chatPayload: common.ServerChatMessagePayload
 		chatPayloadErr := cbor.unmarshal(broadcastInnerPacket.payload, &chatPayload)
 		assert(chatPayloadErr == nil, "expected chat broadcast payload decode to succeed")
+		defer delete(chatPayload.senderNickname)
 		defer delete(chatPayload.timestamp)
 		defer delete(chatPayload.content)
 		assert(chatPayload.id == 17, "expected persisted chat message ID to be broadcast")
+		assert(
+			chatPayload.senderNickname == "router-tester",
+			"expected chat broadcast to carry the stored sender nickname",
+		)
 		assert(chatPayload.roomId == 1, "expected chat broadcast roomId to remain the MVP room")
 		assert(
 			chatPayload.senderId == senderSession.authenticatedUserID,
@@ -1546,6 +1559,7 @@ testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
 		common.StoredChatMessage {
 			id = 5,
 			senderId = 42,
+			senderNickname = strings.clone("history-sender"),
 			roomId = 3,
 			timestamp = strings.clone("t5"),
 			content = strings.clone("five"),
@@ -1574,6 +1588,7 @@ testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
 	)
 	defer {
 		for message in historyPayload.messages {
+			delete(message.senderNickname)
 			delete(message.timestamp)
 			delete(message.content)
 		}
@@ -1584,6 +1599,10 @@ testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
 		"expected the stored page to reach the client",
 	)
 	assert(historyPayload.hasOlder, "expected pagination state to reach the client")
+	assert(
+		historyPayload.messages[0].senderNickname == "history-sender",
+		"expected history messages to carry the sender nickname",
+	)
 
 	deniedQuery := routerTestSendRoomHistoryRequest(&h, &clientTransport, peerID)
 	defer IPC__database_query_request_deinit(deniedQuery.request)
@@ -1602,6 +1621,156 @@ testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
 		deniedPacket.messageType == .ServerProtocolError,
 		"expected non-members to be refused room history",
 	)
+}
+
+@(test)
+testOpenRoomSQLJoinsEveryAccount :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "INSERT INTO room_members") &&
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "CROSS JOIN resolved"),
+		"expected identity resolution to join the resolved account to rooms in one statement",
+	)
+	assert(
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "NOT EXISTS (SELECT 1 FROM existing)"),
+		"expected only accounts created by the statement to be auto-joined",
+	)
+	assert(
+		strings.contains(DATABASE_CREATE_ROOM_SQL, "CROSS JOIN users"),
+		"expected room creation to add every account as a member",
+	)
+	assert(
+		strings.contains(DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, "nickname FROM users") &&
+		strings.contains(DATABASE_GET_ROOM_HISTORY_SQL, "JOIN users"),
+		"expected chat post and history to read the sender nickname",
+	)
+}
+
+@(test)
+testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	adminPeerID := u32(1)
+	otherPeerID := u32(2)
+	unauthenticatedPeerID := u32(3)
+	h.state.connectedPeers[otherPeerID] = true
+	h.state.connectedPeers[unauthenticatedPeerID] = true
+	MainRouterState_setPeerSession(&h.state, unauthenticatedPeerID, RouterPeerSession_init())
+
+	adminTransport := routerCompleteHandshake(&h, adminPeerID, 42)
+	otherTransport := routerCompleteHandshake(&h, otherPeerID, 43)
+
+	sealedPacket, sealOK := common.sealPacketForSession(
+		&adminTransport,
+		.ClientCreateRoom,
+		common.ClientCreateRoomPayload{name = "lobby", description = "hang out"},
+	)
+	assert(sealOK, "expected encrypted create room packet sealing to succeed")
+	defer delete(sealedPacket.payload)
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
+	defer delete(sealedPacketBytes)
+	MainRouterState_handleNetworkDataReceived(
+		&h.pm,
+		&h.state,
+		NetworkDataReceived{peerId = adminPeerID, channel = .Chat, data = sealedPacketBytes},
+	)
+
+	adminQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(adminQuery.request)
+	_, adminRequestOK := adminQuery.request.(common.DatabaseUserServerAdminRequest)
+	assert(adminRequestOK, "expected room creation to check the admin role first")
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		adminQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseUserServerAdminResult{isAdmin = true},
+		},
+	)
+
+	createQuery := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(createQuery.request)
+	createRequest, createRequestOK := createQuery.request.(common.DatabaseCreateRoomRequest)
+	assert(createRequestOK, "expected an admin's room creation to reach the database")
+	assert(
+		createRequest.creatorUserId == 42 && createRequest.name == "lobby",
+		"expected the create request to carry the creator and room name",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		createQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRoomMutationResult {
+				changed = true,
+				room = {
+					id = 9,
+					name = strings.clone("lobby"),
+					description = strings.clone("hang out"),
+				},
+			},
+		},
+	)
+
+	adminSawCreate := false
+	adminSawMembership := false
+	otherSawMembership := false
+	for _ in 0 ..< 3 {
+		send := routerPollNetworkSend(&h)
+		defer delete(send.data)
+		assert(
+			send.peerId == adminPeerID || send.peerId == otherPeerID,
+			fmt.tprintf("expected no message for unauthenticated peer, got peer %d", send.peerId),
+		)
+		outerPacket := routerDecodePacketBytes(send.data)
+		defer delete(outerPacket.payload)
+		clientTransport := &adminTransport
+		if send.peerId == otherPeerID {
+			clientTransport = &otherTransport
+		}
+		innerPacket, openOK := common.openPacketForSession(clientTransport, outerPacket)
+		assert(openOK, "expected the recipient to decrypt the room creation notice")
+		defer delete(innerPacket.payload)
+
+		#partial switch innerPacket.messageType {
+		case .ServerCreateRoom:
+			assert(send.peerId == adminPeerID, "expected only the creator to get ServerCreateRoom")
+			adminSawCreate = true
+		case .ServerRoomMembershipChanged:
+			payload: common.ServerRoomMembershipChangedPayload
+			assert(
+				cbor.unmarshal(innerPacket.payload, &payload) == nil,
+				"expected membership payload decode to succeed",
+			)
+			assert(
+				payload.roomId == 9 && payload.joined,
+				"expected the membership notice to announce the new room as joined",
+			)
+			if send.peerId == adminPeerID {
+				adminSawMembership = true
+			} else {
+				otherSawMembership = true
+			}
+		case:
+			assert(
+				false,
+				fmt.tprintf("unexpected room creation message %v", innerPacket.messageType),
+			)
+		}
+	}
+	assert(adminSawCreate, "expected the creator to get the room creation result")
+	assert(adminSawMembership, "expected the creator to be told to refresh its room list")
+	assert(otherSawMembership, "expected every other session to refresh its room list")
+	_, networkErr := IPC_Client_poll(h.networkFd)
+	assert(networkErr != nil, "expected exactly one notice per authenticated session")
 }
 
 @(test)

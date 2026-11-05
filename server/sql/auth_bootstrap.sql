@@ -37,9 +37,12 @@ ON CONFLICT (id) DO UPDATE
 SET name = EXCLUDED.name,
 	description = EXCLUDED.description;
 
+-- Rooms are open: every account is a member of every room. Accounts created by the server
+-- join existing rooms on their own; this covers the fixture users and any account that
+-- connected before #general existed.
 INSERT INTO room_members (room_id, user_id)
-VALUES
-	(1, 1)
+SELECT 1, id
+FROM users
 ON CONFLICT DO NOTHING;
 
 COMMIT;
