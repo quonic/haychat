@@ -365,3 +365,53 @@ the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.
+
+## Voice Engine Loopback
+
+`client --voice-loopback` is a hidden debug mode for the voice engine (`client/voice_engine.odin`).
+It opens no window and no server connection: audio goes from a source through the gate, the
+Opus encoder, the per-speaker jitter buffer and the decoder to a sink, with the encoder's
+output fed straight back in as a fake remote speaker. Use it to check a microphone, the
+speakers, and the codec settings by ear, or to produce files for analysis. The harness voice
+commands (`voice-source`, `voice-sink`, `voice-stats`, …) arrive with step H7.
+
+```sh
+odin build client -out:haychat-client
+./haychat-client --voice-loopback --seconds 10              # microphone → speakers (use headphones)
+./haychat-client --voice-loopback --source tone:440 --sink file:/tmp/out.f32 --seconds 3
+./haychat-client --voice-loopback --loss 15 --always-on     # hear FEC and concealment
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--seconds N` | How long to run, 1 to 600 (default 10) |
+| `--source SPEC` | `device[:NAME]` (default: the system default microphone), `tone:HZ`, `file:PATH` (raw F32LE mono 48 kHz), or `silence` |
+| `--sink SPEC` | `device[:NAME]` (default: the system default output), `file:PATH` (every speaker mixed, raw F32LE mono 48 kHz, silence included), or `null` |
+| `--loss PCT` | Drop this share of loopback frames (0 to 90) |
+| `--threshold DB` | Voice activity threshold in dBFS (default -45) |
+| `--always-on` | Send every frame (push-to-talk held) instead of gating on voice activity |
+
+Device names are SDL's, which on PipeWire are the device descriptions (`pactl list sinks`
+shows them as `Description`); an unknown name falls back to the default device with a
+warning. The input level and whether the gate is sending print every second on stderr, and
+the engine counters print as one JSON line on stdout when it ends:
+
+```json
+{"result":"voice-loopback","captured":200,"sent":199,"gated":1,"captureDropped":0,"loopbackDropped":0,"decoded":198,"fec":0,"plc":0,"late":0,"decodeErrors":0}
+```
+
+Raw files are what SDL's `disk` driver reads and writes, so the device path also runs with no
+audio server, for example in `./dev.sh shell`:
+
+```sh
+SDL_AUDIO_DRIVER=disk SDL_AUDIO_DISK_INPUT_FILE=/tmp/out.f32 \
+	SDL_AUDIO_DISK_OUTPUT_FILE=/tmp/disk.f32 ./haychat-client --voice-loopback --seconds 2
+```
+
+The disk driver's output file has the playback device's format: F32LE **stereo** 48 kHz.
+To listen to a raw file on the host: `pw-cat --playback --format f32 --rate 48000
+--channels 1 /tmp/out.f32` (or `sox -t f32 -r 48000 -c 1 /tmp/out.f32 -d`). To try it against
+virtual devices without touching your real ones, create a PipeWire null sink
+(`pactl load-module module-null-sink sink_name=hc_test sink_properties=device.description=HC-Test`),
+pass `--sink device:HC-Test`, record it with `pw-record --target hc_test -P
+stream.capture.sink=true out.wav`, and unload the module afterwards.

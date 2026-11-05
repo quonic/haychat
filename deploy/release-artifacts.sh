@@ -10,12 +10,14 @@ set -euo pipefail
 # Output in OUT_DIR:
 #   haychat-server-VERSION-linux-x86_64.tar.gz    server binary, SQL helpers, deploy docs
 #   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, README.txt, licences
-#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3 DLLs, README.txt, licences
+#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3 and libopus DLLs, README.txt,
+#                                                 licences
 #   SHA256SUMS
 #
 # --windows needs two things the dev image does not have:
-#   - git-lfs: the pinned Odin checkout holds vendor/sdl3/SDL3.dll and SDL3.lib as Git LFS
-#     pointers; they are fetched on first use (dnf install git-lfs).
+#   - git-lfs: the pinned Odin checkout holds vendor/sdl3/SDL3.dll, SDL3.lib, the SDL3_ttf
+#     files and vendor/sdl3/mixer/libopus-0.dll as Git LFS pointers; they are fetched on first
+#     use (dnf install git-lfs).
 #   - A Windows SDK and MSVC CRT in "winsysroot" layout. Set HAYCHAT_WINDOWS_SDK_ROOT to one,
 #     or set HAYCHAT_ACCEPT_MSVC_LICENSE=1 to download them with xwin
 #     (https://github.com/Jake-Shadle/xwin), which accepts Microsoft's licence terms for the
@@ -105,15 +107,18 @@ fetch_sdl_lfs_files() {
 	local sdl_dir="$odin_root/vendor/sdl3"
 	if ! is_lfs_pointer "$sdl_dir/SDL3.dll" && ! is_lfs_pointer "$sdl_dir/SDL3.lib" \
 		&& ! is_lfs_pointer "$sdl_dir/ttf/SDL3_ttf.dll" \
-		&& ! is_lfs_pointer "$sdl_dir/ttf/SDL3_ttf.lib"; then
+		&& ! is_lfs_pointer "$sdl_dir/ttf/SDL3_ttf.lib" \
+		&& ! is_lfs_pointer "$sdl_dir/mixer/libopus-0.dll"; then
 		return 0
 	fi
 	command -v git-lfs >/dev/null 2>&1 \
 		|| die "$sdl_dir holds Git LFS pointers; install git-lfs (dnf install git-lfs)"
-	log_step "Fetching SDL3 Windows libraries from Git LFS"
+	log_step "Fetching SDL3 and libopus Windows libraries from Git LFS"
 	git -C "$odin_root" lfs install --local >/dev/null
-	git -C "$odin_root" lfs pull --include \
-		"vendor/sdl3/SDL3.dll,vendor/sdl3/SDL3.lib,vendor/sdl3/ttf/SDL3_ttf.dll,vendor/sdl3/ttf/SDL3_ttf.lib"
+	local include="vendor/sdl3/SDL3.dll,vendor/sdl3/SDL3.lib"
+	include+=",vendor/sdl3/ttf/SDL3_ttf.dll,vendor/sdl3/ttf/SDL3_ttf.lib"
+	include+=",vendor/sdl3/mixer/libopus-0.dll"
+	git -C "$odin_root" lfs pull --include "$include"
 }
 
 windows_sdk_root() {
@@ -159,11 +164,14 @@ if $build_windows; then
 	mkdir -p "$windows_dir"
 	odin build client -target:windows_amd64 -o:speed -linker:lld \
 		-windows-sdk-root:"$sysroot" -out:"$windows_dir/haychat-client.exe"
+	# libopus-0.dll is the copy Odin ships for SDL3_mixer. The client loads it at runtime for
+	# voice, looking next to haychat-client.exe first (client/opus).
 	cp "$odin_root/vendor/sdl3/SDL3.dll" "$odin_root/vendor/sdl3/ttf/SDL3_ttf.dll" \
-		"$windows_dir/"
+		"$odin_root/vendor/sdl3/mixer/libopus-0.dll" "$windows_dir/"
 	copy_client_licences "$windows_dir"
 	cp "$odin_root/vendor/sdl3/LICENSE.txt" "$windows_dir/licenses/SDL3-LICENSE.txt"
 	cp "$odin_root/vendor/sdl3/ttf/LICENSE.txt" "$windows_dir/licenses/SDL3_ttf-LICENSE.txt"
+	cp "$odin_root/vendor/sdl3/mixer/LICENSE.opus.txt" "$windows_dir/licenses/opus-LICENSE.txt"
 	for licence in freetype harfbuzz plutosvg plutovg; do
 		cp "$odin_root/vendor/sdl3/ttf/LICENSE.$licence.txt" "$windows_dir/licenses/"
 	done

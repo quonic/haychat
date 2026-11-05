@@ -45,9 +45,9 @@ newest release for your system:
 
   | Distribution | Command |
   | --- | --- |
-  | Fedora 44 | `sudo dnf install SDL3 SDL3_ttf enet` |
-  | Ubuntu 25.04+, Debian 13+ | `sudo apt install libsdl3-0 libsdl3-ttf0 libenet7` |
-  | Arch Linux | `sudo pacman -S sdl3 sdl3_ttf enet` |
+  | Fedora 44 | `sudo dnf install SDL3 SDL3_ttf enet opus` |
+  | Ubuntu 25.04+, Debian 13+ | `sudo apt install libsdl3-0 libsdl3-ttf0 libenet7 libopus0` |
+  | Arch Linux | `sudo pacman -S sdl3 sdl3_ttf enet opus` |
 
   Then extract the archive and start `./haychat-client` from the extracted folder. Older
   distributions such as Ubuntu 24.04 do not have SDL3 yet; build from source instead, or ask
