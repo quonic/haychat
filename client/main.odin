@@ -64,6 +64,9 @@ State :: struct {
 	// The settings screen replaces the chat view while open. It opens by itself on first run.
 	settingsOpen:                   bool,
 	settings:                       SettingsForm,
+	// The admin's room create/edit form (room_admin.odin); shown in the main pane while open
+	// on the selected server.
+	roomEditor:                     RoomEditor,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -172,6 +175,7 @@ State_deinit :: proc(state: ^State) {
 	}
 	delete(state.serverConnections)
 	SettingsForm_deinit(&state.settings)
+	RoomEditor_deinit(&state.roomEditor)
 	state^ = {}
 }
 

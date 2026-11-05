@@ -371,8 +371,17 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}`,
+		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}`,
 		"the connected JSON",
+	)
+	delete(line)
+	connected.isAdmin = true
+	line, kind, ok = headlessRenderRuntimeEvent(&connected)
+	testExpectString(
+		t,
+		line,
+		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":true}`,
+		"the connected JSON for an admin",
 	)
 	delete(line)
 
@@ -641,7 +650,8 @@ testHeadlessCountsConnectAttemptsUntilConnected :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n" +
 		`{"event":"connecting","serverID":803,"attempt":2}` + "\n" +
-		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora"}` + "\n" +
+		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora","isAdmin":false}` +
+		"\n" +
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n",
 		"the lifecycle lines",
 	)

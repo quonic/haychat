@@ -810,7 +810,13 @@ testMainRouterFailedAuthSuccessAnnouncesNoPresence :: proc(t: ^testing.T) {
 	h.state.peerSessions[failingPeerID] = RouterPeerSession {
 		clientNickname = strings.clone("failing-sender"),
 	}
-	failingSend :: proc(_: ^ProcessManager, _: ^MainRouterState, _: u32, _: int) -> bool {
+	failingSend :: proc(
+		_: ^ProcessManager,
+		_: ^MainRouterState,
+		_: u32,
+		_: int,
+		_: bool,
+	) -> bool {
 		return false
 	}
 	MainRouterState_completeAuthentication(

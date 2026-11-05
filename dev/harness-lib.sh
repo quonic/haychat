@@ -5,6 +5,7 @@
 
 # Helpers shared by dev/harness-smoke.sh and dev/ui-smoke.sh for driving headless clients
 # (docs/testing-harness.md) from bash. Source it after setting:
+#   repo_dir              the repository root (make_admin reads deploy/sql/make-admin.sql)
 #   work_dir              scratch directory; client NAME writes NAME.out and NAME.err there
 #   client_bin            the built client binary
 #   server_address        HOST:PORT the clients connect to
@@ -132,6 +133,22 @@ expect_connected() {
 		fail "client $client could not connect: ${failure:-no connect_failed line}"
 	fi
 	echo "    $client< $line"
+}
+
+# make_admin NICKNAME: gives an existing account the admin role by running
+# deploy/sql/make-admin.sql with psql against the database named by HAYCHAT_DATABASE_* (the
+# same variables, and defaults, the server and dev/live-proof.sh use). The account must exist,
+# so the client has to have connected once under that name. A connected client learns the
+# role on its next connection.
+make_admin() {
+	local nickname=$1
+	command -v psql >/dev/null 2>&1 || fail "make_admin needs psql on PATH"
+	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
+		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
+		-v owner="$nickname" -f "$repo_dir/deploy/sql/make-admin.sql" >/dev/null ||
+		fail "could not make $nickname an admin"
+	echo "    made $nickname an admin (deploy/sql/make-admin.sql)"
 }
 
 stop_client() {

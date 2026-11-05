@@ -259,6 +259,7 @@ State_settingsRemoveServer :: proc(state: ^State, serverID: int) {
 
 @(private = "file")
 State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
+	State_closeRoomEditorForServer(state, serverID)
 	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
 		ordered_remove(&state.server_room_caches, index)

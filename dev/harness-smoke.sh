@@ -14,10 +14,15 @@ set -euo pipefail
 #   4. rename:         B quits and comes back from the same profile (the same identity key)
 #      under a new name; A must see the same user ID come online with the new nickname, and
 #      A's `users` must list it under that name
+#   5. room admin:     A is made an admin with deploy/sql/make-admin.sql (psql), reconnects
+#      and must report isAdmin; A creates a room, B must see room_membership and list it in
+#      `rooms`, and B sends to it; A renames it and B must see room_edited; A deletes it and B
+#      must see room_deleted and fall back to #general
 #
-# dev/live-proof.sh --harness runs it against its throwaway server. It needs bash and
-# coreutils only; JSON lines are matched as text because the harness prints compact JSON
-# with a fixed key order.
+# dev/live-proof.sh --harness runs it against its throwaway server. It needs bash, coreutils,
+# and psql (for step 5, which reaches the server's database through the HAYCHAT_DATABASE_*
+# variables dev/live-proof.sh runs under); JSON lines are matched as text because the harness
+# prints compact JSON with a fixed key order.
 #
 # Usage: dev/harness-smoke.sh [HOST:PORT]   (default 127.0.0.1:12345)
 
@@ -139,6 +144,59 @@ expect_ok a users
 [[ "$last_result" == *"{\"id\":$user_b,\"nickname\":\"$renamed_b\",\"isOnline\":true}"* ]] ||
 	fail "[rename] client a's users do not list user $user_b as $renamed_b"
 echo "==> [harness] rename passed"
+
+# The admin role lives in the database; a session learns it at sign-in, so A reconnects.
+echo "==> [harness] room admin: A becomes an admin, creates, renames, and deletes a room"
+nickname_a="harness-a-$run_tag"
+expect_ok a status
+[[ "$last_result" == *'"isAdmin":false,'* ]] || fail "[admin] client a is an admin already"
+make_admin "$nickname_a"
+expect_ok a reconnect
+expect_ok a wait connected 8000
+expect_ok a status
+[[ "$last_result" == *'"isAdmin":true,'* ]] ||
+	fail "[admin] client a does not report isAdmin after reconnecting"
+
+room_name="harness-room-$run_tag"
+renamed_room="harness-renamed-$run_tag"
+admin_start_a=$(wc -l <"$work_dir/a.out")
+admin_start_b=$(wc -l <"$work_dir/b2.out")
+expect_ok a room-create "$room_name" "made by the harness"
+created_line=$(wait_for_match a \
+	"^\\{\"event\":\"room_created\",.*\"name\":\"$room_name\"," "$admin_start_a") ||
+	fail "[admin] client a did not receive room_created for $room_name"
+echo "    a< $created_line"
+[[ "$created_line" =~ \"roomID\":([0-9]+), ]] || fail "[admin] room_created has no roomID"
+new_room=${BASH_REMATCH[1]}
+membership_line=$(wait_for_line b2 \
+	"{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":$new_room,\"joined\":true}" \
+	"$admin_start_b") || fail "[admin] client b did not receive room_membership for $new_room"
+echo "    b< $membership_line"
+wait_for_match b2 "^\\{\"event\":\"room_list\",.*\"name\":\"$room_name\"" \
+	"$admin_start_b" >/dev/null || fail "[admin] client b's room list never listed $room_name"
+expect_ok b2 rooms
+[[ "$last_result" == *"{\"id\":$new_room,\"name\":\"$room_name\","* ]] ||
+	fail "[admin] client b's rooms do not list $room_name"
+# Sending selects the room on B, so the delete below has to move B back to #general.
+expect_ok b2 send "$new_room" "hello new room $run_tag"
+wait_for_line a "\"content\":\"hello new room $run_tag\"" "$admin_start_a" >/dev/null ||
+	fail "[admin] client a did not receive B's message in the new room"
+
+expect_ok a room-edit "$new_room" "$renamed_room" "renamed by the harness"
+edited_line=$(wait_for_match b2 \
+	"^\\{\"event\":\"room_edited\",.*\"roomID\":$new_room,\"name\":\"$renamed_room\"," \
+	"$admin_start_b") || fail "[admin] client b did not receive room_edited for $new_room"
+echo "    b< $edited_line"
+
+expect_ok a room-delete "$new_room"
+deleted_line=$(wait_for_line b2 \
+	"{\"event\":\"room_deleted\",\"serverID\":1,\"roomID\":$new_room}" "$admin_start_b") ||
+	fail "[admin] client b did not receive room_deleted for $new_room"
+echo "    b< $deleted_line"
+expect_ok b2 status
+[[ "$last_result" == *'"selectedRoomID":1,'* ]] ||
+	fail "[admin] client b did not fall back to #general after the delete"
+echo "==> [harness] room admin passed"
 
 stop_client a
 stop_client b2

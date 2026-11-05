@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 7
+protocolVersion: ProtocolVersion = 8
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -15,6 +15,10 @@ CHAT_MESSAGE_MAX_BYTES :: 4000
 HISTORY_PAGE_MAX_MESSAGES :: 50
 // Most conversations ServerDirectConversations lists, newest first.
 DIRECT_CONVERSATIONS_MAX :: 100
+// Room names are 1..ROOM_NAME_MAX_BYTES bytes and descriptions at most
+// ROOM_DESCRIPTION_MAX_BYTES; the server refuses anything else with "Invalid room metadata".
+ROOM_NAME_MAX_BYTES :: 64
+ROOM_DESCRIPTION_MAX_BYTES :: 256
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.
@@ -88,9 +92,14 @@ ClientAuthRequestPayload :: struct {
 	signature: SignatureBytes,
 }
 
+// isAdmin (protocol 8) tells the client whether the account holds the server's admin role at
+// the moment it signed in, so it can offer room management. It is a hint for the UI only: the
+// server checks the role again on every admin request, and a role granted or revoked while
+// connected shows up on the next connection.
 ServerAuthSuccessPayload :: struct {
 	userId:  int,
 	message: string,
+	isAdmin: bool,
 }
 
 ServerAuthFailurePayload :: struct {
@@ -394,6 +403,11 @@ ServerRoomHistoryPayload :: struct {
 	hasOlder: bool,
 }
 
+// Room management is for accounts with the admin server role; anyone else gets
+// ServerProtocolError "Admin permission required". ServerCreateRoom answers the creator with
+// the new room, and every authenticated session gets ServerRoomMembershipChanged{joined} (rooms
+// are open, so every account is a member). ServerEditRoom and ServerDeleteRoom go to the
+// room's members and to the admin who asked.
 ClientCreateRoomPayload :: struct {
 	name:        string,
 	description: string,
@@ -676,10 +690,13 @@ DatabaseQueryResult :: union {
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
 // to a different key. renamed is true when the key's account took a new nickname on this
 // login; previousNickname (owned, empty otherwise) is the nickname it had before.
+// isAdmin is whether the resolved account holds the admin server role, read in the same
+// statement so ServerAuthSuccess needs no second query.
 DatabaseUserIdentityResult :: struct {
 	userId:           int,
 	renamed:          bool,
 	previousNickname: string,
+	isAdmin:          bool,
 }
 
 DatabaseRoomListResult :: struct {

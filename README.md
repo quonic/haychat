@@ -69,8 +69,8 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
 | `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat and direct message proofs, the harness and GUI smoke tests, and the server SQL proof |
-| `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
-| `./dev.sh live --ui` | Only `dev/ui-smoke.sh` against the live server: the real client window, on SDL's offscreen driver, is driven by `--ui-script` to chat and exchange a direct message with a headless client, taking screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them; see [docs/testing-harness.md](docs/testing-harness.md#gui-automation)). `--all` runs it too |
+| `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, chat, exchange a direct message, and (made admin with `deploy/sql/make-admin.sql`) create, rename, and delete a room (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
+| `./dev.sh live --ui` | Only `dev/ui-smoke.sh` against the live server: the real client window, on SDL's offscreen driver, is driven by `--ui-script` to chat, exchange a direct message with a headless client, and create a room as an admin, taking screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them; see [docs/testing-harness.md](docs/testing-harness.md#gui-automation)). `--all` runs it too |
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 
@@ -180,9 +180,10 @@ curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:
 2. Optionally, `./dev.sh seed` to load the fixture users. You only need it for the `admin` account; the server creates `#general` by itself.
 3. To connect as `admin`: run `./dev.sh client admin` once to create the profile (it cannot claim `admin` yet) and close it. Put the output of `./dev.sh key admin` in `.env` as `HAYCHAT_ADMIN_PUBLIC_KEY=...`, run `./dev.sh restart`, then run `./dev.sh client admin` again.
 4. Open more clients with `./dev.sh client alice`, `./dev.sh client bob`, and so on. A profile's display name is its profile name, so each profile is a distinct user.
-5. After code changes, `./dev.sh restart` for the server and reopen clients to rebuild them.
-6. Before pushing, run `./dev.sh ci`.
-7. `./dev.sh down` when done, or `./dev.sh reset` to start over.
+5. To manage rooms, connect as `admin` (step 3): it holds the admin role, so its sidebar shows **+ New room** and each room header **Edit room** (see Rooms). To make another profile an admin instead, run `./dev.sh psql -v owner=alice <deploy/sql/make-admin.sql` after it connected once, then reopen that client.
+6. After code changes, `./dev.sh restart` for the server and reopen clients to rebuild them.
+7. Before pushing, run `./dev.sh ci`.
+8. `./dev.sh down` when done, or `./dev.sh reset` to start over.
 
 Seeded test identities:
 
@@ -194,7 +195,11 @@ Seeded test identities:
 
 Rooms are open: every account is a member of every room. A nickname that connects for the first time joins every existing room, and a new room includes every account, so testers can chat as soon as they connect. Membership is still stored per account in `room_members`, which the server checks for every send and history request; that is where private rooms will plug in.
 
-On startup, a server whose `rooms` table is empty creates `#general` ("General discussion", room ID `1` on a new database) and makes every existing account a member, so a fresh server is ready to chat with no fixture. It logs `Created default room #general` when it does. Once any room exists it creates nothing, so an admin who renames or deletes `#general` keeps that change across restarts, as long as another room remains. A room the server creates has no creator (`rooms.created_by_user_id` is `NULL`); servers that ran protocol 7 drop that column's `NOT NULL` in place, keeping their data. Admins create further rooms with `ClientCreateRoom`. Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
+Admins manage rooms from the client. An admin is an account holding the `admin` server role; every other account sees no room controls. In the selected server's sidebar, the **Channels** header shows **+ New room**, which opens a form in the main pane (name of 1 to 64 bytes, a leading `#` is dropped; optional description of up to 256 bytes; **Create** or **Cancel**). The server adds every account to the new room, every connected client refreshes its room list, and the admin's client selects the new room. A room's header shows **Edit room**, which opens the same form filled in, with **Save**, **Cancel**, and **Delete room**; delete asks for a second click (**Confirm delete**) and removes the room with its history. Clients whose selected room was deleted move to `#general`, or to the first room when `#general` is gone. Deleting `#general` itself is allowed: the form warns that the server only recreates it on its next start when no rooms are left. The form closes when its room is renamed or deleted by another admin, and shows the server's answer when it refuses (for example a duplicate name, or "Admin permission required" when the role was revoked). Rooms are open, so the client has no member management: `ClientAddRoomMember` and `ClientRemoveRoomMember` stay in the protocol for private rooms later, and the client never sends them.
+
+To become an admin, connect once with the display name that should own the server, then run `deploy/sql/make-admin.sql` against the database (`psql -v owner=NICKNAME -f deploy/sql/make-admin.sql`, see deploy/README.md "First-Time Setup"). In the dev pod, either pipe it into `./dev.sh psql -v owner=NICKNAME`, or `./dev.sh seed` and claim the fixture's `admin` account with `HAYCHAT_ADMIN_PUBLIC_KEY` (see Typical Workflow). The server sends the flag in `ServerAuthSuccess.isAdmin` when a session signs in, so a client made admin while connected sees the controls after its next connection (restart it, or press **Retry now** after a disconnect); the server checks the role again for every room request either way. The flag arrived with protocol version 8: clients and servers must be rebuilt together, and older ones refuse each other with "Unsupported protocol version".
+
+On startup, a server whose `rooms` table is empty creates `#general` ("General discussion", room ID `1` on a new database) and makes every existing account a member, so a fresh server is ready to chat with no fixture. It logs `Created default room #general` when it does. Once any room exists it creates nothing, so an admin who renames or deletes `#general` keeps that change across restarts, as long as another room remains. A room the server creates has no creator (`rooms.created_by_user_id` is `NULL`); servers that ran protocol 7 drop that column's `NOT NULL` in place, keeping their data. Admins create further rooms from the client (above). Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
 
 #### Display names
 
@@ -249,7 +254,8 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 
 ### Known Limitations
 
-- Private rooms are not implemented. Every account joins every room (see Rooms), and the client has no UI to create rooms or manage members; admins can do both only through the protocol messages.
+- Private rooms are not implemented. Every account joins every room (see Rooms), so the client has no member management; admins create, rename, and delete rooms from the client.
+- The admin flag is read when a session signs in: granting or revoking the role takes effect in the client's controls on its next connection (the server enforces it at once).
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).

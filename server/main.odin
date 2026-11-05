@@ -361,6 +361,7 @@ MainRouterAuthSuccessSender :: #type proc(
 	state: ^MainRouterState,
 	peerID: u32,
 	userID: int,
+	isAdmin: bool,
 ) -> bool
 
 MainRouterState_sendAuthSuccess :: proc(
@@ -368,13 +369,14 @@ MainRouterState_sendAuthSuccess :: proc(
 	state: ^MainRouterState,
 	peerID: u32,
 	userID: int,
+	isAdmin: bool,
 ) -> bool {
 	return MainRouterState_sendPeerMessage(
 		pm,
 		state,
 		peerID,
 		common.MessageType.ServerAuthSuccess,
-		common.ServerAuthSuccessPayload{userId = userID, message = "ok"},
+		common.ServerAuthSuccessPayload{userId = userID, message = "ok", isAdmin = isAdmin},
 	)
 }
 
@@ -387,19 +389,23 @@ MainRouterState_sendAuthSuccess :: proc(
 // renamed means this login gave the account a new nickname. Presence normally goes out only
 // for a user's first session, but a rename must reach everyone who already sees the user
 // online, so it is announced even when another session of the user is authenticated.
+//
+// isAdmin comes from the identity statement and only tells the client to offer room
+// management; every admin request still checks the role in the database.
 MainRouterState_completeAuthentication :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	peerID: u32,
 	userID: int,
 	renamed := false,
+	isAdmin := false,
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
 	if session, sessionOK := MainRouterState_getPeerSession(state, peerID);
 	   !sessionOK || session.isAuthenticated {
 		return
 	}
-	if !sendAuthSuccess(pm, state, peerID, userID) {
+	if !sendAuthSuccess(pm, state, peerID, userID, isAdmin) {
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
 		return
 	}
@@ -961,7 +967,11 @@ MainRouterState_authenticatedUserForAdminRequest :: proc(
 }
 
 MainRouterState_hasValidRoomMetadata :: proc(name: string, description: string) -> bool {
-	return len(name) >= 1 && len(name) <= 64 && len(description) <= 256
+	return(
+		len(name) >= 1 &&
+		len(name) <= common.ROOM_NAME_MAX_BYTES &&
+		len(description) <= common.ROOM_DESCRIPTION_MAX_BYTES \
+	)
 }
 
 MainRouterState_handleClientCreateRoom :: proc(
@@ -1375,6 +1385,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			request.peerID,
 			identity.userId,
 			identity.renamed,
+			identity.isAdmin,
 		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)

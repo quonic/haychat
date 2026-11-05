@@ -15,12 +15,13 @@ What works today:
 
 | Feature | State |
 | --- | --- |
-| Text rooms | Works. Every account is in every room; `#general` is open to everyone on the server |
+| Text rooms | Works. Every account is in every room; `#general` is open to everyone on the server. The maintainer (a server admin) can add, rename, and delete rooms; new rooms show up in your list by themselves |
 | Room history | Works. Messages are stored on the server; **Load older messages** at the top of a room fetches earlier ones, also after a restart |
 | Direct messages | Works. Below the rooms, the sidebar lists **Direct Messages** (recent conversations) and **Members** (everyone on the server, online first, with a green dot when online). Click a person to message them |
 | Several servers | Works. The client can connect to more than one server at once |
 | Voice rooms | Not yet |
-| Creating rooms, changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity)) |
+| Creating rooms | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room |
+| Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity)) |
 
 > [!IMPORTANT]
 > Messages are encrypted between your computer and the server, but they are **not end-to-end

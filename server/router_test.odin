@@ -193,13 +193,15 @@ routerEncodePacketBytes :: proc(packet: common.Packet) -> []u8 {
 	return packetBytes
 }
 
-// renamed makes the stubbed identity resolution report that this login renamed the account.
+// renamed makes the stubbed identity resolution report that this login renamed the account,
+// and isAdmin that the account holds the admin role; ServerAuthSuccess must carry the latter.
 routerCompleteHandshake :: proc(
 	h: ^RouterTestHarness,
 	peerID: u32,
 	userID := 42,
 	nickname := "router-tester",
 	renamed := false,
+	isAdmin := false,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -304,6 +306,7 @@ routerCompleteHandshake :: proc(
 				userId = userID,
 				renamed = renamed,
 				previousNickname = renamed ? strings.clone("router-previous") : "",
+				isAdmin = isAdmin,
 			},
 		},
 	)
@@ -324,6 +327,14 @@ routerCompleteHandshake :: proc(
 	assert(
 		authSuccess.userId == userID,
 		"expected authenticated user ID from database resolution",
+	)
+	assert(
+		authSuccess.isAdmin == isAdmin,
+		fmt.tprintf(
+			"expected ServerAuthSuccess.isAdmin %v from the identity result, got %v",
+			isAdmin,
+			authSuccess.isAdmin,
+		),
 	)
 
 	sharedSecret, sharedSecretOK := common.deriveSharedSecret(
@@ -360,6 +371,28 @@ routerCompleteHandshake :: proc(
 	assert(session.isAuthenticated, "expected router peer session to be authenticated")
 
 	return clientTransport
+}
+
+@(test)
+testMainRouterAuthSuccessCarriesTheAdminFlag :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	// routerCompleteHandshake asserts that ServerAuthSuccess.isAdmin matches the identity
+	// statement's flag, for an admin account and for an ordinary one.
+	for isAdmin in ([]bool{true, false}) {
+		h := routerTestHarness_init()
+		defer routerTestHarness_deinit(&h)
+		peerID := u32(1)
+		_ = routerCompleteHandshake(&h, peerID, 42, isAdmin = isAdmin)
+		session, ok := MainRouterState_getPeerSession(&h.state, peerID)
+		assert(
+			ok && session.isAuthenticated && session.authenticatedUserID == 42,
+			"expected the session to be authenticated as user 42",
+		)
+	}
 }
 
 @(test)

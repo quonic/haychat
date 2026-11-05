@@ -100,12 +100,101 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsSevenForDirectMessages :: proc(t: ^testing.T) {
+testProtocolVersionIsEightForTheAdminFlag :: proc(t: ^testing.T) {
 	_ = t
 	assert(
-		protocolVersion == 7,
-		fmt.tprintf("expected protocol version 7 for direct messages, got %d", protocolVersion),
+		protocolVersion == 8,
+		fmt.tprintf("expected protocol version 8 for the admin flag, got %d", protocolVersion),
 	)
+}
+
+@(test)
+testAuthSuccessCarriesTheAdminFlagOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	for isAdmin in ([]bool{true, false}) {
+		encoded, encodeErr := cbor.marshal(
+			ServerAuthSuccessPayload{userId = 4, message = "ok", isAdmin = isAdmin},
+		)
+		assert(encodeErr == nil, "expected ServerAuthSuccessPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerAuthSuccessPayload
+		assert(
+			cbor.unmarshal(encoded, &decoded) == nil,
+			"expected ServerAuthSuccessPayload decoding to succeed",
+		)
+		defer delete(decoded.message)
+		assert(
+			decoded.userId == 4 && decoded.message == "ok" && decoded.isAdmin == isAdmin,
+			fmt.tprintf("expected user 4, \"ok\", isAdmin %v; got %v", isAdmin, decoded),
+		)
+	}
+}
+
+@(test)
+testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	{
+		encoded, encodeErr := cbor.marshal(
+			ClientCreateRoomPayload{name = "random", description = "Off topic"},
+		)
+		assert(encodeErr == nil, "expected ClientCreateRoomPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientCreateRoomPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected create decoding to succeed")
+		defer delete(decoded.name)
+		defer delete(decoded.description)
+		assert(
+			decoded.name == "random" && decoded.description == "Off topic",
+			fmt.tprintf("expected random/Off topic, got %v", decoded),
+		)
+	}
+	{
+		encoded, encodeErr := cbor.marshal(
+			ClientEditRoomPayload{roomId = 3, name = "lounge", description = ""},
+		)
+		assert(encodeErr == nil, "expected ClientEditRoomPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientEditRoomPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected edit decoding to succeed")
+		defer delete(decoded.name)
+		defer delete(decoded.description)
+		assert(
+			decoded.roomId == 3 && decoded.name == "lounge" && decoded.description == "",
+			fmt.tprintf("expected room 3 renamed lounge, got %v", decoded),
+		)
+	}
+	{
+		encoded, encodeErr := cbor.marshal(ClientDeleteRoomPayload{roomId = 3})
+		assert(encodeErr == nil, "expected ClientDeleteRoomPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientDeleteRoomPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected delete decoding to succeed")
+		assert(decoded.roomId == 3, fmt.tprintf("expected room 3, got %v", decoded))
+	}
+	{
+		original := ServerRoomMutationPayload {
+			room = {id = 5, name = "random", description = "Off topic"},
+			roomId = 5,
+			userId = 2,
+			changed = true,
+		}
+		encoded, encodeErr := cbor.marshal(original)
+		assert(encodeErr == nil, "expected ServerRoomMutationPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerRoomMutationPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected mutation decoding to succeed")
+		defer delete(decoded.room.name)
+		defer delete(decoded.room.description)
+		assert(
+			decoded.room.id == 5 &&
+			decoded.room.name == "random" &&
+			decoded.room.description == "Off topic" &&
+			decoded.roomId == 5 &&
+			decoded.userId == 2 &&
+			decoded.changed,
+			fmt.tprintf("expected the created room to survive the round trip, got %v", decoded),
+		)
+	}
 }
 
 @(test)

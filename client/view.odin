@@ -40,7 +40,9 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	// first, so a click there shows its room or conversation in the same frame.
 	banner := buildConnectionBanner(state, time.tick_now())
 	viewSidebar(state, ctx, sidebar, &banner)
-	if state.selected_dm_peer_id != 0 {
+	if State_roomEditorVisible(state) {
+		viewRoomEditor(state, ctx, root, &banner)
+	} else if state.selected_dm_peer_id != 0 {
 		viewDirectChat(state, ctx, root, &banner)
 	} else {
 		viewRoomChat(state, ctx, root, &banner)
@@ -54,17 +56,46 @@ viewVerticalBorder :: proc(ctx: ^ui.Context, r: ui.Rect) {
 }
 
 // Draws a panel header with a title and optional muted subtitle, then a divider under it.
-viewHeader :: proc(ctx: ^ui.Context, area: ^ui.Rect, title: string, subtitle: string = "") {
+// With actionText, a button sits at the right end; returns whether it was clicked.
+viewHeader :: proc(
+	ctx: ^ui.Context,
+	area: ^ui.Rect,
+	title: string,
+	subtitle: string = "",
+	actionText: string = "",
+	actionID: ui.ID = 0,
+) -> bool {
 	header := ui.cutTop(area, ui.dp(ctx, HEADER_HEIGHT))
 	content := ui.shrinkXY(header, ui.dp(ctx, 16), 0)
-	ui.label(ctx, content, title, ctx.theme.fg, .Bold)
-	if len(subtitle) > 0 {
-		titleWidth := ui.textSize(ui.textGet(ctx, 0, .Bold, title)).x
-		subtitleArea := content
-		_ = ui.cutLeft(&subtitleArea, titleWidth + ui.dp(ctx, 12))
-		ui.label(ctx, subtitleArea, subtitle, ctx.theme.fgMuted)
+	actionClicked := false
+	if len(actionText) > 0 {
+		buttonH := ui.dp(ctx, ROW_HEIGHT)
+		buttonW := ui.textSize(ui.textGet(ctx, 0, .Regular, actionText)).x
+		buttonW += ui.dp(ctx, ctx.theme.padding * 4)
+		slot := ui.cutRight(&content, buttonW)
+		_ = ui.cutRight(&content, ui.dp(ctx, PANEL_PADDING))
+		button := ui.Rect{slot.x, slot.y + (slot.h - buttonH) / 2, slot.w, buttonH}
+		actionOptions := ui.ButtonOptions {
+			align      = .Center,
+			color      = ctx.theme.fgMuted,
+			background = ctx.theme.hover,
+		}
+		actionClicked = ui.button(ctx, actionID, button, actionText, actionOptions)
+	}
+	{
+		// A long title or subtitle must not run under the action button.
+		ui.pushClip(ctx, content)
+		defer ui.popClip(ctx)
+		ui.label(ctx, content, title, ctx.theme.fg, .Bold)
+		if len(subtitle) > 0 {
+			titleWidth := ui.textSize(ui.textGet(ctx, 0, .Bold, title)).x
+			subtitleArea := content
+			_ = ui.cutLeft(&subtitleArea, titleWidth + ui.dp(ctx, 12))
+			ui.label(ctx, subtitleArea, subtitle, ctx.theme.fgMuted)
+		}
 	}
 	ui.divider(ctx, ui.cutTop(area, max(1, ui.dp(ctx, 1))))
+	return actionClicked
 }
 
 // Server rail: one button per configured server, and settings at the bottom. Direct messages
@@ -329,6 +360,7 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 	offset := ui.scrollBegin(ctx, scrollID, list, contentH)
 	clickedKind := SidebarRowKind.Placeholder
 	clickedID := 0
+	clickedAction := SidebarRowAction.None
 	y := list.y - offset
 	for row, index in rows {
 		height := sidebarRowHeight(ctx, row, index)
@@ -342,6 +374,7 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 		if viewSidebarRow(ctx, serverID, row, rowRect) {
 			clickedKind = row.kind
 			clickedID = row.id
+			clickedAction = row.action
 		}
 	}
 	ui.scrollEnd(ctx, scrollID, list)
@@ -352,7 +385,11 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 		State_switchToChannel(state, serverID, clickedID)
 	case .Conversation, .Member:
 		State_openDirectConversation(state, serverID, clickedID)
-	case .SectionHeader, .Placeholder:
+	case .SectionHeader:
+		if clickedAction == .NewRoom {
+			State_openRoomCreator(state)
+		}
+	case .Placeholder:
 	}
 }
 
@@ -362,7 +399,21 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 	inset := ui.dp(ctx, ctx.theme.padding)
 	switch row.kind {
 	case .SectionHeader:
-		ui.label(ctx, ui.shrinkXY(rect, inset, 0), row.label, ctx.theme.fgMuted, .Bold)
+		content := ui.shrinkXY(rect, inset, 0)
+		clicked := false
+		if row.action == .NewRoom {
+			text := "+ New room"
+			width := ui.textSize(ui.textGet(ctx, 0, .Regular, text)).x
+			width += ui.dp(ctx, ctx.theme.padding * 2)
+			button := ui.cutRight(&content, width)
+			newRoomOptions := ui.ButtonOptions {
+				align = .Center,
+				color = ctx.theme.primary,
+			}
+			clicked = ui.button(ctx, ui.idOf("new-room", serverID), button, text, newRoomOptions)
+		}
+		ui.label(ctx, content, row.label, ctx.theme.fgMuted, .Bold)
+		return clicked
 	case .Placeholder:
 		ui.label(ctx, ui.shrinkXY(rect, inset, 0), row.label, ctx.theme.fgMuted)
 	case .Channel:
@@ -488,8 +539,12 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	view := buildRoomView(state)
 	area := r
 	room, hasRoom := selectedRoom(state)
+	editClicked := false
 	if hasRoom {
-		viewHeader(ctx, &area, fmt.tprintf("# %s", room.name), room.description)
+		editText := view.canEditRoom ? "Edit room" : ""
+		editID := ui.idOf("edit-room", state.selected_server_id, room.id)
+		title := fmt.tprintf("# %s", room.name)
+		editClicked = viewHeader(ctx, &area, title, room.description, editText, editID)
 	} else {
 		viewHeader(ctx, &area, selectedServerName(state))
 	}
@@ -546,6 +601,11 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 		transcriptUnits(ctx, view.lines),
 		emptyText,
 	)
+
+	// Last, so the form replaces the room only from the next frame on.
+	if editClicked {
+		State_openRoomEditor(state, roomID)
+	}
 }
 
 viewComposerStatusOnly :: proc(ctx: ^ui.Context, area: ^ui.Rect, status: string) {

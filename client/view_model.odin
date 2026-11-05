@@ -16,6 +16,8 @@ TranscriptLine :: struct {
 
 RoomView :: struct {
 	hasSelectedRoom:  bool,
+	// Admins get an "Edit room" control in the room header.
+	canEditRoom:      bool,
 	hasOlder:         bool,
 	isLoadingHistory: bool,
 	lines:            []TranscriptLine,
@@ -32,6 +34,8 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	}
 	serverCache := &state.server_room_caches[serverCacheIndex]
 	view.hasSelectedRoom = ServerRoomCache_roomIsJoined(serverCache, state.selected_channel_id)
+	view.canEditRoom =
+		view.hasSelectedRoom && State_isServerAdmin(state, state.selected_server_id)
 	roomCacheIndex := ServerRoomCache_roomCacheIndex(serverCache^, state.selected_channel_id)
 	if roomCacheIndex < 0 {
 		return
@@ -76,8 +80,15 @@ SidebarRowKind :: enum u8 {
 	Placeholder, // A muted line such as "No conversations yet"
 }
 
+// A control drawn at the right of a section header.
+SidebarRowAction :: enum u8 {
+	None,
+	NewRoom, // "+ New room" on the Channels header, for admins only
+}
+
 SidebarRow :: struct {
 	kind:        SidebarRowKind,
+	action:      SidebarRowAction,
 	id:          int, // Room ID for Channel, peer user ID for Conversation and Member
 	label:       string, // Borrowed from State, or allocated with the view allocator
 	description: string, // Channel tooltip; borrowed
@@ -159,7 +170,12 @@ buildSidebarRows :: proc(
 	connected := State_isServerConnected(state, serverID)
 	inRoom := state.selected_dm_peer_id == 0
 
-	append(&rows, SidebarRow{kind = .SectionHeader, label = "Channels"})
+	// Only an admin can create rooms; the server refuses everyone else anyway.
+	channelsAction := State_isServerAdmin(state, serverID) ? SidebarRowAction.NewRoom : .None
+	append(
+		&rows,
+		SidebarRow{kind = .SectionHeader, label = "Channels", action = channelsAction},
+	)
 	rooms: []common.RoomSummary
 	roomsLoading := false
 	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
@@ -316,5 +332,71 @@ buildDirectConversationView :: proc(
 		}
 	}
 	view.lines = lines
+	return
+}
+
+// What the room form shows. Strings are static or borrowed from State.
+RoomEditorView :: struct {
+	visible:       bool,
+	isCreate:      bool,
+	title:         string, // "New room" or "Edit #name"
+	submitLabel:   string, // "Create" or "Save"; "Creating…"/"Saving…" while waiting
+	showDelete:    bool,
+	deleteLabel:   string, // "Delete room", then "Confirm delete"
+	// Set while a request is out; the buttons do nothing until the server answers.
+	busy:          bool,
+	// Shown above the buttons when editing #general (room 1), which is special only in that
+	// the server recreates it on its next start when no rooms are left.
+	generalNotice: string,
+	error:         string,
+}
+
+ROOM_EDITOR_GENERAL_NOTICE ::
+	"This is #general, the room every new account sees first. Deleting it is allowed; the " +
+	"server creates a new #general on its next start only if no rooms are left."
+
+// Builds the room form for the selected server, or a view with visible false when the form is
+// closed or belongs to another server.
+buildRoomEditorView :: proc(
+	state: ^State,
+	allocator := context.temp_allocator,
+) -> (
+	view: RoomEditorView,
+) {
+	if !State_roomEditorVisible(state) {
+		return
+	}
+	editor := &state.roomEditor
+	view.visible = true
+	view.isCreate = editor.mode == .Create
+	view.busy = editor.pending != .None
+	view.error = editor.error
+	if view.isCreate {
+		view.title = "New room"
+		view.submitLabel = editor.pending == .Create ? "Creating…" : "Create"
+		return
+	}
+	view.title = "Edit room"
+	if index := State_serverRoomCacheIndex(state^, editor.serverID); index >= 0 {
+		for room in state.server_room_caches[index].rooms {
+			if room.id == editor.roomID {
+				view.title = fmt.aprintf("Edit #%s", room.name, allocator = allocator)
+				break
+			}
+		}
+	}
+	view.submitLabel = editor.pending == .Save ? "Saving…" : "Save"
+	view.showDelete = true
+	switch {
+	case editor.pending == .Delete:
+		view.deleteLabel = "Deleting…"
+	case editor.confirmDelete:
+		view.deleteLabel = "Confirm delete"
+	case:
+		view.deleteLabel = "Delete room"
+	}
+	if editor.roomID == common.GENERAL_ROOM_ID {
+		view.generalNotice = ROOM_EDITOR_GENERAL_NOTICE
+	}
 	return
 }

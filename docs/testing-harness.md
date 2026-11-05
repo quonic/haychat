@@ -80,7 +80,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 
 | Command | Result |
 | --- | --- |
-| `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
+| `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `isAdmin` (the server's admin flag for this session, see `connected`), `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
 | `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
 | `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms`. When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
@@ -89,6 +89,9 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
+| `room-create NAME [DESCRIPTION...]` | Admins: asks the server for a new room named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. The result echoes `serverID`, `roomID` (0), `name`, and `description` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room), and every connected client, yours included, gets `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
+| `room-edit ROOM_ID NAME [DESCRIPTION...]` | Admins: renames the room and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. |
+| `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
 | `sleep MS` | Keeps servicing the connection for `MS` milliseconds, printing events. |
 | `help` | Lists the commands and event kinds. |
@@ -109,7 +112,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | Event | Example |
 | --- | --- |
 | `connecting` | `{"event":"connecting","serverID":1,"attempt":1}` (`attempt` counts from 1 since the last `connected` or `disconnected`) |
-| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}` |
+| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}` (`isAdmin`: the account holds the server's `admin` role) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}` |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
@@ -117,6 +120,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true}` |
 | `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"..."}` |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
+| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"..."}` (the answer to your own `room-create`) |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
@@ -144,13 +148,19 @@ A login that renames an account also sends `presence` with the new `nickname`, e
 account was already online; the client updates the name in `users` and `conversations`.
 Direct messages belong to one server: user IDs from different servers are unrelated.
 
+`isAdmin` in `connected` and `status` is what the server said when this session signed in
+(protocol 8). An account made admin while connected (for example with
+`deploy/sql/make-admin.sql`) learns it on its next connection: send `reconnect` and wait for
+`connected`. The server checks the role again for every room request, so a stale `true` only
+earns a `protocol_error "Admin permission required"`.
+
 ## Example: Two Agents Chatting
 
 Each agent runs its own client with its own profile. Alice's side (`>` is stdin, `<` stdout):
 
 ```text
 < {"event":"connecting","serverID":1,"attempt":1}
-< {"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}
+< {"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}
 < {"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}
 > wait room_list
 < {"ok":true,"cmd":"wait","event":"room_list","waitedMS":0}
@@ -231,6 +241,12 @@ grep -F '"cmd":"send"' alice.out
 4. The second client quits and comes back from the same profile under a new name; the first
    must print a `presence` event for the same user ID with the new nickname, and list it under
    that name in `users`.
+5. The first client is made an admin with `deploy/sql/make-admin.sql` (`make_admin` in
+   `dev/harness-lib.sh` runs it with `psql` against the `HAYCHAT_DATABASE_*` database), sends
+   `reconnect`, and must report `"isAdmin":true` in `status`. It creates a room; the second
+   client must print `room_membership`, list the room in `rooms`, and send to it. The first
+   renames the room and the second must print `room_edited`; the first deletes it and the
+   second must print `room_deleted` and report `#general` (room 1) as its selected room.
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
@@ -341,7 +357,10 @@ window waits.
 against the throwaway server. alice, in the window on the offscreen driver, clicks `# general`
 and the composer, sends a message that headless bob must receive, waits for bob's direct
 message under Direct Messages, opens it, asserts its text, and replies from the DM composer;
-bob must receive the reply as a `direct_message`. alice takes six screenshots on the way and
+bob must receive the reply as a `direct_message`. alice is an admin (her profile connects
+once headlessly before the window opens, so `make_admin` has an account to grant the role to):
+she clicks **+ New room**, types a name, clicks **Create**, and waits until the room is drawn;
+bob must receive `room_membership` and list the room. alice takes eight screenshots on the way and
 the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.

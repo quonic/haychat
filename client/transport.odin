@@ -38,6 +38,8 @@ ClientTransportRuntimeEventKind :: enum {
 	UserListReceived,
 	DirectConversationsReceived,
 	UserPresenceChanged,
+	// The creator's answer to ClientCreateRoom (protocol 8): room holds the new room.
+	RoomCreated,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -54,10 +56,11 @@ ClientTransportRuntimeEvent :: struct {
 	hasOlder:          bool,
 	joined:            bool,
 	room:              common.RoomSummary,
-	// Connection lifecycle fields. userID and nickname are set on Connected. retryAt is when
-	// the worker tries again after Disconnected or a retryable ConnectFailed.
+	// Connection lifecycle fields. userID, nickname, and isAdmin are set on Connected. retryAt
+	// is when the worker tries again after Disconnected or a retryable ConnectFailed.
 	userID:            int,
 	nickname:          string,
+	isAdmin:           bool,
 	failureKind:       ClientConnectFailureKind,
 	retryable:         bool,
 	retryAt:           time.Tick,
@@ -95,6 +98,8 @@ ClientServerTransport :: struct {
 	pendingKeysReady:          bool,
 	transport:                 common.TransportState,
 	authenticatedUserID:       int,
+	// Whether ServerAuthSuccess said the account is an admin; fixed for the session.
+	authenticatedIsAdmin:      bool,
 	lastError:                 string,
 	enetHost:                  ^ENet.Host,
 	enetPeer:                  ^ENet.Peer,
@@ -147,6 +152,7 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.pendingKeys = {}
 	transport.pendingKeysReady = false
 	transport.authenticatedUserID = 0
+	transport.authenticatedIsAdmin = false
 }
 
 // Releases the ENet session and every string the transport owns.
@@ -562,6 +568,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		)
 		transport.pendingKeysReady = false
 		transport.authenticatedUserID = authSuccess.userId
+		transport.authenticatedIsAdmin = authSuccess.isAdmin
 		return result, true
 
 	case .ServerAuthFailure:
@@ -791,6 +798,41 @@ ClientServerTransport_requestDirectConversations :: proc(
 	)
 }
 
+// Room management (admins only). The server checks the admin role itself and answers anyone
+// else with ServerProtocolError "Admin permission required".
+ClientServerTransport_createRoom :: proc(
+	transport: ^ClientServerTransport,
+	name: string,
+	description: string,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientCreateRoom,
+		common.ClientCreateRoomPayload{name = name, description = description},
+	)
+}
+
+ClientServerTransport_editRoom :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	name: string,
+	description: string,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientEditRoom,
+		common.ClientEditRoomPayload{roomId = roomID, name = name, description = description},
+	)
+}
+
+ClientServerTransport_deleteRoom :: proc(transport: ^ClientServerTransport, roomID: int) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientDeleteRoom,
+		common.ClientDeleteRoomPayload{roomId = roomID},
+	)
+}
+
 // Reports a payload that failed to decode as a ProtocolError event.
 @(private = "file")
 ClientServerTransport_invalidPayloadEvent :: proc(
@@ -907,6 +949,26 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				kind = .RoomEdited,
 				serverID = transport.serverID,
 				roomID = payload.roomId,
+				room = payload.room,
+			},
+			true
+
+	case .ServerCreateRoom:
+		payload: common.ServerRoomMutationPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			delete(payload.room.name)
+			delete(payload.room.description)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room create payload",
+				),
+				true
+		}
+		// The event owns the room's strings until State takes them.
+		return ClientTransportRuntimeEvent {
+				kind = .RoomCreated,
+				serverID = transport.serverID,
+				roomID = payload.room.id,
 				room = payload.room,
 			},
 			true
