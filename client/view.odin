@@ -465,15 +465,22 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 	case .Channel:
 		id := ui.idOf("channel", serverID, row.id)
 		if row.unreadCount <= 0 {
+			labelColor := row.selected ? ctx.theme.fg : ctx.theme.fgMuted
 			options := ui.ButtonOptions {
 				selected = row.selected,
-				color    = row.selected ? ctx.theme.fg : ctx.theme.fgMuted,
+				color    = labelColor,
 			}
-			// The label is drawn by the button over the full row; the voice indicator goes on
-			// top at the right end.
-			clicked := ui.button(ctx, id, rect, row.label, options)
-			content := ui.shrinkXY(rect, inset, 0)
-			viewChannelVoiceIndicator(ctx, &content, row.voiceUsers)
+			clicked: bool
+			if row.voiceUsers <= 0 {
+				clicked = ui.button(ctx, id, rect, row.label, options)
+			} else {
+				// The speaker and count take the right end first, and the label is drawn into
+				// what is left, so a long room name never runs under them.
+				clicked = ui.button(ctx, id, rect, "", {selected = row.selected})
+				content := ui.shrinkXY(rect, inset, 0)
+				viewChannelVoiceIndicator(ctx, &content, row.voiceUsers)
+				ui.label(ctx, content, row.label, labelColor)
+			}
 			if len(row.description) > 0 {
 				ui.tooltip(ctx, id, rect, row.description)
 			}
