@@ -130,6 +130,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` |
 | `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
 | `read_marker` | `{"event":"read_marker","serverID":1,"kind":"room","conversationID":1,"lastReadMessageId":12,"unreadCount":0}` (`kind` is `room` or `dm`; for `dm`, `conversationID` is the peer's user ID) |
+| `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"recipientJoined":true,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
+| `voice_join_rejected` | `{"event":"voice_join_rejected","serverID":1,"roomID":1,"reason":"voice room is full"}` |
+| `voice_left` | `{"event":"voice_left","serverID":1,"roomID":1,"reason":"the room was deleted"}` (the server removed this session from that room's voice) |
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
@@ -155,6 +158,28 @@ Direct messages belong to one server: user IDs from different servers are unrela
 `deploy/sql/make-admin.sql`) learns it on its next connection: send `reconnect` and wait for
 `connected`. The server checks the role again for every room request, so a stale `true` only
 earns a `protocol_error "Admin permission required"`.
+
+## Voice Events
+
+The harness prints the server's voice control messages as events, so a script can watch who
+is in voice. Voice **commands** (`voice-join`, `voice-leave`, sources and sinks, stats) arrive
+with H7; until then a harness client never joins voice itself, and when it does its engine uses
+a silent source and a null sink, so it never opens an audio device.
+
+- `voice_participants` arrives for every room of the account whenever its voice participant set
+  or a participant's mute or deafen changes, and after every `room_list` for each room with
+  anyone in voice. It doubles as the join acknowledgement: a join is complete when a list for
+  that room arrives with `"recipientJoined":true`, which the server sets per session (protocol
+  12). Naming your `userID` is not enough, because a list also names you for your other
+  devices. A second device of the same account is a second entry with the
+  same `userID`.
+- `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
+  full`, `voice is disabled`, `invalid room`, or `voice is unavailable, try again`.
+- `voice_left` means the server took this session out of a room's voice: `removed from the
+  room`, `the room was deleted` (it comes before `room_deleted`), or `joined another voice room`.
+- Voice does not survive a reconnect. The client joins the same room again after `connected`
+  (until it leaves, or a rejection or `voice_left` ends voice).
+- Voice frames are never events: they go from the network thread straight to the voice engine.
 
 ## Read State
 

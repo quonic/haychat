@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # Usage: dev/live-proof.sh [--all | --harness | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
-#   --all           also the two-client room chat and direct message proofs, the headless
+#   --all           also the two-client room chat, direct message and voice proofs, the headless
 #                   harness smoke test, the GUI automation smoke test, the server SQL proofs,
 #                   and the startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
@@ -30,6 +30,7 @@ ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
 STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOverENet
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
 DIRECT_MESSAGE_TEST=client.testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients
+VOICE_TEST=client.testClientVoiceLiveToneReachesSecondClientThroughServer
 SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 SQL_TESTS+=,server.testUserIdentityStatementAgainstPostgreSQL
@@ -56,7 +57,7 @@ run_startup_failure=false
 if [[ $# -gt 0 ]]; then
 	case "$1" in
 		--all)
-			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST")
+			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST" "$VOICE_TEST")
 			run_harness=true
 			run_ui=true
 			run_sql=true
@@ -190,7 +191,8 @@ live_psql -f server/sql/auth_bootstrap.sql >/dev/null
 if [[ ${#tests[@]} -gt 0 ]]; then
 	test_names=$(IFS=,; echo "${tests[*]}")
 	echo "==> [live] running ${test_names}"
-	HAYCHAT_LIVE_STARTUP_AUTH=1 odin test client \
+	# The voice proof needs libopus; as in check.sh, a missing one fails instead of skipping.
+	HAYCHAT_LIVE_STARTUP_AUTH=1 HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1} odin test client \
 		-define:ODIN_TEST_FANCY=false \
 		-define:ODIN_TEST_NAMES="$test_names"
 fi

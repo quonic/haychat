@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:fmt"
 import "core:log"
 import "core:math"
@@ -19,7 +20,6 @@ VOICE_TEST_REQUIRE_OPUS_ENV :: "HAYCHAT_REQUIRE_OPUS"
 
 // voiceTestOpusAvailable loads libopus for a test. Without it the test is skipped with a
 // warning, unless HAYCHAT_REQUIRE_OPUS=1 makes that a failure.
-@(private = "file")
 voiceTestOpusAvailable :: proc(t: ^testing.T, loc := #caller_location) -> bool {
 	if opus.load() {
 		return true
@@ -47,7 +47,7 @@ voiceTestOpusAvailable :: proc(t: ^testing.T, loc := #caller_location) -> bool {
 @(private = "file")
 voiceTestTone :: proc(samples: []f32, hz: f64, amplitude: f32) {
 	for &sample, index in samples {
-		sample = amplitude * f32(math.sin(2 * math.PI * hz * f64(index) / VOICE_SAMPLE_RATE))
+		sample = amplitude * f32(math.sin(2 * math.PI * hz * f64(index) / common.VOICE_SAMPLE_RATE))
 	}
 }
 
@@ -59,7 +59,7 @@ voiceTestExpectTone :: proc(
 	what: string,
 	loc := #caller_location,
 ) {
-	analysis := analyzeVoiceTone(samples, VOICE_SAMPLE_RATE, hz)
+	analysis := analyzeVoiceTone(samples, common.VOICE_SAMPLE_RATE, hz)
 	assert(
 		voiceTonePasses(analysis, hz, voiceToneRMSDB(amplitude)),
 		fmt.tprintf(
@@ -161,7 +161,7 @@ testVoiceGateMuteClosesAtOnce :: proc(t: ^testing.T) {
 
 @(test)
 testVoiceFrameLevel :: proc(t: ^testing.T) {
-	frame: [VOICE_FRAME_SAMPLES]f32
+	frame: [common.VOICE_FRAME_SAMPLES]f32
 	assert(voiceFrameLevelDB(frame[:]) == VOICE_LEVEL_FLOOR_DB, "expected silence at the floor")
 	voiceTestTone(frame[:], 1000, 0.5)
 	level := voiceFrameLevelDB(frame[:])
@@ -175,19 +175,19 @@ testVoiceFrameLevel :: proc(t: ^testing.T) {
 
 @(test)
 testVoiceToneAnalysisFindsTheTone :: proc(t: ^testing.T) {
-	samples := make([]f32, VOICE_SAMPLE_RATE)
+	samples := make([]f32, common.VOICE_SAMPLE_RATE)
 	defer delete(samples)
 	voiceTestTone(samples, 440, 0.5)
 	voiceTestExpectTone(samples, 440, 0.5, "pure tone")
 
-	analysis := analyzeVoiceTone(samples, VOICE_SAMPLE_RATE, 460)
+	analysis := analyzeVoiceTone(samples, common.VOICE_SAMPLE_RATE, 460)
 	assert(
 		!voiceTonePasses(analysis, 460, voiceToneRMSDB(0.5)),
 		"expected a 440 Hz tone not to pass as 460 Hz",
 	)
 	assert(
 		!voiceTonePasses(
-			analyzeVoiceTone(samples, VOICE_SAMPLE_RATE, 440),
+			analyzeVoiceTone(samples, common.VOICE_SAMPLE_RATE, 440),
 			440,
 			voiceToneRMSDB(0.05),
 		),
@@ -200,7 +200,7 @@ testVoiceToneAnalysisFindsTheTone :: proc(t: ^testing.T) {
 		state = state * 6364136223846793005 + 1442695040888963407
 		sample = f32(i32(state >> 33) % 20000) / 40000
 	}
-	noise := analyzeVoiceTone(samples, VOICE_SAMPLE_RATE, 440)
+	noise := analyzeVoiceTone(samples, common.VOICE_SAMPLE_RATE, 440)
 	assert(
 		noise.snrDB < VOICE_TONE_MIN_SNR_DB,
 		fmt.tprintf("expected noise to fail, SNR %f", noise.snrDB),
@@ -230,7 +230,7 @@ testOpusEncoderUsesVoiceSettings :: proc(t: ^testing.T) {
 	if !voiceTestOpusAvailable(t) {
 		return
 	}
-	encoder, code := opus.createVoiceEncoder(VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
+	encoder, code := opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
 	assert(encoder != nil, fmt.tprintf("expected an encoder, got %s", opus.errorString(code)))
 	defer opus.destroyEncoder(encoder)
 	expected := [][2]i32 {
@@ -264,38 +264,38 @@ testOpusRoundTripsATone :: proc(t: ^testing.T) {
 	if !voiceTestOpusAvailable(t) {
 		return
 	}
-	encoder, _ := opus.createVoiceEncoder(VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
-	decoder, _ := opus.createDecoder(VOICE_SAMPLE_RATE)
+	encoder, _ := opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
+	decoder, _ := opus.createDecoder(common.VOICE_SAMPLE_RATE)
 	assert(encoder != nil && decoder != nil, "expected an encoder and a decoder")
 	defer opus.destroyEncoder(encoder)
 	defer opus.destroyDecoder(decoder)
 
 	FRAMES :: 75 // 1.5 s
-	source := make([]f32, FRAMES * VOICE_FRAME_SAMPLES)
+	source := make([]f32, FRAMES * common.VOICE_FRAME_SAMPLES)
 	defer delete(source)
-	decoded := make([]f32, FRAMES * VOICE_FRAME_SAMPLES)
+	decoded := make([]f32, FRAMES * common.VOICE_FRAME_SAMPLES)
 	defer delete(decoded)
 	voiceTestTone(source, 440, 0.5)
 
 	packet: [opus.MAX_PACKET_BYTES]u8
 	totalBytes := 0
 	for frame in 0 ..< FRAMES {
-		pcm := source[frame * VOICE_FRAME_SAMPLES:][:VOICE_FRAME_SAMPLES]
+		pcm := source[frame * common.VOICE_FRAME_SAMPLES:][:common.VOICE_FRAME_SAMPLES]
 		length := opus.encodeFloat(encoder, pcm, packet[:])
 		assert(
-			length > 0 && int(length) <= VOICE_OPUS_MAX_FRAME_BYTES,
+			length > 0 && int(length) <= common.VOICE_OPUS_MAX_BYTES,
 			fmt.tprintf("expected a packet within the relay's cap, got %d", length),
 		)
 		totalBytes += int(length)
-		samples := opus.packetSampleCount(packet[:length], VOICE_SAMPLE_RATE)
+		samples := opus.packetSampleCount(packet[:length], common.VOICE_SAMPLE_RATE)
 		assert(
-			samples == VOICE_FRAME_SAMPLES,
+			samples == common.VOICE_FRAME_SAMPLES,
 			fmt.tprintf("expected 960 samples, got %d", samples),
 		)
-		out := decoded[frame * VOICE_FRAME_SAMPLES:][:VOICE_FRAME_SAMPLES]
+		out := decoded[frame * common.VOICE_FRAME_SAMPLES:][:common.VOICE_FRAME_SAMPLES]
 		got := opus.decodeFloat(decoder, packet[:length], out)
 		assert(
-			got == VOICE_FRAME_SAMPLES,
+			got == common.VOICE_FRAME_SAMPLES,
 			fmt.tprintf("expected 960 decoded samples, got %d", got),
 		)
 	}
@@ -306,15 +306,18 @@ testOpusRoundTripsATone :: proc(t: ^testing.T) {
 		fmt.tprintf("expected about 60 bytes per frame, got %d", average),
 	)
 	// Skip the codec's start-up (lookahead and the first frames).
-	voiceTestExpectTone(decoded[VOICE_SAMPLE_RATE / 5:], 440, 0.5, "Opus round trip")
+	voiceTestExpectTone(decoded[common.VOICE_SAMPLE_RATE / 5:], 440, 0.5, "Opus round trip")
 
 	// Concealment and FEC both yield one full frame.
-	pcm: [VOICE_FRAME_SAMPLES]f32
+	pcm: [common.VOICE_FRAME_SAMPLES]f32
 	plc := opus.decodeFloat(decoder, nil, pcm[:])
-	assert(plc == VOICE_FRAME_SAMPLES, fmt.tprintf("expected 960 concealed samples, got %d", plc))
-	length := opus.encodeFloat(encoder, source[:VOICE_FRAME_SAMPLES], packet[:])
+	assert(
+		plc == common.VOICE_FRAME_SAMPLES,
+		fmt.tprintf("expected 960 concealed samples, got %d", plc),
+	)
+	length := opus.encodeFloat(encoder, source[:common.VOICE_FRAME_SAMPLES], packet[:])
 	fec := opus.decodeFloat(decoder, packet[:length], pcm[:], fec = true)
-	assert(fec == VOICE_FRAME_SAMPLES, fmt.tprintf("expected 960 FEC samples, got %d", fec))
+	assert(fec == common.VOICE_FRAME_SAMPLES, fmt.tprintf("expected 960 FEC samples, got %d", fec))
 }
 
 // ── Engine ────────────────────────────────────────────────────────
@@ -333,7 +336,7 @@ voiceTestOnOutbound :: proc(userdata: rawptr, frame: VoiceOutboundFrame) {
 	if record.count > 0 && frame.frameSequence != record.lastSequence + 1 {
 		record.inOrder = false
 	}
-	if frame.flags & VOICE_FLAG_FEC_PRESENT == 0 {
+	if frame.flags & common.VOICE_FRAME_FLAG_FEC_PRESENT == 0 {
 		record.allFEC = false
 	}
 	record.lastSequence = frame.frameSequence
@@ -414,7 +417,7 @@ testVoiceEngineLoopbackPlaysTheTone :: proc(t: ^testing.T) {
 	defer voiceTestFreeSamples(samples)
 
 	assert(
-		len(samples) == FRAMES * VOICE_FRAME_SAMPLES,
+		len(samples) == FRAMES * common.VOICE_FRAME_SAMPLES,
 		fmt.tprintf("expected one mixed frame per step, got %d samples", len(samples)),
 	)
 	stats := snapshot.stats
@@ -441,7 +444,7 @@ testVoiceEngineLoopbackPlaysTheTone :: proc(t: ^testing.T) {
 	)
 	assert(stats.decodeErrors == 0, "expected no decode errors")
 	// Skip the attack, the jitter pre-roll and the codec's start-up.
-	voiceTestExpectTone(samples[VOICE_SAMPLE_RATE / 4:], 440, 0.5, "loopback")
+	voiceTestExpectTone(samples[common.VOICE_SAMPLE_RATE / 4:], 440, 0.5, "loopback")
 }
 
 @(test)
@@ -482,7 +485,7 @@ testVoiceEngineLoopbackSurvivesLossAndReordering :: proc(t: ^testing.T) {
 		jitter.late == 0,
 		fmt.tprintf("expected reordered frames to arrive in time, got %v", jitter),
 	)
-	voiceTestExpectTone(samples[VOICE_SAMPLE_RATE / 4:], 440, 0.5, "lossy loopback")
+	voiceTestExpectTone(samples[common.VOICE_SAMPLE_RATE / 4:], 440, 0.5, "lossy loopback")
 }
 
 @(test)
@@ -550,7 +553,7 @@ testVoiceEngineInboundQueueIsBoundedAndValidated :: proc(t: ^testing.T) {
 	payload := []u8{1, 2, 3}
 	assert(!VoiceEngine_pushInbound(engine, 5, 1, 0, payload), "expected no frames before open")
 	assert(VoiceEngine_open(engine), VoiceEngine_lastError(engine))
-	oversize: [VOICE_OPUS_MAX_FRAME_BYTES + 1]u8
+	oversize: [common.VOICE_OPUS_MAX_BYTES + 1]u8
 	assert(!VoiceEngine_pushInbound(engine, 0, 1, 0, payload), "expected sender 0 to be rejected")
 	assert(
 		!VoiceEngine_pushInbound(engine, 5, 1, 0, nil),
@@ -581,15 +584,21 @@ testVoiceEngineDropsIdleSpeakers :: proc(t: ^testing.T) {
 	defer VoiceEngine_destroy(engine)
 	assert(VoiceEngine_open(engine), VoiceEngine_lastError(engine))
 
-	encoder, _ := opus.createVoiceEncoder(VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
+	encoder, _ := opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
 	defer opus.destroyEncoder(encoder)
-	pcm: [VOICE_FRAME_SAMPLES]f32
+	pcm: [common.VOICE_FRAME_SAMPLES]f32
 	voiceTestTone(pcm[:], 300, 0.3)
 	packet: [opus.MAX_PACKET_BYTES]u8
 	length := opus.encodeFloat(encoder, pcm[:], packet[:])
 	for user in u32(1) ..= 3 {
 		assert(
-			VoiceEngine_pushInbound(engine, user, 10, VOICE_FLAG_END_OF_SPURT, packet[:length]),
+			VoiceEngine_pushInbound(
+				engine,
+				user,
+				10,
+				common.VOICE_FRAME_FLAG_END_OF_SPURT,
+				packet[:length],
+			),
 			"expected the frame to be queued",
 		)
 	}
@@ -645,7 +654,7 @@ testVoiceEngineFileSourceFeedsTheEncoder :: proc(t: ^testing.T) {
 	defer configTestRemovePathIfExists(dir)
 	inputPath := configTestJoinPath({dir, "in.f32"})
 	outputPath := configTestJoinPath({dir, "out.f32"})
-	input := make([]f32, VOICE_SAMPLE_RATE)
+	input := make([]f32, common.VOICE_SAMPLE_RATE)
 	defer delete(input)
 	voiceTestTone(input, 600, 0.4)
 	assert(
@@ -680,7 +689,7 @@ testVoiceEngineFileSourceFeedsTheEncoder :: proc(t: ^testing.T) {
 	output := voiceTestReadSamples(outputPath)
 	defer voiceTestFreeSamples(output)
 	voiceTestExpectTone(
-		output[VOICE_SAMPLE_RATE / 4:][:VOICE_SAMPLE_RATE / 2],
+		output[common.VOICE_SAMPLE_RATE / 4:][:common.VOICE_SAMPLE_RATE / 2],
 		600,
 		0.4,
 		"file source",
@@ -798,7 +807,7 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 	defer configTestRemovePathIfExists(dir)
 	inputPath := configTestJoinPath({dir, "mic.f32"})
 	outputPath := configTestJoinPath({dir, "speaker.f32"})
-	input := make([]f32, 3 * VOICE_SAMPLE_RATE)
+	input := make([]f32, 3 * common.VOICE_SAMPLE_RATE)
 	defer delete(input)
 	voiceTestTone(input, 440, 0.5)
 	assert(
@@ -834,7 +843,7 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 	// time, so a loaded CI runner gets as long as it needs, up to the deadline. The checks
 	// below need over 1 s of stereo F32 from the disk driver with a steady tone in its last
 	// 0.5 s, so wait for 1.25 s to leave room for the device and jitter pre-roll.
-	minOutputBytes := i64(VOICE_SAMPLE_RATE) * 5 / 4 * 2 * size_of(f32)
+	minOutputBytes := i64(common.VOICE_SAMPLE_RATE) * 5 / 4 * 2 * size_of(f32)
 	if started {
 		waitStart := time.tick_now()
 		for time.tick_since(waitStart) < 15 * time.Second {
@@ -866,7 +875,7 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 		sample = output[index * 2]
 	}
 	assert(
-		len(left) > VOICE_SAMPLE_RATE,
+		len(left) > common.VOICE_SAMPLE_RATE,
 		fmt.tprintf("expected over 1 s of output, got %d samples", len(left)),
 	)
 	log.infof(
@@ -877,5 +886,5 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 		len(left),
 	)
 	// The tail holds the steady tone; the start is device and jitter pre-roll.
-	voiceTestExpectTone(left[len(left) - VOICE_SAMPLE_RATE / 2:], 440, 0.5, "disk driver")
+	voiceTestExpectTone(left[len(left) - common.VOICE_SAMPLE_RATE / 2:], 440, 0.5, "disk driver")
 }

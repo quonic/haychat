@@ -9,7 +9,7 @@ HayChat is a self-hosted alternative to Discord. It features encrypted client-se
 
 ## Features
 
-- Encrypted transport between client and server: Ed25519 identities, X25519 key exchange, and XChaCha20-Poly1305 packets, with the server key pinned on first connect. The server decrypts messages and stores them unencrypted in its PostgreSQL database; end-to-end encryption is not implemented yet. Each transport channel has its own keys: the handshake derives four with HKDF (control and voice, one per direction), the control channel (ENet channel 1) keeps a strict sequence counter, and the voice channel (ENet channel 2) gets a 64-packet replay window. This key schedule arrived with protocol version 9, so clients and servers must be rebuilt together: older ones refuse each other with "Unsupported protocol version", which the client shows as the two speaking different protocol versions. Protocol version 10 adds the voice control messages (join, leave, mute and deafen state, participant lists) and binds each voice datagram's kind byte into its authentication tag. The server handles voice joins and relays voice frames (see Voice under Server Configuration); the client does not join voice yet. Clients and servers on protocol 10 must again be rebuilt together.
+- Encrypted transport between client and server: Ed25519 identities, X25519 key exchange, and XChaCha20-Poly1305 packets, with the server key pinned on first connect. The server decrypts messages and stores them unencrypted in its PostgreSQL database; end-to-end encryption is not implemented yet. Each transport channel has its own keys: the handshake derives four with HKDF (control and voice, one per direction), the control channel (ENet channel 1) keeps a strict sequence counter, and the voice channel (ENet channel 2) gets a 64-packet replay window. This key schedule arrived with protocol version 9, so clients and servers must be rebuilt together: older ones refuse each other with "Unsupported protocol version", which the client shows as the two speaking different protocol versions. Protocol version 10 adds the voice control messages (join, leave, mute and deafen state, participant lists) and binds each voice datagram's kind byte into its authentication tag. The server handles voice joins and relays voice frames (see Voice under Server Configuration), and the client joins, sends and plays voice (see Voice rooms under Using the Client). Clients and servers on protocol 10 must again be rebuilt together. Protocol version 12 adds a per-session flag to every voice participant list, so a client completes a join only on the server's acknowledgement of its own session rather than on any list that names its account; it, too, needs clients and servers rebuilt together.
 - Real-time messaging with low latency
 - User-friendly interface with customizable themes
 - Server chat in shared rooms, and direct messages between any two accounts on a server
@@ -47,6 +47,8 @@ The window opens at once; connecting happens in the background.
   - the server's identity key does not match the pinned one (expected after a server reset or reinstall): **Trust the new key** replaces the pin, saves the config, and reconnects;
   - the client and server speak different protocol versions;
   - the display name is too short or too long, or the identity key in the config is corrupt.
+
+- **Voice rooms.** Every room carries voice. The client side works end to end: it joins a room's voice, sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. There are no voice controls in the window yet: the voice bar, the join buttons and the voice settings arrive with the next client update (H6), and the headless harness gets voice commands after that (H7). Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working.
 
 Client config keys (`config.json`):
 
@@ -278,6 +280,7 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
+- Voice has no window controls yet (see Voice rooms); the client can join voice, but only code and tests call it until the voice UI lands.
 
 ## License
 

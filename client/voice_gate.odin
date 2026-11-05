@@ -40,7 +40,7 @@ VoiceGateInput :: struct {
 VoiceGateResult :: struct {
 	// Send this frame.
 	transmit:   bool,
-	// This is the last frame of the talk spurt; it carries VOICE_FLAG_END_OF_SPURT.
+	// This is the last frame of the talk spurt; it carries common.VOICE_FRAME_FLAG_END_OF_SPURT.
 	endOfSpurt: bool,
 }
 
