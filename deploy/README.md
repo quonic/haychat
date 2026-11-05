@@ -367,7 +367,7 @@ Release assets:
 | --- | --- |
 | `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, licence |
 | `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, licences |
-| `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `README.txt`, licences |
+| `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, licences |
 | `SHA256SUMS` | Checksums of the three archives |
 
 **Token.** The jobs authenticate with the repository secret `RELEASE_TOKEN` when it exists,
@@ -390,9 +390,10 @@ server host with `podman build -f deploy/Containerfile .` instead.
 
 **The Linux client** is linked against the system SDL3, SDL3_ttf, and ENet rather than
 bundling them: the Fedora 44 builds of SDL3_ttf pull in FreeType, HarfBuzz, PlutoSVG, and
-GLib, and copying that chain onto other distributions is fragile. Its `README.txt` tells
-testers which packages to install (Fedora `SDL3 SDL3_ttf enet`, Ubuntu 25.04+ and Debian 13+
-`libsdl3-0 libsdl3-ttf0 libenet7`). The binary needs glibc 2.34 or newer.
+GLib, and copying that chain onto other distributions is fragile. It loads the system
+libopus (`libopus.so.0`) at runtime for voice and starts without it. Its `README.txt` tells
+testers which packages to install (Fedora `SDL3 SDL3_ttf enet opus`, Ubuntu 25.04+ and
+Debian 13+ `libsdl3-0 libsdl3-ttf0 libenet7 libopus0`). The binary needs glibc 2.34 or newer.
 
 **The Windows client is cross-compiled on Linux.** The pinned Odin refuses a Windows target
 without `-windows-sdk-root:PATH` and links it with `lld-link`, which needs the MSVC CRT and
@@ -402,10 +403,13 @@ downloads, splatted into `winsysroot` layout and cached by the workflow) and bui
 `odin build client -target:windows_amd64 -linker:lld -windows-sdk-root:...`. The workflow sets
 `HAYCHAT_ACCEPT_MSVC_LICENSE=1`, which accepts Microsoft's licence terms for those libraries on
 the maintainer's behalf; remove `--windows` from the `archives` job if you do not want that.
-The script also fetches `SDL3.dll` and `SDL3.lib` with `git lfs`: the pinned Odin checkout
-stores them as Git LFS pointers, so a plain clone has 130-byte placeholders. The zip ships
-`SDL3.dll` and `SDL3_ttf.dll` with their licences (zlib; SDL3_ttf.dll also contains FreeType,
-HarfBuzz, PlutoSVG, and PlutoVG, whose licences are included). The cross-built client was run
+The script also fetches `SDL3.dll`, `SDL3.lib`, the SDL3_ttf files, and
+`vendor/sdl3/mixer/libopus-0.dll` with `git lfs`: the pinned Odin checkout stores them as
+Git LFS pointers, so a plain clone has 130-byte placeholders. The zip ships `SDL3.dll` and
+`SDL3_ttf.dll` with their licences (zlib; SDL3_ttf.dll also contains FreeType, HarfBuzz,
+PlutoSVG, and PlutoVG, whose licences are included), and `libopus-0.dll` (the copy Odin ships
+for SDL3_mixer, which the client loads at runtime for voice) with its BSD licence as
+`licenses/opus-LICENSE.txt`. The cross-built client was run
 under Wine in headless mode against the release image and connected and chatted; it has not
 been run on a real Windows machine yet.
 
@@ -444,7 +448,9 @@ Without the cross-build, build on a Windows machine with the same Odin commit as
    C:\Odin\odin.exe build client -o:speed -out:haychat-client.exe
    copy C:\Odin\vendor\sdl3\SDL3.dll .
    copy C:\Odin\vendor\sdl3\ttf\SDL3_ttf.dll .
+   copy C:\Odin\vendor\sdl3\mixer\libopus-0.dll .
    ```
 
-   Ship `haychat-client.exe` with both DLLs, `C:\Odin\vendor\sdl3\LICENSE.txt`, and the
-   `LICENSE*.txt` files from `C:\Odin\vendor\sdl3\ttf\`.
+   Ship `haychat-client.exe` with the three DLLs, `C:\Odin\vendor\sdl3\LICENSE.txt`, the
+   `LICENSE*.txt` files from `C:\Odin\vendor\sdl3\ttf\`, and
+   `C:\Odin\vendor\sdl3\mixer\LICENSE.opus.txt`.

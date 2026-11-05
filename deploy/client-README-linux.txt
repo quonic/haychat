@@ -8,11 +8,14 @@ https://git.spyingwind.com/jim/haychat/src/branch/main/docs/tester-guide.md
 1. Install the libraries the client uses
 ----------------------------------------
 
-The client needs SDL3, SDL3_ttf and ENet from your distribution:
+The client needs SDL3, SDL3_ttf, ENet and libopus from your distribution:
 
-  Fedora 44:                      sudo dnf install SDL3 SDL3_ttf enet
-  Ubuntu 25.04+ / Debian 13+:     sudo apt install libsdl3-0 libsdl3-ttf0 libenet7
-  Arch Linux:                     sudo pacman -S sdl3 sdl3_ttf enet
+  Fedora 44:                      sudo dnf install SDL3 SDL3_ttf enet opus
+  Ubuntu 25.04+ / Debian 13+:     sudo apt install libsdl3-0 libsdl3-ttf0 libenet7 libopus0
+  Arch Linux:                     sudo pacman -S sdl3 sdl3_ttf enet opus
+
+libopus (libopus.so.0) is the voice codec. The client loads it only when voice is used, so
+text chat works without it; voice then reports that libopus was not found.
 
 Older distributions (Ubuntu 24.04, Debian 12) do not package SDL3; build the client from
 source instead (see the tester guide). The client also needs glibc 2.34 or newer.

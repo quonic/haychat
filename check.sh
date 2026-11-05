@@ -11,6 +11,10 @@ cd "$script_dir"
 
 test_flags=(-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_FANCY=false)
 
+# The Opus and voice engine tests skip when libopus cannot be loaded. CI must not skip them
+# silently, so a missing libopus fails the suite here. HAYCHAT_REQUIRE_OPUS=0 allows the skip.
+export HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1}
+
 echo "==> odin check server"
 odin check server
 

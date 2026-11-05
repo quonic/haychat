@@ -43,6 +43,10 @@ main :: proc() {
 	if headlessRequested(os.args[1:]) {
 		os.exit(headlessMain(os.args[1:]))
 	}
+	// A hidden debug mode (voice_loopback.odin): microphone → Opus → speakers, no window.
+	if voiceLoopbackRequested(os.args[1:]) {
+		os.exit(voiceLoopbackMain(os.args[1:]))
+	}
 	// UI script mode (ui_script.odin) drives this same window from a script.
 	if uiScriptRequested(os.args[1:]) {
 		os.exit(uiScriptMain(os.args[1:]))

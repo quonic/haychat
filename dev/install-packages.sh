@@ -22,6 +22,9 @@ build_packages=(
 	enet-devel
 	SDL3-devel
 	SDL3_ttf-devel
+	# libopus.so.0, loaded at runtime by client/opus for voice; the voice tests need it.
+	# Not opus-devel: the client never links libopus.
+	opus
 	libX11-devel
 	openssl-devel
 	which
