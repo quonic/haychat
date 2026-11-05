@@ -29,6 +29,9 @@ HayChat is a self-hosted alternative to Discord. It features encrypted client-se
 
 Clone the repository, install podman, and run `./dev.sh ci` to build the toolchain image and run every check. See Development Environment below to run a local server and clients.
 
+- **Testers:** [docs/tester-guide.md](docs/tester-guide.md) explains how to get the client, connect, and report problems.
+- **Running a server for testers:** see [Deployment](#deployment) and [deploy/README.md](deploy/README.md).
+
 On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`, defaulting to `$HOME/.config/haychat/config.json` when `XDG_CONFIG_HOME` is unset. Startup also migrates the original historical malformed path formula `$HOME$XDG_CONFIG_HOME/haychat/config.json`, which means older installs are recovered from either the default `$HOME$HOME/.config/haychat/config.json` shape or a custom `XDG_CONFIG_HOME` variant if that file still exists.
 
 ### Using the Client
@@ -198,6 +201,18 @@ Any two accounts on a server can message each other directly. Direct messages be
 
 In the client, the selected server's sidebar lists its channels, then **Direct Messages** (recent conversations, newest first) and **Members** (every other account, online first, then alphabetical). A green dot marks an account that is online. Clicking a conversation or a member opens the conversation in the main pane, with the person's name and online state in the header, the transcript (your own messages are labelled "You"), **Load older messages** while older ones exist, and a composer like the room one; clicking a channel goes back to it. A message that arrives for a conversation that is not open moves it to the top of **Direct Messages** and shows an unread count until you open it. The server keeps no read state, so unread counts start at zero each time the client starts. Conversations belong to one server; the rail has no separate direct-message button.
 
+### Deployment
+
+[deploy/README.md](deploy/README.md) covers running HayChat for real users: the production server image (`deploy/Containerfile`, a multi-stage build that uses the same package script and Odin pins as the dev image), systemd quadlet units that run it next to PostgreSQL (`deploy/quadlet/`), the io_uring container settings, first-time setup (`deploy/sql/make-admin.sql` gives your account the admin role), the firewall, backups, and upgrades.
+
+| Command | Purpose |
+| --- | --- |
+| `./dev.sh release-image` | Build the production server image as `localhost/haychat-server:dev` |
+| `./dev.sh release-image --smoke` | Also run it against a throwaway PostgreSQL, check that a headless client connects and sees `#general`, and run `deploy/sql/make-admin.sql` |
+| `deploy/release-artifacts.sh VERSION OUT_DIR [--windows]` | Build the release archives (server binary, Linux client, cross-compiled Windows client) inside `./dev.sh shell` |
+
+`.forgejo/workflows/release.yml` runs on tags `v*`: it builds the archives and the image, pushes the image to the repository's container registry, and publishes a Forgejo release (see deploy/README.md "Release Builds").
+
 ### Continuous Integration
 
 HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
@@ -233,6 +248,8 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
 - Direct messages have no read receipts or server-side unread state; the client counts unread messages only while it is running.
+- A display name cannot be changed on a server after the first connection: the server keeps one name per identity key and refuses a new name from the same key with "user identity is unavailable", which the client shows as "The name … is already in use".
+- The server has no schema migrations: a server version with an incompatible schema rebuilds the database empty (see deploy/README.md "Upgrades").
 
 ## License
 

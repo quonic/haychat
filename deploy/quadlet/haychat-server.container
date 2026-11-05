@@ -1,0 +1,42 @@
+# The HayChat server. Logs and state (server identity key, web admin token) live in the
+# haychat-logs and haychat-storage volumes. Optional settings go in the environment file
+# %E/haychat-server/server.env: /etc/haychat-server/server.env for a system service, or
+# ~/.config/haychat-server/server.env for a user service. See deploy/README.md.
+
+[Unit]
+Description=HayChat server
+Requires=haychat-db.service
+After=haychat-db.service
+
+[Container]
+ContainerName=haychat-server
+Pod=haychat.pod
+# Pin a release tag (for example :v0.1.0) rather than :latest, and change it to upgrade.
+Image=git.spyingwind.com/jim/haychat/server:latest
+RunInit=true
+Volume=haychat-logs:/var/lib/haychat/logs
+Volume=haychat-storage:/var/lib/haychat/storage
+Environment=HAYCHAT_DATABASE_URL=127.0.0.1 HAYCHAT_DATABASE_PORT=5432
+Environment=HAYCHAT_DATABASE_USER=haychat HAYCHAT_DATABASE_NAME=haychat
+Secret=haychat-db-password,type=env,target=HAYCHAT_DATABASE_PASS
+EnvironmentFile=%E/haychat-server/server.env
+# The web admin runs on io_uring (core:nbio). Podman's default seccomp profile blocks it, so
+# use the default profile plus the io_uring syscalls (`./dev.sh seccomp-profile PATH`), and
+# turn off SELinux confinement, whose container_t policy blocks io_uring too.
+SeccompProfile=%E/haychat-server/seccomp-io-uring.json
+SecurityLabelDisable=true
+StopTimeout=15
+# GET /status is the web admin's unauthenticated health probe.
+HealthCmd=curl -fsS http://127.0.0.1:8080/status
+HealthInterval=30s
+HealthStartPeriod=60s
+
+[Service]
+# The server exits with status 0 when it cannot reach PostgreSQL at startup, so restart on
+# any exit. `systemctl stop` still stops it.
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

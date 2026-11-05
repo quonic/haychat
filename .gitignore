@@ -138,3 +138,7 @@ Temporary Items
 # APM dependencies
 apm_modules/
 .vscode/settings.json
+
+# Release archives and the xwin cache from deploy/release-artifacts.sh.
+/dist/
+/.cache/

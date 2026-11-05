@@ -1,0 +1,14 @@
+# HayChat pod: PostgreSQL and the HayChat server share its network namespace and reach each
+# other on 127.0.0.1. Only the client port is published; PostgreSQL and the web admin are not.
+# See deploy/README.md. Needs podman 5.0 or newer (.pod units).
+
+[Unit]
+Description=HayChat chat server pod
+
+[Pod]
+PodName=haychat
+# Clients connect here over UDP. Change the left side to publish another host port.
+PublishPort=12345:12345/udp
+
+[Install]
+WantedBy=default.target

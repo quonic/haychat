@@ -14,6 +14,7 @@ repo_dir=$(cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd)
 dev_dir="$repo_dir/dev"
 
 IMAGE_REPO=localhost/haychat-dev
+RELEASE_IMAGE=localhost/haychat-server:dev
 POSTGRES_IMAGE=${HAYCHAT_DEV_POSTGRES_IMAGE:-docker.io/library/postgres:17}
 
 # The long-lived dev environment: one pod holding PostgreSQL and the server, which share the
@@ -83,6 +84,10 @@ Toolchain:
   image [--pull]        (re)build the dev image; other commands build it when missing
   seccomp-profile PATH  write podman's default seccomp profile plus io_uring to PATH (for a
                         CI runner host's containers.conf; see README "Continuous Integration")
+  release-image [--smoke]
+                        build the production server image (deploy/Containerfile) as
+                        $RELEASE_IMAGE; --smoke also runs it against a
+                        throwaway database and connects a headless client (deploy/README.md)
   shell                 interactive shell in the dev image with the repo mounted at /src
                         read-write (changes made there land in your working tree)
 
@@ -629,6 +634,49 @@ cmd_seccomp_profile() {
 	echo "Wrote $1"
 }
 
+cmd_release_image() {
+	local smoke=false arg
+	for arg in "$@"; do
+		case "$arg" in
+			--smoke) smoke=true ;;
+			*) die "unknown release-image option: $arg" ;;
+		esac
+	done
+	log_step "Building the production server image $RELEASE_IMAGE"
+	# The context is the repository root, filtered by .containerignore.
+	podman build -f "$repo_dir/deploy/Containerfile" -t "$RELEASE_IMAGE" "$repo_dir"
+	if $smoke; then
+		with_throwaway_pod smoke_release_image
+	fi
+}
+
+# Runs the production image in the throwaway pod the way deploy/README.md does, checks that a
+# headless client from the dev image connects and sees the #general room the server creates,
+# and gives that account the admin role with deploy/sql/make-admin.sql.
+smoke_release_image() {
+	local server="$throwaway_pod-server" name db_args=()
+	name="smoke-$(date +%s)"
+	mapfile -d '' db_args < <(database_env_args)
+	prepare_server_sandbox
+	log_step "Starting $RELEASE_IMAGE in pod $throwaway_pod"
+	podman run -d --pod "$throwaway_pod" --name "$server" --init \
+		"${SERVER_SANDBOX_ARGS[@]}" "${db_args[@]}" "$RELEASE_IMAGE" >/dev/null
+	wait_for_server_ready "$server"
+
+	# shellcheck disable=SC2016  # the snippet expands inside the container
+	local client='odin build client -out:/tmp/haychat-client >&2 &&
+		printf "%s\n" "wait room_list 10000" quit |
+		/tmp/haychat-client --headless --name "$1" --server 127.0.0.1:12345 \
+			--config-dir /tmp/profile'
+	log_step "Connecting headless client $name: its room list must hold #general"
+	run_snapshot_in_pod "$throwaway_pod" -- "$client" "$name" | grep -F '"name":"general"' \
+		|| die "the headless client did not connect or saw no #general"
+	log_step "Making $name an admin with deploy/sql/make-admin.sql"
+	podman exec -i "$throwaway_pod-db" psql -q -U "$DB_USER" -d "$DB_NAME" -v owner="$name" \
+		<"$repo_dir/deploy/sql/make-admin.sql"
+	log_step "Release image smoke test passed"
+}
+
 cmd_shell() {
 	ensure_image
 	# SELinux labelling is disabled rather than relabelling the repository with :z.
@@ -662,6 +710,7 @@ main() {
 		key) cmd_key "$@" ;;
 		image) cmd_image "$@" ;;
 		seccomp-profile) cmd_seccomp_profile "$@" ;;
+		release-image) cmd_release_image "$@" ;;
 		shell) cmd_shell "$@" ;;
 		*)
 			echo "Unknown command: $command" >&2
