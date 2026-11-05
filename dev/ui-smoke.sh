@@ -139,6 +139,8 @@ screenshot $screenshot_dir/08-room-created.bmp
 quit
 EOF
 
+# Anything bob printed before the window opens cannot be about alice's new room.
+admin_start=$(wc -l <"$work_dir/bob.out")
 echo "==> [ui] starting the GUI as alice (SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen})"
 SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} "$client_bin" --ui-script "$script" \
 	--name "$nickname_alice" --server "$server_address" \
@@ -173,10 +175,11 @@ echo "    bob< $reply_line"
 
 echo "==> [ui] alice creates a room from the window, bob sees it"
 membership_line=$(wait_for_match bob \
-	'^\{"event":"room_membership",.*"joined":true\}$') ||
+	'^\{"event":"room_membership",.*"joined":true\}$' "$admin_start") ||
 	fail "[admin] bob did not receive room_membership for alice's new room"
 echo "    bob< $membership_line"
-wait_for_match bob "^\\{\"event\":\"room_list\",.*\"name\":\"$admin_room\"" >/dev/null ||
+wait_for_match bob "^\\{\"event\":\"room_list\",.*\"name\":\"$admin_room\"" "$admin_start" \
+	>/dev/null ||
 	fail "[admin] bob's room list never listed $admin_room"
 expect_ok bob rooms
 [[ "$last_result" == *"\"name\":\"$admin_room\""* ]] ||
