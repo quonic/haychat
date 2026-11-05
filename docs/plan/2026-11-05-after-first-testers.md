@@ -137,6 +137,11 @@ test.
 | H7 harness commands and live voice proof | `voice-live-proof` | H5 |
 | H8 manual test kit and tuning | `voice-manual-test-kit` | H6, H7 |
 
+H8 also takes two jitter buffer edges from the review of PR #17: `JitterBuffer_endSpurt`
+may clip the start of a spurt after a fast push-to-talk re-press, and a spurt that starts
+from idle after a sender restart may keep a high `hasTransit`-based depth for a few spurts.
+H8 adds a test or a manual checklist item for each.
+
 ## Release
 
 When M1 and B3 have merged, the maintainer can tag `v0.1.0-rc2`. That server adopts an rc1
