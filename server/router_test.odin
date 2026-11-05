@@ -95,6 +95,11 @@ routerTestHarness_init :: proc() -> RouterTestHarness {
 	config.databaseSocketName = "router_test_database"
 	config.serverPrivateKey = common.identityPrivateKeyToHex(serverPrivateKey)
 	config.serverPublicKey = common.identityPublicKeyToHex(serverPublicKey)
+	// The defaults loadVoiceConfig would give, so voice tests start from production behaviour.
+	config.voiceEnabled = DEFAULT_VOICE_ENABLED
+	config.voiceMaxParticipants = DEFAULT_VOICE_MAX_PARTICIPANTS
+	config.voiceMaxPacketsPerSecond = DEFAULT_VOICE_MAX_PACKETS_PER_SECOND
+	config.voiceMaxFrameBytes = DEFAULT_VOICE_MAX_FRAME_BYTES
 
 	pm := initProcessManager(config)
 	pm.config.networkFd, _ = IPC_Client_init(&pm.config.networkSocket)
@@ -137,6 +142,21 @@ routerPollNetworkSend :: proc(h: ^RouterTestHarness) -> NetworkSendData {
 		return m
 	case:
 		assert(false, "expected NetworkSendData message")
+	}
+	return {}
+}
+
+// Pops the NetworkVoiceSessionOpen that follows ServerAuthSuccess. The caller wipes its keys.
+routerPollVoiceSessionOpen :: proc(h: ^RouterTestHarness) -> NetworkVoiceSessionOpen {
+	msg, err := IPC_Client_poll(h.networkFd)
+	assert(err == nil, "expected queued NetworkVoiceSessionOpen after auth success")
+	defer IPC__message_deinit(&msg)
+
+	#partial switch m in msg {
+	case NetworkVoiceSessionOpen:
+		return m
+	case:
+		assert(false, fmt.tprintf("expected NetworkVoiceSessionOpen, got %v", msg))
 	}
 	return {}
 }
@@ -202,6 +222,7 @@ routerCompleteHandshake :: proc(
 	nickname := "router-tester",
 	renamed := false,
 	isAdmin := false,
+	voiceOpen: ^NetworkVoiceSessionOpen = nil,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -320,6 +341,29 @@ routerCompleteHandshake :: proc(
 		"expected auth result packet to be ServerAuthSuccess",
 	)
 
+	// The voice halves go to the network thread right after ServerAuthSuccess (H3). A caller
+	// that wants them passes voiceOpen and wipes them; otherwise they are wiped here.
+	voiceSessionOpen := routerPollVoiceSessionOpen(h)
+	assert(
+		voiceSessionOpen.peerId == peerID && voiceSessionOpen.userId == userID,
+		fmt.tprintf(
+			"expected the voice session for peer %d as user %d, got peer %d as user %d",
+			peerID,
+			userID,
+			voiceSessionOpen.peerId,
+			voiceSessionOpen.userId,
+		),
+	)
+	assert(
+		voiceSessionOpen.send.active && voiceSessionOpen.receive.active,
+		"expected NetworkVoiceSessionOpen to carry active voice halves",
+	)
+	if voiceOpen != nil {
+		voiceOpen^ = voiceSessionOpen
+	}
+	common.ChannelSendState_wipe(&voiceSessionOpen.send)
+	common.VoiceReceiveState_wipe(&voiceSessionOpen.receive)
+
 	authSuccess: common.ServerAuthSuccessPayload
 	authSuccessErr := cbor.unmarshal(authSuccessPacket.payload, &authSuccess)
 	assert(authSuccessErr == nil, "expected auth success payload decode to succeed")
@@ -369,6 +413,12 @@ routerCompleteHandshake :: proc(
 	session, ok := MainRouterState_getPeerSession(&h.state, peerID)
 	assert(ok, "expected router peer session to exist")
 	assert(session.isAuthenticated, "expected router peer session to be authenticated")
+	zeroSend: common.ChannelSendState
+	zeroReceive: common.VoiceReceiveState
+	assert(
+		session.transport.voiceSend == zeroSend && session.transport.voiceReceive == zeroReceive,
+		"expected the router's copy of the voice halves to be zero after the hand-off",
+	)
 
 	return clientTransport
 }
@@ -485,73 +535,6 @@ testMainRouterRejectsUnsupportedApplicationMessage :: proc(t: ^testing.T) {
 
 	_, databaseErr := IPC_Client_poll(h.databaseFd)
 	assert(databaseErr != nil, "expected unsupported application message to reach no database")
-}
-
-// Protocol 10 defines the voice control messages before the router handles them (H3). Until
-// then each one gets the "Unsupported message type" protocol error, keeps the session, and
-// reaches neither the database nor anything else.
-@(test)
-testMainRouterAnswersVoiceControlAsUnsupportedForNow :: proc(t: ^testing.T) {
-	_ = t
-
-	sync.mutex_lock(&routerTestMutex)
-	defer sync.mutex_unlock(&routerTestMutex)
-
-	h := routerTestHarness_init()
-	defer routerTestHarness_deinit(&h)
-
-	peerID := u32(1)
-	clientTransport := routerCompleteHandshake(&h, peerID)
-
-	joinPayload := common.ClientJoinVoicePayload {
-		roomId = common.GENERAL_ROOM_ID,
-	}
-	leavePayload := common.ClientLeaveVoicePayload{}
-	statePayload := common.ClientVoiceStatePayload {
-		muted = true,
-	}
-	payloads := [3]any{joinPayload, leavePayload, statePayload}
-	messageTypes := [3]common.MessageType{.ClientJoinVoice, .ClientLeaveVoice, .ClientVoiceState}
-	for messageType, index in messageTypes {
-		sealedPacket, sealOK := common.sealPacketForSession(
-			&clientTransport,
-			messageType,
-			payloads[index],
-		)
-		assert(sealOK, fmt.tprintf("expected sealing %v to succeed", messageType))
-		defer delete(sealedPacket.payload)
-		sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
-		defer delete(sealedPacketBytes)
-
-		MainRouterState_handleNetworkDataReceived(
-			&h.pm,
-			&h.state,
-			NetworkDataReceived{peerId = peerID, channel = .Chat, data = sealedPacketBytes},
-		)
-
-		responseSend := routerPollNetworkSend(&h)
-		defer delete(responseSend.data)
-		responseOuterPacket := routerDecodePacketBytes(responseSend.data)
-		defer delete(responseOuterPacket.payload)
-		responseInnerPacket, openOK := common.openPacketForSession(
-			&clientTransport,
-			responseOuterPacket,
-		)
-		assert(openOK, "expected the client to decrypt the unsupported message response")
-		defer delete(responseInnerPacket.payload)
-		assert(
-			responseInnerPacket.messageType == .ServerProtocolError,
-			fmt.tprintf("expected %v to produce ServerProtocolError", messageType),
-		)
-		session, sessionOK := MainRouterState_getPeerSession(&h.state, peerID)
-		assert(
-			sessionOK && session.isAuthenticated,
-			fmt.tprintf("expected %v to keep the session", messageType),
-		)
-	}
-
-	_, databaseErr := IPC_Client_poll(h.databaseFd)
-	assert(databaseErr != nil, "expected voice control messages to reach no database")
 }
 
 @(test)
@@ -984,6 +967,13 @@ testMainRouterIgnoresNonChatChannelPackets :: proc(t: ^testing.T) {
 
 	_, networkErr := IPC_Client_poll(h.networkFd)
 	assert(networkErr != nil, "expected non-chat channel packet to be ignored")
+	assert(
+		h.state.unexpectedVoiceDatagrams == 1,
+		fmt.tprintf(
+			"expected the stray voice datagram to be counted, got %d",
+			h.state.unexpectedVoiceDatagrams,
+		),
+	)
 }
 
 @(test)

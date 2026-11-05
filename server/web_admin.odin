@@ -106,25 +106,71 @@ statusWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {
 
 	#partial switch msg in message {
 	case AdminQueryStatusResponse:
-		http.respond_plain(
-			res,
-			fmt.aprintf(
-				"uptime=%d\nconnected_peers=%d\nnetwork_running=%v\nweb_admin_running=%v\ndatabase_running=%v\nnetwork_restart_pending=%v\nweb_admin_restart_pending=%v\ndatabase_restart_pending=%v\nshutdown_requested=%v",
-				msg.uptime,
-				msg.connectedPeers,
-				msg.networkRunning,
-				msg.webAdminRunning,
-				msg.databaseRunning,
-				msg.networkRestartPending,
-				msg.webAdminRestartPending,
-				msg.databaseRestartPending,
-				msg.shutdownRequested,
-			),
-		)
+		http.respond_plain(res, webAdminFormatStatus(msg))
 	case:
 		fmt.eprintfln("[WebAdmin] Received unexpected message type")
 		http.respond_plain(res, "Error retrieving status")
 	}
+}
+
+// One key=value line per field. The voice lines follow the process lines; drops are one line
+// per VoiceRelayDropReason, named voice_drops_<reason in snake case>.
+webAdminFormatStatus :: proc(
+	msg: AdminQueryStatusResponse,
+	allocator := context.allocator,
+) -> string {
+	builder := strings.builder_make(allocator)
+	fmt.sbprintf(
+		&builder,
+		"uptime=%d\nconnected_peers=%d\nnetwork_running=%v\nweb_admin_running=%v\n" +
+		"database_running=%v\nnetwork_restart_pending=%v\nweb_admin_restart_pending=%v\n" +
+		"database_restart_pending=%v\nshutdown_requested=%v",
+		msg.uptime,
+		msg.connectedPeers,
+		msg.networkRunning,
+		msg.webAdminRunning,
+		msg.databaseRunning,
+		msg.networkRestartPending,
+		msg.webAdminRestartPending,
+		msg.databaseRestartPending,
+		msg.shutdownRequested,
+	)
+	fmt.sbprintf(
+		&builder,
+		"\nvoice_rooms=%d\nvoice_participants=%d\nvoice_frames_in=%d\n" +
+		"voice_frames_relayed=%d\nvoice_frames_out=%d\nvoice_send_failures=%d",
+		msg.voiceRooms,
+		msg.voiceParticipants,
+		msg.voiceRelay.datagramsIn,
+		msg.voiceRelay.framesRelayed,
+		msg.voiceRelay.datagramsOut,
+		msg.voiceRelay.sendFailures,
+	)
+	for reason in VoiceRelayDropReason {
+		fmt.sbprintf(
+			&builder,
+			"\nvoice_drops_%s=%d",
+			WEB_ADMIN_VOICE_DROP_NAMES[reason],
+			msg.voiceRelay.drops[reason],
+		)
+	}
+	return strings.to_string(builder)
+}
+
+WEB_ADMIN_VOICE_DROP_NAMES := [VoiceRelayDropReason]string {
+	.UnknownPeer    = "unknown_peer",
+	.NotInRoom      = "not_in_room",
+	.RateLimited    = "rate_limited",
+	.Malformed      = "malformed",
+	.Replayed       = "replayed",
+	.TooOld         = "too_old",
+	.BadTag         = "bad_tag",
+	.Inactive       = "inactive",
+	.MalformedFrame = "malformed_frame",
+	.WrongRoom      = "wrong_room",
+	.Muted          = "muted",
+	.Oversize       = "oversize",
+	.BadDuration    = "bad_duration",
 }
 
 peersWebAdmin :: proc(req: ^http.Request, res: ^http.Response) {

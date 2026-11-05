@@ -38,6 +38,11 @@ NetworkIPCHandlers :: struct {
 	sendData:       proc(userData: rawptr, msg: NetworkSendData),
 	broadcast:      proc(userData: rawptr, msg: NetworkBroadcast),
 	disconnectPeer: proc(userData: rawptr, msg: NetworkDisconnectPeer),
+	// The voice handlers. voiceSessionOpen gets the queued message itself so it can move the
+	// keys out; the drain wipes whatever is left afterwards.
+	voiceSessionOpen: proc(userData: rawptr, msg: ^NetworkVoiceSessionOpen),
+	voiceRoute:       proc(userData: rawptr, msg: NetworkVoiceRoute),
+	voiceReset:       proc(userData: rawptr),
 }
 
 NetworkIPCDrainResult :: struct {
@@ -52,6 +57,7 @@ NetworkLoopState :: struct {
 	peerManager: ^PeerManager,
 	enetHost:    ^ENet.Host,
 	ipcFd:       linux.Fd,
+	voiceRelay:  ^VoiceRelay,
 }
 
 // networkDrainIPC pops every pending message for the network endpoint, up to limit, and hands
@@ -70,7 +76,8 @@ networkDrainIPC :: proc(
 		}
 		result.processed += 1
 
-		switch msg in ipcMsg {
+		// By reference, so the voice session handler can move keys out of the queued message.
+		switch &msg in ipcMsg {
 		case NetworkSendData:
 			if handlers.sendData != nil {
 				handlers.sendData(handlers.userData, msg)
@@ -90,6 +97,24 @@ networkDrainIPC :: proc(
 				handlers.disconnectPeer(handlers.userData, msg)
 			}
 			result.transmitted += 1
+
+		case NetworkVoiceSessionOpen:
+			if handlers.voiceSessionOpen != nil {
+				handlers.voiceSessionOpen(handlers.userData, &msg)
+			}
+			// Wipes the keys whether or not a handler took them.
+			IPC__message_deinit(&ipcMsg)
+
+		case NetworkVoiceRoute:
+			if handlers.voiceRoute != nil {
+				handlers.voiceRoute(handlers.userData, msg)
+			}
+			IPC__message_deinit(&ipcMsg)
+
+		case NetworkVoiceReset:
+			if handlers.voiceReset != nil {
+				handlers.voiceReset(handlers.userData)
+			}
 
 		case ProcessShutdown:
 			fmt.println("[Network] Received shutdown signal from main process")
@@ -187,11 +212,33 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 		enetHost    = enetHost,
 		ipcFd       = client_fd,
 	}
+	// The relay lives on this thread's stack for as long as the loop runs; its deinit wipes
+	// every peer's voice keys when the service stops or restarts.
+	voiceRelay: VoiceRelay
+	VoiceRelay_init(
+		&voiceRelay,
+		VoiceRelayConfig {
+			maxPacketsPerSecond = pm.config.voiceMaxPacketsPerSecond,
+			maxFrameBytes = pm.config.voiceMaxFrameBytes,
+		},
+		networkLoop__voiceSend,
+		networkLoop__voiceClock,
+		&loopState,
+	)
+	defer VoiceRelay_deinit(&voiceRelay)
+	loopState.voiceRelay = &voiceRelay
+	// Counters start over with the service; publish the zeros so /status does not keep
+	// showing the previous run's numbers.
+	VoiceRelayStats_publish(&voiceRelayPublishedStats, voiceRelay.stats)
+
 	handlers := NetworkIPCHandlers {
-		userData       = &loopState,
-		sendData       = networkLoop__sendData,
-		broadcast      = networkLoop__broadcast,
-		disconnectPeer = networkLoop__disconnectPeer,
+		userData         = &loopState,
+		sendData         = networkLoop__sendData,
+		broadcast        = networkLoop__broadcast,
+		disconnectPeer   = networkLoop__disconnectPeer,
+		voiceSessionOpen = networkLoop__voiceSessionOpen,
+		voiceRoute       = networkLoop__voiceRoute,
+		voiceReset       = networkLoop__voiceReset,
 	}
 
 	serviceFailing := false
@@ -211,7 +258,14 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 		if drain.hitLimit {
 			timeout = 0
 		}
-		if !networkServiceENet(&loopState, timeout) {
+		voiceSentBefore := voiceRelay.stats.datagramsOut
+		serviceOK := networkServiceENet(&loopState, timeout)
+		// Relayed voice is queued in ENet during the pass; push it out in one flush.
+		if voiceRelay.stats.datagramsOut != voiceSentBefore {
+			ENet.host_flush(enetHost)
+		}
+		VoiceRelay_publishStats(&voiceRelay, &voiceRelayPublishedStats)
+		if !serviceOK {
 			if !serviceFailing {
 				fmt.eprintln("[Network] ENet host_service failed")
 			}
@@ -251,9 +305,15 @@ networkServiceENet :: proc(state: ^NetworkLoopState, timeoutMS: u32) -> bool {
 				enetEvent.packet,
 				enetEvent.channelID,
 				int(state.ipcFd),
+				state.voiceRelay,
 			)
 		case .DISCONNECT:
-			handlePeerDisconnect(state.peerManager, enetEvent.peer, int(state.ipcFd))
+			handlePeerDisconnect(
+				state.peerManager,
+				enetEvent.peer,
+				int(state.ipcFd),
+				state.voiceRelay,
+			)
 		case .NONE:
 		}
 	}
@@ -272,7 +332,57 @@ networkLoop__broadcast :: proc(userData: rawptr, msg: NetworkBroadcast) {
 
 networkLoop__disconnectPeer :: proc(userData: rawptr, msg: NetworkDisconnectPeer) {
 	state := cast(^NetworkLoopState)userData
+	// The router dropped this peer; its voice must stop at once, like on a disconnect event.
+	if state.voiceRelay != nil {
+		VoiceRelay_removePeer(state.voiceRelay, msg.peerId)
+	}
 	handleNetworkDisconnectPeer(state.peerManager, msg)
+}
+
+networkLoop__voiceSessionOpen :: proc(userData: rawptr, msg: ^NetworkVoiceSessionOpen) {
+	state := cast(^NetworkLoopState)userData
+	// The peer may have disconnected while the message was queued. Its disconnect already went
+	// through the relay, so installing the keys now would keep them until the service stops;
+	// leave them in the message, which the drain wipes.
+	if _, connected := PeerManager_getPeer(state.peerManager, msg.peerId); !connected {
+		return
+	}
+	VoiceRelay_openSession(state.voiceRelay, msg)
+}
+
+networkLoop__voiceRoute :: proc(userData: rawptr, msg: NetworkVoiceRoute) {
+	state := cast(^NetworkLoopState)userData
+	VoiceRelay_applyRoute(state.voiceRelay, msg.roomId, msg.members)
+}
+
+networkLoop__voiceReset :: proc(userData: rawptr) {
+	state := cast(^NetworkLoopState)userData
+	VoiceRelay_reset(state.voiceRelay)
+}
+
+// Queues one relayed voice datagram: unreliable and unsequenced on the voice channel, so a
+// late frame still reaches the jitter buffer (voice-rooms-design.md 3.1). packet_create copies
+// the relay's scratch buffer. The loop flushes once after the ENet pass.
+networkLoop__voiceSend :: proc(userData: rawptr, peerId: u32, datagram: []u8) -> bool {
+	state := cast(^NetworkLoopState)userData
+	peer, ok := PeerManager_getPeer(state.peerManager, peerId)
+	if !ok || peer.enetPeer == nil || len(datagram) == 0 {
+		return false
+	}
+	packet := ENet.packet_create(raw_data(datagram), uint(len(datagram)), {.UNSEQUENCED})
+	if packet == nil {
+		return false
+	}
+	if ENet.peer_send(peer.enetPeer, u8(NetworkChannel.Voice), packet) != 0 {
+		ENet.packet_destroy(packet)
+		return false
+	}
+	return true
+}
+
+networkLoop__voiceClock :: proc(userData: rawptr) -> i64 {
+	_ = userData
+	return time.tick_now()._nsec
 }
 
 // networkPacketFlags maps a send's delivery mode to ENet flags. Unreliable packets use no
@@ -313,19 +423,29 @@ handlePeerConnect :: proc(peerManager: ^PeerManager, enetPeer: ^ENet.Peer, ipcFd
 	fmt.printfln("[Network] New peer connected: ID=%d", peerId)
 }
 
-// handlePeerData copies an incoming packet into an IPC message for the router, which owns
-// decryption and routing, and releases the ENet packet.
+// handlePeerData releases the ENet packet after handling it. Voice datagrams (channel 2) go to
+// the relay on this thread and never reach the router: no IPC, no copy, no log line. Every other
+// packet is copied into an IPC message for the router, which owns control decryption and
+// routing.
 handlePeerData :: proc(
 	peerManager: ^PeerManager,
 	enetPeer: ^ENet.Peer,
 	packet: ^ENet.Packet,
 	channelID: u8,
 	ipcFd: int,
+	voiceRelay: ^VoiceRelay,
 ) {
 	_ = peerManager
 	defer ENet.packet_destroy(packet)
 
 	peerId := u32(uintptr(enetPeer.data))
+	if NetworkChannel(channelID) == .Voice {
+		// The relay counts a peer it does not know, peer ID 0 included.
+		if voiceRelay != nil {
+			VoiceRelay_handleDatagram(voiceRelay, peerId, packet.data[:packet.dataLength])
+		}
+		return
+	}
 	if peerId == 0 {
 		fmt.eprintfln("[Network] Received data from peer with invalid ID")
 		return
@@ -355,14 +475,23 @@ handlePeerData :: proc(
 	}
 }
 
-// handlePeerDisconnect handles a peer disconnection
-handlePeerDisconnect :: proc(peerManager: ^PeerManager, enetPeer: ^ENet.Peer, ipcFd: int) {
+// handlePeerDisconnect forgets the peer, in the voice relay first so its frames stop before the
+// router has even seen the disconnect, and tells the router.
+handlePeerDisconnect :: proc(
+	peerManager: ^PeerManager,
+	enetPeer: ^ENet.Peer,
+	ipcFd: int,
+	voiceRelay: ^VoiceRelay,
+) {
 	peerId := u32(uintptr(enetPeer.data))
 
 	if peerId == 0 {
 		return
 	}
 
+	if voiceRelay != nil {
+		VoiceRelay_removePeer(voiceRelay, peerId)
+	}
 	PeerManager_removePeer(peerManager, peerId)
 
 	// Send notification to main process

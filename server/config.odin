@@ -69,6 +69,12 @@ ServerConfig :: struct {
 	adminPublicKey:         string, // Hex Ed25519 key allowed to claim keyless privileged accounts
 	webAdminToken:          string, // Bearer token required by protected web admin routes
 	webAdminTokenFilePath:  string, // Where a generated web admin token is persisted
+
+	// Voice settings (voice-rooms-design.md 4.4). Voice rides the ENet port above (channel 2).
+	voiceEnabled:             bool, // false rejects every voice join with "voice is disabled"
+	voiceMaxParticipants:     int, // voice sessions per room
+	voiceMaxPacketsPerSecond: int, // per-peer relay rate limit; the burst is a third of it
+	voiceMaxFrameBytes:       int, // largest Opus payload the relay forwards
 }
 
 ServerIdentityFile :: struct {
@@ -82,6 +88,20 @@ DEFAULT_SERVER_IDENTITY_FILE_NAME :: "server_identity.json"
 DEFAULT_WEB_ADMIN_TOKEN_FILE_NAME :: "web_admin_token"
 WEB_ADMIN_TOKEN_MIN_LENGTH :: 32
 WEB_ADMIN_GENERATED_TOKEN_BYTES :: 32
+
+// Voice defaults and the ranges validateVoiceConfig clamps to. Clients send 50 frames per
+// second, so the default rate leaves 20% headroom. The frame size cannot exceed the wire limit
+// (common.VOICE_OPUS_MAX_BYTES); 64 bytes is about 25 kbit/s, the lowest useful cap.
+DEFAULT_VOICE_ENABLED :: true
+DEFAULT_VOICE_MAX_PARTICIPANTS :: 25
+VOICE_MAX_PARTICIPANTS_MIN :: 1
+VOICE_MAX_PARTICIPANTS_MAX :: 200
+DEFAULT_VOICE_MAX_PACKETS_PER_SECOND :: 60
+VOICE_MAX_PACKETS_PER_SECOND_MIN :: 1
+VOICE_MAX_PACKETS_PER_SECOND_MAX :: 1000
+DEFAULT_VOICE_MAX_FRAME_BYTES :: 512
+VOICE_MAX_FRAME_BYTES_MIN :: 64
+VOICE_MAX_FRAME_BYTES_MAX :: common.VOICE_OPUS_MAX_BYTES
 
 loadConfig :: proc() -> (ServerConfig, string) {
 	logDir := getEnvOr("HAYCHAT_LOG_DIR", DEFAULT_LOG_PATH)
@@ -124,6 +144,7 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		adminPublicKey         = getEnvOr("HAYCHAT_ADMIN_PUBLIC_KEY", ""),
 		webAdminToken          = getEnvOr("HAYCHAT_WEB_ADMIN_TOKEN", ""),
 	}
+	loadVoiceConfig(&config)
 
 	validateAndNormalizeConfig(&config)
 	if preflightErr := startupPreflightError(config); len(preflightErr) > 0 {
@@ -136,6 +157,45 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		return config, tokenErr
 	}
 	return config, ""
+}
+
+// Reads the HAYCHAT_VOICE_* keys and clamps them to their ranges. A value that does not parse
+// falls back to the default.
+loadVoiceConfig :: proc(config: ^ServerConfig) {
+	config.voiceEnabled = parseBoolOr("HAYCHAT_VOICE_ENABLED", DEFAULT_VOICE_ENABLED)
+	config.voiceMaxParticipants = parseOr(
+		"HAYCHAT_VOICE_MAX_PARTICIPANTS",
+		int(DEFAULT_VOICE_MAX_PARTICIPANTS),
+	)
+	config.voiceMaxPacketsPerSecond = parseOr(
+		"HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND",
+		int(DEFAULT_VOICE_MAX_PACKETS_PER_SECOND),
+	)
+	config.voiceMaxFrameBytes = parseOr(
+		"HAYCHAT_VOICE_MAX_FRAME_BYTES",
+		int(DEFAULT_VOICE_MAX_FRAME_BYTES),
+	)
+	validateVoiceConfig(config)
+}
+
+// Clamps the voice limits into their ranges, so a typo cannot turn the relay off (0 packets per
+// second) or past the wire limit.
+validateVoiceConfig :: proc(config: ^ServerConfig) {
+	config.voiceMaxParticipants = clamp(
+		config.voiceMaxParticipants,
+		VOICE_MAX_PARTICIPANTS_MIN,
+		VOICE_MAX_PARTICIPANTS_MAX,
+	)
+	config.voiceMaxPacketsPerSecond = clamp(
+		config.voiceMaxPacketsPerSecond,
+		VOICE_MAX_PACKETS_PER_SECOND_MIN,
+		VOICE_MAX_PACKETS_PER_SECOND_MAX,
+	)
+	config.voiceMaxFrameBytes = clamp(
+		config.voiceMaxFrameBytes,
+		VOICE_MAX_FRAME_BYTES_MIN,
+		VOICE_MAX_FRAME_BYTES_MAX,
+	)
 }
 
 // serverLogLevelIsDebug reports whether HAYCHAT_LOG_LEVEL asks for per-packet debug lines.
@@ -342,6 +402,22 @@ parseOr :: proc {
 	parseInt64Or,
 	parseF32Or,
 	parseF64Or,
+}
+
+// Accepts true/false, 1/0, yes/no and on/off in any case; anything else is the default.
+parseBoolOr :: proc(key: string, default_value: bool) -> bool {
+	value := strings.trim_space(os.get_env(key, context.temp_allocator))
+	for word in ([]string{"true", "1", "yes", "on"}) {
+		if strings.equal_fold(value, word) {
+			return true
+		}
+	}
+	for word in ([]string{"false", "0", "no", "off"}) {
+		if strings.equal_fold(value, word) {
+			return false
+		}
+	}
+	return default_value
 }
 
 parseUintOr :: proc(key: string, default_value: uint) -> uint {
