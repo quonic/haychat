@@ -8,6 +8,8 @@ Diagnostics (config notes, connection errors) go to stderr, so stdout is always 
 stream of JSON lines.
 
 The code lives in `client/headless.odin`; its unit tests are in `client/headless_test.odin`.
+To drive the real window instead (clicks, typing, screenshots), see
+[GUI Automation](#gui-automation).
 
 ## Running It
 
@@ -226,3 +228,113 @@ grep -F '"cmd":"send"' alice.out
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
 any client connects. If the sender is not a member of room 1 the server answers with
 `protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
+
+## GUI Automation
+
+The headless harness acts as a user without the window. Its sibling, `client --ui-script FILE`,
+drives the real window from a script: it clicks widgets, types, presses keys, waits until text
+appears, and captures screenshots. Nothing is injected through the operating system (KDE
+Wayland offers no input injection): the script runs on the UI thread between frames and pushes
+synthetic SDL events, which travel the same path as real input (`handleAppEvent` →
+`ui.handleEvent` → widgets). The interpreter lives in `client/ui_script.odin`; the drawn-text
+registry it reads is `client/ui/automation.odin`, which records the strings drawn by
+`ui.label`, `ui.wrappedLabel`, `ui.button`, transcript units and empty text inputs'
+placeholders, plus every widget's hit-test rect, only while a script runs.
+
+```sh
+odin build client -out:haychat-client
+SDL_VIDEO_DRIVER=offscreen ./haychat-client --ui-script smoke.uis \
+	--name alice-1 --server 127.0.0.1:12345 --config-dir ./profiles/alice --window 1280x800
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--ui-script FILE` | The script to run. Every line is parsed before the window opens, so a bad line runs nothing. |
+| `--name`, `--server`, `--config-dir` | Exactly as in headless mode (the same parser). Without a name or server the window opens the first-run screen, which a script can fill in. |
+| `--window WxH` | Window size in window coordinates, at least `800x480` (default `1280x800`), so screenshots have a known size. |
+
+### Running Without a Display
+
+SDL3's `offscreen` video driver renders into memory with no display server; the Fedora SDL3
+package (the dev image and CI) includes it and renders through EGL (`opengl` renderer, Mesa
+in the dev image). Set `SDL_VIDEO_DRIVER=offscreen` for headless machines and containers; the
+client prints what it got on stderr (`[Info] UI script: video driver offscreen renderer
+opengl`). `SDL_VIDEO_DRIVER=dummy` works too, with SDL's `software` renderer. On a desktop,
+leave the variable unset (or set `wayland`/`x11`) to watch the window being driven.
+Use `--config-dir` (or an isolated `XDG_CONFIG_HOME`) so a scripted run never touches your own
+identity in `~/.config/haychat`.
+
+### Script Language
+
+One command per line. A word starting with `#` outside quotes begins a comment, so
+`click "# general"  # the channel` works. TEXT is a bare word or a `"quoted string"` with the
+escapes `\"`, `\\`, `\n` and `\t`. Text matches are exact and case sensitive against whole
+drawn strings (a sidebar row whose text is cut off on screen still matches its full text).
+Timeouts default to 5000 ms and may be at most 600000.
+
+| Command | Effect |
+| --- | --- |
+| `wait MS` | Lets the UI run and draw for MS milliseconds. |
+| `wait-text "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn in the current frame. |
+| `wait-count N "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn at least N times (e.g. a user under both Direct Messages and Members). |
+| `assert-text "TEXT"` | Fails unless TEXT is drawn in the current frame. |
+| `click "TEXT"` | Clicks the centre of the most recently drawn TEXT that lies on a widget (button, sidebar row, rail button, input placeholder), or else the most recent TEXT anywhere. A sidebar row therefore wins over a header repeating its label. |
+| `click-id NAME [INT...]` | Clicks the widget whose ID is `ui.idOf(NAME, INT...)`, the same name and values the view passes (up to 4 integers), e.g. `click-id dm-input 1 7` for the DM composer with user 7 on server 1, or `click-id room-input 1 1`. |
+| `click X Y` | Clicks at window coordinates. |
+| `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
+| `key NAME` | Presses and releases a key. Names (any case): `Return`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `A`, `C`, `V`, `X`, with optional `Shift+`, `Ctrl+`, `Alt+`, `Gui+`/`Cmd+` prefixes, e.g. `Shift+Return`, `Ctrl+A`. |
+| `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
+| `quit` | Ends the script and closes the window. Reaching the end of the file does the same. |
+
+After `click`, `type` and `key` the next command waits until two more frames are drawn, so
+the input has been handled and its effects are on screen. Waits re-check every frame and at
+least every 10 ms.
+
+### Output and Exit Codes
+
+stdout carries one JSON line per command and a final summary; diagnostics go to stderr.
+
+```json
+{"ok":true,"cmd":"wait-text","line":2,"text":"# general","waitedMS":42}
+{"ok":true,"cmd":"click","line":3,"text":"# general","x":184.0,"y":107.0}
+{"ok":true,"cmd":"screenshot","line":4,"file":"shots/01.bmp"}
+{"ok":false,"cmd":"assert-text","line":5,"text":"bye","error":"the text is not drawn in the current frame"}
+{"event":"ui_script_done","failed":1,"skipped":1}
+```
+
+The script stops at the first failed command; the commands after it count as `skipped`. A
+bad line prints `{"ok":false,"cmd":"parse","line":N,"error":"..."}` before anything runs.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every command succeeded. |
+| 1 | Usage error: bad options, an unreadable script, a parse error, or SDL could not start. |
+| 3 | A wait timed out, an assertion failed, a lookup found nothing, or the window was closed before the script finished. |
+
+### Screenshot of a Given State
+
+Write a script that reaches the state, waits for text that proves it is drawn, and captures:
+
+```text
+wait-text "# general" 15000
+click "# general"
+wait-text "No messages yet"
+screenshot /tmp/general-empty.bmp
+quit
+```
+
+Combine it with headless clients to set the scene: `dev/ui-smoke.sh` starts a headless bob,
+writes a script for the GUI alice with bob's user ID filled in, and lets bob answer while the
+window waits.
+
+### GUI Smoke Test
+
+`./dev.sh live --ui` (also part of `--all` and so of `./dev.sh ci`) runs `dev/ui-smoke.sh`
+against the throwaway server. alice, in the window on the offscreen driver, clicks `# general`
+and the composer, sends a message that headless bob must receive, waits for bob's direct
+message under Direct Messages, opens it, asserts its text, and replies from the DM composer;
+bob must receive the reply as a `direct_message`. alice takes six screenshots on the way and
+the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
+in a new temporary directory, which disappears with the container under `./dev.sh`; set
+`HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
+`dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

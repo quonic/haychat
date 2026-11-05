@@ -65,8 +65,9 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat and direct message proofs, the harness smoke test, and the server SQL proof |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat and direct message proofs, the harness and GUI smoke tests, and the server SQL proof |
 | `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
+| `./dev.sh live --ui` | Only `dev/ui-smoke.sh` against the live server: the real client window, on SDL's offscreen driver, is driven by `--ui-script` to chat and exchange a direct message with a headless client, taking screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them; see [docs/testing-harness.md](docs/testing-harness.md#gui-automation)). `--all` runs it too |
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 

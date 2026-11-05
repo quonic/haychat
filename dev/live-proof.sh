@@ -10,12 +10,15 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --sql | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat and direct message proofs, the headless
-#                   harness smoke test, and the server SQL proof (what CI and `./dev.sh ci`
-#                   run)
+#                   harness smoke test, the GUI automation smoke test, and the server SQL
+#                   proof (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
+#   --ui            only the GUI automation smoke test (dev/ui-smoke.sh): the real window on
+#                   SDL's offscreen video driver, driven by --ui-script; screenshots go to
+#                   HAYCHAT_UI_SCREENSHOT_DIR when it is set
 #   --sql           only the server SQL proof: database-backed server tests that run the
 #                   direct message and default room statements against this database
 #   test_name...    the given client test procedures, e.g. client.testFoo
@@ -31,17 +34,23 @@ SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
+run_ui=false
 run_sql=false
 if [[ $# -gt 0 ]]; then
 	case "$1" in
 		--all)
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST")
 			run_harness=true
+			run_ui=true
 			run_sql=true
 			;;
 		--harness)
 			tests=()
 			run_harness=true
+			;;
+		--ui)
+			tests=()
+			run_ui=true
 			;;
 		--sql)
 			tests=()
@@ -168,6 +177,11 @@ fi
 if [[ "$run_harness" == true ]]; then
 	echo "==> [live] running dev/harness-smoke.sh"
 	dev/harness-smoke.sh 127.0.0.1:12345
+fi
+
+if [[ "$run_ui" == true ]]; then
+	echo "==> [live] running dev/ui-smoke.sh"
+	dev/ui-smoke.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

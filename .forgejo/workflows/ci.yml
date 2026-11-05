@@ -62,5 +62,5 @@ jobs:
       - name: Compile checks and leak-checked tests
         run: ./check.sh
 
-      - name: Live startup auth, two-client chat, harness, and SQL proofs
+      - name: Live startup auth, two-client chat, harness, GUI, and SQL proofs
         run: dev/live-proof.sh --all

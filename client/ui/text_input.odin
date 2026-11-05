@@ -149,6 +149,8 @@ textInput :: proc(
 		fillTextRange(ctx, text, origin, lo, hi, ctx.theme.selection)
 	}
 	if len(display) == 0 && len(placeholder) > 0 {
+		// A driver can find an empty input by its placeholder.
+		automationText(ctx, inner, placeholder)
 		drawText(ctx, textGet(ctx, 0, .Regular, placeholder, wrapW), origin, ctx.theme.fgMuted)
 	} else {
 		drawText(ctx, text, origin, ctx.theme.fg)
