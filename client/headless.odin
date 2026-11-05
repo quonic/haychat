@@ -239,6 +239,9 @@ HeadlessEventKind :: enum {
 	VoiceParticipants,
 	VoiceJoinRejected,
 	VoiceLeft,
+	// Derived by the harness (headless_voice.odin), not runtime events.
+	VoiceSpeaking,
+	VoiceStatus,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -263,6 +266,8 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.VoiceParticipants = "voice_participants",
 	.VoiceJoinRejected = "voice_join_rejected",
 	.VoiceLeft      = "voice_left",
+	.VoiceSpeaking  = "voice_speaking",
+	.VoiceStatus    = "voice_status",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -1047,6 +1052,25 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"read", 2, 1, .None, "read room|dm ID [MESSAGE_ID]",
 		"marks a room or conversation read (default: up to its newest loaded message)",
 		headlessCommandRead},
+	{"voice-join", 1, 0, .None, "voice-join ROOM_ID",
+		"joins a room's voice; done at voice_status joined", headlessCommandVoiceJoin},
+	{"voice-leave", 0, 0, .None, "voice-leave", "leaves voice", headlessCommandVoiceLeave},
+	{"voice-source", 1, 0, .None, "voice-source tone:HZ[:AMP]|file:PATH|silence|device[:NAME]",
+		"what the next join sends (files: raw F32LE mono 48 kHz)", headlessCommandVoiceSource},
+	{"voice-sink", 1, 0, .None, "voice-sink file:PATH|null|device[:NAME]",
+		"where the next join plays (files: raw F32LE mono 48 kHz)", headlessCommandVoiceSink},
+	{"voice-gate", 1, 1, .None, "voice-gate vad [THRESHOLD_DB]|ptt|open",
+		"voice activity, push-to-talk, or always sending", headlessCommandVoiceGate},
+	{"voice-mute", 1, 0, .None, "voice-mute on|off", "stops sending and tells the server",
+		headlessCommandVoiceMute},
+	{"voice-deafen", 1, 0, .None, "voice-deafen on|off", "stops playback and tells the server",
+		headlessCommandVoiceDeafen},
+	{"voice-ptt", 1, 0, .None, "voice-ptt down|up", "presses or releases push-to-talk",
+		headlessCommandVoicePushToTalk},
+	{"voice-stats", 0, 0, .None, "voice-stats",
+		"engine, jitter, speaker and network voice counters", headlessCommandVoiceStats},
+	{"voice-flush", 0, 0, .None, "voice-flush",
+		"replies once the file sink's audio so far is on disk", headlessCommandVoiceFlush},
 	{"wait", 1, 1, .None, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
 	{"sleep", 1, 0, .None, "sleep MS", "keeps servicing the connection for MS milliseconds",
@@ -1157,6 +1181,8 @@ HeadlessHarness :: struct {
 	pendingEvents:   [HeadlessEventKind]int,
 	// Connecting events per server since its last connected or disconnected event.
 	connectAttempts: map[int]int,
+	// What voice_status and voice_speaking last reported (headless_voice.odin).
+	voice:           HeadlessVoiceTracker,
 	running:         bool,
 }
 
@@ -1209,17 +1235,21 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		headlessRecordEvent(harness, kind)
 	}
 	State_applyRuntimeEvent(&harness.state, event)
+	// Applying a voice event can start or stop the engine; report that right after it.
+	headlessPollVoice(harness)
 }
 
 headlessDrainEvents :: proc(harness: ^HeadlessHarness) {
 	for _ in 0 ..< CHAT_RUNTIME_MAX_EVENTS_PER_FRAME {
 		event, hasEvent := ClientNetworkWorker_popEvent(harness.state.networkWorker)
 		if !hasEvent {
-			return
+			break
 		}
 		headlessHandleRuntimeEvent(harness, &event)
 		ClientTransportRuntimeEvent_deinit(&event)
 	}
+	// Speaking changes without any event, and commands change the voice status.
+	headlessPollVoice(harness)
 }
 
 headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {
@@ -1270,7 +1300,7 @@ headlessConnectAndWait :: proc(
 ) -> bool {
 	harness.state = State_initFromConfig(config)
 	state := &harness.state
-	// No audio device unless a script asks for one (H7's voice-source and voice-sink): a
+	// No audio device unless a script asks for one (voice-source and voice-sink device): a
 	// harness client in voice records nothing and plays nothing, and never initialises SDL.
 	State_setVoiceEngineTemplate(
 		state,

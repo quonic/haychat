@@ -10,12 +10,16 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --ui | --sql | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --voice | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
-#                   harness smoke test, the GUI automation smoke test, the server SQL proofs,
-#                   and the startup failure exit check (what CI and `./dev.sh ci` run)
+#                   harness smoke test, the two-process voice proof, the GUI automation smoke
+#                   test, the server SQL proofs, and the startup failure exit check (what CI
+#                   and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
+#   --voice         only the voice proof between two headless client processes
+#                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
+#                   with dev/tools/voice-check, then the same through SDL's disk audio driver
 #   --ui            only the GUI automation smoke test (dev/ui-smoke.sh): the real window on
 #                   SDL's offscreen video driver, driven by --ui-script; screenshots go to
 #                   HAYCHAT_UI_SCREENSHOT_DIR when it is set
@@ -51,6 +55,7 @@ SQL_TESTS+=,server.testDirectUnreadAndMarkReadAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
+run_voice=false
 run_ui=false
 run_sql=false
 run_startup_failure=false
@@ -59,6 +64,7 @@ if [[ $# -gt 0 ]]; then
 		--all)
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST" "$VOICE_TEST")
 			run_harness=true
+			run_voice=true
 			run_ui=true
 			run_sql=true
 			run_startup_failure=true
@@ -66,6 +72,10 @@ if [[ $# -gt 0 ]]; then
 		--harness)
 			tests=()
 			run_harness=true
+			;;
+		--voice)
+			tests=()
+			run_voice=true
 			;;
 		--ui)
 			tests=()
@@ -200,6 +210,11 @@ fi
 if [[ "$run_harness" == true ]]; then
 	echo "==> [live] running dev/harness-smoke.sh"
 	dev/harness-smoke.sh 127.0.0.1:12345
+fi
+
+if [[ "$run_voice" == true ]]; then
+	echo "==> [live] running dev/voice-proof.sh"
+	dev/voice-proof.sh 127.0.0.1:12345
 fi
 
 if [[ "$run_ui" == true ]]; then

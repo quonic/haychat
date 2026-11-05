@@ -93,6 +93,15 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-edit ROOM_ID NAME [DESCRIPTION...]` | Admins: renames the room and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. |
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
 | `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
+| `voice-join ROOM_ID` | Joins the room's voice on the selected server (leaving any other first). `ok` (`serverID`, `roomID`, `status` `joining`) means the request went out; the join completes with `voice_participants` carrying `"recipientJoined":true`, then `voice_status` `joined` once the engine runs. A refusal arrives as `voice_join_rejected`. See [Voice](#voice). |
+| `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice). A file sink is closed, complete, at this point. |
+| `voice-source SPEC` | What the next join sends: `tone:HZ[:AMP]` (a sine, amplitude 0 to 1, default 0.5), `file:PATH` (raw F32LE mono 48 kHz, silent after its end), `silence` (the default), or `device[:NAME]` (an SDL recording device; the only way SDL audio is initialised). |
+| `voice-sink SPEC` | Where the next join plays: `file:PATH` (every speaker mixed into raw F32LE mono 48 kHz, silence written while nobody speaks), `null` (the default: decode and discard), or `device[:NAME]` (an SDL playback device). |
+| `voice-gate vad [THRESHOLD_DB]\|ptt\|open` | Voice activity (threshold in dBFS, -100 to below 0, default -45), push-to-talk, or `open`: push-to-talk with the key held, so every frame is sent. Applies at once and to the next join. |
+| `voice-mute on\|off`, `voice-deafen on\|off` | Mute closes the gate at once and deafen stops playback at once; both are then sent to the server (which shows them in `voice_participants`) and carried by the next join. |
+| `voice-ptt down\|up` | Presses or releases push-to-talk (local only). |
+| `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
+| `voice-flush` | With a file sink: replies once every frame played so far is in the file (`path`, `bytes`, `seconds`, `running`), so a script can analyse it without leaving. Without a running engine it reports the file as the engine closed it. |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
 | `sleep MS` | Keeps servicing the connection for `MS` milliseconds, printing events. |
 | `help` | Lists the commands and event kinds. |
@@ -133,6 +142,8 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"recipientJoined":true,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
 | `voice_join_rejected` | `{"event":"voice_join_rejected","serverID":1,"roomID":1,"reason":"voice room is full"}` |
 | `voice_left` | `{"event":"voice_left","serverID":1,"roomID":1,"reason":"the room was deleted"}` (the server removed this session from that room's voice) |
+| `voice_status` | `{"event":"voice_status","serverID":1,"roomID":1,"status":"joined","wantRoomID":1,"error":""}` (the client's voice state changed: `idle`, `joining`, `joined`, or `unavailable`; printed by the harness, not the server) |
+| `voice_speaking` | `{"event":"voice_speaking","serverID":1,"roomID":1,"userID":3,"speaking":true,"self":false}` (a speaker started or stopped being heard; `self` is this client's own sending; printed by the harness) |
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
@@ -159,12 +170,32 @@ Direct messages belong to one server: user IDs from different servers are unrela
 `connected`. The server checks the role again for every room request, so a stale `true` only
 earns a `protocol_error "Admin permission required"`.
 
-## Voice Events
+## Voice
 
-The harness prints the server's voice control messages as events, so a script can watch who
-is in voice. Voice **commands** (`voice-join`, `voice-leave`, sources and sinks, stats) arrive
-with H7; until then a harness client never joins voice itself, and when it does its engine uses
-a silent source and a null sink, so it never opens an audio device.
+A harness client can join a room's voice, send a tone or a file, record what it hears into a
+file, and report the engine's counters, so two scripted clients can prove voice end to end
+without an audio device. `dev/voice-proof.sh` (below) is a complete example.
+
+### Sources, Sinks and Files
+
+`voice-source`, `voice-sink` and `voice-gate` change the engine template, the config every
+**new** engine starts from: they take effect at the next `voice-join`. A running engine keeps
+the source and sink it opened with (the result says `"pendingRejoin":true`), so set them
+before joining, or `voice-leave` and `voice-join` again. The gate mode, mute, deafen and
+push-to-talk also reach a running engine at once.
+
+A harness client starts with `silence`, `null` and voice activity, so voice never opens an
+audio device, and SDL audio is never initialised, unless a script asks for `device`. Under
+`SDL_AUDIO_DRIVER=disk`, `device` reads `SDL_AUDIO_DISK_INPUT_FILE` and writes
+`SDL_AUDIO_DISK_OUTPUT_FILE` instead of real hardware.
+
+Every file is **raw F32LE samples at 48 kHz, mono**, with no header: the file source, the
+file sink, and `dev/tools/voice-check`. The one exception is SDL's disk driver output for a
+`device` sink, which has the playback device's format, F32LE **stereo** 48 kHz
+(`voice-check --channels 2`). A file sink starts when the engine starts (at the join) and
+writes 20 ms of silence for every frame nobody speaks, so the file's time base is the join.
+
+### Voice Events
 
 - `voice_participants` arrives for every room of the account whenever its voice participant set
   or a participant's mute or deafen changes, and after every `room_list` for each room with
@@ -173,6 +204,19 @@ a silent source and a null sink, so it never opens an audio device.
   12). Naming your `userID` is not enough, because a list also names you for your other
   devices. A second device of the same account is a second entry with the
   same `userID`.
+- `voice_status` is the harness's view of the client's voice state, printed whenever it
+  changes: `joining` after `voice-join` (or a re-join after a reconnect), `joined` once the
+  server acknowledged this session and the engine runs, `idle` after a leave, a rejection, a
+  removal or a lost connection (`wantRoomID` is the room a reconnect joins again, 0 when none),
+  and `unavailable` when the engine could not start; `error` then says why (no libopus, a
+  device or file that cannot be opened).
+- `voice_speaking` is printed on each edge of a speaker being heard. For another participant
+  (`"self":false`, `userID` is the sender) it follows the engine's talk spurt for that speaker:
+  it starts with the first frame and ends on the sender's end-of-spurt flag, or 200 ms after
+  its frames stop (a leave or a mute). For this client (`"self":true`) it is whether the gate
+  is sending. Both already have their own hysteresis (the jitter buffer's spurt, the gate's
+  attack and hangover), so the edges are stable enough to `wait` for; when the engine stops,
+  every speaker still speaking gets a `false` edge.
 - `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
   full`, `voice is disabled`, `invalid room`, or `voice is unavailable, try again`.
 - `voice_left` means the server took this session out of a room's voice: `removed from the
@@ -180,6 +224,83 @@ a silent source and a null sink, so it never opens an audio device.
 - Voice does not survive a reconnect. The client joins the same room again after `connected`
   (until it leaves, or a rejection or `voice_left` ends voice).
 - Voice frames are never events: they go from the network thread straight to the voice engine.
+
+### Voice Stats
+
+`voice-stats` reports the flat fields scripts need first, then every counter:
+
+```json
+{"ok":true,"cmd":"voice-stats","status":"joined","serverID":1,"roomID":1,"running":true,
+ "joinedMS":4104,"sent":0,"received":211,"lost":0,"fec":0,"plc":0,"late":0,"jitterMS":1.18,
+ "depth":3,"inputLevelDB":-100.0,"transmitting":false,"frameSequence":233,
+ "engine":{"framesCaptured":233,"framesSent":0,...},"jitter":{"received":211,...},
+ "speakers":[{"userID":3,"speaking":true,"levelDB":-9.0,"bufferedFrames":3,"targetDepth":3,
+ "jitterMS":1.18}],
+ "network":{"datagramsReceived":211,"framesDelivered":211,"receiveDropped":{"Malformed":0,...},
+ "framesSent":0,"sendDropped":{"NotJoined":0,...}}}
+```
+
+(Wrapped here; the harness prints one line.)
+
+| Field | Meaning |
+| --- | --- |
+| `status`, `serverID`, `roomID` | As in `voice_status` |
+| `running` | Whether an engine runs (only while joined) |
+| `joinedMS` | Time since the join completed (`voice_status` `joined`); 0 when not joined. At 20 ms a frame, an open gate sends `joinedMS / 20` frames |
+| `sent` | Frames this client encoded and handed to the network |
+| `received` | Frames accepted into the jitter buffers (every speaker, expired ones included) |
+| `lost`, `fec`, `plc` | Frames missing at playout (`fec + plc + silent`), those rebuilt from the next frame's redundancy, and those concealed |
+| `late` | Frames that arrived after their playout time |
+| `jitterMS`, `depth` | The largest interarrival jitter estimate and jitter-buffer target depth (frames) over the current speakers |
+| `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level, whether the gate sent it, and the capture sequence |
+| `engine` | `VoiceEngineStats` (`client/voice_engine.odin`): capture, gate, encode, inbound, decode and sink counters |
+| `jitter` | `JitterStats` (`client/voice_jitter.odin`) summed over every speaker |
+| `speakers` | Each current remote speaker: `userID`, `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
+| `network` | The transport's `ClientVoiceNetworkStats` for the voice server, read under the network worker's lock: datagrams received and delivered, frames sent, and every drop by reason |
+
+A speaker's frames stop without an end-of-spurt flag when it leaves, so the listener conceals
+a few (`plc`, then `silent`) before its spurt times out. Take stats while the speaker still
+talks when counting losses.
+
+### Voice Check and the Live Proof
+
+`dev/tools/voice-check` is a small Odin program that checks a recording for a tone with the
+same Goertzel analysis as the client's voice tests (the `client/toneanalysis` package):
+
+```sh
+odin run dev/tools/voice-check -- b.f32 --freq 440 --tolerance 5 --min-seconds 3
+odin run dev/tools/voice-check -- --write-tone mic.f32 --freq 440 --seconds 10   # a test input
+```
+
+It finds the longest stretch of 20 ms blocks within 20 dB of the expected level (from
+`--amplitude`, default 0.5), trims 100 ms from each end, and checks it in half-second windows:
+every window's dominant frequency within `--tolerance` Hz of `--freq` and its SNR (the target
+bin over the median bin) at least `--min-snr` dB (default 20); the stretch's RMS level within
+`--level-tolerance` dB (default 6) of the expected level; and the stretch at least
+`--min-seconds` long. It prints the measured frequency (median and worst window), level and
+SNR either way, and exits 0 on a pass, 1 on a failure and 2 on a usage or file error.
+`--channels N` reads interleaved files (the first channel is checked) and `--rate HZ` another
+sample rate.
+
+`./dev.sh live --voice` runs `dev/voice-proof.sh` against a throwaway server (`--all`, and so
+`./dev.sh ci` and Forgejo CI, run it too):
+
+1. File path: B sets `voice-sink file:...` and joins room 1; A sets `voice-source
+   tone:440:0.5` and `voice-gate open` and joins. Each waits for its `voice_participants` with
+   `recipientJoined` and its `voice_status` `joined`; B must list A and print A's
+   `voice_speaking` `true`. After `HAYCHAT_VOICE_PROOF_SECONDS` (default 4) both report
+   `voice-stats` and A leaves; B must print A's `voice_speaking` `false` and a list with only
+   itself, then `voice-flush`. `voice-check` must pass on B's file with at least 3 s of tone,
+   A must have sent at least 95 % of `joinedMS / 20` frames, B must have received at least
+   95 % of what A sent, and FEC plus PLC must stay under 2 % of what B received.
+2. SDL devices: the same with C on `voice-source device` and D on `voice-sink device`, both
+   under `SDL_AUDIO_DRIVER=disk`. C's input file is a tone from `voice-check --write-tone`;
+   D's disk output (stereo) must pass `voice-check --channels 2`, and D must receive 95 % of
+   what C sent with FEC plus PLC under 2 %. The disk driver paces capture by its own clock, so
+   C's frame count is not checked against time.
+
+It needs libopus (in the dev image and CI) and nothing else: no audio server, no device, no
+display.
 
 ## Read State
 
@@ -426,8 +547,8 @@ in a new temporary directory, which disappears with the container under `./dev.s
 It opens no window and no server connection: audio goes from a source through the gate, the
 Opus encoder, the per-speaker jitter buffer and the decoder to a sink, with the encoder's
 output fed straight back in as a fake remote speaker. Use it to check a microphone, the
-speakers, and the codec settings by ear, or to produce files for analysis. The harness voice
-commands (`voice-source`, `voice-sink`, `voice-stats`, …) arrive with step H7.
+speakers, and the codec settings by ear, or to produce files for analysis. To run voice
+through a server instead, use the harness's voice commands (see [Voice](#voice)).
 
 ```sh
 odin build client -out:haychat-client
@@ -439,7 +560,7 @@ odin build client -out:haychat-client
 | Option | Meaning |
 | --- | --- |
 | `--seconds N` | How long to run, 1 to 600 (default 10) |
-| `--source SPEC` | `device[:NAME]` (default: the system default microphone), `tone:HZ`, `file:PATH` (raw F32LE mono 48 kHz), or `silence` |
+| `--source SPEC` | `device[:NAME]` (default: the system default microphone), `tone:HZ[:AMP]`, `file:PATH` (raw F32LE mono 48 kHz), or `silence` |
 | `--sink SPEC` | `device[:NAME]` (default: the system default output), `file:PATH` (every speaker mixed, raw F32LE mono 48 kHz, silence included), or `null` |
 | `--loss PCT` | Drop this share of loopback frames (0 to 90) |
 | `--threshold DB` | Voice activity threshold in dBFS (default -45) |
