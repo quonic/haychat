@@ -33,6 +33,13 @@ DIRECT_MESSAGE_TEST=client.testClientServerTransportCanExchangeLiveDirectMessage
 SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 SQL_TESTS+=,server.testUserIdentityStatementAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsCreateFreshSchemaAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsAdoptRC1SchemaAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsAdoptProtocol7RoomsAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsRefuseNewerSchemaAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsRefuseUnrecognisedSchemaAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsRollBackFailedMigrationAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsApplyNewMigrationOnceAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
@@ -192,8 +199,9 @@ if [[ "$run_ui" == true ]]; then
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares
-# the running server's database, which is safe: its schema check finds the schema the server
-# just created, and it touches only accounts it created itself.
+# the running server's database, which is safe: its migration run finds the database the server
+# just migrated and changes nothing, it touches only accounts it created itself, and the
+# migration tests work in schemas of their own that they drop again.
 if [[ "$run_sql" == true ]]; then
 	echo "==> [live] running server SQL proof ${SQL_TESTS}"
 	HAYCHAT_DATABASE_SQL_TEST=1 odin test server \

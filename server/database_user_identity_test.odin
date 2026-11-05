@@ -74,7 +74,10 @@ testUserIdentityStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		"isolate identity test",
 		fmt.tprintf("CREATE SCHEMA %s; SET LOCAL search_path TO %s", schema, schema),
 	)
-	databaseDefaultRoomTestExec(conn, "create schema", DATABASE_SCHEMA_CREATE_SQL)
+	{
+		_, migrateErr := databaseApplyMigrations(conn, DATABASE_MIGRATIONS[:])
+		assert(len(migrateErr) == 0, migrateErr)
+	}
 	databaseDefaultRoomTestExec(
 		conn,
 		"create rooms",
