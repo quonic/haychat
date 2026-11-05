@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Live end-to-end proof: builds the server, starts it against the PostgreSQL database named by
-# HAYCHAT_DATABASE_*, waits until it reports readiness, loads the server/sql/auth_bootstrap.sql
-# fixture (which creates #general, room 1), runs the live client tests against it on
-# 127.0.0.1:12345, and stops the server again.
+# HAYCHAT_DATABASE_*, waits until it reports readiness, checks that the server created
+# #general (room 1) on its own, loads the server/sql/auth_bootstrap.sql fixture (for its admin
+# account), runs the live client tests against it on 127.0.0.1:12345, and stops the server.
 #
 # It runs inside the dev image (`./dev.sh live`, `./dev.sh ci`) or the Forgejo CI job
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
@@ -16,7 +16,7 @@ set -euo pipefail
 #                   the server SQL proof (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
 #   --sql           only the server SQL proof: database-backed server tests that run the
-#                   direct message statements against this database
+#                   direct message and default room statements against this database
 #   test_name...    the given client test procedures, e.g. client.testFoo
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -25,6 +25,7 @@ ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
 STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOverENet
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
 SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
@@ -134,13 +135,25 @@ server_pid=$!
 wait_for_server_ready
 echo "==> [live] server is ready"
 
-# The server creates the schema but no rooms, and the chat proofs post to #general. The
-# fixture is loaded before any live client connects, so their new accounts join #general.
+live_psql() {
+	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
+		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" "$@"
+}
+
+# The server creates #general on an empty database before it reports readiness, and the chat
+# proofs post to it, so check it is there before anything else touches the rooms.
+rooms=$(live_psql -tA -c "SELECT string_agg(id || ':' || name, ',') FROM rooms")
+if [[ "$rooms" != "1:general" ]]; then
+	echo "Expected the server to create #general as room 1, found rooms: ${rooms:-none}" >&2
+	exit 1
+fi
+echo "==> [live] server created #general"
+
+# The room no longer depends on the fixture; it adds the admin and haypeer accounts. It loads
+# before any live client connects, and the fixture's room upsert keeps #general as room 1.
 echo "==> [live] loading server/sql/auth_bootstrap.sql"
-PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
-	-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
-	-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
-	-f server/sql/auth_bootstrap.sql >/dev/null
+live_psql -f server/sql/auth_bootstrap.sql >/dev/null
 
 if [[ ${#tests[@]} -gt 0 ]]; then
 	test_names=$(IFS=,; echo "${tests[*]}")

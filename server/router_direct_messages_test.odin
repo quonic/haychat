@@ -730,6 +730,66 @@ testMainRouterAnnouncesPresenceOnFirstSessionAndLastDisconnect :: proc(t: ^testi
 }
 
 @(test)
+testMainRouterFailedAuthSuccessAnnouncesNoPresence :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	watcherPeerID := u32(1)
+	failingPeerID := u32(2)
+	h.state.connectedPeers[failingPeerID] = true
+	watcherTransport := routerCompleteHandshake(&h, watcherPeerID, 42)
+	routerTestExpectNoNetworkMessage(&h, "expected no presence notice with nobody to tell")
+
+	// A session whose identity just resolved, as the handshake leaves it before auth success.
+	h.state.peerSessions[failingPeerID] = RouterPeerSession {
+		clientNickname = strings.clone("failing-sender"),
+	}
+	failingSend :: proc(_: ^ProcessManager, _: ^MainRouterState, _: u32, _: int) -> bool {
+		return false
+	}
+	MainRouterState_completeAuthentication(&h.pm, &h.state, failingPeerID, 43, failingSend)
+
+	// The session was never announced online, so the violation must not announce it offline:
+	// the only messages are its own protocol error and its disconnect.
+	errorSend := routerPollNetworkSend(&h)
+	defer delete(errorSend.data)
+	assert(errorSend.peerId == failingPeerID, "expected only the failing peer to hear back")
+	errorPacket := routerDecodePacketBytes(errorSend.data)
+	defer delete(errorPacket.payload)
+	assert(
+		errorPacket.messageType == .ServerProtocolError,
+		fmt.tprintf("expected ServerProtocolError, got %v", errorPacket.messageType),
+	)
+	disconnect := routerPollDisconnect(&h)
+	assert(disconnect.peerId == failingPeerID, "expected the failing peer to be disconnected")
+	routerTestExpectNoNetworkMessage(&h, "expected no presence notice for a failed auth success")
+
+	session := h.state.peerSessions[failingPeerID]
+	assert(
+		!session.isAuthenticated && session.authenticatedUserID == 0,
+		fmt.tprintf(
+			"expected the failed session to stay unauthenticated, got %v as %d",
+			session.isAuthenticated,
+			session.authenticatedUserID,
+		),
+	)
+	assert(!MainRouterState_isUserOnline(&h.state, 43), "expected 43 not to count as online")
+
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, failingPeerID)
+	routerTestExpectNoNetworkMessage(&h, "expected its disconnect to announce nothing either")
+
+	// The watcher's transport is untouched: its next packet still opens in sequence.
+	peers := [?]RouterTestPeer{{watcherPeerID, &watcherTransport}}
+	MainRouterState_sendProtocolError(&h.pm, &h.state, watcherPeerID, "still in sequence")
+	routerTestExpectProtocolError(&h, peers[:], "still in sequence")
+}
+
+@(test)
 testDirectMessageSQLChecksRecipientInOneStatement :: proc(t: ^testing.T) {
 	_ = t
 	assert(
