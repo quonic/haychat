@@ -8,7 +8,6 @@ package client
 
 import "core:fmt"
 import "core:strconv"
-import "core:strings"
 import "core:time"
 
 VOICE_LOOPBACK_FLAG :: "--voice-loopback"
@@ -18,8 +17,8 @@ VOICE_LOOPBACK_USAGE ::
 	"usage: client --voice-loopback [--seconds N] [--source SPEC] [--sink SPEC] [--loss PCT]\n" +
 	"                               [--threshold DB] [--always-on]\n" +
 	"  --seconds N      how long to run (default 10, at most 600)\n" +
-	"  --source SPEC    device[:NAME] (default), tone:HZ, file:PATH (raw F32LE mono 48 kHz),\n" +
-	"                   or silence\n" +
+	"  --source SPEC    device[:NAME] (default), tone:HZ[:AMP], file:PATH (raw F32LE mono\n" +
+	"                   48 kHz), or silence\n" +
 	"  --sink SPEC      device[:NAME] (default), file:PATH (raw F32LE mono 48 kHz), or null\n" +
 	"  --loss PCT       drop this share of loopback frames (0-90) to hear FEC and PLC\n" +
 	"  --threshold DB   voice activity threshold in dBFS (default -45)\n" +
@@ -33,65 +32,6 @@ voiceLoopbackRequested :: proc(args: []string) -> bool {
 		}
 	}
 	return false
-}
-
-@(private = "file")
-voiceLoopbackParseSource :: proc(spec: string, source: ^VoiceSourceConfig) -> bool {
-	kind, _, rest := strings.partition(spec, ":")
-	switch kind {
-	case "device":
-		source^ = {
-			kind       = .Device,
-			deviceName = rest,
-		}
-	case "silence":
-		source^ = {
-			kind = .Silence,
-		}
-	case "file":
-		source^ = {
-			kind = .File,
-			path = rest,
-		}
-		return rest != ""
-	case "tone":
-		hz, ok := strconv.parse_f32(rest)
-		if !ok || hz <= 0 || hz >= 24000 {
-			return false
-		}
-		source^ = {
-			kind   = .Tone,
-			toneHz = hz,
-		}
-	case:
-		return false
-	}
-	return true
-}
-
-@(private = "file")
-voiceLoopbackParseSink :: proc(spec: string, sink: ^VoiceSinkConfig) -> bool {
-	kind, _, rest := strings.partition(spec, ":")
-	switch kind {
-	case "device":
-		sink^ = {
-			kind       = .Device,
-			deviceName = rest,
-		}
-	case "null":
-		sink^ = {
-			kind = .Null,
-		}
-	case "file":
-		sink^ = {
-			kind = .File,
-			path = rest,
-		}
-		return rest != ""
-	case:
-		return false
-	}
-	return true
 }
 
 voiceLoopbackMain :: proc(args: []string) -> int {
@@ -120,9 +60,9 @@ voiceLoopbackMain :: proc(args: []string) -> int {
 			ok = parsedOK && parsed > 0 && parsed <= VOICE_LOOPBACK_MAX_SECONDS
 			seconds = parsed
 		case "--source":
-			ok = voiceLoopbackParseSource(value, &config.source)
+			config.source, ok = voiceParseSourceSpec(value)
 		case "--sink":
-			ok = voiceLoopbackParseSink(value, &config.sink)
+			config.sink, ok = voiceParseSinkSpec(value)
 		case "--loss":
 			parsed, parsedOK := strconv.parse_int(value)
 			ok = parsedOK && parsed >= 0 && parsed <= 90

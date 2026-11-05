@@ -61,9 +61,10 @@ Usage: ./dev.sh <command> [args]
 
 Checks (each run uses fresh containers and a throwaway database):
   check                 compile checks and leak-checked test suites (./check.sh)
-  live [--all|--harness|--ui|NAME...]
-                        live server + client proof against a throwaway database; --ui
-                        drives the real window offscreen (screenshots: see below)
+  live [--all|--harness|--voice|--ui|--sql|NAME...]
+                        live server + client proof against a throwaway database; --voice
+                        runs the two-process voice proof, --ui drives the real window
+                        offscreen (screenshots: see below)
   ci                    check, then live: exactly what Forgejo CI runs
 
 Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):

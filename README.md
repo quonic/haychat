@@ -48,7 +48,7 @@ The window opens at once; connecting happens in the background.
   - the client and server speak different protocol versions;
   - the display name is too short or too long, or the identity key in the config is corrupt.
 
-- **Voice rooms.** Every room carries voice. The client side works end to end: it joins a room's voice, sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. There are no voice controls in the window yet: the voice bar, the join buttons and the voice settings arrive with the next client update (H6), and the headless harness gets voice commands after that (H7). Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working.
+- **Voice rooms.** Every room carries voice. The client side works end to end: it joins a room's voice, sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. There are no voice controls in the window yet: the voice bar, the join buttons and the voice settings arrive with the next client update (H6), and the headless harness already drives voice from scripts (`voice-join`, `voice-source`, `voice-sink`, `voice-stats`; see [docs/testing-harness.md](docs/testing-harness.md#voice)). Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working.
 
 Client config keys (`config.json`):
 
@@ -70,8 +70,9 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat and direct message proofs, the harness and GUI smoke tests, and the server SQL proof |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat, direct message and voice proofs, the harness and GUI smoke tests, the two-process voice proof, and the server SQL proof |
 | `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, chat, exchange a direct message, and (made admin with `deploy/sql/make-admin.sql`) create, rename, and delete a room (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
+| `./dev.sh live --voice` | Only `dev/voice-proof.sh` against the live server: two headless client processes join room 1's voice; one sends a 440 Hz tone and the other records it into a file, which `dev/tools/voice-check` must find at the right frequency and level, with no frames lost; then the same through SDL's disk audio driver (see [docs/testing-harness.md](docs/testing-harness.md#voice)). `--all` runs it too |
 | `./dev.sh live --ui` | Only `dev/ui-smoke.sh` against the live server: the real client window, on SDL's offscreen driver, is driven by `--ui-script` to chat, exchange a direct message with a headless client, and create a room as an admin, taking screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them; see [docs/testing-harness.md](docs/testing-harness.md#gui-automation)). `--all` runs it too |
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
@@ -280,7 +281,7 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
-- Voice has no window controls yet (see Voice rooms); the client can join voice, but only code and tests call it until the voice UI lands.
+- Voice has no window controls yet (see Voice rooms); the client can join voice, but only code, tests and the headless harness call it until the voice UI lands.
 
 ## License
 

@@ -112,17 +112,18 @@ ClientVoiceState_takeError :: proc(voice: ^ClientVoiceState, message: ^string) {
 }
 
 // Sets the config new engines start from. Strings are cloned; the outbound seam is always
-// replaced by the network send path. Takes effect at the next join.
+// replaced by the network send path. Takes effect at the next join. config may be a copy of
+// the current template with one part changed: its strings are cloned before the old ones go.
 State_setVoiceEngineTemplate :: proc(state: ^State, config: VoiceEngineConfig) {
+	next := config
+	next.source.path = strings.clone(config.source.path)
+	next.source.deviceName = strings.clone(config.source.deviceName)
+	next.sink.path = strings.clone(config.sink.path)
+	next.sink.deviceName = strings.clone(config.sink.deviceName)
+	next.onOutbound = nil
+	next.outboundUserdata = nil
 	VoiceEngineConfig_deleteStrings(&state.voice.engineTemplate)
-	state.voice.engineTemplate = config
-	template := &state.voice.engineTemplate
-	template.source.path = strings.clone(config.source.path)
-	template.source.deviceName = strings.clone(config.source.deviceName)
-	template.sink.path = strings.clone(config.sink.path)
-	template.sink.deviceName = strings.clone(config.sink.deviceName)
-	template.onOutbound = nil
-	template.outboundUserdata = nil
+	state.voice.engineTemplate = next
 }
 
 // The participants the server last listed for a room, or nil when nobody is in its voice.
