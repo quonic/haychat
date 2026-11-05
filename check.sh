@@ -34,6 +34,13 @@ odin test client "${test_flags[@]}"
 echo "==> odin test client/ui"
 odin test client/ui "${test_flags[@]}"
 
+echo "==> odin test client/toneanalysis"
+odin test client/toneanalysis "${test_flags[@]}"
+
+# The live voice proof's tone checker (dev/voice-proof.sh builds and runs it).
+echo "==> odin test dev/tools/voice-check"
+odin test dev/tools/voice-check "${test_flags[@]}"
+
 # Router and database tests share process-wide state, so the server suite runs serially.
 echo "==> odin test server"
 odin test server "${test_flags[@]}" -define:ODIN_TEST_THREADS=1

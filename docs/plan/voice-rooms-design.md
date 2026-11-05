@@ -13,13 +13,17 @@ relay; no protocol change) and H6 (client voice UI: participants in the channel 
 room header's join and leave button, the voice bar, Settings → Voice with device lists, mode,
 push-to-talk key, threshold over a live meter, gain, volume, bitrate and a microphone test, the
 eight client config keys of 5.3, and push-to-talk while the window has focus; no protocol
-change) are implemented; H7–H8 follow section 7. H3 chose the cached member list for leave and
+change) and H7 (harness voice commands, `voice_status` and `voice_speaking` events,
+`dev/tools/voice-check` on the shared `client/toneanalysis` package, and `dev/voice-proof.sh`
+in `dev/live-proof.sh --voice` and `--all`, both over the file sink and SDL's disk driver; no
+protocol change) are implemented; H8 follows section 7. H3 chose the cached member list for leave and
 state fan-out (4.2), and atomics for the `/status` counters (Q9). H5 seals and sends voice under
 the worker lock instead of moving `voiceSend` to the voice thread (1.4), because a reconnect
 rewrites it on the worker, and checks a per-session generation before every send and delivery.
 H6 reopens the engine for a device change instead of a command queue to a running engine
 (1.2, 1.4): the session stays joined and the gap is a few tens of milliseconds, and every other
-setting reaches the running engine through its atomic controls.
+setting reaches the running engine through its atomic controls. H7's files are raw F32LE rather than WAV (5.4), and a
+harness source or sink change applies at the next join instead of reopening a running engine.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport

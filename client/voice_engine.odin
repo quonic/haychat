@@ -265,6 +265,10 @@ VoiceEngine :: struct {
 	hasHeldFrame:        bool,
 	errorBuffer:         [VOICE_ERROR_BUFFER_SIZE]u8,
 	errorLength:         int,
+	// File sink flushes (VoiceEngine_requestSinkFlush): tickets, both atomic. The voice
+	// thread, which owns the file, flushes and then publishes the ticket it served.
+	sinkFlushRequested:  u64,
+	sinkFlushCompleted:  u64,
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────
@@ -740,6 +744,7 @@ VoiceEngine_step :: proc(engine: ^VoiceEngine) {
 	VoiceEngine_capture(engine, now)
 	VoiceEngine_drainInbound(engine, now)
 	VoiceEngine_playout(engine, now)
+	VoiceEngine_serveSinkFlush(engine)
 	VoiceEngine_expireSpeakers(engine, now)
 	VoiceEngine_publish(engine)
 }
@@ -764,6 +769,34 @@ VoiceEngine_applyControls :: proc(engine: ^VoiceEngine) {
 			_ = SDL.SetAudioDeviceGain(engine.playbackDevice, volume)
 		}
 	}
+}
+
+// VoiceEngine_requestSinkFlush asks the voice thread to flush the file sink after its next
+// playout and returns a ticket; once VoiceEngine_sinkFlushCompleted reaches it, every frame
+// played before the request is in the file. From any thread. With no file sink the request is
+// served all the same, so a caller never waits for nothing.
+VoiceEngine_requestSinkFlush :: proc(engine: ^VoiceEngine) -> u64 {
+	return sync.atomic_add(&engine.sinkFlushRequested, 1) + 1
+}
+
+VoiceEngine_sinkFlushCompleted :: proc(engine: ^VoiceEngine) -> u64 {
+	return sync.atomic_load(&engine.sinkFlushCompleted)
+}
+
+@(private = "file")
+VoiceEngine_serveSinkFlush :: proc(engine: ^VoiceEngine) {
+	requested := sync.atomic_load(&engine.sinkFlushRequested)
+	if requested == sync.atomic_load(&engine.sinkFlushCompleted) {
+		return
+	}
+	// Writes are unbuffered, so this only makes them durable (fsync); the point is the
+	// ticket, which says the frames before the request have been written.
+	if engine.sinkFile != nil {
+		if os.flush(engine.sinkFile) != nil {
+			engine.stats.sinkWriteErrors += 1
+		}
+	}
+	sync.atomic_store(&engine.sinkFlushCompleted, requested)
 }
 
 @(private = "file")
