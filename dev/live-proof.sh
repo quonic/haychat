@@ -90,7 +90,19 @@ wait_for_server_ready() {
 	return 1
 }
 
+# The server's web admin needs io_uring, which seccomp, SELinux, or the io_uring_disabled
+# sysctl can each block. Report all three so an nbio acquire failure is easy to place.
+report_sandbox() {
+	local seccomp selinux io_uring_disabled
+	seccomp=$(awk '/^Seccomp:/ { print ($2 == 0 ? "off" : "filtered") }' /proc/self/status)
+	selinux=$(tr -d '\0' </proc/self/attr/current 2>/dev/null || echo "n/a")
+	io_uring_disabled=$(cat /proc/sys/kernel/io_uring_disabled 2>/dev/null || echo "n/a")
+	echo "==> [live] sandbox: seccomp=${seccomp:-n/a} selinux=${selinux:-n/a}" \
+		"io_uring_disabled=${io_uring_disabled}"
+}
+
 cd "$repo_dir"
+report_sandbox
 
 echo "==> [live] building server"
 odin build server -out:"$server_bin"
