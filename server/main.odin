@@ -153,8 +153,9 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 }
 
 MainRouterState_deinit :: proc(state: ^MainRouterState) {
-	for _, session in state.peerSessions {
-		delete(session.clientNickname)
+	// By reference, so each stored transport is wiped, not a copy of it.
+	for _, &session in state.peerSessions {
+		RouterPeerSession_deinit(&session)
 	}
 	for _, request in state.pendingDatabaseRequests {
 		PendingDBRequest_deinit(request)
@@ -204,8 +205,10 @@ MainRouterState_ensurePeerSession :: proc(
 }
 
 MainRouterState_removePeerSession :: proc(state: ^MainRouterState, peerID: u32) {
-	if session, ok := MainRouterState_getPeerSession(state, peerID); ok {
-		RouterPeerSession_deinit(&session)
+	// Deinit the stored entry in place: deinit on a copy would leave the entry's transport
+	// keys in the map's memory after delete_key.
+	if session, ok := &state.peerSessions[peerID]; ok {
+		RouterPeerSession_deinit(session)
 	}
 	delete_key(&state.peerSessions, peerID)
 }
@@ -633,7 +636,12 @@ MainRouterState_handleClientHello :: proc(
 		return
 	}
 
-	RouterPeerSession_deinit(&session)
+	// Reset the stored entry in place, so its keys are wiped and it never keeps a pointer to
+	// the nickname freed here if the handshake stops below.
+	if stored, storedOK := &state.peerSessions[peerID]; storedOK {
+		RouterPeerSession_deinit(stored)
+		stored^ = RouterPeerSession_init()
+	}
 	session = RouterPeerSession_init()
 	session.clientNickname = strings.clone(req.nickname)
 	session.clientIdentityPublicKey = req.clientIdentityPublicKey
