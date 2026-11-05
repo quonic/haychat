@@ -9,10 +9,11 @@ import "core:time"
 NETWORK_WORKER_MAX_EVENTS_PER_SERVER :: 16
 NETWORK_WORKER_IDLE_SLEEP :: 5 * time.Millisecond
 
-// ClientNetworkWorker services every live server session on a background thread. ENet needs
-// regular servicing to send acknowledgements and keepalives, so servers the user is not
-// looking at would otherwise time out. Decoded runtime events are queued for the UI thread,
-// which drains them each frame without doing any network I/O itself.
+// ClientNetworkWorker services every server session on a background thread: it runs each
+// transport's connect state machine (connection.odin), so connecting, signing in, and
+// reconnecting never block the UI, and it keeps established sessions serviced, since ENet needs
+// regular servicing to send acknowledgements and keepalives. Decoded runtime events are queued
+// for the UI thread, which drains them each frame without doing any network I/O itself.
 //
 // mutex guards the ENet hosts, the transport crypto state, and the event queue. Any code on
 // the UI thread that sends through a transport must hold it (see ClientNetworkWorker_lock).
@@ -41,11 +42,15 @@ ClientNetworkWorker_start :: proc(
 	worker.onEventQueued = onEventQueued
 	worker.onEventQueuedData = onEventQueuedData
 	worker.events = make([dynamic]ClientTransportRuntimeEvent)
-	worker.thread = thread.create_and_start_with_data(worker, ClientNetworkWorker_run)
+	// The worker allocates the events and transport strings that the UI thread later frees,
+	// so it must use the same allocator. The thread package gives it its own temp allocator.
+	worker.thread = thread.create_and_start_with_data(worker, ClientNetworkWorker_run, context)
 	return worker
 }
 
-ClientNetworkWorker_stop :: proc(worker: ^ClientNetworkWorker) {
+// Stops and joins the worker thread but keeps the worker and its queued events, so the caller
+// can still drain them (see State_stopNetwork). Safe to call more than once.
+ClientNetworkWorker_stopThread :: proc(worker: ^ClientNetworkWorker) {
 	if worker == nil {
 		return
 	}
@@ -53,7 +58,16 @@ ClientNetworkWorker_stop :: proc(worker: ^ClientNetworkWorker) {
 	if worker.thread != nil {
 		thread.join(worker.thread)
 		thread.destroy(worker.thread)
+		worker.thread = nil
 	}
+}
+
+// Stops the thread and frees the worker, including any events still queued.
+ClientNetworkWorker_stop :: proc(worker: ^ClientNetworkWorker) {
+	if worker == nil {
+		return
+	}
+	ClientNetworkWorker_stopThread(worker)
 	for index in 0 ..< len(worker.events) {
 		ClientTransportRuntimeEvent_deinit(&worker.events[index])
 	}
@@ -122,6 +136,7 @@ ClientNetworkWorker_run :: proc(data: rawptr) {
 	worker := cast(^ClientNetworkWorker)data
 	for !sync.atomic_load(&worker.stopping) {
 		ClientNetworkWorker_servicePass(worker)
+		free_all(context.temp_allocator)
 		time.sleep(NETWORK_WORKER_IDLE_SLEEP)
 	}
 }

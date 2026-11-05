@@ -579,10 +579,11 @@ cmd_client() {
 	log_step "Building and starting client profile \"$profile\""
 	# The client runs inside the dev pod, so its default server (localhost:12345) is the dev
 	# server. Its config and identity key live in a per-profile volume. A new profile starts
-	# from a config holding only its display name; the client fills in the rest. The client
-	# has no UI for the name, and the server binds each nickname to the first key it sees, so
-	# profiles need distinct names. The container runs without SELinux confinement (see
-	# prepare_server_sandbox), which also lets it use the host display socket.
+	# from a config holding its display name and the dev server, so it skips the client's
+	# first-run screen; the client generates the identity key. The server binds each nickname
+	# to the first key it sees, so profiles need distinct names. The container runs without
+	# SELinux confinement (see prepare_server_sandbox), which also lets it use the host
+	# display socket.
 	# shellcheck disable=SC2016  # the snippet expands inside the container
 	run_snapshot_in_pod "$POD" \
 		-v "$CLIENT_VOLUME_PREFIX$profile:/config" \
@@ -591,7 +592,10 @@ cmd_client() {
 		-- 'config=/config/haychat/config.json
 			if [[ ! -f "$config" ]]; then
 				mkdir -p "${config%/*}"
-				printf "{\"display_name\": \"%s\"}\n" "$1" >"$config"
+				server="{\"id\": 1, \"name\": \"Dev Server\", \"short_name\": \"DS\","
+				server+=" \"host\": \"localhost\", \"port\": 12345}"
+				printf "{\"display_name\": \"%s\", \"servers\": [%s]}\n" "$1" "$server" \
+					>"$config"
 			fi
 			odin build client -out:/tmp/haychat-client && exec /tmp/haychat-client' \
 		"$profile"

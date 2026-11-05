@@ -2,6 +2,7 @@ package client
 
 import "../common"
 import "core:fmt"
+import "core:time"
 import "ui"
 
 // Screens are drawn immediately each frame from State. Widgets report clicks and edits through
@@ -19,9 +20,18 @@ PANEL_PADDING :: 8
 
 viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	root := ctx.windowRect
+	// First run has nothing to show beside the form, so it takes the whole window.
+	if state.settingsOpen && State_needsFirstRunSetup(state.config) {
+		viewSettings(state, ctx, root)
+		return
+	}
 	rail := ui.cutLeft(&root, ui.dp(ctx, RAIL_WIDTH))
 	ui.fillRect(ctx, rail, ctx.theme.bg)
 	viewRail(state, ctx, rail)
+	if state.settingsOpen {
+		viewSettings(state, ctx, root)
+		return
+	}
 
 	sidebar := ui.cutLeft(&root, ui.dp(ctx, SIDEBAR_WIDTH))
 	ui.fillRect(ctx, sidebar, ctx.theme.surface)
@@ -77,6 +87,16 @@ viewRail :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	_ = ui.cutTop(&area, spacing)
 	ui.divider(ctx, ui.cutTop(&area, spacing))
 
+	// Settings sits at the bottom, below the scrolling server list.
+	settingsID := ui.idOf("rail-settings")
+	settingsButton := ui.cutBottom(&area, size)
+	ui.divider(ctx, ui.cutBottom(&area, spacing))
+	_ = ui.cutBottom(&area, spacing)
+	settingsOptions := options
+	settingsOptions.selected = state.settingsOpen
+	settingsClicked := ui.button(ctx, settingsID, settingsButton, "⚙", settingsOptions)
+	ui.tooltip(ctx, settingsID, settingsButton, "Settings")
+
 	scrollID := ui.idOf("rail-servers")
 	servers := state.config.servers[:]
 	contentH := f32(len(servers)) * (size + spacing)
@@ -87,19 +107,169 @@ viewRail :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	for server in servers {
 		id := ui.idOf("rail-server", server.id)
 		buttonRect := ui.Rect{area.x, y, area.w, size}
-		options.selected = !state.view_dms && state.selected_server_id == server.id
+		options.selected =
+			!state.view_dms && !state.settingsOpen && state.selected_server_id == server.id
 		if ui.button(ctx, id, buttonRect, server.short_name, options) {
 			clickedServerID = server.id
 			clicked = true
 		}
+		viewServerStatusDot(state, ctx, buttonRect, server.id)
 		ui.tooltip(ctx, id, buttonRect, server.name)
 		y += size + spacing
 	}
 	ui.scrollEnd(ctx, scrollID, area)
 
+	// Actions run after the loop because they can reallocate the server list being drawn.
 	if clicked {
+		State_closeSettings(state)
 		State_switchToServer(state, clickedServerID)
+	} else if settingsClicked {
+		if state.settingsOpen {
+			State_closeSettings(state)
+		} else {
+			State_openSettings(state)
+		}
 	}
+}
+
+@(private = "file")
+connectionStatusColor :: proc(ctx: ^ui.Context, status: ClientConnectionStatus) -> ui.Color {
+	switch status {
+	case .Established:
+		return ctx.theme.success
+	case .Failed:
+		return ctx.theme.danger
+	case .Idle, .Connecting, .Handshaking, .Disconnected:
+	}
+	return ctx.theme.warning
+}
+
+// A small dot in the corner of a rail button: green connected, amber connecting or waiting
+// to reconnect, red stopped.
+@(private = "file")
+viewServerStatusDot :: proc(state: ^State, ctx: ^ui.Context, button: ui.Rect, serverID: int) {
+	index := State_serverConnectionIndex(state^, serverID)
+	if index < 0 {
+		return
+	}
+	diameter := ui.dp(ctx, 10)
+	ring := max(1, ui.dp(ctx, 2))
+	dot := ui.Rect {
+		button.x + button.w - diameter,
+		button.y + button.h - diameter,
+		diameter,
+		diameter,
+	}
+	ui.fillRoundedRect(ctx, dot, diameter / 2, ctx.theme.bg)
+	color := connectionStatusColor(ctx, state.serverConnections[index].status)
+	inner := ui.shrink(dot, ring)
+	ui.fillRoundedRect(ctx, inner, inner.w / 2, color)
+}
+
+// The muted one-line status at the bottom of the channel list, e.g. "Connected as alice".
+@(private = "file")
+viewConnectionFooter :: proc(state: ^State, ctx: ^ui.Context, area: ^ui.Rect) {
+	banner := buildConnectionBanner(state, time.tick_now())
+	if !banner.hasServer {
+		return
+	}
+	footer := ui.cutBottom(area, ui.dp(ctx, ROW_HEIGHT + PANEL_PADDING))
+	ui.divider(ctx, ui.Rect{footer.x, footer.y, footer.w, 1})
+	content := ui.shrinkXY(footer, ui.dp(ctx, 16), 0)
+	dotSize := ui.dp(ctx, 8)
+	dot := ui.Rect{content.x, content.y + (content.h - dotSize) / 2, dotSize, dotSize}
+	connection := State_serverConnection(state, state.selected_server_id)
+	ui.fillRoundedRect(ctx, dot, dotSize / 2, connectionStatusColor(ctx, connection.status))
+	_ = ui.cutLeft(&content, dotSize + ui.dp(ctx, 8))
+	ui.label(ctx, content, banner.summary, ctx.theme.fgMuted)
+	if banner.refreshIn > 0 {
+		ui.requestFrameAt(ctx, ctx.nowMS + u64(time.duration_milliseconds(banner.refreshIn)) + 1)
+	}
+}
+
+// The explanation shown above the room while the selected server is not connected, with the
+// actions that can fix it. Draws nothing while connected.
+@(private = "file")
+viewConnectionBanner :: proc(state: ^State, ctx: ^ui.Context, area: ^ui.Rect) {
+	banner := buildConnectionBanner(state, time.tick_now())
+	if len(banner.text) == 0 {
+		return
+	}
+	padding := ui.dp(ctx, COMPOSER_PADDING)
+	accentW := ui.dp(ctx, 3)
+	textW := area.w - padding * 4 - accentW
+	textH := ui.wrappedTextHeight(ctx, banner.text, textW)
+	hasActions := banner.showRetry || banner.showTrustKey || banner.showSettings
+	actionsH := hasActions ? ui.dp(ctx, ROW_HEIGHT) + ui.dp(ctx, PANEL_PADDING) : 0
+	outer := ui.cutTop(area, textH + actionsH + padding * 3)
+	box := ui.shrinkXY(outer, padding, 0)
+	box.y += padding
+	box.h -= padding
+	ui.fillRoundedRect(ctx, box, ui.dp(ctx, ctx.theme.cornerRadius), ctx.theme.elevated)
+	accent := banner.tone == .Error ? ctx.theme.danger : ctx.theme.warning
+	ui.fillRect(ctx, ui.Rect{box.x, box.y, accentW, box.h}, accent)
+
+	content := ui.shrinkXY(box, padding, padding / 2)
+	_ = ui.cutLeft(&content, accentW)
+	ui.wrappedLabel(ctx, ui.cutTop(&content, textH), banner.text, ctx.theme.fg)
+	if banner.refreshIn > 0 {
+		ui.requestFrameAt(ctx, ctx.nowMS + u64(time.duration_milliseconds(banner.refreshIn)) + 1)
+	}
+	if !hasActions {
+		return
+	}
+
+	_ = ui.cutTop(&content, ui.dp(ctx, PANEL_PADDING))
+	row := ui.cutTop(&content, ui.dp(ctx, ROW_HEIGHT))
+	serverID := state.selected_server_id
+	retry, trust, settings := false, false, false
+	if banner.showTrustKey {
+		trustID := ui.idOf("banner-trust", serverID)
+		trust = viewBannerButton(ctx, &row, trustID, "Trust the new key", true)
+	}
+	if banner.showSettings {
+		settingsID := ui.idOf("banner-settings", serverID)
+		settings = viewBannerButton(ctx, &row, settingsID, "Open settings", true)
+	}
+	if banner.showRetry {
+		// Retry is the main action unless a more specific fix is offered.
+		retryPrimary := !banner.showTrustKey && !banner.showSettings
+		retryID := ui.idOf("banner-retry", serverID)
+		retry = viewBannerButton(ctx, &row, retryID, "Retry now", retryPrimary)
+	}
+	switch {
+	case trust:
+		State_trustNewServerKey(state, serverID)
+	case settings:
+		State_openSettings(state)
+	case retry:
+		State_retryConnection(state, serverID)
+	}
+}
+
+// Lays out one banner button from the left of row and returns whether it was clicked.
+@(private = "file")
+viewBannerButton :: proc(
+	ctx: ^ui.Context,
+	row: ^ui.Rect,
+	id: ui.ID,
+	text: string,
+	primary: bool,
+) -> bool {
+	width := ui.textSize(ui.textGet(ctx, 0, .Bold, text)).x + ui.dp(ctx, ctx.theme.padding * 4)
+	rect := ui.cutLeft(row, width)
+	_ = ui.cutLeft(row, ui.dp(ctx, PANEL_PADDING))
+	options := ui.ButtonOptions {
+		align = .Center,
+		font  = .Bold,
+	}
+	if primary {
+		options.background = ctx.theme.primary
+		options.color = ctx.theme.onPrimary
+	} else {
+		options.background = ctx.theme.hover
+	}
+	return ui.button(ctx, id, rect, text, options)
 }
 
 @(private = "file")
@@ -147,6 +317,7 @@ listContentHeight :: proc(ctx: ^ui.Context, count: int) -> f32 {
 viewChannelList :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	area := r
 	viewHeader(ctx, &area, selectedServerName(state))
+	viewConnectionFooter(state, ctx, &area)
 	list := ui.shrink(area, ui.dp(ctx, PANEL_PADDING))
 
 	rooms: []common.RoomSummary
@@ -158,6 +329,9 @@ viewChannelList :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	}
 	if len(rooms) == 0 {
 		emptyText := roomsLoading ? "Loading channels…" : "No channels"
+		if !State_isServerConnected(state, state.selected_server_id) {
+			emptyText = "Waiting for the server…"
+		}
 		ui.label(
 			ctx,
 			ui.cutTop(&list, ui.dp(ctx, ROW_HEIGHT)),
@@ -274,6 +448,7 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	} else {
 		viewHeader(ctx, &area, selectedServerName(state))
 	}
+	viewConnectionBanner(state, ctx, &area)
 
 	serverID := state.selected_server_id
 	roomID := state.selected_channel_id

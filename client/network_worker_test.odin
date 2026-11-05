@@ -6,19 +6,38 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 
+// Rewritten from testNetworkWorkerStartsAndStopsWithoutLiveSessions: the worker now owns
+// connecting, so starting it must begin a connect attempt for every server without blocking,
+// and stopping it mid-attempt must not leak.
 @(test)
-testNetworkWorkerStartsAndStopsWithoutLiveSessions :: proc(t: ^testing.T) {
+testNetworkWorkerStartsConnectingEveryServer :: proc(t: ^testing.T) {
 	state := testStateWithServers(
 		{
-			Server{id = 701, name = "Worker A", host = "localhost", port = 1},
-			Server{id = 702, name = "Worker B", host = "localhost", port = 1},
+			Server{id = 701, name = "Worker A", host = "127.0.0.1", port = 1},
+			Server{id = 702, name = "Worker B", host = "127.0.0.1", port = 1},
 		},
 	)
-	state.networkWorker = ClientNetworkWorker_start(state.serverTransports[:])
-	time.sleep(20 * time.Millisecond)
+	State_startNetwork(&state)
 
-	_, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
-	testing.expect(t, !hasEvent, "expected transports without live sessions to produce no events")
+	connecting := map[int]bool{}
+	defer delete(connecting)
+	deadline := time.tick_now()
+	for len(connecting) < 2 && time.tick_since(deadline) < 2 * time.Second {
+		event, hasEvent := ClientNetworkWorker_popEvent(state.networkWorker)
+		if !hasEvent {
+			time.sleep(5 * time.Millisecond)
+			continue
+		}
+		testing.expectf(
+			t,
+			event.kind == .Connecting,
+			"expected only connect attempts against a closed port, got %v",
+			event.kind,
+		)
+		connecting[event.serverID] = true
+		ClientTransportRuntimeEvent_deinit(&event)
+	}
+	testing.expect(t, connecting[701] && connecting[702], "expected both servers to connect")
 
 	// State_deinit stops the worker before freeing the transports it services.
 	State_deinit(&state)

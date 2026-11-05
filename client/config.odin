@@ -261,30 +261,12 @@ ensureIdentityKeys :: proc(config: ^Config) -> bool {
 	return true
 }
 
-pinServerIdentity :: proc(
-	server: ^Server,
-	serverPublicKey: common.IdentityPublicKeyBytes,
-) -> (
-	common.PeerTrustState,
-	bool,
-) {
-	serverPublicKeyHex := common.identityPublicKeyToHex(serverPublicKey)
-	serverFingerprintHex := common.fingerprintToHex(
-		common.fingerprintIdentityPublicKey(serverPublicKey),
-	)
-
-	if len(server.pinned_server_public_key) == 0 && len(server.pinned_server_fingerprint) == 0 {
-		server.pinned_server_public_key = serverPublicKeyHex
-		server.pinned_server_fingerprint = serverFingerprintHex
-		return .Trusted, true
-	}
-
-	if server.pinned_server_public_key == serverPublicKeyHex &&
-	   server.pinned_server_fingerprint == serverFingerprintHex {
-		return .Trusted, false
-	}
-
-	return .Changed, false
+// Replaces a server's pins with clones of the given hex key and fingerprint.
+Server_setPins :: proc(server: ^Server, publicKey, fingerprint: string) {
+	delete(server.pinned_server_public_key)
+	delete(server.pinned_server_fingerprint)
+	server.pinned_server_public_key = strings.clone(publicKey)
+	server.pinned_server_fingerprint = strings.clone(fingerprint)
 }
 
 // Config values are owned: every string and array is heap allocated. Clone before storing a
@@ -359,4 +341,30 @@ Config_deinit :: proc(config: ^Config) {
 	}
 	delete(config.friends)
 	config^ = {}
+}
+
+LOCAL_DEFAULT_DISPLAY_NAME :: "Test User"
+LOCAL_DEFAULT_SERVER_NAME :: "Test Server"
+LOCAL_DEFAULT_SERVER_HOST :: "localhost"
+
+// Fills an empty display name and an empty server list with the local development profile
+// ("Test User" on localhost:12345). The GUI never does this: it shows the first-run screen
+// instead. Tests and tools that want a ready-to-connect default call it explicitly.
+Config_fillLocalDefaults :: proc(config: ^Config) {
+	if len(config.display_name) == 0 {
+		delete(config.display_name)
+		config.display_name = strings.clone(LOCAL_DEFAULT_DISPLAY_NAME)
+	}
+	if len(config.servers) == 0 {
+		append(
+			&config.servers,
+			Server {
+				id = 1,
+				name = strings.clone(LOCAL_DEFAULT_SERVER_NAME),
+				short_name = getShortServerName(LOCAL_DEFAULT_SERVER_NAME),
+				host = strings.clone(LOCAL_DEFAULT_SERVER_HOST),
+				port = common.DEFAULT_SERVER_PORT,
+			},
+		)
+	}
 }

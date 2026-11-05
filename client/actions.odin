@@ -154,9 +154,11 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 	}
 }
 
+// Requests are skipped while the server is not connected; the Connected event requests the
+// room list again, and the room list requests the selected room's history.
 State_requestRoomList :: proc(state: ^State, serverID: int) {
 	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
-	if transportIndex < 0 {
+	if transportIndex < 0 || !State_isServerConnected(state, serverID) {
 		return
 	}
 	cache := State_serverRoomCache(state, serverID)
@@ -180,7 +182,7 @@ State_requestRoomHistory :: proc(state: ^State, serverID: int, roomID: int, befo
 		return
 	}
 	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
-	if transportIndex < 0 {
+	if transportIndex < 0 || !State_isServerConnected(state, serverID) {
 		return
 	}
 	transport := &state.serverTransports[transportIndex]
@@ -354,14 +356,22 @@ State_receiveRoomList :: proc(state: ^State, serverID: int, rooms: ^[dynamic]com
 			unordered_remove(&cache.roomCaches, index)
 		}
 	}
-	if serverID == state.selected_server_id &&
-	   !ServerRoomCache_roomIsJoined(cache, state.selected_channel_id) {
+	if serverID != state.selected_server_id {
+		return
+	}
+	if !ServerRoomCache_roomIsJoined(cache, state.selected_channel_id) {
 		if len(cache.rooms) > 0 {
 			state.selected_channel_id = cache.rooms[0].id
 			State_requestRoomHistory(state, serverID, state.selected_channel_id, 0)
 		} else {
 			state.selected_channel_id = 0
 		}
+		return
+	}
+	// The selected room may not have loaded yet (first connect) or may be stale (reconnect).
+	roomCache := ServerRoomCache_roomCache(cache, state.selected_channel_id)
+	if !roomCache.initialHistoryLoaded {
+		State_requestRoomHistory(state, serverID, state.selected_channel_id, 0)
 	}
 }
 
@@ -466,7 +476,15 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_roomDeleted(state, event.serverID, event.roomID)
 	case .ProtocolError:
 		State_transportProtocolError(state, event.serverID, event.message)
-	case .Disconnected, .None:
+	case .Connecting:
+		State_connectionStarted(state, event)
+	case .Connected:
+		State_connectionEstablished(state, event)
+	case .ConnectFailed:
+		State_connectionFailed(state, event)
+	case .Disconnected:
+		State_connectionLost(state, event)
+	case .None:
 	}
 }
 

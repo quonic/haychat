@@ -31,6 +31,30 @@ Clone the repository, install podman, and run `./dev.sh ci` to build the toolcha
 
 On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`, defaulting to `$HOME/.config/haychat/config.json` when `XDG_CONFIG_HOME` is unset. Startup also migrates the original historical malformed path formula `$HOME$XDG_CONFIG_HOME/haychat/config.json`, which means older installs are recovered from either the default `$HOME$HOME/.config/haychat/config.json` shape or a custom `XDG_CONFIG_HOME` variant if that file still exists.
 
+### Using the Client
+
+The window opens at once; connecting happens in the background.
+
+- **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 characters), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
+- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the display name or to add, edit, or remove servers. Changing the name reconnects every server; changing a server's address reconnects only that server and pins its key afresh.
+- **Connection status.** The sidebar footer shows the selected server's status ("Connected as alice", "Connecting…", "Reconnecting in 4 s"), and a dot on each rail button shows every server's status (green connected, amber connecting or waiting, red stopped). While the selected server is not connected, a banner above the room explains why, with a **Retry now** button.
+- **Reconnecting.** After a lost connection or a failed attempt the client retries after 1 s, 2 s, 4 s, and so on, capped at 30 s, each shortened by up to 20% of random jitter so clients do not all return at once. Restarting the server therefore reconnects every client without user action.
+- **Failures that stop retrying.** Some causes cannot fix themselves, so the client stops and says what to do:
+  - the name is taken, or bound to another device's key, on that server: choose another name in Settings;
+  - the server's identity key does not match the pinned one (expected after a server reset or reinstall): **Trust the new key** replaces the pin, saves the config, and reconnects;
+  - the client and server speak different protocol versions;
+  - the display name is too short or too long, or the identity key in the config is corrupt.
+
+Client config keys (`config.json`):
+
+| Key | Purpose |
+| --- | --- |
+| `display_name` | The nickname sent to every server. The server binds it to the first identity key that uses it |
+| `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
+| `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
+| `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes; replaced by **Trust the new key** |
+| `friends[]` | Placeholder direct-message contacts (direct messages are not implemented yet) |
+
 ### Development Environment
 
 Development runs in [podman](https://podman.io/) containers, so the host needs only podman (`sudo dnf install podman` on Fedora, `sudo apt install podman` on Debian/Ubuntu). `./dev.sh` is the single entry point. Run `./dev.sh help` for the full command list.
@@ -61,7 +85,7 @@ Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a
 | `./dev.sh admin [-X METHOD] PATH` | Call a web admin route with the token filled in, e.g. `./dev.sh admin /peers` |
 | `./dev.sh seed` | Load the `server/sql/auth_bootstrap.sql` fixture (see Seeded test identities) |
 | `./dev.sh psql [ARGS...]` | psql on the dev database |
-| `./dev.sh client [PROFILE]` | Build the client and open its window on your Wayland or X11 display. Each profile has its own config and identity key, and a new profile's display name is the profile name, so two profiles are two users |
+| `./dev.sh client [PROFILE]` | Build the client and open its window on your Wayland or X11 display. Each profile has its own config and identity key. A new profile's display name is the profile name and its server is the dev server, so two profiles are two users. Profiles created before the first-run screen existed have no server: enter `localhost` once on that screen |
 | `./dev.sh key [PROFILE]` | Print a profile's public key, for `HAYCHAT_ADMIN_PUBLIC_KEY` |
 | `./dev.sh down` | Remove the pod. The database, server state, and client profiles are kept in volumes |
 | `./dev.sh reset` | `down`, then delete those volumes. The next `up` starts with an empty database and a new server identity key |
