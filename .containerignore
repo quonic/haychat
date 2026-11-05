@@ -1,0 +1,12 @@
+# Build context for deploy/Containerfile (`podman build -f deploy/Containerfile .`). Only the
+# files the image needs are sent, so local leftovers (logs/, storage/, binaries, .env) never
+# reach a build. dev/Containerfile uses dev/ as its context and is not affected.
+*
+!LICENSE
+!common/
+!server/
+# Built binaries left in the tree by `odin build server`.
+server/server
+!dev/install-packages.sh
+!dev/bootstrap-odin.sh
+!deploy/sql/

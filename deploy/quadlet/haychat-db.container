@@ -1,0 +1,24 @@
+# PostgreSQL for HayChat. Its data lives in the haychat-pgdata volume.
+# The password comes from the podman secret haychat-db-password (see deploy/README.md).
+
+[Unit]
+Description=HayChat PostgreSQL
+
+[Container]
+ContainerName=haychat-db
+Pod=haychat.pod
+Image=docker.io/library/postgres:17
+Volume=haychat-pgdata:/var/lib/postgresql/data
+Environment=POSTGRES_USER=haychat POSTGRES_DB=haychat
+Secret=haychat-db-password,type=env,target=POSTGRES_PASSWORD
+HealthCmd=pg_isready -q -h 127.0.0.1 -U haychat -d haychat
+HealthInterval=10s
+HealthStartPeriod=30s
+Notify=healthy
+
+[Service]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

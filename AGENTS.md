@@ -24,6 +24,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 - `client/`: Contains the client-side code for the HayChat application, including the GUI and client logic.
 - `server/`: Contains the server-side code for the HayChat application, including the web service frontend, database management, and client-server communication.
 - `common/`: Contains shared code and definitions used by both the client and server.
+- `deploy/`: Production server image (`deploy/Containerfile`), quadlet units, SQL helpers, and the release archive script used by `.forgejo/workflows/release.yml`. See `deploy/README.md`; `./dev.sh release-image --smoke` builds and smoke-tests the image.
 
 ## Code Style
 

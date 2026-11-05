@@ -1,0 +1,81 @@
+# HayChat production server image.
+#
+# Build it from the repository root (the build context must be the root, so the build stage
+# can reach dev/, common/, and server/):
+#
+#   podman build -f deploy/Containerfile -t haychat-server .
+#
+# or `./dev.sh release-image`. See deploy/README.md for running it.
+#
+# The build stage uses the same package script and Odin pins as the dev image and CI. The
+# runtime stage holds only the server binary and the libraries it links. x86-64 (amd64) only:
+# the link check below names the x86-64 loader.
+
+# ── Build ─────────────────────────────────────────────────────────
+
+FROM registry.fedoraproject.org/fedora:44 AS build
+
+COPY dev/install-packages.sh dev/bootstrap-odin.sh /usr/local/lib/haychat/
+RUN /usr/local/lib/haychat/install-packages.sh
+RUN /usr/local/lib/haychat/bootstrap-odin.sh /opt/Odin
+
+ENV ODIN_ROOT=/opt/Odin \
+	PATH=/opt/Odin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+
+WORKDIR /src
+COPY common common
+COPY server server
+RUN mkdir -p /out \
+	&& odin build server -o:speed -out:/out/haychat-server \
+	&& echo "Shared libraries the server links:" \
+	&& objdump -p /out/haychat-server | grep NEEDED
+
+# ── Runtime ───────────────────────────────────────────────────────
+
+FROM registry.fedoraproject.org/fedora-minimal:44
+
+# The server's direct dependencies (objdump NEEDED above) are libpq.so.5 and libenet.so.7
+# beside glibc; the packages pull in libpq's own dependencies (OpenSSL, Kerberos, LDAP).
+# fedora-minimal already has curl, which health checks and `podman exec ... curl` calls to
+# the web admin use (it listens on 127.0.0.1 inside the container only).
+RUN microdnf install -y --setopt=install_weak_deps=0 libpq enet \
+	&& microdnf clean all \
+	&& rm -rf /var/cache/libdnf5 /var/lib/dnf
+
+# A fixed, non-root account. Named volumes copy the ownership of the directories below the
+# first time they are mounted, so the server can write its logs and state.
+RUN echo 'haychat:x:10001:10001:HayChat server:/var/lib/haychat:/sbin/nologin' >>/etc/passwd \
+	&& echo 'haychat:x:10001:' >>/etc/group \
+	&& mkdir -p /var/lib/haychat/logs /var/lib/haychat/storage \
+	&& chown -R 10001:10001 /var/lib/haychat \
+	&& chmod 0700 /var/lib/haychat/storage
+
+COPY --from=build /out/haychat-server /usr/local/bin/haychat-server
+COPY LICENSE /usr/share/licenses/haychat/LICENSE
+COPY server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql /usr/share/haychat/sql/
+
+# Fail the build when a linked library is missing from the runtime stage.
+RUN ! /lib64/ld-linux-x86-64.so.2 --list /usr/local/bin/haychat-server | grep -F 'not found'
+
+ENV HAYCHAT_LISTEN_ADDR=0.0.0.0 \
+	HAYCHAT_LISTEN_PORT=12345 \
+	HAYCHAT_WEB_ADMIN_PORT=8080 \
+	HAYCHAT_LOG_DIR=/var/lib/haychat/logs \
+	HAYCHAT_FILE_STORAGE_PATH=/var/lib/haychat/storage \
+	HAYCHAT_SERVER_IDENTITY_FILE=/var/lib/haychat/storage/server_identity.json
+
+USER 10001:10001
+WORKDIR /var/lib/haychat
+VOLUME ["/var/lib/haychat/logs", "/var/lib/haychat/storage"]
+EXPOSE 12345/udp
+
+# SIGINT is the server's graceful shutdown signal: it stops its worker processes first.
+# (A HEALTHCHECK here would be dropped from OCI images; deploy/quadlet sets HealthCmd.)
+STOPSIGNAL SIGINT
+
+ENTRYPOINT ["/usr/local/bin/haychat-server"]
+
+LABEL org.opencontainers.image.title="HayChat server" \
+	org.opencontainers.image.description="Self-hosted chat server (encrypted ENet transport)" \
+	org.opencontainers.image.source="https://git.spyingwind.com/jim/haychat" \
+	org.opencontainers.image.licenses="AGPL-3.0-only"

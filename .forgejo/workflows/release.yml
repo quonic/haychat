@@ -1,0 +1,196 @@
+name: Release
+
+# Builds the release archives (server binary, Linux client, Windows client) and the server
+# container image. A pushed tag v* also pushes the image to this repository's container
+# registry and publishes a Forgejo release with the archives attached. A manual run builds
+# everything and keeps the archives as workflow artifacts; it pushes the image (tag "edge")
+# only when push_image is set. See deploy/README.md "Release builds".
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: Push the server image as :edge
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+# The steps use bash syntax; without this a job container may run them with sh.
+defaults:
+  run:
+    shell: bash
+
+env:
+  # A personal access token (scopes write:package and write:repository) stored as the
+  # repository secret RELEASE_TOKEN. Without it the automatic job token is used, which may
+  # not be allowed to push packages on every Forgejo version.
+  RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+jobs:
+  archives:
+    name: Server and client archives
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    env:
+      HAYCHAT_XWIN_CACHE: /opt/xwin
+      # The Windows client is linked against the MSVC CRT and Windows SDK import libraries,
+      # downloaded by xwin. Setting this accepts Microsoft's licence terms for them; see
+      # deploy/release-artifacts.sh.
+      HAYCHAT_ACCEPT_MSVC_LICENSE: '1'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # JavaScript actions (checkout, cache, upload-artifact) run with the job container's node.
+      - name: Install Node.js and git for actions
+        run: dnf install -y --setopt=install_weak_deps=False nodejs git-core
+
+      - uses: actions/checkout@v4
+
+      - name: Install build packages
+        run: |
+          dev/install-packages.sh
+          # git-lfs fetches the pinned Odin's SDL3 Windows DLLs; python3 writes the zip.
+          dnf install -y --setopt=install_weak_deps=False git-lfs python3
+
+      - name: Cache Odin toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/Odin
+          key: odin-fedora44-${{ hashFiles('dev/bootstrap-odin.sh', 'dev/install-packages.sh') }}
+
+      - name: Cache Windows SDK
+        uses: actions/cache@v4
+        with:
+          path: /opt/xwin
+          key: xwin-${{ hashFiles('deploy/release-artifacts.sh') }}
+
+      - name: Bootstrap Odin and shared libraries
+        run: |
+          dev/bootstrap-odin.sh /opt/Odin
+          echo "/opt/Odin" >> "$GITHUB_PATH"
+
+      - name: Pick the version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version=${GITHUB_REF#refs/tags/}
+          else
+            version="dev-${GITHUB_SHA::8}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The tag name reaches the shell through the environment, never spliced into the script.
+      - name: Build the archives
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: deploy/release-artifacts.sh "$VERSION" dist --windows
+
+      # v3: Forgejo does not support the v4 artifact actions (actionlint warns that v3 is too
+      # old for GitHub, which does not apply here).
+      - uses: actions/upload-artifact@v3
+        with:
+          name: haychat-${{ steps.version.outputs.version }}
+          path: dist/
+
+  image:
+    name: Server container image
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.push_image == 'true'
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install Node.js, git, and buildah
+        run: dnf install -y --setopt=install_weak_deps=False nodejs git-core buildah
+
+      - uses: actions/checkout@v4
+
+      # The job container is itself a container, so buildah runs without its own namespaces
+      # (chroot isolation) and with the vfs storage driver, which need no extra privileges
+      # beyond the runner's defaults. If the runner's containers cannot do even that, this
+      # step fails and the release still gets the archives, including the server binary.
+      - name: Build the image
+        run: |
+          buildah build --isolation chroot --storage-driver vfs \
+            -f deploy/Containerfile -t haychat-server:build .
+
+      - name: Push the image
+        run: |
+          registry=${GITHUB_SERVER_URL#*://}
+          image="$registry/${GITHUB_REPOSITORY,,}/server"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tags=("${GITHUB_REF#refs/tags/}" latest)
+          else
+            tags=(edge)
+          fi
+          echo "$RELEASE_TOKEN" | buildah login --storage-driver vfs \
+            -u "$GITHUB_ACTOR" --password-stdin "$registry"
+          for tag in "${tags[@]}"; do
+            buildah push --storage-driver vfs haychat-server:build "docker://$image:$tag"
+            echo "Pushed $image:$tag"
+          done
+
+  release:
+    name: Forgejo release
+    runs-on: ubuntu-latest
+    needs: [archives, image]
+    # Runs when the image job failed or was skipped too, so the archives are always published.
+    if: always() && needs.archives.result == 'success' && startsWith(github.ref, 'refs/tags/v')
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install Node.js and jq
+        run: dnf install -y --setopt=install_weak_deps=False nodejs jq
+
+      - uses: actions/download-artifact@v3
+        with:
+          name: haychat-${{ needs.archives.outputs.version }}
+          path: dist
+
+      - name: Create the release and upload the archives
+        env:
+          VERSION: ${{ needs.archives.outputs.version }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -euo pipefail
+          api="$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: token $RELEASE_TOKEN")
+          registry=${GITHUB_SERVER_URL#*://}
+          image="$registry/${GITHUB_REPOSITORY,,}/server:$VERSION"
+
+          if [[ "$IMAGE_RESULT" == "success" ]]; then
+            image_note="Server image: \`podman pull $image\`"
+          else
+            image_note="The server image was not pushed (image job: $IMAGE_RESULT). Use the server archive, or build the image with \`podman build -f deploy/Containerfile .\`."
+          fi
+          body=$(printf '%s\n\n%s\n\n%s\n' \
+            "Test build of HayChat $VERSION. Testers: see docs/tester-guide.md." \
+            "$image_note" \
+            "Checksums are in SHA256SUMS. Deployment: deploy/README.md.")
+
+          # Reuse the release when the job is re-run for the same tag.
+          release_id=$(curl -fsS "${auth[@]}" "$api/releases/tags/$VERSION" | jq -r .id) \
+            || release_id=""
+          if [[ -z "$release_id" ]]; then
+            release_id=$(jq -n --arg tag "$VERSION" --arg body "$body" \
+                '{tag_name: $tag, name: $tag, body: $body, prerelease: true}' \
+              | curl -fsS "${auth[@]}" -H "Content-Type: application/json" \
+                  -X POST --data @- "$api/releases" \
+              | jq -r .id)
+          fi
+          echo "Release $VERSION has ID $release_id"
+
+          existing=$(curl -fsS "${auth[@]}" "$api/releases/$release_id/assets")
+          for file in dist/*; do
+            name=$(basename "$file")
+            for old in $(jq -r --arg n "$name" '.[] | select(.name == $n) | .id' <<<"$existing"); do
+              curl -fsS "${auth[@]}" -X DELETE "$api/releases/$release_id/assets/$old"
+            done
+            curl -fsS "${auth[@]}" -X POST -F "attachment=@$file" \
+              "$api/releases/$release_id/assets?name=$name" >/dev/null
+            echo "Uploaded $name"
+          done
