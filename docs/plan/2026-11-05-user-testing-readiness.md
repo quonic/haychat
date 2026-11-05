@@ -200,3 +200,30 @@ a tone on one client and verify frequency on another. Estimate work in PR-sized 
 3. Restarting the server reconnects both clients without user action.
 4. A wrong server address, a taken nickname, and a changed server key each show a clear message.
 5. `./dev.sh ci` passes, including the two-client room and DM proofs and the harness smoke test.
+
+## Status (2026-11-05, end of day)
+
+Every package above landed on `main` the same day, each as its own reviewed PR on Forgejo:
+
+| PR | Package | What landed |
+| --- | --- | --- |
+| #2 | A | Open rooms (every account is in every room), sender nicknames on the wire, protocol 6, `MessageType` value pin test, `live --all` in CI |
+| #3 | D | `client --headless`: JSON-over-stdio harness for agents, `dev/harness-smoke.sh` |
+| #4 | E | `docs/plan/voice-rooms-design.md` |
+| #5 | C | Background connect with reconnect and backoff, connection status, readable failures, first-run and Settings screens |
+| #6 | B1 | Direct messages, user directory and presence on the server, protocol 7 |
+| #7 | A2 | The server creates `#general` on first start |
+| #8 | H0 | Network loop drains IPC in full, ring-buffer IPC queues, thread pool removed |
+| #9 | B2 | Direct messages in the client sidebar and pane, harness `users`/`dm`/`dm-history` |
+| #10 | G | `deploy/Containerfile`, quadlet units, release workflow (Linux and Windows clients), `docs/tester-guide.md` |
+| #11 | A3 | Changing the display name renames the same account; startup failures exit 1 |
+| #12 | D2 | `client --ui-script`: scripted clicks, typing and screenshots of the real window; offscreen GUI proof in CI |
+
+Acceptance (see above) was checked against the dev server with the headless harness and the
+GUI: two fresh users chat in `#general` with nicknames, exchange direct messages and see the
+history after a restart, reconnect without user action after a server restart, and get clear
+messages for a wrong address, a taken name and a changed server key. `./dev.sh ci` is green.
+
+Still open: F (admin room management in the client), the voice steps H1–H8, schema migrations
+before testers have data worth keeping, server-side read state for DM unread counts, and the
+`IPC__route_to` bug noted in #8.
