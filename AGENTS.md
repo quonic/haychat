@@ -51,7 +51,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 ## Testing
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
-- Full gate (what CI runs): `./dev.sh ci`, which runs `./check.sh` and then `dev/live-proof.sh --all` (startup auth and two-client room chat proofs) against a throwaway PostgreSQL. `./dev.sh check` runs only `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
+- Full gate (what CI runs): `./dev.sh ci`, which runs `./check.sh` and then `dev/live-proof.sh --all` (startup auth, two-client room chat, headless harness, and server SQL proofs) against a throwaway PostgreSQL. `./dev.sh check` runs only `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
 - Prefer component-scoped checks while editing: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`. The serial server suite is the reliable default for router/database tests.
 - Acting as a user: `client --headless` runs the client without a window, reading commands on stdin and printing JSON lines on stdout, so an agent or script can connect, list rooms, send, and wait for events. See `docs/testing-harness.md`; `./dev.sh live --harness` runs its smoke test against a throwaway server.
 - Use the built-in testing library from Odin. `import "core:testing"` and any procedures must have `t: ^testing.T,` as the first parameter.
@@ -68,6 +68,7 @@ Making breaking changes to the project is currently allowed, but it is recommend
 
 - Shared encrypted application packets and database IPC types belong in `common/protocol.odin`. When changing a wire payload, update both client transport decoding and server routing, then validate `odin test common` before component tests.
 - Room access is server-authoritative and membership-scoped. Rooms are open for now: new accounts join every room and new rooms include every account, but `room_members` stays the authoritative check. Clients may request room lists and history, but must treat `ServerListRooms`, membership, edit, and delete events as the source of truth for visible rooms.
+- Direct messages are server-authoritative too: a client must not append a sent direct message locally but wait for the `ServerDirectMessage` echo, which carries the stored ID and timestamp and reaches every session of both users. Direct history pages exactly like room history. `ServerUserList` and `ServerUserPresence` are the source of truth for who exists and who is online.
 - `MessageType` numbers its members automatically. `common/protocol_test.odin` pins the wire value of every member in use; never renumber, add new members at the end of the enum, pin each member you put on the wire, and bump `protocolVersion` for any payload or enum change.
 - Chat history uses message IDs as stable pagination cursors. Fetch the newest page with cursor `0`, request older pages with the oldest loaded message ID, and merge duplicate page boundaries by message ID.
 - CBOR-decoded strings and dynamic arrays are owned allocations. Transfer ownership explicitly between packet/event/message layers, clear the source after transfer, and free ignored payloads. Do not retain borrowed decoded data after its packet or event is deinitialized.

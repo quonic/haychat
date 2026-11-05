@@ -29,6 +29,10 @@ PendingDBRequestType :: enum {
 	AddRoomMember,
 	CheckAdminRemoveRoomMember,
 	RemoveRoomMember,
+	PostDirectMessage,
+	GetDirectHistory,
+	ListDirectConversations,
+	ListUsers,
 }
 
 PendingDBRequest :: struct {
@@ -38,6 +42,7 @@ PendingDBRequest :: struct {
 	roomID:           int,
 	name:             string,
 	description:      string,
+	// Room member mutations: the member. Direct messages and history: the peer account.
 	targetUserID:     int,
 	recipientUserIDs: [dynamic]int,
 }
@@ -332,9 +337,21 @@ MainRouterState_protocolViolation :: proc(
 ) {
 	MainRouterState_sendProtocolError(pm, state, peerID, message)
 	if session, ok := MainRouterState_getPeerSession(state, peerID); ok {
+		wasAuthenticated := session.isAuthenticated
 		session.transport.phase = .Failed
 		session.isAuthenticated = false
 		MainRouterState_setPeerSession(state, peerID, session)
+		// The session no longer counts as online, and its later disconnect event will not
+		// see it as authenticated, so presence must be settled here.
+		if wasAuthenticated {
+			MainRouterState_noteSessionEnded(
+				pm,
+				state,
+				peerID,
+				session.authenticatedUserID,
+				session.clientNickname,
+			)
+		}
 	}
 	MainRouterState_disconnectPeer(pm, peerID)
 }
@@ -450,7 +467,11 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .CheckAdminAddRoomMember,
 		     .AddRoomMember,
 		     .CheckAdminRemoveRoomMember,
-		     .RemoveRoomMember:
+		     .RemoveRoomMember,
+		     .PostDirectMessage,
+		     .GetDirectHistory,
+		     .ListDirectConversations,
+		     .ListUsers:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case:
 		}
@@ -793,7 +814,7 @@ MainRouterState_handleClientFetchRoomHistory :: proc(
 	   req.roomId <= 0 ||
 	   req.beforeMessageID < 0 ||
 	   req.limit < 1 ||
-	   req.limit > 50 {
+	   req.limit > common.HISTORY_PAGE_MAX_MESSAGES {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room history request")
 		return
 	}
@@ -1036,6 +1057,14 @@ MainRouterState_dispatchApplicationPacket :: proc(
 			packet.payload,
 			.CheckAdminRemoveRoomMember,
 		)
+	case .ClientDirectMessage:
+		MainRouterState_handleClientDirectMessage(pm, state, peerID, packet.payload)
+	case .ClientFetchDirectHistory:
+		MainRouterState_handleClientFetchDirectHistory(pm, state, peerID, packet.payload)
+	case .ClientListDirectConversations:
+		MainRouterState_handleClientListDirectConversations(pm, state, peerID, packet.payload)
+	case .ClientUserList:
+		MainRouterState_handleClientListUsers(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1250,6 +1279,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		if !sessionOK || session.isAuthenticated {
 			return
 		}
+		// Counted before this session joins, so only a user's first session announces them.
+		wasOnline := MainRouterState_isUserOnline(state, identity.userId)
 		session.isAuthenticated = true
 		session.authenticatedUserID = identity.userId
 		MainRouterState_setPeerSession(state, request.peerID, session)
@@ -1265,6 +1296,17 @@ MainRouterState_handleDatabaseResult :: proc(
 				state,
 				request.peerID,
 				"Failed to send auth success",
+			)
+			return
+		}
+		if !wasOnline {
+			MainRouterState_broadcastPresence(
+				pm,
+				state,
+				identity.userId,
+				session.clientNickname,
+				true,
+				request.peerID,
 			)
 		}
 	case .ListRooms:
@@ -1610,6 +1652,14 @@ MainRouterState_handleDatabaseResult :: proc(
 				common.ServerRoomMembershipChangedPayload{roomId = request.roomID, joined = false},
 			)
 		}
+	case .PostDirectMessage:
+		MainRouterState_handlePostDirectMessageResult(pm, state, request, response)
+	case .GetDirectHistory:
+		MainRouterState_handleDirectHistoryResult(pm, state, request, response)
+	case .ListDirectConversations:
+		MainRouterState_handleDirectConversationListResult(pm, state, request, response)
+	case .ListUsers:
+		MainRouterState_handleUserDirectoryResult(pm, state, request, response)
 	}
 }
 
@@ -1761,9 +1811,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 				routerState.connectedPeers[m.peerId] = true
 				MainRouterState_setPeerSession(&routerState, m.peerId, RouterPeerSession_init())
 			case NetworkPeerDisconnected:
-				delete_key(&routerState.connectedPeers, m.peerId)
-				MainRouterState_removePendingRequestsForPeer(&routerState, m.peerId)
-				MainRouterState_removePeerSession(&routerState, m.peerId)
+				MainRouterState_handlePeerDisconnected(pm, &routerState, m.peerId)
 			case NetworkDataReceived:
 				MainRouterState_handleNetworkDataReceived(pm, &routerState, m)
 				delete(m.data)
