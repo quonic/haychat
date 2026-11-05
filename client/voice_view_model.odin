@@ -298,6 +298,8 @@ VoiceSettingsView :: struct {
 	// Why devices cannot be listed; the lists then offer only the system default.
 	devicesNote:       string,
 	pttKeyLabel:       string,
+	// VOICE_PTT_FOCUS_NOTICE, plus why a key that types is ignored in text fields.
+	pttNotice:         string,
 	capturingKey:      bool,
 	thresholdText:     string,
 	inputGainText:     string,
@@ -317,6 +319,10 @@ VOICE_ECHO_NOTICE ::
 	"HayChat has no echo cancellation: use headphones, or others hear themselves through " +
 	"your microphone."
 VOICE_PTT_FOCUS_NOTICE :: "Push-to-talk works only while the HayChat window has focus."
+VOICE_PTT_TYPING_NOTICE ::
+	VOICE_PTT_FOCUS_NOTICE +
+	" This key types, so it does nothing while you are typing in a text field; a key such as " +
+	"Ctrl or an F-key works everywhere."
 VOICE_KEY_CAPTURE_TEXT :: "Press a key… (Esc cancels)"
 VOICE_TEST_START_TEXT :: "Test microphone"
 VOICE_TEST_STOP_TEXT :: "Stop test"
@@ -381,6 +387,10 @@ buildVoiceSettingsView :: proc(
 	}
 	view.capturingKey = panel.capturingKey
 	view.pttKeyLabel = panel.capturingKey ? VOICE_KEY_CAPTURE_TEXT : view.settings.pttKey
+	view.pttNotice = VOICE_PTT_FOCUS_NOTICE
+	if voiceKeyEditsText(voicePushToTalkKeyFromName(view.settings.pttKey)) {
+		view.pttNotice = VOICE_PTT_TYPING_NOTICE
+	}
 	view.thresholdText = fmt.aprintf(
 		"%d dBFS",
 		int(view.settings.vadThresholdDB),

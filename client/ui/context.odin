@@ -360,6 +360,12 @@ interact :: proc(ctx: ^Context, id: ID, r: Rect) -> (result: Interaction) {
 	return
 }
 
+// Whether a text field had keyboard focus in the last frame. Between frames, while events are
+// handled, this is what the user is typing into.
+hasTextFocus :: proc(ctx: ^Context) -> bool {
+	return ctx.textInputWanted
+}
+
 // Marks id as focused this frame; call it from widgets that accept keyboard input.
 takeFocus :: proc(ctx: ^Context, id: ID) {
 	ctx.focusDrawn = true

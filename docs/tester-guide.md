@@ -164,6 +164,8 @@ server, and keep chatting anywhere while you are.
   threshold. In **Push-to-talk** mode it sends only while you hold the push-to-talk key
   (Left Ctrl unless you change it). **Push-to-talk works only while the HayChat window has
   focus**: if you click into another window while holding the key, HayChat stops sending.
+  A push-to-talk key that types (a letter, a digit or Space) does nothing while you are typing
+  in a text field, so pick a key such as Ctrl or an F-key if you want to talk while typing.
 - **Linux needs libopus:** the `opus` package on Fedora and Arch, `libopus0` on Debian and
   Ubuntu (it is in the install commands above). Without it the voice bar says "Voice
   unavailable: libopus not found" and chat still works.

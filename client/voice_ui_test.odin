@@ -15,6 +15,7 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 import "opus"
+import SDL "vendor:sdl3"
 
 UI_VOICE_SELF_USER_ID :: 3
 
@@ -772,4 +773,82 @@ testVoiceUIWaitForSequence :: proc(engine: ^VoiceEngine, atLeast: u32) -> u32 {
 		}
 		time.sleep(5 * time.Millisecond)
 	}
+}
+
+// A push-to-talk key that types (a letter, Space, Enter...) is left to a focused text field,
+// so typing "t" in the message box never opens the microphone; keys a text field does not
+// use work everywhere, and a key up always releases.
+@(test)
+testVoicePushToTalkIgnoresTypingKeysInTextFields :: proc(t: ^testing.T) {
+	letter := voicePushToTalkKeyFromName("T")
+	ctrl := voicePushToTalkKeyFromName("Left Ctrl")
+	testing.expect(t, letter == SDL.K_T && ctrl == SDL.K_LCTRL, "expected SDL key names")
+	testing.expect(
+		t,
+		voiceKeyEditsText(SDL.K_T) &&
+		voiceKeyEditsText(SDL.K_SPACE) &&
+		voiceKeyEditsText(SDL.K_RETURN) &&
+		voiceKeyEditsText(SDL.K_BACKSPACE),
+		"expected letters, Space, Enter and Backspace to edit text",
+	)
+	testing.expect(
+		t,
+		!voiceKeyEditsText(SDL.K_LCTRL) &&
+		!voiceKeyEditsText(SDL.K_F13) &&
+		!voiceKeyEditsText(SDL.K_RALT) &&
+		!voiceKeyEditsText(SDL.K_UNKNOWN),
+		"expected modifiers and function keys not to edit text",
+	)
+	testing.expect(
+		t,
+		voicePushToTalkKeyFromName("No Such Key") == ctrl,
+		"expected an unknown name to fall back to the default key",
+	)
+
+	Case :: struct {
+		pttKey, key:                SDL.Keycode,
+		down, held, textFocused:    bool,
+		wantChange, wantHeld:       bool,
+		name:                       string,
+	}
+	cases := [?]Case {
+		{letter, letter, true, false, false, true, true, "letter, no text field: press"},
+		{letter, letter, true, false, true, false, false, "letter while typing: ignored"},
+		{letter, letter, false, false, true, false, false, "letter up while typing: nothing"},
+		{letter, letter, false, true, true, true, false, "held letter: up releases anyway"},
+		{ctrl, ctrl, true, false, true, true, true, "Ctrl while typing: press"},
+		{ctrl, ctrl, false, true, true, true, false, "Ctrl up while typing: release"},
+		{ctrl, ctrl, true, true, false, false, true, "already held: no change"},
+		{ctrl, letter, true, false, false, false, false, "another key: nothing"},
+		{0, ctrl, true, false, false, false, false, "push-to-talk off: nothing"},
+	}
+	for c in cases {
+		change, held := voicePushToTalkKeyEvent(c.pttKey, c.key, c.down, c.held, c.textFocused)
+		testing.expectf(
+			t,
+			change == c.wantChange && held == c.wantHeld,
+			"%s: expected change %v held %v, got %v %v",
+			c.name,
+			c.wantChange,
+			c.wantHeld,
+			change,
+			held,
+		)
+	}
+}
+
+// The settings note warns when the chosen key types.
+@(test)
+testVoiceSettingsViewWarnsAboutATypingPushToTalkKey :: proc(t: ^testing.T) {
+	state := testVoiceUIState(946)
+	defer State_deinit(&state)
+	settings := State_voiceSettings(&state)
+	settings.mode = .PushToTalk
+	State_applyVoiceSettings(&state, settings, persist = false)
+	view := buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expectf(t, view.pttNotice == VOICE_PTT_FOCUS_NOTICE, "Left Ctrl: %q", view.pttNotice)
+	settings.pttKey = "Space"
+	State_applyVoiceSettings(&state, settings, persist = false)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expectf(t, view.pttNotice == VOICE_PTT_TYPING_NOTICE, "Space: %q", view.pttNotice)
 }

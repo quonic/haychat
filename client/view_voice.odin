@@ -361,7 +361,7 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 		}
 		keyClicked = ui.button(ctx, ui.idOf("voice-ptt-key"), keyRow, keyText, keyOptions)
 		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
-		voiceSettingsWrapped(ctx, &column, VOICE_PTT_FOCUS_NOTICE, ctx.theme.fgMuted)
+		voiceSettingsWrapped(ctx, &column, view.pttNotice, ctx.theme.fgMuted)
 		_ = ui.cutTop(&column, sectionGap)
 	}
 
