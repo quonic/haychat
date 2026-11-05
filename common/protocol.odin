@@ -674,9 +674,12 @@ DatabaseQueryResult :: union {
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
-// to a different key.
+// to a different key. renamed is true when the key's account took a new nickname on this
+// login; previousNickname (owned, empty otherwise) is the nickname it had before.
 DatabaseUserIdentityResult :: struct {
-	userId: int,
+	userId:           int,
+	renamed:          bool,
+	previousNickname: string,
 }
 
 DatabaseRoomListResult :: struct {

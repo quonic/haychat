@@ -404,6 +404,71 @@ testPresenceUpdatesTheDirectory :: proc(t: ^testing.T) {
 }
 
 @(test)
+testPresenceRenamesTheDirectoryAndConversation :: proc(t: ^testing.T) {
+	server := testDirectServer(613)
+	state := testStateWithServers({server})
+	defer State_deinit(&state)
+	testApplyConnected(&state, server.id, 7)
+	testApplyUserList(
+		&state,
+		server.id,
+		{id = 7, nickname = "me", isOnline = true},
+		{id = 3, nickname = "carol", isOnline = true},
+	)
+	testApplyConversations(&state, server.id, {id = 3, nickname = "carol"})
+	testApplyDirectMessage(&state, server.id, 101, 3, 7, "hi", "carol", "me")
+
+	// The server announces a rename as presence carrying the account's new nickname.
+	renamed := ClientTransportRuntimeEvent {
+		kind = .UserPresenceChanged,
+		serverID = server.id,
+		user = {id = 3, nickname = strings.clone("carol-renamed"), isOnline = true},
+	}
+	State_applyRuntimeEvent(&state, &renamed)
+	ClientTransportRuntimeEvent_deinit(&renamed)
+
+	cache := State_serverDirectCache(&state, server.id)
+	userIndex := ServerDirectCache_userIndex(cache^, 3)
+	conversationIndex := ServerDirectCache_conversationIndex(cache^, 3)
+	testing.expect(
+		t,
+		len(cache.users) == 2 &&
+		userIndex >= 0 &&
+		cache.users[userIndex].nickname == "carol-renamed",
+		fmt.tprintf("expected carol renamed in the directory, got %v", cache.users),
+	)
+	testing.expect(
+		t,
+		conversationIndex >= 0 &&
+		cache.conversations[conversationIndex].peerNickname == "carol-renamed",
+		fmt.tprintf("expected carol renamed in the conversations, got %v", cache.conversations),
+	)
+
+	// The sidebar reads the new name for both the conversation and the member row.
+	rows := buildSidebarRows(&state)
+	labels := 0
+	for row in rows {
+		if (row.kind == .Conversation || row.kind == .Member) && row.id == 3 {
+			testing.expect(
+				t,
+				row.label == "carol-renamed",
+				fmt.tprintf("expected the %v row renamed, got %q", row.kind, row.label),
+			)
+			labels += 1
+		}
+	}
+	testing.expect(t, labels == 2, "expected a conversation row and a member row for carol")
+
+	// Cached messages keep the nickname they were sent with.
+	conversation := &cache.caches[ServerDirectCache_conversationCacheIndex(cache^, 3)]
+	testing.expect(
+		t,
+		len(conversation.messages) == 1 && conversation.messages[0].senderNickname == "carol",
+		"expected the cached message to keep its sender nickname",
+	)
+}
+
+@(test)
 testSendDirectMessageWaitsForTheServerEcho :: proc(t: ^testing.T) {
 	sync.mutex_lock(&directMessageSendBridgeTestMutex)
 	defer sync.mutex_unlock(&directMessageSendBridgeTestMutex)

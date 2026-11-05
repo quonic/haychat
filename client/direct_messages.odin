@@ -38,7 +38,7 @@ DirectConversationCache :: struct {
 ServerDirectCache :: struct {
 	serverID:             int,
 	// Every account on the server, the signed-in user included, in the server's order (by
-	// nickname). Presence events update isOnline in place.
+	// nickname). Presence events update isOnline, and the nickname after a rename, in place.
 	users:                [dynamic]common.UserSummary,
 	usersLoaded:          bool,
 	usersLoading:         bool,
@@ -520,16 +520,32 @@ State_receiveDirectConversations :: proc(
 	cache.conversationsLoading = false
 }
 
-// Updates the directory's online flag. An account the directory does not list yet (it was
-// created after the list was fetched) is added, taking ownership of user's nickname and
-// clearing it; otherwise the caller still owns it.
+// Updates the directory's online flag and, when the event carries a different nickname (the
+// account was renamed: a rename is announced as presence), the account's nickname in the
+// directory and in its conversation summary. Cached messages keep the senderNickname they were
+// stored with; a history fetch shows the current name, because the server joins it then. An
+// account the directory does not list yet (it was created after the list was fetched) is added,
+// taking ownership of user's nickname and clearing it; otherwise the caller still owns it.
 State_userPresenceChanged :: proc(state: ^State, serverID: int, user: ^common.UserSummary) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 || user.id <= 0 {
 		return
 	}
 	cache := State_serverDirectCache(state, serverID)
+	if index := ServerDirectCache_conversationIndex(cache^, user.id); index >= 0 {
+		summary := &cache.conversations[index]
+		if len(user.nickname) > 0 && summary.peerNickname != user.nickname {
+			delete(summary.peerNickname)
+			summary.peerNickname = strings.clone(user.nickname)
+		}
+	}
 	if index := ServerDirectCache_userIndex(cache^, user.id); index >= 0 {
-		cache.users[index].isOnline = user.isOnline
+		known := &cache.users[index]
+		known.isOnline = user.isOnline
+		if len(user.nickname) > 0 && known.nickname != user.nickname {
+			delete(known.nickname)
+			known.nickname = user.nickname
+			user.nickname = ""
+		}
 		return
 	}
 	append(&cache.users, user^)

@@ -26,9 +26,12 @@ odin build client -out:haychat-client
 Options also accept the `--name=NAME` form.
 
 A profile directory is a stable identity. Its Ed25519 identity key is created on first use, and
-the server binds a nickname to the first key that uses it. Reuse the directory to come back as
-the same user; use a new directory and a new name for a new user. Two clients with the same name
-and different directories cannot both log in (`user identity is unavailable`). Give every
+the server's account belongs to that key. Reuse the directory to come back as the same user; use
+a new directory and a new name for a new user. Reusing a directory with a different `--name`
+renames that user's account (same user ID), and other connected clients get a `presence`
+event with the new name. Two clients with the same name and different directories cannot both
+log in (`user identity is unavailable`), and neither can a rename to a name another account
+holds. Give every
 scripted run unique names, for example by appending a timestamp.
 
 `--server` makes the profile hold exactly that one server. An existing entry for the same
@@ -135,6 +138,8 @@ the client fetches all three for a new session. A `direct_message` belongs to th
 with `recipientID` when `senderID` is your own `userID` (from `connected`), and with `senderID`
 otherwise. `presence` arrives when another account's first session signs in (`isOnline` true)
 or its last one ends (false); other sessions of an account that is already online send none.
+A login that renames an account also sends `presence` with the new `nickname`, even when that
+account was already online; the client updates the name in `users` and `conversations`.
 Direct messages belong to one server: user IDs from different servers are unrelated.
 
 ## Example: Two Agents Chatting
@@ -221,6 +226,9 @@ grep -F '"cmd":"send"' alice.out
 3. The first client prints a `presence` event for the second, finds its user ID with `users`,
    and sends it a unique direct message with `dm`; the second must print a `direct_message`
    event with that text, and its `dm-history` with the first must contain it.
+4. The second client quits and comes back from the same profile under a new name; the first
+   must print a `presence` event for the same user ID with the new nickname, and list it under
+   that name in `users`.
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
