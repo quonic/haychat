@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 9
+protocolVersion: ProtocolVersion = 10
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -203,8 +203,11 @@ MessageType :: enum {
 	// Messaging
 	ClientChatMessage, // Chat message sent from client to server
 	ServerChatMessage, // Chat message broadcasted from server to clients
-	ClientVoiceData, // Voice data sent from client to server
-	ServerVoiceData, // Voice data broadcasted from server to clients
+	// Retired placeholders, never sent: voice frames are binary datagrams on ENet channel 2
+	// (common/voice_wire.odin) and have no MessageType. Kept so that the members after them,
+	// ClientDirectMessage and ServerDirectMessage among them, keep their wire values.
+	ClientVoiceData,
+	ServerVoiceData,
 	ClientVideoData, // Video data sent from client to server
 	ServerVideoData, // Video data broadcasted from server to clients
 	ClientDirectMessage, // ClientDirectMessagePayload: send a direct message to one account
@@ -301,6 +304,15 @@ MessageType :: enum {
 	ClientListDirectConversations, // ClientListDirectConversationsPayload: recent conversations
 	ServerDirectConversations, // ServerDirectConversationsPayload: latest message per peer
 	ServerUserPresence, // ServerUserPresencePayload: a user came online or went offline
+
+	// Voice control (protocol 10), CBOR on the reliable control channel. The frames themselves
+	// are binary datagrams on ENet channel 2 (common/voice_wire.odin).
+	ClientJoinVoice, // ClientJoinVoicePayload: join one room's voice session
+	ClientLeaveVoice, // ClientLeaveVoicePayload: leave the current voice session
+	ClientVoiceState, // ClientVoiceStatePayload: mute or deafen changed while joined
+	ServerVoiceParticipants, // ServerVoiceParticipantsPayload: a room's full participant set
+	ServerVoiceJoinRejected, // ServerVoiceJoinRejectedPayload: a ClientJoinVoice was refused
+	ServerVoiceLeft, // ServerVoiceLeftPayload: the server removed this session from voice
 }
 
 RoomType :: enum {
@@ -536,11 +548,81 @@ ServerUserPresencePayload :: struct {
 	isOnline: bool,
 }
 
-VoiceData :: struct {
-	senderId:  int,
-	roomId:    int,
-	timestamp: datetime.DateTime, // Time the voice data was sent, only used by the server when sending to clients, when receiving from clients this can be set to the current time on the server
-	data:      []u8, // Raw Opus-encoded voice data
+// Voice control payloads (protocol 10, voice-rooms-design.md 3.4). A voice session belongs to
+// one client session (device): a user with two devices can be in voice on each.
+
+// ClientJoinVoice: join roomId's voice session, leaving any other one this session is in.
+// The server checks room membership and answers with ServerVoiceParticipants (which lists the
+// joiner) or ServerVoiceJoinRejected.
+ClientJoinVoicePayload :: struct {
+	roomId:   int,
+	muted:    bool,
+	deafened: bool,
+}
+
+// ClientLeaveVoice: leave the current voice session. It carries no fields; the server knows
+// which room the session is in.
+ClientLeaveVoicePayload :: struct {}
+
+// ClientVoiceState: mute or deafen changed while joined.
+ClientVoiceStatePayload :: struct {
+	muted:    bool,
+	deafened: bool,
+}
+
+// One voice session in a room. nickname is owned.
+VoiceParticipant :: struct {
+	userId:   int,
+	nickname: string,
+	muted:    bool,
+	deafened: bool,
+}
+
+// ServerVoiceParticipants: the full participant set of roomId, never a delta. Sent to every
+// live session of every room member whenever the set or any participant's state changes, and
+// to a joiner as the join acknowledgement. participants and each nickname are owned.
+ServerVoiceParticipantsPayload :: struct {
+	roomId:       int,
+	participants: [dynamic]VoiceParticipant,
+}
+
+// ServerVoiceJoinRejected: a ClientJoinVoice for roomId was refused. reason is owned and
+// meant for people ("not a room member", "voice room is full", "voice is disabled").
+ServerVoiceJoinRejectedPayload :: struct {
+	roomId: int,
+	reason: string,
+}
+
+// ServerVoiceLeft: the server removed this session from roomId's voice session: removed from
+// the room, the room was deleted, or the session joined another room. reason is owned.
+ServerVoiceLeftPayload :: struct {
+	roomId: int,
+	reason: string,
+}
+
+// Frees what a VoiceParticipant owns and clears it.
+VoiceParticipant_deinit :: proc(participant: ^VoiceParticipant) {
+	delete(participant.nickname)
+	participant.nickname = ""
+}
+
+// Frees every participant and the array, and clears the payload.
+ServerVoiceParticipantsPayload_deinit :: proc(payload: ^ServerVoiceParticipantsPayload) {
+	for &participant in payload.participants {
+		VoiceParticipant_deinit(&participant)
+	}
+	delete(payload.participants)
+	payload.participants = nil
+}
+
+ServerVoiceJoinRejectedPayload_deinit :: proc(payload: ^ServerVoiceJoinRejectedPayload) {
+	delete(payload.reason)
+	payload.reason = ""
+}
+
+ServerVoiceLeftPayload_deinit :: proc(payload: ^ServerVoiceLeftPayload) {
+	delete(payload.reason)
+	payload.reason = ""
 }
 
 VideoData :: struct {

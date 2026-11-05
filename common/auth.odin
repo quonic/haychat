@@ -43,6 +43,9 @@ REPLAY_WINDOW_SIZE :: 64
 VOICE_DATAGRAM_KIND_FRAME :: u8(0x01)
 VOICE_DATAGRAM_HEADER_SIZE :: 1 + 8
 VOICE_DATAGRAM_OVERHEAD :: VOICE_DATAGRAM_HEADER_SIZE + TRANSPORT_TAG_SIZE
+// Voice datagrams only: the transport AAD followed by the datagram's kind byte (makeVoiceAAD).
+// Control packets keep TRANSPORT_AAD_SIZE.
+VOICE_AAD_SIZE :: TRANSPORT_AAD_SIZE + 1
 
 IdentityPrivateKeyBytes :: [AUTH_IDENTITY_PRIVATE_KEY_SIZE]u8
 IdentityPublicKeyBytes :: [AUTH_IDENTITY_PUBLIC_KEY_SIZE]u8
@@ -56,6 +59,7 @@ TransportKey :: [TRANSPORT_KEY_SIZE]u8
 TransportNonce :: [TRANSPORT_NONCE_SIZE]u8
 TransportTag :: [TRANSPORT_TAG_SIZE]u8
 TransportAAD :: [TRANSPORT_AAD_SIZE]u8
+VoiceAAD :: [VOICE_AAD_SIZE]u8
 FingerprintBytes :: [FINGERPRINT_SIZE]u8
 
 SessionRole :: enum u8 {
@@ -663,6 +667,25 @@ makeTransportAAD :: proc(
 	return aad
 }
 
+// Voice datagrams only: sessionID || channel || sequence LE || kind. The kind byte travels in
+// clear at datagram offset 0, so it is bound into the tag: once a second kind exists, nobody
+// can relabel a datagram of one kind as the other. This is deliberately a separate helper and
+// a separate type from makeTransportAAD, which control packets use unchanged (the two cannot
+// be passed for each other), so the control channel's AAD and its test vectors stay as they
+// were in protocol 9.
+makeVoiceAAD :: proc(
+	sessionID: SessionID,
+	channel: TransportChannel,
+	sequence: u64,
+	kind: u8,
+) -> VoiceAAD {
+	transportAAD := makeTransportAAD(sessionID, channel, sequence)
+	aad: VoiceAAD
+	copy(aad[:TRANSPORT_AAD_SIZE], transportAAD[:])
+	aad[TRANSPORT_AAD_SIZE] = kind
+	return aad
+}
+
 // Voice only: the XChaCha20 24-byte nonce is channel (1) || sequence LE (8) || zeros (15).
 //
 // Why this nonce never repeats under a key: every voice key belongs to exactly one session
@@ -835,6 +858,23 @@ sealVoiceDatagram :: proc(
 	n: int,
 	ok: bool,
 ) {
+	return sealVoiceDatagramOfKind(send, sessionID, VOICE_DATAGRAM_KIND_FRAME, plaintext, dst)
+}
+
+// sealVoiceDatagram with an explicit kind byte, written at offset 0 and bound into the AAD.
+// Package-private: only VOICE_DATAGRAM_KIND_FRAME exists, and the tests use another kind to
+// prove that relabelling a datagram breaks its tag.
+@(private)
+sealVoiceDatagramOfKind :: proc(
+	send: ^ChannelSendState,
+	sessionID: SessionID,
+	kind: u8,
+	plaintext: []u8,
+	dst: []u8,
+) -> (
+	n: int,
+	ok: bool,
+) {
 	if !send.active {
 		return 0, false
 	}
@@ -849,11 +889,11 @@ sealVoiceDatagram :: proc(
 	}
 
 	ciphertextEnd := VOICE_DATAGRAM_HEADER_SIZE + len(plaintext)
-	dst[0] = VOICE_DATAGRAM_KIND_FRAME
+	dst[0] = kind
 	endian.unchecked_put_u64le(dst[1:VOICE_DATAGRAM_HEADER_SIZE], sequence)
 
 	nonce := makeVoiceNonce(.Voice, sequence)
-	aad := makeTransportAAD(sessionID, .Voice, sequence)
+	aad := makeVoiceAAD(sessionID, .Voice, sequence, kind)
 	ctx: chacha20poly1305.Context
 	chacha20poly1305.init_xchacha(&ctx, send.key[:])
 	defer chacha20poly1305.reset(&ctx)
@@ -932,7 +972,7 @@ voiceOpenDatagramUncounted :: proc(
 
 	ciphertextEnd := VOICE_DATAGRAM_HEADER_SIZE + ciphertextLength
 	nonce := makeVoiceNonce(.Voice, sequence)
-	aad := makeTransportAAD(sessionID, .Voice, sequence)
+	aad := makeVoiceAAD(sessionID, .Voice, sequence, datagram[0])
 	ctx: chacha20poly1305.Context
 	chacha20poly1305.init_xchacha(&ctx, receive.key[:])
 	defer chacha20poly1305.reset(&ctx)

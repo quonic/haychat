@@ -51,6 +51,12 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientListDirectConversations, 138},
 	{.ServerDirectConversations, 139},
 	{.ServerUserPresence, 140},
+	{.ClientJoinVoice, 141},
+	{.ClientLeaveVoice, 142},
+	{.ClientVoiceState, 143},
+	{.ServerVoiceParticipants, 144},
+	{.ServerVoiceJoinRejected, 145},
+	{.ServerVoiceLeft, 146},
 }
 
 @(test)
@@ -100,15 +106,28 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsNineForTransportChannelKeys :: proc(t: ^testing.T) {
+testProtocolVersionIsTenForVoiceControl :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule (four keys,
-	// channel-bound AAD), so peers on 8 or older cannot talk to this build.
+	// channel-bound AAD); 10 added the voice control messages and bound the voice datagram's
+	// kind byte into its AAD, so peers on 9 or older cannot talk to this build.
 	assert(
-		protocolVersion == 9,
+		protocolVersion == 10,
+		fmt.tprintf("expected protocol version 10 for voice control, got %d", protocolVersion),
+	)
+}
+
+// The retired voice placeholders must stay where they are: removing them would renumber
+// ClientDirectMessage and ServerDirectMessage, which follow them and are on the wire.
+@(test)
+testRetiredVoiceDataPlaceholdersKeepTheirPlace :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(MessageType.ClientVoiceData) == 64 && int(MessageType.ServerVoiceData) == 65,
 		fmt.tprintf(
-			"expected protocol version 9 for the per-channel transport keys, got %d",
-			protocolVersion,
+			"expected the retired voice placeholders at 64 and 65, got %d and %d",
+			int(MessageType.ClientVoiceData),
+			int(MessageType.ServerVoiceData),
 		),
 	)
 }

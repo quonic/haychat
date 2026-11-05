@@ -1019,6 +1019,89 @@ testClientServerTransportTranslatesEncryptedServerChatIntoRuntimeEvent :: proc(t
 	_ = t
 }
 
+@(private = "file")
+testExpectVoiceControlIsUnexpected :: proc(
+	transport: ^ClientServerTransport,
+	serverTransport: ^common.TransportState,
+	messageType: common.MessageType,
+	payload: any,
+) {
+	sealedPacket, sealOK := common.sealPacketForSession(serverTransport, messageType, payload)
+	assert(sealOK, fmt.tprintf("expected the server to seal %v", messageType))
+	defer delete(sealedPacket.payload)
+	sealedPacketBytes, bytesOK := common.marshalPacket(sealedPacket)
+	assert(bytesOK, "expected the sealed voice control packet to marshal")
+	defer delete(sealedPacketBytes)
+
+	runtimeEvent, eventOK := ClientServerTransport_handleRuntimePacketBytes(
+		transport,
+		sealedPacketBytes,
+	)
+	assert(eventOK, "expected the packet handler to report the voice control message")
+	defer ClientTransportRuntimeEvent_deinit(&runtimeEvent)
+	assert(
+		runtimeEvent.kind == .ProtocolError,
+		fmt.tprintf(
+			"expected %v to be a protocol error for now, got %v",
+			messageType,
+			runtimeEvent.kind,
+		),
+	)
+	assert(
+		transport.transport.phase == .Established,
+		"expected an unhandled voice control message to keep the session",
+	)
+}
+
+// Protocol 10 defines the voice control messages before the client handles them (H5). Until
+// then a server voice message is an unexpected runtime message: a ProtocolError event that
+// keeps the session, with the payload freed by the packet handler (the leak checker covers
+// the owned nickname and reason strings).
+@(test)
+testClientServerTransportTreatsVoiceControlAsUnexpectedForNow :: proc(t: ^testing.T) {
+	server := Server {
+		id         = 77,
+		name       = "Voice Server",
+		host       = "localhost",
+		port       = common.DEFAULT_SERVER_PORT,
+	}
+	config := testConfigWithServers({server})
+	defer Config_deinit(&config)
+
+	transport, serverTransport, ok := buildEstablishedTransportPair(server, config)
+	assert(ok, "expected transport pair setup to succeed")
+	defer ClientServerTransport_deinit(&transport)
+
+	participants := make([dynamic]common.VoiceParticipant, context.temp_allocator)
+	append(&participants, common.VoiceParticipant{userId = 3, nickname = "alice"})
+	participantsPayload := common.ServerVoiceParticipantsPayload {
+		roomId       = 1,
+		participants = participants,
+	}
+	rejectedPayload := common.ServerVoiceJoinRejectedPayload {
+		roomId = 1,
+		reason = "voice room is full",
+	}
+	leftPayload := common.ServerVoiceLeftPayload {
+		roomId = 1,
+		reason = "room deleted",
+	}
+	testExpectVoiceControlIsUnexpected(
+		&transport,
+		&serverTransport,
+		.ServerVoiceParticipants,
+		participantsPayload,
+	)
+	testExpectVoiceControlIsUnexpected(
+		&transport,
+		&serverTransport,
+		.ServerVoiceJoinRejected,
+		rejectedPayload,
+	)
+	testExpectVoiceControlIsUnexpected(&transport, &serverTransport, .ServerVoiceLeft, leftPayload)
+	_ = t
+}
+
 @(test)
 testClientServerTransportTranslatesProtocolErrorIntoRuntimeEvent :: proc(t: ^testing.T) {
 	server := Server {
