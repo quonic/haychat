@@ -77,7 +77,7 @@ The server's web admin uses `core:nbio`, which needs io_uring on Linux. Podman's
 - `HAYCHAT_DEV_ENV_FILE`: server overrides file (default `.env`, see below)
 - `HAYCHAT_DEV_POSTGRES_IMAGE`: PostgreSQL image (default `docker.io/library/postgres:17`)
 - `HAYCHAT_DEV_SECCOMP`: seccomp profile for containers that run the server, replacing the generated one (for example `unconfined`)
-- `HAYCHAT_SERVER_READY_TIMEOUT_SECS`: how long to wait for the server to report readiness (default `120` for `./dev.sh`, `60` for `dev/live-proof.sh`)
+- `HAYCHAT_SERVER_READY_TIMEOUT_SECS`: how long to wait for the server to report readiness. `./dev.sh up` and `restart` default to `120`; `dev/live-proof.sh` defaults to `60`, and `./dev.sh live` and `ci` pass the variable through to it when it is set
 
 #### Without Containers
 

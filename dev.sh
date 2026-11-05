@@ -369,6 +369,10 @@ run_snapshot_in_pod() {
 	local db_args=()
 	mapfile -d '' db_args < <(database_env_args)
 	prepare_server_sandbox
+	# dev/live-proof.sh has its own readiness default; pass the timeout only when it is set.
+	if [[ -n "${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-}" ]]; then
+		run_args+=(-e "HAYCHAT_SERVER_READY_TIMEOUT_SECS=$HAYCHAT_SERVER_READY_TIMEOUT_SECS")
+	fi
 
 	source_snapshot | podman run --rm -i --init --pod "$pod" \
 		"${SERVER_SANDBOX_ARGS[@]}" "${db_args[@]}" "${run_args[@]}" "$(image_ref)" \
