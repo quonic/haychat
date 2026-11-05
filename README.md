@@ -162,7 +162,23 @@ Seeded test identities:
 
 ### Continuous Integration
 
-HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh`, the same steps as `./dev.sh ci`. The job container runs with `seccomp=unconfined` and `label=disable` because the runner host has no copy of the narrower io_uring profile.
+HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
+
+The live proof needs io_uring in the job container (see Dev Environment). forgejo-runner ignores `--security-opt` in a workflow's `container.options`, so the runner's own `config.yml` has to provide it. On the runner host, generate the profile from that host's podman default and reference it:
+
+```sh
+./dev.sh seccomp-profile /etc/forgejo-runner/seccomp-io-uring.json
+```
+
+```yaml
+# forgejo-runner config.yml
+container:
+  options: >-
+    --security-opt seccomp=/etc/forgejo-runner/seccomp-io-uring.json
+    --security-opt label=disable
+```
+
+The runner reads the profile file itself, so the path is on the runner host. `label=disable` is needed only on SELinux hosts. These options apply to every job and service container that runner starts, so a runner dedicated to this repository (with its own label in `runs-on`) keeps other repositories' jobs fully confined. `dev/live-proof.sh` prints the sandbox it got (`seccomp=filtered selinux=... io_uring_disabled=0`) before starting the server. `selinux=...container_t...` there means the options were not applied.
 
 ### Known Limitations
 

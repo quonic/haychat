@@ -80,6 +80,8 @@ Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):
 
 Toolchain:
   image [--pull]        (re)build the dev image; other commands build it when missing
+  seccomp-profile PATH  write podman's default seccomp profile plus io_uring to PATH (for a
+                        CI runner's container options; see README "Continuous Integration")
   shell                 interactive shell in the dev image with the repo mounted at /src
                         read-write (changes made there land in your working tree)
 
@@ -163,6 +165,23 @@ source_snapshot() {
 # without SELinux confinement. They stay rootless and keep the rest of the seccomp filter.
 SERVER_SANDBOX_ARGS=()
 
+# write_io_uring_seccomp_profile PATH
+# Writes podman's default seccomp profile with the three io_uring syscalls allowed to PATH.
+# Fails when the default profile cannot be read.
+write_io_uring_seccomp_profile() {
+	local output_profile=$1 source_profile
+	source_profile=$(podman info --format '{{.Host.Security.SECCOMPProfilePath}}' 2>/dev/null \
+		|| true)
+	[[ -r "$source_profile" ]] && grep -q '"syscalls": \[' "$source_profile" || return 1
+
+	local io_uring_rule='{"names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],'
+	io_uring_rule+=' "action": "SCMP_ACT_ALLOW"},'
+	mkdir -p "$(dirname -- "$output_profile")"
+	# Prepend the rule to the first "syscalls" array.
+	sed "0,/\"syscalls\": \\[/s//\"syscalls\": [ $io_uring_rule/" \
+		"$source_profile" >"$output_profile"
+}
+
 prepare_server_sandbox() {
 	[[ ${#SERVER_SANDBOX_ARGS[@]} -gt 0 ]] && return 0
 	SERVER_SANDBOX_ARGS=(--security-opt label=disable)
@@ -172,19 +191,9 @@ prepare_server_sandbox() {
 		return 0
 	fi
 
-	local source_profile output_dir output_profile
-	source_profile=$(podman info --format '{{.Host.Security.SECCOMPProfilePath}}' 2>/dev/null \
-		|| true)
-	output_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/haychat-dev"
-	output_profile="$output_dir/seccomp-io-uring.json"
-
-	if [[ -r "$source_profile" ]] && grep -q '"syscalls": \[' "$source_profile"; then
-		local io_uring_rule='{"names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],'
-		io_uring_rule+=' "action": "SCMP_ACT_ALLOW"},'
-		mkdir -p "$output_dir"
-		# Prepend the rule to the first "syscalls" array.
-		sed "0,/\"syscalls\": \\[/s//\"syscalls\": [ $io_uring_rule/" \
-			"$source_profile" >"$output_profile"
+	local output_profile
+	output_profile="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/haychat-dev/seccomp-io-uring.json"
+	if write_io_uring_seccomp_profile "$output_profile"; then
 		SERVER_SANDBOX_ARGS+=(--security-opt "seccomp=$output_profile")
 	else
 		echo "    (could not read podman's default seccomp profile; running the server" \
@@ -605,6 +614,12 @@ cmd_image() {
 	build_image "${build_args[@]}"
 }
 
+cmd_seccomp_profile() {
+	[[ $# -eq 1 ]] || die "usage: ./dev.sh seccomp-profile PATH"
+	write_io_uring_seccomp_profile "$1" || die "could not read podman's default seccomp profile"
+	echo "Wrote $1"
+}
+
 cmd_shell() {
 	ensure_image
 	# SELinux labelling is disabled rather than relabelling the repository with :z.
@@ -637,6 +652,7 @@ main() {
 		client) cmd_client "$@" ;;
 		key) cmd_key "$@" ;;
 		image) cmd_image "$@" ;;
+		seccomp-profile) cmd_seccomp_profile "$@" ;;
 		shell) cmd_shell "$@" ;;
 		*)
 			echo "Unknown command: $command" >&2
