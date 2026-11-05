@@ -169,21 +169,29 @@ State_readMarkerSendState :: proc(
 }
 
 // Sends ClientMarkRead for the conversation up to messageID and records it for the throttle.
-// Returns false, with the chat status set, when nothing went out. The answer arrives as
-// ServerReadMarker (or a protocol error); nothing changes locally until then.
+// Returns false when nothing went out, and with reportFailure also sets the chat status to
+// why. The automatic path (State_updateReadMarkers) passes false: a send that keeps failing
+// would otherwise overwrite the status line about once a second, hiding the message the user
+// needs, such as the connection state. The answer arrives as ServerReadMarker (or a protocol
+// error); nothing changes locally until then.
 State_markConversationRead :: proc(
 	state: ^State,
 	kind: common.ReadMarkerKind,
 	serverID, conversationID, messageID: int,
 	now: time.Tick,
+	reportFailure := true,
 ) -> bool {
 	if conversationID <= 0 || messageID <= 0 {
-		State_setChatStatus(state, "Nothing to mark read")
+		if reportFailure {
+			State_setChatStatus(state, "Nothing to mark read")
+		}
 		return false
 	}
 	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
 	if transportIndex < 0 || !State_isServerConnected(state, serverID) {
-		State_setChatStatus(state, "Not connected to the server")
+		if reportFailure {
+			State_setChatStatus(state, "Not connected to the server")
+		}
 		return false
 	}
 	transport := &state.serverTransports[transportIndex]
@@ -193,12 +201,15 @@ State_markConversationRead :: proc(
 	send.sentAt = now
 	ClientNetworkWorker_lock(state.networkWorker)
 	sent := readMarkerSendBridge(transport, kind, conversationID, messageID)
-	if !sent && len(transport.lastError) > 0 {
+	reported := false
+	if !sent && reportFailure && len(transport.lastError) > 0 {
 		State_setChatStatus(state, transport.lastError)
+		reported = true
 	}
 	ClientNetworkWorker_unlock(state.networkWorker)
 	if !sent {
-		if len(state.chat_status_message) == 0 {
+		// Whatever the status said before is not this failure's reason.
+		if reportFailure && !reported {
 			State_setChatStatus(state, "Failed to mark read")
 		}
 		return false
@@ -213,6 +224,23 @@ State_markConversationRead :: proc(
 // Returns how long until a throttled mark-read may go out, so the caller wakes up for it, or
 // -1 when nothing is waiting.
 State_updateReadMarkers :: proc(state: ^State, now: time.Tick) -> time.Duration {
+	return State_markViewedConversation(state, now, ignoreThrottle = false)
+}
+
+// Marks the viewed conversation read right away, ignoring the throttle. The GUI calls it as the
+// window loses focus, while the conversation still counts as viewed: a message that arrived
+// while it was viewed did not count toward the badge, so it must not stay behind a throttled
+// mark-read that would never go out once the window is unfocused.
+State_flushReadMarkers :: proc(state: ^State, now: time.Tick) {
+	_ = State_markViewedConversation(state, now, ignoreThrottle = true)
+}
+
+@(private = "file")
+State_markViewedConversation :: proc(
+	state: ^State,
+	now: time.Tick,
+	ignoreThrottle: bool,
+) -> time.Duration {
 	serverID := state.selected_server_id
 	kind := common.ReadMarkerKind.Room
 	conversationID := state.selected_channel_id
@@ -232,13 +260,21 @@ State_updateReadMarkers :: proc(state: ^State, now: time.Tick) -> time.Duration 
 	if newest <= send.sentMessageID {
 		return -1
 	}
-	if send.sentAt != {} {
+	if !ignoreThrottle && send.sentAt != {} {
 		elapsed := time.tick_diff(send.sentAt, now)
 		if elapsed < READ_MARKER_MIN_INTERVAL {
 			return READ_MARKER_MIN_INTERVAL - elapsed
 		}
 	}
-	State_markConversationRead(state, kind, serverID, conversationID, newest, now)
+	State_markConversationRead(
+		state,
+		kind,
+		serverID,
+		conversationID,
+		newest,
+		now,
+		reportFailure = false,
+	)
 	return -1
 }
 

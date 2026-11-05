@@ -214,6 +214,11 @@ appTrackWindowFocus :: proc(state: ^State, event: ^SDL.Event, scripted: bool) {
 	case .WINDOW_FOCUS_GAINED:
 		state.windowFocused = true
 	case .WINDOW_FOCUS_LOST:
+		if !scripted {
+			// While the conversation still counts as viewed: send a throttled mark-read now,
+			// or the messages seen in the last second would count neither as read nor unread.
+			State_flushReadMarkers(state, time.tick_now())
+		}
 		state.windowFocused = scripted
 	}
 }
