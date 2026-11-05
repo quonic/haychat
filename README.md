@@ -164,21 +164,30 @@ Seeded test identities:
 
 HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
 
-The live proof needs io_uring in the job container (see Dev Environment). forgejo-runner ignores `--security-opt` in a workflow's `container.options`, so the runner's own `config.yml` has to provide it. On the runner host, generate the profile from that host's podman default and reference it:
+The live proof needs io_uring in the job container (see Dev Environment), which takes two changes on a podman-backed runner host. Both apply to every container that runner starts.
 
-```sh
-./dev.sh seccomp-profile /etc/forgejo-runner/seccomp-io-uring.json
-```
+1. Seccomp: make the io_uring profile podman's default. forgejo-runner sends `--security-opt seccomp=FILE` as inline JSON, Docker style, which podman's Docker-compatible API rejects ("opening seccomp profile failed ... file name too long"). Instead, generate the profile from the host's own podman default and point `containers.conf` at it. Use `/etc/containers/containers.conf.d/` when the runner talks to rootful podman, or `~/.config/containers/containers.conf.d/` of the runner's user for rootless podman:
 
-```yaml
-# forgejo-runner config.yml
-container:
-  options: >-
-    --security-opt seccomp=/etc/forgejo-runner/seccomp-io-uring.json
-    --security-opt label=disable
-```
+   ```sh
+   ./dev.sh seccomp-profile /etc/forgejo-runner/seccomp-io-uring.json
+   ```
 
-The runner reads the profile file itself, so the path is on the runner host. `label=disable` is needed only on SELinux hosts. These options apply to every job and service container that runner starts, so a runner dedicated to this repository (with its own label in `runs-on`) keeps other repositories' jobs fully confined. `dev/live-proof.sh` prints the sandbox it got (`seccomp=filtered selinux=... io_uring_disabled=0`) before starting the server. `selinux=...container_t...` there means the options were not applied.
+   ```toml
+   # containers.conf.d/50-io-uring.conf
+   [containers]
+   seccomp_profile = "/etc/forgejo-runner/seccomp-io-uring.json"
+   ```
+
+   Restart the podman API service (`podman.socket` / `podman.service`) afterwards.
+
+2. SELinux (only on SELinux hosts): forgejo-runner ignores `--security-opt` in a workflow's `container.options`, so set it in the runner's `config.yml` and restart the runner:
+
+   ```yaml
+   container:
+     options: --security-opt label=disable
+   ```
+
+`dev/live-proof.sh` prints the sandbox it got before starting the server. A working runner shows `seccomp=filtered selinux=...spc_t... io_uring_disabled=0`. `container_t` means step 2 is missing; seccomp with io_uring still blocked shows up as the web admin's `acquire_err == nil` assertion.
 
 ### Known Limitations
 

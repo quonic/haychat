@@ -81,7 +81,7 @@ Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):
 Toolchain:
   image [--pull]        (re)build the dev image; other commands build it when missing
   seccomp-profile PATH  write podman's default seccomp profile plus io_uring to PATH (for a
-                        CI runner's container options; see README "Continuous Integration")
+                        CI runner host's containers.conf; see README "Continuous Integration")
   shell                 interactive shell in the dev image with the repo mounted at /src
                         read-write (changes made there land in your working tree)
 
