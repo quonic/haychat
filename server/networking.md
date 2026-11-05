@@ -11,7 +11,8 @@ clients ◄─ENet/UDP─► network thread ◄─IPC─► main thread ◄─IP
 ```
 
 - network → main: `NetworkPeerConnected`, `NetworkDataReceived`, `NetworkPeerDisconnected`.
-- main → network: `NetworkSendData`, `NetworkBroadcast`, `NetworkDisconnectPeer`, and the
+- main → network: `NetworkSendData`, `NetworkBroadcast`, `NetworkDisconnectPeer`, the voice
+  commands `NetworkVoiceSessionOpen`, `NetworkVoiceRoute` and `NetworkVoiceReset`, and the
   `ProcessShutdown` / `ProcessRestart` signals.
 - main ↔ database: `DatabaseQuery` / `DatabaseQueryResult`; main ↔ web admin: `Admin*`.
 
@@ -47,12 +48,48 @@ most about 2 ms for the network thread to see it. Before this design the loop po
 message per `host_service(…, 100)` call, so outbound traffic drained at one message per
 inbound event plus ten per second and fan-out queued without bound.
 
-Received packets are copied into `NetworkDataReceived` and go straight to the router; the
-network thread does not decrypt or parse them. The router owns per-peer transport state.
+Received control packets (channel 1) are copied into `NetworkDataReceived` and go straight to
+the router; the network thread does not decrypt or parse them. The router owns their
+transport state.
 
 `NetworkSendData` and `NetworkBroadcast` carry `unreliable` (default `false`): reliable sends
 use `ENet.PacketFlag.RELIABLE`, unreliable ones use no flag (sequenced, may drop). Nothing sends
-unreliable packets yet; voice will.
+unreliable packets through them; voice goes through the relay below.
+
+## Voice channel (ENet channel 2)
+
+Voice datagrams never leave the network thread. `networkServerLoop` owns a `VoiceRelay`
+(`server/voice_relay.odin`) with each authenticated peer's voice send and receive state and the
+recipient list of every voice room:
+
+```text
+client ─ch2─► handlePeerData ─► VoiceRelay_handleDatagram ─► peer_send(ch2, UNSEQUENCED) × N-1
+                                  │                                      ▲
+router ─NetworkVoiceSessionOpen──►┤ (keys, once, at auth success)        │ one host_flush
+       ─NetworkVoiceRoute────────►┤ (full room recipient set per change)  │ per loop pass
+       ─NetworkVoiceReset────────►┘ (network service stop)
+```
+
+Per datagram, in order, each failure counted by reason and none of them disconnecting the peer:
+
+1. Unknown peer (no voice session) or not in a room: drop.
+2. Token bucket: `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, burst a third of it. Before any AEAD
+   work, so a flood costs little.
+3. `openVoiceDatagram`: malformed, replayed, too old, bad tag, inactive.
+4. `decodeClientVoiceFrame`; then wrong room ID, muted sender, Opus payload over
+   `HAYCHAT_VOICE_MAX_FRAME_BYTES`, or a TOC byte that is not exactly 20 ms
+   (`opusPacketIsVoiceFrameDuration`; the server needs no libopus).
+5. `encodeServerVoiceFrame` in place with the sender's user ID, then for every other room
+   member that is not deafened: `sealVoiceDatagram` with that member's send state and
+   `ENet.peer_send` on channel 2 with `UNSEQUENCED`, so a late frame still reaches the jitter
+   buffer. The sender never gets its own frame back.
+
+The relay uses fixed scratch buffers, so a frame costs no allocation of its own (ENet copies each
+packet). It logs nothing per packet. A disconnect (`handlePeerDisconnect`, or a router-commanded
+`NetworkDisconnectPeer`) removes the peer from the relay at once and wipes its keys, before the
+router hears about it. A `NetworkVoiceSessionOpen` for a peer that already disconnected is
+dropped and wiped. The counters are published for web admin `/status` with atomic stores
+(`voiceRelayPublishedStats`).
 
 ## Logging
 

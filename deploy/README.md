@@ -192,12 +192,17 @@ deployment:
 | --- | --- |
 | The image | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_WEB_ADMIN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE` |
 | The quadlet unit (or your `podman run`) | `HAYCHAT_DATABASE_URL=127.0.0.1`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_NAME`, and `HAYCHAT_DATABASE_PASS` from the `haychat-db-password` secret |
-| You, in `server.env` (all optional) | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_WEB_ADMIN_TOKEN`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY` |
+| You, in `server.env` (all optional) | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_WEB_ADMIN_TOKEN`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES` |
 
 `server.env` holds secrets when you set the web admin token or a fixed server key, so keep it
 at mode `0600`. To keep the server listening on another port inside the pod, set
 `HAYCHAT_LISTEN_PORT` and change the pod's `PublishPort=` to match; changing only the left
 side of `PublishPort=` is simpler.
+
+Voice is on by default in every room. `HAYCHAT_VOICE_ENABLED=false` turns it off;
+`HAYCHAT_VOICE_MAX_PARTICIPANTS` (default 25) caps each room, and
+`HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` (60) and `HAYCHAT_VOICE_MAX_FRAME_BYTES` (512) bound
+what one connection may send. README.md "Server Configuration" describes each one.
 
 ## Network
 
@@ -209,7 +214,8 @@ sudo firewall-cmd --permanent --add-port=12345/udp && sudo firewall-cmd --reload
 sudo ufw allow 12345/udp                                                           # ufw
 ```
 
-Nothing else needs to be reachable. Give testers the host name (or public IP address) and the
+Voice uses the same port (it is another ENet channel on the same connection), so there is no
+second port to open. Nothing else needs to be reachable. Give testers the host name (or public IP address) and the
 port. The transport is encrypted (X25519 key exchange, XChaCha20-Poly1305) and every client
 pins the server's identity key on its first connection, so no TLS certificate is involved.
 
@@ -276,7 +282,9 @@ already bound to your key, so you do not need it.
 ## Web Admin
 
 The web admin listens on `127.0.0.1:8080` inside the pod only; it is never published. `GET
-/status` is an unauthenticated health check (the quadlet unit uses it as `HealthCmd`). The
+/status` is an unauthenticated health check (the quadlet unit uses it as `HealthCmd`); it also
+lists voice counters (rooms, participants, frames in and out, drops by reason; see README.md
+"Web Admin"). The
 other routes (`/peers`, `/logs`, `POST /shutdown`, `POST /restart`) need the bearer token, which
 the server generates in its storage volume unless `HAYCHAT_WEB_ADMIN_TOKEN` is set. Call them
 from inside the container:

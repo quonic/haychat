@@ -33,6 +33,7 @@ PendingDBRequestType :: enum {
 	GetDirectHistory,
 	ListDirectConversations,
 	ListUsers,
+	JoinVoiceMemberCheck,
 	MarkRead,
 }
 
@@ -48,6 +49,9 @@ PendingDBRequest :: struct {
 	// Mark-read: which kind of conversation roomID or targetUserID names.
 	readMarkerKind:   common.ReadMarkerKind,
 	recipientUserIDs: [dynamic]int,
+	// ClientJoinVoice: the flags the joiner asked for, applied once the membership check passes.
+	voiceMuted:       bool,
+	voiceDeafened:    bool,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -126,6 +130,13 @@ MainRouterState :: struct {
 	serverIdentityPublicKey:  common.IdentityPublicKeyBytes,
 	adminPublicKey:           common.IdentityPublicKeyBytes,
 	hasAdminPublicKey:        bool,
+	// Voice control plane (voice.odin): roomID -> its voice session, removed when empty, and
+	// peerID -> the room that session is in.
+	voiceRooms:               map[int]VoiceRoomState,
+	peerVoiceRoom:            map[u32]int,
+	// Voice datagrams that reached the router. The network thread's relay consumes channel 2,
+	// so this stays 0 unless something routes voice here by mistake.
+	unexpectedVoiceDatagrams: u64,
 }
 
 MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
@@ -134,6 +145,8 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 		peerSessions            = make(map[u32]RouterPeerSession),
 		pendingDatabaseRequests = make(map[u64]PendingDBRequest),
 		nextRequestID           = 1,
+		voiceRooms              = make(map[int]VoiceRoomState),
+		peerVoiceRoom           = make(map[u32]int),
 	}
 
 	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
@@ -166,6 +179,7 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
+	MainRouterState_voiceFreeState(state)
 }
 
 MainRouterState_generateRequestID :: proc(state: ^MainRouterState) -> u64 {
@@ -349,7 +363,8 @@ MainRouterState_protocolViolation :: proc(
 		session.isAuthenticated = false
 		MainRouterState_setPeerSession(state, peerID, session)
 		// The session no longer counts as online, and its later disconnect event will not
-		// see it as authenticated, so presence must be settled here.
+		// see it as authenticated, so presence and voice must be settled here.
+		MainRouterState_voiceLeave(pm, state, peerID, skipSelf = true)
 		if wasAuthenticated {
 			MainRouterState_noteSessionEnded(
 				pm,
@@ -422,7 +437,18 @@ MainRouterState_completeAuthentication :: proc(
 	wasOnline := MainRouterState_isUserOnline(state, userID)
 	session.isAuthenticated = true
 	session.authenticatedUserID = userID
+	// The voice halves move to the network thread's relay (Q8). Taken from this copy before it
+	// is stored, so the stored session holds zeros and the router never touches voice crypto.
+	voiceSend, voiceReceive := common.TransportState_takeVoiceState(&session.transport)
 	MainRouterState_setPeerSession(state, peerID, session)
+	MainRouterState_sendVoiceSessionOpen(
+		pm,
+		peerID,
+		userID,
+		session.transport.sessionID,
+		&voiceSend,
+		&voiceReceive,
+	)
 	if renamed {
 		MainRouterState_renameUserSessions(state, userID, session.clientNickname)
 	}
@@ -519,8 +545,9 @@ MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
 	for _, request in state.pendingDatabaseRequests {
 		PendingDBRequest_deinit(request)
 	}
-	for _, session in state.peerSessions {
-		delete(session.clientNickname)
+	// By reference, so each stored transport is wiped, not a copy of it.
+	for _, &session in state.peerSessions {
+		RouterPeerSession_deinit(&session)
 	}
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
@@ -573,6 +600,14 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .ListUsers,
 		     .MarkRead:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
+		case .JoinVoiceMemberCheck:
+			MainRouterState_sendVoiceJoinRejected(
+				pm,
+				state,
+				request.peerID,
+				request.roomID,
+				message,
+			)
 		case:
 		}
 		PendingDBRequest_deinit(request)
@@ -589,6 +624,7 @@ MainRouterState_prepareForProcessStop :: proc(
 	case .Network:
 		MainRouterState_failPendingDatabaseRequests(pm, state, message)
 		MainRouterState_clearTransientRuntimeState(state)
+		MainRouterState_voiceReset(pm, state)
 	case .Database:
 		MainRouterState_failPendingDatabaseRequests(pm, state, message)
 	case .WebAdmin:
@@ -1175,6 +1211,12 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientListDirectConversations(pm, state, peerID, packet.payload)
 	case .ClientUserList:
 		MainRouterState_handleClientListUsers(pm, state, peerID, packet.payload)
+	case .ClientJoinVoice:
+		MainRouterState_handleClientJoinVoice(pm, state, peerID, packet.payload)
+	case .ClientLeaveVoice:
+		MainRouterState_handleClientLeaveVoice(pm, state, peerID, packet.payload)
+	case .ClientVoiceState:
+		MainRouterState_handleClientVoiceState(pm, state, peerID, packet.payload)
 	case .ClientMarkRead:
 		MainRouterState_handleClientMarkRead(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
@@ -1296,7 +1338,13 @@ MainRouterState_handleNetworkDataReceived :: proc(
 	// Only the control channel reaches the router. Anything else is dropped without a protocol
 	// violation: datagrams on other channels (voice is channel 2) are not authenticated by
 	// ENet, so letting them end a session would hand any spoofer a way to disconnect people.
-	if msg.channel != .Chat {
+	switch msg.channel {
+	case .Chat:
+	case .Voice:
+		// The network thread's VoiceRelay consumes channel 2; count anything that slips by.
+		state.unexpectedVoiceDatagrams += 1
+		return
+	case .None, .Video, .Screenshare, .FileTransfer:
 		return
 	}
 	if len(msg.data) == 0 {
@@ -1417,6 +1465,12 @@ MainRouterState_handleDatabaseResult :: proc(
 			request.peerID,
 			.ServerListRooms,
 			common.ServerListRoomsPayload{rooms = roomList.rooms},
+		)
+		MainRouterState_voiceSendActiveParticipants(
+			pm,
+			state,
+			request.peerID,
+			roomList.rooms[:],
 		)
 	case .PostChatMessage:
 		posted, postedOK := response.result.(common.DatabasePostRoomChatMessageResult)
@@ -1641,6 +1695,8 @@ MainRouterState_handleDatabaseResult :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
 			return
 		}
+		// Voice first, so a client leaves the room's voice session before it drops the room.
+		MainRouterState_voiceEvictRoom(pm, state, request.roomID, VOICE_LEFT_ROOM_DELETED)
 		deletePayload := common.ServerRoomMutationPayload {
 			roomId  = request.roomID,
 			changed = true,
@@ -1697,6 +1753,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 		if mutation.changed {
+			MainRouterState_voiceNoteRoomMember(state, request.roomID, request.targetUserID)
 			MainRouterState_sendMessageToUserID(
 				pm,
 				state,
@@ -1741,6 +1798,13 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 		if mutation.changed {
+			MainRouterState_voiceEvictUser(
+				pm,
+				state,
+				request.roomID,
+				request.targetUserID,
+				VOICE_LEFT_REMOVED_FROM_ROOM,
+			)
 			MainRouterState_sendMessageToUserID(
 				pm,
 				state,
@@ -1757,6 +1821,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleDirectConversationListResult(pm, state, request, response)
 	case .ListUsers:
 		MainRouterState_handleUserDirectoryResult(pm, state, request, response)
+	case .JoinVoiceMemberCheck:
+		MainRouterState_handleJoinVoiceMemberCheckResult(pm, state, request, response)
 	case .MarkRead:
 		MainRouterState_handleMarkReadResult(pm, state, request, response)
 	}
@@ -1969,8 +2035,16 @@ mainLoopHandleMessage :: proc(
 	msg: Message,
 ) -> bool {
 	switch m in msg {
-	case NetworkSendData, NetworkBroadcast, NetworkDisconnectPeer:
+	case NetworkSendData,
+	     NetworkBroadcast,
+	     NetworkDisconnectPeer,
+	     NetworkVoiceRoute,
+	     NetworkVoiceReset:
 	// Commands are generated by main and should not loop back here.
+	case NetworkVoiceSessionOpen:
+		// Never addressed to main; wipe the keys rather than drop them as they are.
+		stray := msg
+		IPC__message_deinit(&stray)
 	case NetworkPeerConnected:
 		routerState.connectedPeers[m.peerId] = true
 		MainRouterState_setPeerSession(routerState, m.peerId, RouterPeerSession_init())
@@ -1981,8 +2055,12 @@ mainLoopHandleMessage :: proc(
 		delete(m.data)
 	case AdminQueryStatus:
 		uptime := i64(time.duration_seconds(time.since(pm.startTime)))
+		voiceRooms, voiceParticipants := MainRouterState_voiceCounts(routerState)
 		sync.mutex_lock(&pm.processMutex)
 		response := AdminQueryStatusResponse {
+			voiceRooms             = voiceRooms,
+			voiceParticipants      = voiceParticipants,
+			voiceRelay             = VoiceRelayStats_load(&voiceRelayPublishedStats),
 			uptime                 = uptime,
 			connectedPeers         = len(routerState.connectedPeers),
 			networkRunning         = pm.networkProcess.isRunning,

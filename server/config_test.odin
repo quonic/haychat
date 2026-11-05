@@ -153,3 +153,111 @@ testConfigLogLevelDebugGatesPerPacketLogs :: proc(t: ^testing.T) {
 	assert(!serverLogLevelIsDebug("info"), "expected the default level info to hide debug lines")
 	assert(!serverLogLevelIsDebug(""), "expected an empty log level to disable debug lines")
 }
+
+@(test)
+testConfigVoiceKeysDefaultParseAndClamp :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
+	_ = t
+	keys := [?]string {
+		"HAYCHAT_VOICE_ENABLED",
+		"HAYCHAT_VOICE_MAX_PARTICIPANTS",
+		"HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND",
+		"HAYCHAT_VOICE_MAX_FRAME_BYTES",
+	}
+	// Restore whatever the environment had, so the test leaves no trace.
+	saved: [len(keys)]string
+	for key, index in keys {
+		saved[index] = os.get_env(key, context.temp_allocator)
+	}
+	defer for key, index in keys {
+		if len(saved[index]) > 0 {
+			os.set_env(key, saved[index])
+		} else {
+			os.unset_env(key)
+		}
+	}
+
+	for key in keys {
+		os.unset_env(key)
+	}
+	config: ServerConfig
+	loadVoiceConfig(&config)
+	assert(
+		config.voiceEnabled == DEFAULT_VOICE_ENABLED &&
+		config.voiceMaxParticipants == DEFAULT_VOICE_MAX_PARTICIPANTS &&
+		config.voiceMaxPacketsPerSecond == DEFAULT_VOICE_MAX_PACKETS_PER_SECOND &&
+		config.voiceMaxFrameBytes == DEFAULT_VOICE_MAX_FRAME_BYTES,
+		fmt.tprintf("expected the voice defaults true/25/60/512, got %v", config),
+	)
+
+	os.set_env("HAYCHAT_VOICE_ENABLED", " Off ")
+	os.set_env("HAYCHAT_VOICE_MAX_PARTICIPANTS", "8")
+	os.set_env("HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND", "75")
+	os.set_env("HAYCHAT_VOICE_MAX_FRAME_BYTES", "128")
+	loadVoiceConfig(&config)
+	assert(
+		!config.voiceEnabled &&
+		config.voiceMaxParticipants == 8 &&
+		config.voiceMaxPacketsPerSecond == 75 &&
+		config.voiceMaxFrameBytes == 128,
+		fmt.tprintf("expected false/8/75/128 from the environment, got %v", config),
+	)
+
+	// Out of range values clamp; an unparsable one falls back to the default.
+	os.set_env("HAYCHAT_VOICE_ENABLED", "maybe")
+	os.set_env("HAYCHAT_VOICE_MAX_PARTICIPANTS", "0")
+	os.set_env("HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND", "50000")
+	os.set_env("HAYCHAT_VOICE_MAX_FRAME_BYTES", "1275")
+	loadVoiceConfig(&config)
+	assert(
+		config.voiceEnabled == DEFAULT_VOICE_ENABLED &&
+		config.voiceMaxParticipants == VOICE_MAX_PARTICIPANTS_MIN &&
+		config.voiceMaxPacketsPerSecond == VOICE_MAX_PACKETS_PER_SECOND_MAX &&
+		config.voiceMaxFrameBytes == common.VOICE_OPUS_MAX_BYTES,
+		fmt.tprintf("expected default/1/1000/512 after clamping, got %v", config),
+	)
+
+	os.set_env("HAYCHAT_VOICE_MAX_PARTICIPANTS", "500")
+	os.set_env("HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND", "-3")
+	os.set_env("HAYCHAT_VOICE_MAX_FRAME_BYTES", "12")
+	loadVoiceConfig(&config)
+	assert(
+		config.voiceMaxParticipants == VOICE_MAX_PARTICIPANTS_MAX &&
+		config.voiceMaxPacketsPerSecond == VOICE_MAX_PACKETS_PER_SECOND_MIN &&
+		config.voiceMaxFrameBytes == VOICE_MAX_FRAME_BYTES_MIN,
+		fmt.tprintf("expected 200/1/64 after clamping, got %v", config),
+	)
+}
+
+@(test)
+testWebAdminStatusListsVoiceCounters :: proc(t: ^testing.T) {
+	_ = t
+	status := AdminQueryStatusResponse {
+		voiceRooms        = 2,
+		voiceParticipants = 5,
+	}
+	status.voiceRelay.datagramsIn = 100
+	status.voiceRelay.framesRelayed = 90
+	status.voiceRelay.datagramsOut = 360
+	status.voiceRelay.drops[.RateLimited] = 7
+	status.voiceRelay.drops[.BadTag] = 3
+	text := webAdminFormatStatus(status, context.temp_allocator)
+	for line in ([]string {
+			"voice_rooms=2",
+			"voice_participants=5",
+			"voice_frames_in=100",
+			"voice_frames_relayed=90",
+			"voice_frames_out=360",
+			"voice_send_failures=0",
+			"voice_drops_rate_limited=7",
+			"voice_drops_bad_tag=3",
+			"voice_drops_bad_duration=0",
+		}) {
+		assert(
+			strings.contains(text, fmt.tprintf("\n%s\n", line)) ||
+			strings.has_suffix(text, fmt.tprintf("\n%s", line)),
+			fmt.tprintf("expected /status to include %q, got:\n%s", line, text),
+		)
+	}
+}

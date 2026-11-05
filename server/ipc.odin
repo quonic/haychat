@@ -19,6 +19,9 @@ Message :: union {
 	NetworkSendData,
 	NetworkBroadcast,
 	NetworkDisconnectPeer,
+	NetworkVoiceSessionOpen,
+	NetworkVoiceRoute,
+	NetworkVoiceReset,
 	// Web admin messages
 	AdminQueryStatus,
 	AdminQueryStatusResponse,
@@ -88,6 +91,38 @@ NetworkDisconnectPeer :: struct {
 	peerId: u32,
 }
 
+// Router -> network thread, right after ServerAuthSuccess: the voice halves of the session's
+// transport, taken out with common.TransportState_takeVoiceState. From here on only the
+// network thread's VoiceRelay seals and opens this peer's voice datagrams; the router never
+// touches voice crypto again. The keys are wiped wherever this message is freed
+// (IPC__message_deinit), sent or not, so they never linger in a dropped message.
+NetworkVoiceSessionOpen :: struct {
+	peerId:    u32,
+	userId:    int,
+	sessionID: common.SessionID,
+	send:      common.ChannelSendState,
+	receive:   common.VoiceReceiveState,
+}
+
+NetworkVoiceRouteMember :: struct {
+	peerId:   u32,
+	muted:    bool, // the relay drops this peer's frames
+	deafened: bool, // the relay sends this peer nothing
+}
+
+// Router -> network thread: the complete recipient set of one room's voice session, sent on
+// every join, leave, mute or deafen change. It replaces the relay's previous set for roomId;
+// an empty members list removes the room. members is owned.
+NetworkVoiceRoute :: struct {
+	roomId:  int,
+	members: []NetworkVoiceRouteMember,
+}
+
+// Router -> network thread: forget every voice session and route. Sent when the network
+// service is stopped or restarted, so commands still queued from before the stop cannot
+// attach old keys or routes to peers of the new service, whose peer IDs start over.
+NetworkVoiceReset :: struct {}
+
 AdminQueryStatus :: struct {}
 
 AdminQueryStatusResponse :: struct {
@@ -100,6 +135,11 @@ AdminQueryStatusResponse :: struct {
 	webAdminRestartPending: bool,
 	databaseRestartPending: bool,
 	shutdownRequested:      bool,
+	// Voice (Q9): rooms and participants from the router, which owns the control plane, and the
+	// counters the network thread's relay last published (voiceRelayPublishedStats).
+	voiceRooms:             int,
+	voiceParticipants:      int,
+	voiceRelay:             VoiceRelayStats,
 }
 
 AdminPeerInfo :: struct {
@@ -198,6 +238,7 @@ IPC_Ring_init :: proc(
 }
 
 IPC_Ring_deinit :: proc(ring: ^IPC_Ring($T)) {
+	IPC_Ring__wipeItems(ring.items)
 	delete(ring.items, ring.allocator)
 	ring^ = {}
 }
@@ -210,6 +251,14 @@ IPC_Ring_capacity :: proc(ring: ^IPC_Ring($T)) -> int {
 	return len(ring.items)
 }
 
+// Queued messages can carry voice keys (NetworkVoiceSessionOpen), so a buffer is zeroed before
+// it goes back to the allocator; otherwise a grow would leave copies of them in freed memory.
+IPC_Ring__wipeItems :: proc(items: []$T) {
+	if len(items) > 0 {
+		mem.zero_explicit(raw_data(items), len(items) * size_of(T))
+	}
+}
+
 // IPC_Ring__grow copies the items into a buffer twice as large, oldest first, so head is 0.
 IPC_Ring__grow :: proc(ring: ^IPC_Ring($T)) {
 	if ring.allocator.procedure == nil {
@@ -220,6 +269,7 @@ IPC_Ring__grow :: proc(ring: ^IPC_Ring($T)) {
 	for i in 0 ..< ring.count {
 		newItems[i] = ring.items[(ring.head + i) % len(ring.items)]
 	}
+	IPC_Ring__wipeItems(ring.items)
 	delete(ring.items, ring.allocator)
 	ring.items = newItems
 	ring.head = 0
@@ -238,8 +288,9 @@ IPC_Ring_pop :: proc(ring: ^IPC_Ring($T)) -> (T, bool) {
 		return {}, false
 	}
 	item := ring.items[ring.head]
-	// Clear the slot so the ring never holds a second reference to popped, owned data.
-	ring.items[ring.head] = {}
+	// Clear the slot so the ring never holds a second reference to popped, owned data, nor a
+	// second copy of voice keys.
+	mem.zero_explicit(&ring.items[ring.head], size_of(T))
 	ring.head = (ring.head + 1) % len(ring.items)
 	ring.count -= 1
 	if ring.count == 0 {
@@ -373,13 +424,19 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 }
 
 IPC__message_deinit :: proc(msg: ^Message) {
-	#partial switch m in msg^ {
+	#partial switch &m in msg^ {
 	case NetworkDataReceived:
 		delete(m.data)
 	case NetworkSendData:
 		delete(m.data)
 	case NetworkBroadcast:
 		delete(m.data)
+	case NetworkVoiceSessionOpen:
+		// m is a reference into msg, so this wipes the queued copy itself.
+		common.ChannelSendState_wipe(&m.send)
+		common.VoiceReceiveState_wipe(&m.receive)
+	case NetworkVoiceRoute:
+		delete(m.members)
 	case AdminGetPeersResponse:
 		delete(m.peers)
 	case AdminGetLogsResponse:
@@ -474,7 +531,12 @@ IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_K
 		// Switch on the variant the union holds. `type_of(msg)` is `Message` itself, so a
 		// typeid switch on it never matched a variant and routed every message to Unknown.
 		#partial switch _ in msg {
-		case NetworkSendData, NetworkBroadcast, NetworkDisconnectPeer:
+		case NetworkSendData,
+		     NetworkBroadcast,
+		     NetworkDisconnectPeer,
+		     NetworkVoiceSessionOpen,
+		     NetworkVoiceRoute,
+		     NetworkVoiceReset:
 			return .Network
 		case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
 			return .WebAdmin

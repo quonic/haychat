@@ -3,8 +3,11 @@
 **Date:** 2026-11-05
 **Base:** `main` at `60ea446`
 **Status:** Design. H0 (server network loop, PR #8), H1 (per-channel transport keys and
-replay window, protocol 9) and H2 (binary voice frames, TOC check, kind-bound voice AAD and the
-voice control messages, protocol 10) are implemented; H3–H8 follow section 7.
+replay window, protocol 9), H2 (binary voice frames, TOC check, kind-bound voice AAD and the
+voice control messages, protocol 10), H3 (server voice: router control plane in
+`server/voice.odin`, network-thread relay in `server/voice_relay.odin`, no protocol change) and
+H4 (client voice engine) are implemented; H5–H8 follow section 7. H3 chose the cached member
+list for leave and state fan-out (4.2), and atomics for the `/status` counters (Q9).
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport

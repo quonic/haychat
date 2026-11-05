@@ -39,7 +39,7 @@ networkTestCreatePacket :: proc(data: []u8) -> ^ENet.Packet {
 }
 
 @(test)
-testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
+testHandlePeerDataForwardsControlPacketsToTheRouter :: proc(t: ^testing.T) {
 	_ = t
 
 	mainFd, networkFd := networkTestInitNetworkIPC("network_event_handler_test_network")
@@ -54,13 +54,7 @@ testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
 	enetPeer := ENet.Peer{}
 	enetPeer.data = rawptr(uintptr(42))
 
-	handlePeerData(
-		&peerManager,
-		&enetPeer,
-		packet,
-		u8(NetworkChannel.Voice),
-		int(networkFd),
-	)
+	handlePeerData(&peerManager, &enetPeer, packet, u8(NetworkChannel.Chat), int(networkFd), nil)
 
 	msg, err := IPC_Client_poll(mainFd)
 	assert(err == nil, "expected main IPC queue to receive a network data message")
@@ -68,7 +62,7 @@ testHandlePeerDataPropagatesInboundChannel :: proc(t: ^testing.T) {
 	#partial switch m in msg {
 	case NetworkDataReceived:
 		assert(m.peerId == 42, "expected peer ID to be forwarded")
-		assert(m.channel == .Voice, "expected inbound ENet channel to be forwarded")
+		assert(m.channel == .Chat, "expected inbound ENet channel to be forwarded")
 		assert(len(m.data) == 4, "expected packet data to be copied")
 		delete(m.data)
 	case:
