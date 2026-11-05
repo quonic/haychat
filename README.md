@@ -42,7 +42,8 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | Command | What it runs |
 | --- | --- |
 | `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat proof and the harness smoke test |
+| `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, and chat (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 
 Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
