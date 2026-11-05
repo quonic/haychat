@@ -8,8 +8,15 @@ import "core:strings"
 import "core:time"
 import "vendor:ENet"
 
+// ENet channel 1 carries every control packet (the handshake and all CBOR traffic); channel
+// 2 is reserved for voice datagrams. The host allocates channels 0..4, matching the server.
 STARTUP_AUTH_CHANNEL_CHAT :: u8(1)
+STARTUP_AUTH_CHANNEL_VOICE :: u8(2)
 STARTUP_AUTH_CHANNEL_COUNT :: uint(5)
+
+#assert(STARTUP_AUTH_CHANNEL_CHAT == u8(common.TransportChannel.Control))
+#assert(STARTUP_AUTH_CHANNEL_VOICE == u8(common.TransportChannel.Voice))
+#assert(uint(STARTUP_AUTH_CHANNEL_VOICE) < STARTUP_AUTH_CHANNEL_COUNT)
 
 ClientTransportResult :: struct {
 	responsePacketBytes: []u8,
@@ -112,6 +119,10 @@ ClientServerTransport :: struct {
 	// Set when the server or identity config cannot produce a valid ClientHello at all.
 	configInvalid:             bool,
 	connection:                ClientConnection,
+	// Packets received on any channel but control, dropped unread. Owned by the network
+	// worker. Nothing uses the voice channel yet; this keeps a stray datagram from being
+	// parsed as a control packet, which would end the session.
+	droppedNonControlPackets:  u64,
 }
 
 ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, message: string) {
@@ -149,7 +160,7 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.serverEphemeralPublicKey = {}
 	transport.sessionID = {}
 	transport.authChallenge = {}
-	transport.pendingKeys = {}
+	common.DirectionalTransportKeys_wipe(&transport.pendingKeys)
 	transport.pendingKeysReady = false
 	transport.authenticatedUserID = 0
 	transport.authenticatedIsAdmin = false
@@ -164,6 +175,8 @@ ClientServerTransport_deinit :: proc(transport: ^ClientServerTransport) {
 	delete(transport.lastError)
 	delete(transport.pinnedServerPublicKey)
 	delete(transport.pinnedServerFingerprint)
+	common.TransportState_deinit(&transport.transport)
+	common.DirectionalTransportKeys_wipe(&transport.pendingKeys)
 	transport^ = {}
 }
 
@@ -566,6 +579,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 			transport.pendingKeys,
 			transport.transport.peerTrustState,
 		)
+		common.DirectionalTransportKeys_wipe(&transport.pendingKeys)
 		transport.pendingKeysReady = false
 		transport.authenticatedUserID = authSuccess.userId
 		transport.authenticatedIsAdmin = authSuccess.isAdmin
@@ -1232,6 +1246,10 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 
 	switch event.type {
 	case .RECEIVE:
+		if !ClientServerTransport_acceptReceiveChannel(transport, event.channelID) {
+			ENet.packet_destroy(event.packet)
+			return {}, false
+		}
 		packetBytes := ClientServerTransport_copyENetPacket(event.packet)
 		defer delete(packetBytes)
 		return ClientServerTransport_handleRuntimePacketBytes(transport, packetBytes)
@@ -1247,6 +1265,21 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 		return {}, false
 	}
 	return {}, false
+}
+
+// Reports whether a received packet may be handled as a control packet. Every other channel is
+// counted and dropped: voice datagrams get their own receive path later (they are opened
+// with the voice receive state, never as CBOR), and a datagram ENet does not authenticate
+// must never be able to end the session by failing to parse.
+ClientServerTransport_acceptReceiveChannel :: proc(
+	transport: ^ClientServerTransport,
+	channelID: u8,
+) -> bool {
+	if channelID == STARTUP_AUTH_CHANNEL_CHAT {
+		return true
+	}
+	transport.droppedNonControlPackets += 1
+	return false
 }
 
 // Copies an ENet packet's bytes and destroys the packet.

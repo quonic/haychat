@@ -110,6 +110,7 @@ RouterPeerSession_init :: proc() -> RouterPeerSession {
 
 RouterPeerSession_deinit :: proc(session: ^RouterPeerSession) {
 	delete(session.clientNickname)
+	common.TransportState_deinit(&session.transport)
 	session^ = {}
 }
 
@@ -152,8 +153,9 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 }
 
 MainRouterState_deinit :: proc(state: ^MainRouterState) {
-	for _, session in state.peerSessions {
-		delete(session.clientNickname)
+	// By reference, so each stored transport is wiped, not a copy of it.
+	for _, &session in state.peerSessions {
+		RouterPeerSession_deinit(&session)
 	}
 	for _, request in state.pendingDatabaseRequests {
 		PendingDBRequest_deinit(request)
@@ -203,8 +205,10 @@ MainRouterState_ensurePeerSession :: proc(
 }
 
 MainRouterState_removePeerSession :: proc(state: ^MainRouterState, peerID: u32) {
-	if session, ok := MainRouterState_getPeerSession(state, peerID); ok {
-		RouterPeerSession_deinit(&session)
+	// Deinit the stored entry in place: deinit on a copy would leave the entry's transport
+	// keys in the map's memory after delete_key.
+	if session, ok := &state.peerSessions[peerID]; ok {
+		RouterPeerSession_deinit(session)
 	}
 	delete_key(&state.peerSessions, peerID)
 }
@@ -632,7 +636,12 @@ MainRouterState_handleClientHello :: proc(
 		return
 	}
 
-	RouterPeerSession_deinit(&session)
+	// Reset the stored entry in place, so its keys are wiped and it never keeps a pointer to
+	// the nickname freed here if the handshake stops below.
+	if stored, storedOK := &state.peerSessions[peerID]; storedOK {
+		RouterPeerSession_deinit(stored)
+		stored^ = RouterPeerSession_init()
+	}
 	session = RouterPeerSession_init()
 	session.clientNickname = strings.clone(req.nickname)
 	session.clientIdentityPublicKey = req.clientIdentityPublicKey
@@ -815,6 +824,7 @@ MainRouterState_handleClientAuthRequest :: proc(
 		transcriptHash,
 	)
 	common.TransportState_activate(&session.transport, session.sessionID, keys, .Trusted)
+	common.DirectionalTransportKeys_wipe(&keys)
 	MainRouterState_setPeerSession(state, peerID, session)
 	MainRouterState_sendDatabaseRequest(
 		pm,
@@ -1277,6 +1287,9 @@ MainRouterState_handleNetworkDataReceived :: proc(
 	state: ^MainRouterState,
 	msg: NetworkDataReceived,
 ) {
+	// Only the control channel reaches the router. Anything else is dropped without a protocol
+	// violation: datagrams on other channels (voice is channel 2) are not authenticated by
+	// ENet, so letting them end a session would hand any spoofer a way to disconnect people.
 	if msg.channel != .Chat {
 		return
 	}

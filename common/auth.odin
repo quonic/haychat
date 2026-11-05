@@ -23,8 +23,26 @@ AUTH_CHALLENGE_SIZE :: 32
 TRANSPORT_KEY_SIZE :: chacha20poly1305.KEY_SIZE
 TRANSPORT_NONCE_SIZE :: chacha20poly1305.XIV_SIZE
 TRANSPORT_TAG_SIZE :: chacha20poly1305.TAG_SIZE
-TRANSPORT_AAD_SIZE :: SESSION_ID_SIZE + 8
+// sessionID || channel || sequence (LE). Binding the channel means a packet sealed for one
+// channel can never be opened as a packet of another, even with the same sequence.
+TRANSPORT_AAD_SIZE :: SESSION_ID_SIZE + 1 + 8
 FINGERPRINT_SIZE :: 32
+
+// HKDF info for the transport key schedule. Protocol 9 changed the key schedule from two keys
+// (no info) to four, so the label names the version; a peer on the old schedule derives
+// different keys and cannot open anything.
+TRANSPORT_HKDF_INFO :: "haychat transport v2"
+TRANSPORT_KEY_COUNT :: 4
+
+// How far behind the highest accepted voice sequence a datagram may arrive. 64 frames are
+// 1.28 s of voice at 50 packets per second, longer than any jitter buffer waits.
+REPLAY_WINDOW_SIZE :: 64
+
+// Voice datagram envelope (voice-rooms-design.md 3.3): kind (1) || sequence LE (8) ||
+// ciphertext (n) || tag (16). The nonce is derived from the sequence and never sent.
+VOICE_DATAGRAM_KIND_FRAME :: u8(0x01)
+VOICE_DATAGRAM_HEADER_SIZE :: 1 + 8
+VOICE_DATAGRAM_OVERHEAD :: VOICE_DATAGRAM_HEADER_SIZE + TRANSPORT_TAG_SIZE
 
 IdentityPrivateKeyBytes :: [AUTH_IDENTITY_PRIVATE_KEY_SIZE]u8
 IdentityPublicKeyBytes :: [AUTH_IDENTITY_PUBLIC_KEY_SIZE]u8
@@ -61,25 +79,96 @@ PeerTrustState :: enum u8 {
 	Changed,
 }
 
+// The transport channels that carry encrypted traffic. The values are the ENet channel IDs:
+// the server's NetworkChannel.Chat and NetworkChannel.Voice and the client's
+// STARTUP_AUTH_CHANNEL_CHAT use the same numbers (both sides assert it at compile time).
+TransportChannel :: enum u8 {
+	Control = 1, // reliable and ordered; every CBOR packet
+	Voice   = 2, // unsequenced datagrams; voice frames only
+}
+
+// One key per channel and direction. Separate keys per channel give domain separation: the
+// voice channel's deterministic nonces and the control channel's random nonces never share
+// a key, so they cannot collide.
 TransportKeySet :: struct {
-	clientToServer: TransportKey,
-	serverToClient: TransportKey,
+	clientToServer: [TransportChannel]TransportKey,
+	serverToClient: [TransportChannel]TransportKey,
 }
 
 DirectionalTransportKeys :: struct {
-	sendKey:    TransportKey,
-	receiveKey: TransportKey,
+	sendKey:    [TransportChannel]TransportKey,
+	receiveKey: [TransportChannel]TransportKey,
 }
 
+// The send half of one channel. active is false until TransportState_activate fills the key,
+// and again after a wipe, so a zeroed state can never seal with the all-zero key.
+ChannelSendState :: struct {
+	key:          TransportKey,
+	nextSequence: u64,
+	active:       bool,
+}
+
+ControlReceiveState :: struct {
+	key:          TransportKey,
+	nextSequence: u64, // strict: reliable and ordered, so any gap is an attack or a bug
+	active:       bool,
+}
+
+// Sliding replay window over the most recent REPLAY_WINDOW_SIZE sequences.
+ReplayWindow :: struct {
+	highest: u64, // highest accepted sequence
+	bitmap:  u64, // bit i set: sequence (highest - i) was accepted
+	hasAny:  bool,
+}
+
+ReplayCheckResult :: enum u8 {
+	Fresh, // not seen, and inside or ahead of the window
+	Duplicate, // already accepted
+	TooOld, // at or below highest - REPLAY_WINDOW_SIZE
+}
+
+VoiceOpenResult :: enum u8 {
+	Ok,
+	Malformed, // short datagram, unknown kind, or a destination buffer that is too small
+	Replayed,
+	TooOld,
+	BadTag,
+	Inactive, // no voice key: never activated, or the state was taken or wiped
+}
+
+// Why voice datagrams were dropped. A bad voice datagram is counted, never fatal: ENet does
+// not authenticate datagrams, so tearing the session down would let a spoofer disconnect
+// people.
+VoiceReceiveStats :: struct {
+	accepted:  u64,
+	malformed: u64,
+	replayed:  u64,
+	tooOld:    u64,
+	badTag:    u64,
+	inactive:  u64,
+}
+
+VoiceReceiveState :: struct {
+	key:    TransportKey,
+	window: ReplayWindow,
+	stats:  VoiceReceiveStats,
+	active: bool,
+}
+
+// Each channel half is its own struct so that different threads can own them: the control
+// halves stay with the code that runs the handshake (the server router, the client network
+// worker), and the voice halves move to whoever handles voice (TransportState_takeVoiceState).
 TransportState :: struct {
-	role:                SessionRole,
-	phase:               HandshakePhase,
-	peerTrustState:      PeerTrustState,
-	sessionID:           SessionID,
-	sendKey:             TransportKey,
-	receiveKey:          TransportKey,
-	nextSendSequence:    u64,
-	nextReceiveSequence: u64,
+	role:           SessionRole,
+	phase:          HandshakePhase,
+	peerTrustState: PeerTrustState,
+	sessionID:      SessionID,
+	controlSend:    ChannelSendState,
+	controlReceive: ControlReceiveState,
+	// Moved out to the thread that owns voice after activation; see
+	// TransportState_takeVoiceState.
+	voiceSend:      ChannelSendState,
+	voiceReceive:   VoiceReceiveState,
 }
 
 HandshakeTranscript :: struct {
@@ -495,6 +584,9 @@ identityPublicKeyFromHex :: proc(hexValue: string) -> (IdentityPublicKeyBytes, b
 	return publicKeyBytes, true
 }
 
+// Expands the handshake secret into four keys, in this fixed order: control client→server,
+// control server→client, voice client→server, voice server→client. Client and server must
+// agree on the order byte for byte; testTransportKeyDerivationVector pins it.
 deriveTransportKeySet :: proc(
 	sessionID: SessionID,
 	sharedSecret: SharedSecretBytes,
@@ -503,19 +595,29 @@ deriveTransportKeySet :: proc(
 	sessionIDCopy := sessionID
 	sharedSecretCopy := sharedSecret
 	transcriptHashCopy := transcriptHash
+	defer crypto.zero_explicit(&sharedSecretCopy, size_of(sharedSecretCopy))
 
 	salt: [SESSION_ID_SIZE + FINGERPRINT_SIZE]u8
 	copy(salt[:SESSION_ID_SIZE], sessionIDCopy[:])
 	copy(salt[SESSION_ID_SIZE:], transcriptHashCopy[:])
 
-	okm: [TRANSPORT_KEY_SIZE * 2]u8
+	okm: [TRANSPORT_KEY_SIZE * TRANSPORT_KEY_COUNT]u8
 	defer crypto.zero_explicit(&okm, size_of(okm))
 
-	hkdf.extract_and_expand(.SHA256, salt[:], sharedSecretCopy[:], nil, okm[:])
+	info := TRANSPORT_HKDF_INFO
+	hkdf.extract_and_expand(
+		.SHA256,
+		salt[:],
+		sharedSecretCopy[:],
+		transmute([]u8)info,
+		okm[:],
+	)
 
 	keySet: TransportKeySet
-	copy(keySet.clientToServer[:], okm[:TRANSPORT_KEY_SIZE])
-	copy(keySet.serverToClient[:], okm[TRANSPORT_KEY_SIZE:])
+	copy(keySet.clientToServer[.Control][:], okm[0 * TRANSPORT_KEY_SIZE:1 * TRANSPORT_KEY_SIZE])
+	copy(keySet.serverToClient[.Control][:], okm[1 * TRANSPORT_KEY_SIZE:2 * TRANSPORT_KEY_SIZE])
+	copy(keySet.clientToServer[.Voice][:], okm[2 * TRANSPORT_KEY_SIZE:3 * TRANSPORT_KEY_SIZE])
+	copy(keySet.serverToClient[.Voice][:], okm[3 * TRANSPORT_KEY_SIZE:4 * TRANSPORT_KEY_SIZE])
 	return keySet
 }
 
@@ -526,32 +628,63 @@ deriveDirectionalTransportKeys :: proc(
 	transcriptHash: FingerprintBytes,
 ) -> DirectionalTransportKeys {
 	keySet := deriveTransportKeySet(sessionID, sharedSecret, transcriptHash)
+	defer crypto.zero_explicit(&keySet, size_of(keySet))
 	keys: DirectionalTransportKeys
 
 	switch role {
 	case .Client:
-		copy(keys.sendKey[:], keySet.clientToServer[:])
-		copy(keys.receiveKey[:], keySet.serverToClient[:])
+		keys.sendKey = keySet.clientToServer
+		keys.receiveKey = keySet.serverToClient
 	case .Server:
-		copy(keys.sendKey[:], keySet.serverToClient[:])
-		copy(keys.receiveKey[:], keySet.clientToServer[:])
+		keys.sendKey = keySet.serverToClient
+		keys.receiveKey = keySet.clientToServer
 	case:
 	}
 
 	return keys
 }
 
-makeTransportAAD :: proc(sessionID: SessionID, sequence: u64) -> TransportAAD {
+// Wipes keys that were derived but not (or no longer) needed, such as the client's pending
+// keys after activation.
+DirectionalTransportKeys_wipe :: proc(keys: ^DirectionalTransportKeys) {
+	crypto.zero_explicit(keys, size_of(keys^))
+}
+
+makeTransportAAD :: proc(
+	sessionID: SessionID,
+	channel: TransportChannel,
+	sequence: u64,
+) -> TransportAAD {
 	sessionIDCopy := sessionID
 	aad: TransportAAD
 	copy(aad[:SESSION_ID_SIZE], sessionIDCopy[:])
-	endian.unchecked_put_u64le(aad[SESSION_ID_SIZE:], sequence)
+	aad[SESSION_ID_SIZE] = u8(channel)
+	endian.unchecked_put_u64le(aad[SESSION_ID_SIZE + 1:], sequence)
 	return aad
+}
+
+// Voice only: the XChaCha20 24-byte nonce is channel (1) || sequence LE (8) || zeros (15).
+//
+// Why this nonce never repeats under a key: every voice key belongs to exactly one session
+// and one direction (HKDF over a fresh X25519 secret and the session's transcript, then split
+// by channel and direction), and the only sender under that key is that direction's
+// ChannelSendState. Its counter starts at 0 on activation, only ever increments, and refuses
+// to wrap (ChannelSendState_nextSequence), so each (key, sequence) pair is used at most once.
+// A sealed state is never copied back after TransportState_takeVoiceState zeroes the source,
+// so two senders cannot share a counter. The control channel uses random nonces, but under
+// a different key, so it cannot collide with these. The channel byte is redundant with the
+// key separation; it is there so a future channel that reuses this scheme stays distinct.
+makeVoiceNonce :: proc(channel: TransportChannel, sequence: u64) -> TransportNonce {
+	nonce: TransportNonce
+	nonce[0] = u8(channel)
+	endian.unchecked_put_u64le(nonce[1:9], sequence)
+	return nonce
 }
 
 sealTransportPayload :: proc(
 	key: TransportKey,
 	sessionID: SessionID,
+	channel: TransportChannel,
 	sequence: u64,
 	plaintext: []u8,
 ) -> (
@@ -566,9 +699,10 @@ sealTransportPayload :: proc(
 	}
 
 	keyCopy := key
+	defer crypto.zero_explicit(&keyCopy, size_of(keyCopy))
 	ciphertext := make([dynamic]u8, len(plaintext))
 	tag: TransportTag
-	aad := makeTransportAAD(sessionID, sequence)
+	aad := makeTransportAAD(sessionID, channel, sequence)
 	ctx: chacha20poly1305.Context
 	chacha20poly1305.init_xchacha(&ctx, keyCopy[:])
 	defer chacha20poly1305.reset(&ctx)
@@ -580,6 +714,7 @@ sealTransportPayload :: proc(
 openTransportPayload :: proc(
 	key: TransportKey,
 	sessionID: SessionID,
+	channel: TransportChannel,
 	sequence: u64,
 	nonce: TransportNonce,
 	tag: TransportTag,
@@ -589,10 +724,11 @@ openTransportPayload :: proc(
 	bool,
 ) {
 	keyCopy := key
+	defer crypto.zero_explicit(&keyCopy, size_of(keyCopy))
 	nonceCopy := nonce
 	tagCopy := tag
 	plaintext := make([dynamic]u8, len(ciphertext))
-	aad := makeTransportAAD(sessionID, sequence)
+	aad := makeTransportAAD(sessionID, channel, sequence)
 	ctx: chacha20poly1305.Context
 	chacha20poly1305.init_xchacha(&ctx, keyCopy[:])
 	defer chacha20poly1305.reset(&ctx)
@@ -605,10 +741,222 @@ openTransportPayload :: proc(
 	return plaintext[:], true
 }
 
+// Pure check: never mutates the window, so a datagram whose tag later fails cannot move it.
+ReplayWindow_check :: proc(window: ^ReplayWindow, sequence: u64) -> ReplayCheckResult {
+	if !window.hasAny || sequence > window.highest {
+		return .Fresh
+	}
+
+	behind := window.highest - sequence
+	if behind >= REPLAY_WINDOW_SIZE {
+		return .TooOld
+	}
+	if window.bitmap & (u64(1) << behind) != 0 {
+		return .Duplicate
+	}
+	return .Fresh
+}
+
+// Records an accepted sequence. Call it only after the AEAD open succeeded, and only for a
+// sequence ReplayWindow_check called Fresh; anything else is ignored.
+ReplayWindow_commit :: proc(window: ^ReplayWindow, sequence: u64) {
+	if ReplayWindow_check(window, sequence) != .Fresh {
+		return
+	}
+
+	if !window.hasAny {
+		window.highest = sequence
+		window.bitmap = 1
+		window.hasAny = true
+		return
+	}
+
+	if sequence > window.highest {
+		shift := sequence - window.highest
+		// Shifting a u64 by 64 or more is not a useful operation; spell out the result.
+		if shift >= REPLAY_WINDOW_SIZE {
+			window.bitmap = 1
+		} else {
+			window.bitmap = (window.bitmap << shift) | 1
+		}
+		window.highest = sequence
+		return
+	}
+
+	window.bitmap |= u64(1) << (window.highest - sequence)
+}
+
+// Hands out the next send sequence. Refuses once the counter reaches max(u64): the counter
+// must never wrap, because a wrapped voice counter would reuse a deterministic nonce.
+ChannelSendState_nextSequence :: proc(send: ^ChannelSendState) -> (u64, bool) {
+	if !send.active || send.nextSequence == max(u64) {
+		return 0, false
+	}
+
+	sequence := send.nextSequence
+	send.nextSequence += 1
+	return sequence, true
+}
+
+ChannelSendState_wipe :: proc(send: ^ChannelSendState) {
+	crypto.zero_explicit(send, size_of(send^))
+}
+
+ControlReceiveState_wipe :: proc(receive: ^ControlReceiveState) {
+	crypto.zero_explicit(receive, size_of(receive^))
+}
+
+VoiceReceiveState_wipe :: proc(receive: ^VoiceReceiveState) {
+	crypto.zero_explicit(receive, size_of(receive^))
+}
+
+// Reports whether two byte slices share any memory. The AEAD needs its input and output to
+// alias exactly or not at all, and the voice procedures never want them to alias.
+@(private = "file")
+bytesOverlap :: proc(a, b: []u8) -> bool {
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	aStart := uintptr(raw_data(a))
+	bStart := uintptr(raw_data(b))
+	return aStart < bStart + uintptr(len(b)) && bStart < aStart + uintptr(len(a))
+}
+
+// Seals plaintext into dst as a voice datagram: kind || sequence LE || ciphertext || tag.
+// Allocates nothing, so the voice thread can call it every 20 ms. dst needs
+// len(plaintext) + VOICE_DATAGRAM_OVERHEAD bytes and must not overlap plaintext. Fails without
+// consuming a sequence when dst is too small, and fails once the send counter is exhausted.
+sealVoiceDatagram :: proc(
+	send: ^ChannelSendState,
+	sessionID: SessionID,
+	plaintext: []u8,
+	dst: []u8,
+) -> (
+	n: int,
+	ok: bool,
+) {
+	if !send.active {
+		return 0, false
+	}
+	total := VOICE_DATAGRAM_OVERHEAD + len(plaintext)
+	if len(dst) < total || bytesOverlap(plaintext, dst[:total]) {
+		return 0, false
+	}
+
+	sequence, sequenceOK := ChannelSendState_nextSequence(send)
+	if !sequenceOK {
+		return 0, false
+	}
+
+	ciphertextEnd := VOICE_DATAGRAM_HEADER_SIZE + len(plaintext)
+	dst[0] = VOICE_DATAGRAM_KIND_FRAME
+	endian.unchecked_put_u64le(dst[1:VOICE_DATAGRAM_HEADER_SIZE], sequence)
+
+	nonce := makeVoiceNonce(.Voice, sequence)
+	aad := makeTransportAAD(sessionID, .Voice, sequence)
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, send.key[:])
+	defer chacha20poly1305.reset(&ctx)
+
+	chacha20poly1305.seal(
+		&ctx,
+		dst[VOICE_DATAGRAM_HEADER_SIZE:ciphertextEnd],
+		dst[ciphertextEnd:total],
+		nonce[:],
+		aad[:],
+		plaintext,
+	)
+	return total, true
+}
+
+// Opens a voice datagram into dst: check the replay window, open with the derived nonce, and
+// only then commit the window, so a forged datagram cannot move it. Allocates nothing. Every
+// outcome is counted in receive.stats; none of them should end the session.
+openVoiceDatagram :: proc(
+	receive: ^VoiceReceiveState,
+	sessionID: SessionID,
+	datagram: []u8,
+	dst: []u8,
+) -> (
+	n: int,
+	result: VoiceOpenResult,
+) {
+	n, result = voiceOpenDatagramUncounted(receive, sessionID, datagram, dst)
+	switch result {
+	case .Ok:
+		receive.stats.accepted += 1
+	case .Malformed:
+		receive.stats.malformed += 1
+	case .Replayed:
+		receive.stats.replayed += 1
+	case .TooOld:
+		receive.stats.tooOld += 1
+	case .BadTag:
+		receive.stats.badTag += 1
+	case .Inactive:
+		receive.stats.inactive += 1
+	}
+	return n, result
+}
+
+@(private = "file")
+voiceOpenDatagramUncounted :: proc(
+	receive: ^VoiceReceiveState,
+	sessionID: SessionID,
+	datagram: []u8,
+	dst: []u8,
+) -> (
+	int,
+	VoiceOpenResult,
+) {
+	if !receive.active {
+		return 0, .Inactive
+	}
+	if len(datagram) < VOICE_DATAGRAM_OVERHEAD || datagram[0] != VOICE_DATAGRAM_KIND_FRAME {
+		return 0, .Malformed
+	}
+
+	ciphertextLength := len(datagram) - VOICE_DATAGRAM_OVERHEAD
+	if len(dst) < ciphertextLength || bytesOverlap(datagram, dst[:ciphertextLength]) {
+		return 0, .Malformed
+	}
+
+	sequence := endian.unchecked_get_u64le(datagram[1:VOICE_DATAGRAM_HEADER_SIZE])
+	switch ReplayWindow_check(&receive.window, sequence) {
+	case .Fresh:
+	case .Duplicate:
+		return 0, .Replayed
+	case .TooOld:
+		return 0, .TooOld
+	}
+
+	ciphertextEnd := VOICE_DATAGRAM_HEADER_SIZE + ciphertextLength
+	nonce := makeVoiceNonce(.Voice, sequence)
+	aad := makeTransportAAD(sessionID, .Voice, sequence)
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, receive.key[:])
+	defer chacha20poly1305.reset(&ctx)
+
+	if !chacha20poly1305.open(
+		&ctx,
+		dst[:ciphertextLength],
+		nonce[:],
+		aad[:],
+		datagram[VOICE_DATAGRAM_HEADER_SIZE:ciphertextEnd],
+		datagram[ciphertextEnd:],
+	) {
+		return 0, .BadTag
+	}
+
+	ReplayWindow_commit(&receive.window, sequence)
+	return ciphertextLength, .Ok
+}
+
 TransportState_init :: proc(role: SessionRole) -> TransportState {
 	return TransportState{role = role, phase = .Disconnected, peerTrustState = .Unknown}
 }
 
+// Fills all four channel halves from the derived keys and starts every counter at zero.
 TransportState_activate :: proc(
 	state: ^TransportState,
 	sessionID: SessionID,
@@ -616,18 +964,64 @@ TransportState_activate :: proc(
 	peerTrustState: PeerTrustState,
 ) {
 	keysCopy := keys
+	defer DirectionalTransportKeys_wipe(&keysCopy)
+
+	TransportState_wipeKeys(state)
 	state.phase = .Established
 	state.peerTrustState = peerTrustState
 	state.sessionID = sessionID
-	copy(state.sendKey[:], keysCopy.sendKey[:])
-	copy(state.receiveKey[:], keysCopy.receiveKey[:])
-	state.nextSendSequence = 0
-	state.nextReceiveSequence = 0
+	state.controlSend = ChannelSendState {
+		key    = keysCopy.sendKey[.Control],
+		active = true,
+	}
+	state.controlReceive = ControlReceiveState {
+		key    = keysCopy.receiveKey[.Control],
+		active = true,
+	}
+	state.voiceSend = ChannelSendState {
+		key    = keysCopy.sendKey[.Voice],
+		active = true,
+	}
+	state.voiceReceive = VoiceReceiveState {
+		key    = keysCopy.receiveKey[.Voice],
+		active = true,
+	}
 }
 
+// Moves the voice halves out to the thread that will own them and zeroes them here, so the
+// control side can never seal or open voice traffic afterwards (and two copies of one send
+// counter can never both be in use).
+TransportState_takeVoiceState :: proc(
+	state: ^TransportState,
+) -> (
+	send: ChannelSendState,
+	receive: VoiceReceiveState,
+) {
+	send = state.voiceSend
+	receive = state.voiceReceive
+	ChannelSendState_wipe(&state.voiceSend)
+	VoiceReceiveState_wipe(&state.voiceReceive)
+	return send, receive
+}
+
+@(private = "file")
+TransportState_wipeKeys :: proc(state: ^TransportState) {
+	ChannelSendState_wipe(&state.controlSend)
+	ControlReceiveState_wipe(&state.controlReceive)
+	ChannelSendState_wipe(&state.voiceSend)
+	VoiceReceiveState_wipe(&state.voiceReceive)
+}
+
+// Wipes every key and counter and returns to Disconnected, keeping only the role.
 TransportState_reset :: proc(state: ^TransportState) {
 	role := state.role
+	crypto.zero_explicit(state, size_of(state^))
 	state^ = TransportState_init(role)
+}
+
+// Wipes the state before its owner goes away. The struct owns no allocations.
+TransportState_deinit :: proc(state: ^TransportState) {
+	crypto.zero_explicit(state, size_of(state^))
 }
 
 TransportState_canEncrypt :: proc(state: ^TransportState) -> bool {
@@ -638,22 +1032,16 @@ TransportState_nextSendSequence :: proc(state: ^TransportState) -> (u64, bool) {
 	if !TransportState_canEncrypt(state) {
 		return 0, false
 	}
-
-	sequence := state.nextSendSequence
-	state.nextSendSequence += 1
-	return sequence, true
+	return ChannelSendState_nextSequence(&state.controlSend)
 }
 
-TransportState_acceptReceiveSequence :: proc(state: ^TransportState, sequence: u64) -> bool {
-	if !TransportState_canEncrypt(state) {
+// Pure check of the strict control counter; openPacketForSession commits it after the tag
+// verifies.
+TransportState_checkReceiveSequence :: proc(state: ^TransportState, sequence: u64) -> bool {
+	if !TransportState_canEncrypt(state) || !state.controlReceive.active {
 		return false
 	}
-	if sequence != state.nextReceiveSequence {
-		return false
-	}
-
-	state.nextReceiveSequence += 1
-	return true
+	return sequence == state.controlReceive.nextSequence
 }
 
 buildPacket :: proc(messageType: MessageType, payload: any) -> (Packet, bool) {
@@ -713,8 +1101,9 @@ sealPacketForSession :: proc(
 	}
 
 	nonce, tag, ciphertext, sealOK := sealTransportPayload(
-		state.sendKey,
+		state.controlSend.key,
 		state.sessionID,
+		.Control,
 		sequence,
 		innerPacketBytes,
 	)
@@ -740,6 +1129,7 @@ sealPacketForSession :: proc(
 	return Packet{messageType = .EncryptedPacket, payload = envelopeBytes}, true
 }
 
+// Opens a control-channel packet. The strict counter accepts only the next sequence.
 openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Packet, bool) {
 	if !TransportState_canEncrypt(state) {
 		return {}, false
@@ -757,13 +1147,17 @@ openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Pa
 	if !constantTimeEqual(envelope.sessionID[:], state.sessionID[:]) {
 		return {}, false
 	}
-	if !TransportState_acceptReceiveSequence(state, envelope.sequence) {
+	// Check first, commit only after the tag verifies, so a forged packet cannot advance the
+	// counter. (A forged control packet ends the session anyway, but the order is the same
+	// on every channel.)
+	if !TransportState_checkReceiveSequence(state, envelope.sequence) {
 		return {}, false
 	}
 
 	innerPacketBytes, ok := openTransportPayload(
-		state.receiveKey,
+		state.controlReceive.key,
 		state.sessionID,
+		.Control,
 		envelope.sequence,
 		envelope.nonce,
 		envelope.tag,
@@ -773,6 +1167,7 @@ openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Pa
 		return {}, false
 	}
 	defer delete(innerPacketBytes)
+	state.controlReceive.nextSequence += 1
 
 	innerPacket: Packet
 	if cbor.unmarshal(innerPacketBytes, &innerPacket) != nil {
