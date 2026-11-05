@@ -256,13 +256,14 @@ HeadlessMessageEventJSON :: struct {
 }
 
 HeadlessRoomChatJSON :: struct {
-	event:     string,
-	serverID:  int,
-	roomID:    int,
-	messageID: int,
-	senderID:  int,
-	timestamp: string,
-	content:   string,
+	event:          string,
+	serverID:       int,
+	roomID:         int,
+	messageID:      int,
+	senderID:       int,
+	senderNickname: string,
+	timestamp:      string,
+	content:        string,
 }
 
 HeadlessRoomListJSON :: struct {
@@ -272,10 +273,11 @@ HeadlessRoomListJSON :: struct {
 }
 
 HeadlessHistoryMessageJSON :: struct {
-	id:        int,
-	senderID:  int,
-	timestamp: string,
-	content:   string,
+	id:             int,
+	senderID:       int,
+	senderNickname: string,
+	timestamp:      string,
+	content:        string,
 }
 
 HeadlessRoomHistoryJSON :: struct {
@@ -345,6 +347,7 @@ headlessRenderRuntimeEvent :: proc(
 				roomID = event.roomID,
 				messageID = event.messageID,
 				senderID = event.senderID,
+				senderNickname = event.senderNickname,
 				timestamp = event.timestamp,
 				content = event.message,
 			},
@@ -366,10 +369,11 @@ headlessRenderRuntimeEvent :: proc(
 		defer delete(messages, allocator)
 		for message, index in event.messages {
 			messages[index] = {
-				id        = message.id,
-				senderID  = message.senderId,
-				timestamp = message.timestamp,
-				content   = message.content,
+				id             = message.id,
+				senderID       = message.senderId,
+				senderNickname = message.senderNickname,
+				timestamp      = message.timestamp,
+				content        = message.content,
 			}
 		}
 		line = headlessMarshal(

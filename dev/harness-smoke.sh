@@ -156,7 +156,8 @@ expect_ok a send "$room_id" "$message"
 if ! received=$(client_command b wait room_chat 5000) ||
 	[[ "$received" != '{"ok":true,'* ]]; then
 	fail "[two-client] client b did not receive a room_chat event within 5 s" \
-		"(${received:-no result}); room $room_id membership is required, see work package A"
+		"(${received:-no result}); both clients must be members of room $room_id" \
+		"(rooms are open, so check that the #general fixture was loaded before they connected)"
 fi
 chat_line=$(wait_for_line b "\"content\":\"$message\"" 0) ||
 	fail "[two-client] client b received a room_chat event without the sent text"

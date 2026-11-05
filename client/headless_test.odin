@@ -191,13 +191,14 @@ testHeadlessParseCommand :: proc(t: ^testing.T) {
 @(test)
 testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	chat := ClientTransportRuntimeEvent {
-		kind      = .RoomChatReceived,
-		serverID  = 1,
-		roomID    = 1,
-		messageID = 12,
-		senderID  = 3,
-		timestamp = "2026-11-05T10:00:00Z",
-		message   = "say \"hi\"\n\\o/",
+		kind           = .RoomChatReceived,
+		serverID       = 1,
+		roomID         = 1,
+		messageID      = 12,
+		senderID       = 3,
+		senderNickname = "carol",
+		timestamp      = "2026-11-05T10:00:00Z",
+		message        = "say \"hi\"\n\\o/",
 	}
 	line, kind, ok := headlessRenderRuntimeEvent(&chat)
 	testing.expect(t, ok && kind == .RoomChat, "expected a room_chat event")
@@ -205,7 +206,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,` +
-		`"timestamp":"2026-11-05T10:00:00Z","content":"say \"hi\"\n\\o/"}`,
+		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z",` +
+		`"content":"say \"hi\"\n\\o/"}`,
 		"the room_chat JSON",
 	)
 	delete(line)
@@ -253,7 +255,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_history","serverID":1,"roomID":4,"hasOlder":true,` +
-		`"messages":[{"id":9,"senderID":2,"timestamp":"t","content":"old"}]}`,
+		`"messages":[{"id":9,"senderID":2,"senderNickname":"","timestamp":"t",` +
+		`"content":"old"}]}`,
 		"the room_history JSON",
 	)
 	delete(line)

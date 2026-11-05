@@ -83,8 +83,8 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1"}` |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to server"}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}` |
-| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"timestamp":"...","content":"hi"}` |
-| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"timestamp":"...","content":"hi"}]}` |
+| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
+| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true}` |
 | `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"..."}` |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
@@ -105,17 +105,21 @@ Each agent runs its own client with its own profile. Alice's side (`>` is stdin,
 < {"ok":true,"cmd":"wait","event":"room_list","waitedMS":0}
 > send 1 hello bob
 < {"ok":true,"cmd":"send","serverID":1,"roomID":1}
-< {"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"timestamp":"...","content":"hello bob"}
-> wait room_chat 30000
-< {"event":"room_chat","serverID":1,"roomID":1,"messageID":13,"senderID":4,"timestamp":"...","content":"hi alice"}
+< {"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice-1","timestamp":"...","content":"hello bob"}
+> wait room_chat
 < {"ok":true,"cmd":"wait","event":"room_chat","waitedMS":0}
+> wait room_chat 30000
+< {"event":"room_chat","serverID":1,"roomID":1,"messageID":13,"senderID":4,"senderNickname":"bob-1","timestamp":"...","content":"hi alice"}
+< {"ok":true,"cmd":"wait","event":"room_chat","waitedMS":2140}
 > quit
 < {"ok":true,"cmd":"quit"}
 ```
 
-Alice's own message comes back as a `room_chat` event too, so her `wait room_chat` would match
-it; check `senderID` against the `userID` from `connected` to tell them apart. Bob runs the same
-with `--name bob-1 --config-dir ./profiles/bob`, waits for `room_chat`, and replies with
+Alice's own message comes back as a `room_chat` event too, and `wait` counts every event that
+has been printed, so her first `wait room_chat` is satisfied at once by that echo. The second
+`wait` is the one that blocks until Bob answers; check `senderID` against the `userID` from
+`connected` (or `senderNickname`) to tell the two apart. Bob runs the same with
+`--name bob-1 --config-dir ./profiles/bob`, waits for `room_chat`, and replies with
 `send 1 hi alice`.
 
 From a shell script, give each client a named pipe for stdin and a file for stdout:
@@ -140,7 +144,7 @@ grep -F '"cmd":"send"' alice.out
 2. A second client connects; the first sends a unique message to room 1 and the second must
    print a `room_chat` event with that text.
 
-`./dev.sh live --all` runs it after the live client tests. Step 2 needs every user to be a
-member of room 1 (the open-rooms change, work package A in
-`docs/plan/2026-11-05-user-testing-readiness.md`); before that change new users join no
-rooms, so the server rejects the message and step 2 fails with a `[two-client]` message.
+`./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
+account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
+any client connects. If the sender is not a member of room 1 the server answers with
+`protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
