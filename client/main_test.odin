@@ -1773,16 +1773,18 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 	State_applyRuntimeEvent(&stateB, &received)
 	ClientTransportRuntimeEvent_deinit(&received)
 	conversationB := testDirectCache(&stateB, serverID, userA)
-	testing.expect(
-		t,
-		len(conversationB.messages) == 1 && conversationB.unreadCount == 1,
-		"expected B's conversation with A to hold the message as unread",
-	)
 	cacheB := State_serverDirectCache(&stateB, serverID)
 	testing.expect(
 		t,
 		len(cacheB.conversations) > 0 && cacheB.conversations[0].peerUserId == userA,
 		"expected A's conversation at the top of B's list",
+	)
+	testing.expect(
+		t,
+		len(conversationB.messages) == 1 &&
+		len(cacheB.conversations) > 0 &&
+		cacheB.conversations[0].unreadCount == 1,
+		"expected B's conversation with A to hold the message as unread",
 	)
 
 	// The sender sees its own message only through the server's echo.
@@ -1799,10 +1801,11 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		State_applyRuntimeEvent(&stateA, &echo)
 		ClientTransportRuntimeEvent_deinit(&echo)
 		conversationA := testDirectCache(&stateA, serverID, userB)
+		summaryA := State_directSummary(&stateA, serverID, userB)
 		testing.expect(
 			t,
-			len(conversationA.messages) == 1 && conversationA.unreadCount == 0,
-			"expected A's open conversation to show the echo as read",
+			len(conversationA.messages) == 1 && summaryA != nil && summaryA.unreadCount == 0,
+			"expected A's own message never to count as unread",
 		)
 	}
 

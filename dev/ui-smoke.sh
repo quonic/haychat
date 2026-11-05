@@ -159,7 +159,7 @@ echo "    bob< $room_line"
 
 echo "==> [ui] bob sends alice a direct message, alice opens it in the window"
 expect_ok bob users
-[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_alice\",\"isOnline\":true\} ]] ||
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_alice\",\"isOnline\":true, ]] ||
 	fail "[dm] bob's users do not list $nickname_alice as online"
 user_alice=${BASH_REMATCH[1]}
 expect_ok bob dm "$user_alice" "$dm_message"

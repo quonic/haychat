@@ -57,6 +57,8 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerVoiceParticipants, 144},
 	{.ServerVoiceJoinRejected, 145},
 	{.ServerVoiceLeft, 146},
+	{.ClientMarkRead, 147},
+	{.ServerReadMarker, 148},
 }
 
 @(test)
@@ -106,14 +108,16 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsTenForVoiceControl :: proc(t: ^testing.T) {
+testProtocolVersionIsElevenForReadState :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule (four keys,
 	// channel-bound AAD); 10 added the voice control messages and bound the voice datagram's
-	// kind byte into its AAD, so peers on 9 or older cannot talk to this build.
+	// kind byte into its AAD; 11 added read state (ClientMarkRead, ServerReadMarker, and the
+	// read-state fields of RoomSummary and DirectConversationSummary), so peers on 10 or
+	// older cannot talk to this build.
 	assert(
-		protocolVersion == 10,
-		fmt.tprintf("expected protocol version 10 for voice control, got %d", protocolVersion),
+		protocolVersion == 11,
+		fmt.tprintf("expected protocol version 11 for read state, got %d", protocolVersion),
 	)
 }
 
@@ -413,6 +417,8 @@ testDirectConversationsPayloadRoundTripsOverCBOR :: proc(t: ^testing.T) {
 			lastSenderId = 3,
 			lastTimestamp = "t12",
 			lastContent = "see you",
+			lastReadMessageId = 10,
+			unreadCount = 2,
 		},
 	)
 	encoded, encodeErr := cbor.marshal(
@@ -443,7 +449,89 @@ testDirectConversationsPayloadRoundTripsOverCBOR :: proc(t: ^testing.T) {
 		summary.peerNickname == "bob" &&
 		summary.lastMessageID == 12 &&
 		summary.lastSenderId == 3 &&
-		summary.lastContent == "see you",
+		summary.lastContent == "see you" &&
+		summary.lastReadMessageId == 10 &&
+		summary.unreadCount == 2,
 		fmt.tprintf("expected the conversation summary to survive, got %v", summary),
 	)
+}
+
+@(test)
+testRoomListCarriesReadStateOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	rooms := make([dynamic]RoomSummary, context.temp_allocator)
+	append(
+		&rooms,
+		RoomSummary {
+			id = GENERAL_ROOM_ID,
+			name = "general",
+			description = "General discussion",
+			lastReadMessageId = 41,
+			unreadCount = UNREAD_COUNT_CAP,
+		},
+	)
+	encoded, encodeErr := cbor.marshal(ServerListRoomsPayload{rooms = rooms})
+	assert(encodeErr == nil, "expected ServerListRoomsPayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ServerListRoomsPayload
+	assert(
+		cbor.unmarshal(encoded, &decoded) == nil,
+		"expected ServerListRoomsPayload decoding to succeed",
+	)
+	defer {
+		for room in decoded.rooms {
+			delete(room.name)
+			delete(room.description)
+		}
+		delete(decoded.rooms)
+	}
+	assert(len(decoded.rooms) == 1, fmt.tprintf("expected one room, got %d", len(decoded.rooms)))
+	room := decoded.rooms[0]
+	assert(
+		room.id == GENERAL_ROOM_ID &&
+		room.name == "general" &&
+		room.lastReadMessageId == 41 &&
+		room.unreadCount == UNREAD_COUNT_CAP,
+		fmt.tprintf("expected the room's read state to survive, got %v", room),
+	)
+}
+
+@(test)
+testReadMarkerPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	for kind in ReadMarkerKind {
+		markBytes, markErr := cbor.marshal(
+			ClientMarkReadPayload{kind = kind, conversationId = 7, messageId = 99},
+		)
+		assert(markErr == nil, "expected ClientMarkReadPayload encoding to succeed")
+		defer delete(markBytes)
+		mark: ClientMarkReadPayload
+		assert(
+			cbor.unmarshal(markBytes, &mark) == nil,
+			"expected ClientMarkReadPayload decoding to succeed",
+		)
+		assert(
+			mark == ClientMarkReadPayload{kind = kind, conversationId = 7, messageId = 99},
+			fmt.tprintf("expected the mark-read request to survive, got %v", mark),
+		)
+
+		original := ServerReadMarkerPayload {
+			kind              = kind,
+			conversationId    = 7,
+			lastReadMessageId = 98,
+			unreadCount       = 3,
+		}
+		markerBytes, markerErr := cbor.marshal(original)
+		assert(markerErr == nil, "expected ServerReadMarkerPayload encoding to succeed")
+		defer delete(markerBytes)
+		marker: ServerReadMarkerPayload
+		assert(
+			cbor.unmarshal(markerBytes, &marker) == nil,
+			"expected ServerReadMarkerPayload decoding to succeed",
+		)
+		assert(marker == original, fmt.tprintf("expected %v to survive, got %v", original, marker))
+	}
+	// The kind is a fixed wire value, like MessageType.
+	assert(int(ReadMarkerKind.Room) == 0, "expected ReadMarkerKind.Room to stay 0 on the wire")
+	assert(int(ReadMarkerKind.Direct) == 1, "expected ReadMarkerKind.Direct to stay 1 on the wire")
 }

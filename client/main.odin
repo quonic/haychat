@@ -22,6 +22,9 @@ RoomCache :: struct {
 	isLoadingHistory:     bool,
 	oldestMessageID:      int,
 	hasOlder:             bool,
+	// The room's last mark-read (read_state.odin); its marker and unread count live in the
+	// room's RoomSummary in ServerRoomCache.rooms.
+	readSend:             ReadMarkerSendState,
 }
 
 ServerRoomCache :: struct {
@@ -67,6 +70,9 @@ State :: struct {
 	// The admin's room create/edit form (room_admin.odin); shown in the main pane while open
 	// on the selected server.
 	roomEditor:                     RoomEditor,
+	// Whether the window has input focus. Only the GUI sets it; a conversation counts as
+	// viewed (marked read, no new badge) only while it is set (read_state.odin).
+	windowFocused:                  bool,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {

@@ -235,6 +235,7 @@ HeadlessEventKind :: enum {
 	Conversations,
 	Presence,
 	RoomCreated,
+	ReadMarker,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -255,6 +256,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.Conversations  = "conversations",
 	.Presence       = "presence",
 	.RoomCreated    = "room_created",
+	.ReadMarker     = "read_marker",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -403,19 +405,39 @@ HeadlessUserListJSON :: struct {
 	users:    []common.UserSummary,
 }
 
+// unreadCount and lastReadMessageId are the read state (protocol 11): from the server's list,
+// moved by read_marker events, plus the peer's live messages counted since.
 HeadlessConversationJSON :: struct {
-	peerUserID:    int,
-	peerNickname:  string,
-	lastMessageID: int,
-	lastSenderID:  int,
-	lastTimestamp: string,
-	lastContent:   string,
+	peerUserID:        int,
+	peerNickname:      string,
+	lastMessageID:     int,
+	lastSenderID:      int,
+	lastTimestamp:     string,
+	lastContent:       string,
+	lastReadMessageId: int,
+	unreadCount:       int,
 }
 
 HeadlessConversationsJSON :: struct {
 	event:         string,
 	serverID:      int,
 	conversations: []HeadlessConversationJSON,
+}
+
+// ServerReadMarker: this account marked a conversation read, on this session or another one.
+// kind is "room" (conversationID is a room ID) or "dm" (a peer user ID).
+HeadlessReadMarkerJSON :: struct {
+	event:             string,
+	serverID:          int,
+	kind:              string,
+	conversationID:    int,
+	lastReadMessageId: int,
+	unreadCount:       int,
+}
+
+HEADLESS_READ_MARKER_KIND_NAMES := [common.ReadMarkerKind]string {
+	.Room   = "room",
+	.Direct = "dm",
 }
 
 HeadlessPresenceJSON :: struct {
@@ -439,8 +461,10 @@ headlessConversationsJSON :: proc(
 			peerNickname  = conversation.peerNickname,
 			lastMessageID = conversation.lastMessageID,
 			lastSenderID  = conversation.lastSenderId,
-			lastTimestamp = conversation.lastTimestamp,
-			lastContent   = conversation.lastContent,
+			lastTimestamp     = conversation.lastTimestamp,
+			lastContent       = conversation.lastContent,
+			lastReadMessageId = conversation.lastReadMessageId,
+			unreadCount       = conversation.unreadCount,
 		}
 	}
 	return result
@@ -713,6 +737,20 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
+	case .ReadMarkerReceived:
+		kind = .ReadMarker
+		marker := event.readMarker
+		line = headlessMarshal(
+			HeadlessReadMarkerJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				kind = HEADLESS_READ_MARKER_KIND_NAMES[marker.kind],
+				conversationID = marker.conversationId,
+				lastReadMessageId = marker.lastReadMessageId,
+				unreadCount = marker.unreadCount,
+			},
+			allocator,
+		)
 	case .UserPresenceChanged:
 		kind = .Presence
 		line = headlessMarshal(
@@ -789,13 +827,23 @@ HeadlessSendJSON :: struct {
 	roomID:   int,
 }
 
+// One account in `users`: the directory entry plus the read state of the direct conversation
+// with it (both 0 when there is none).
+HeadlessUserJSON :: struct {
+	id:                int,
+	nickname:          string,
+	isOnline:          bool,
+	lastReadMessageId: int,
+	unreadCount:       int,
+}
+
 HeadlessUsersJSON :: struct {
 	ok:       bool,
 	cmd:      string,
 	serverID: int,
 	loaded:   bool,
 	loading:  bool,
-	users:    []common.UserSummary,
+	users:    []HeadlessUserJSON,
 }
 
 HeadlessConversationsResultJSON :: struct {
@@ -832,6 +880,17 @@ HeadlessDirectHistoryRequestJSON :: struct {
 	serverID:        int,
 	peerUserID:      int,
 	beforeMessageID: int,
+}
+
+// `read`: the mark-read went out. The server answers with a read_marker event on every session
+// of the account when the marker moved, and with nothing when it did not.
+HeadlessReadJSON :: struct {
+	ok:             bool,
+	cmd:            string,
+	serverID:       int,
+	kind:           string,
+	conversationID: int,
+	messageID:      int,
 }
 
 HeadlessWaitJSON :: struct {
@@ -913,6 +972,9 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"room-delete", 1, 0, .None, "room-delete ROOM_ID",
 		"admins: deletes a room and its history; it arrives as room_deleted",
 		headlessCommandRoomDelete},
+	{"read", 2, 1, .None, "read room|dm ID [MESSAGE_ID]",
+		"marks a room or conversation read (default: up to its newest loaded message)",
+		headlessCommandRead},
 	{"wait", 1, 1, .None, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
 	{"sleep", 1, 0, .None, "sleep MS", "keeps servicing the connection for MS milliseconds",
@@ -1381,6 +1443,19 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 		State_requestUserList(state, serverID)
 		cache = State_serverDirectCache(state, serverID)
 	}
+	users := make([]HeadlessUserJSON, len(cache.users))
+	defer delete(users)
+	for user, index in cache.users {
+		users[index] = {
+			id       = user.id,
+			nickname = user.nickname,
+			isOnline = user.isOnline,
+		}
+		if summary := State_directSummary(state, serverID, user.id); summary != nil {
+			users[index].lastReadMessageId = summary.lastReadMessageId
+			users[index].unreadCount = summary.unreadCount
+		}
+	}
 	headlessWriteJSON(
 		harness,
 		HeadlessUsersJSON {
@@ -1389,7 +1464,7 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			serverID = serverID,
 			loaded = cache.usersLoaded,
 			loading = cache.usersLoading,
-			users = cache.users[:],
+			users = users,
 		},
 	)
 }
@@ -1578,6 +1653,68 @@ headlessCommandRoomDelete :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	state := &harness.state
 	errorMessage := State_sendDeleteRoom(state, state.selected_server_id, roomID)
 	headlessWriteRoomRequest(harness, command, errorMessage, roomID, "", "")
+}
+
+// Marks a room or conversation read through State_markConversationRead, the action behind the
+// GUI's automatic marking. The harness never marks anything read by itself (it has no window
+// focus), so this is the only way an agent clears a badge.
+headlessCommandRead :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	usage :: "usage: read room|dm ID [MESSAGE_ID]"
+	kind: common.ReadMarkerKind
+	switch command.args[0] {
+	case "room":
+		kind = .Room
+	case "dm":
+		kind = .Direct
+	case:
+		headlessWriteError(harness, command.name, usage)
+		return
+	}
+	conversationID, idOK := headlessParseNumber(command.args[1])
+	messageID, messageOK := 0, true
+	if command.argCount > 2 {
+		messageID, messageOK = headlessParseNumber(command.args[2])
+	}
+	if !idOK || conversationID == 0 || !messageOK || (command.argCount > 2 && messageID == 0) {
+		headlessWriteError(harness, command.name, usage)
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	if command.argCount <= 2 {
+		messageID = State_newestLoadedMessageID(state, kind, serverID, conversationID)
+		if messageID == 0 {
+			headlessWriteError(
+				harness,
+				command.name,
+				"nothing loaded in that conversation; fetch its history first or pass MESSAGE_ID",
+			)
+			return
+		}
+	}
+	State_clearChatStatus(state)
+	if !State_markConversationRead(
+		state,
+		kind,
+		serverID,
+		conversationID,
+		messageID,
+		time.tick_now(),
+	) {
+		headlessWriteError(harness, command.name, state.chat_status_message)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessReadJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			kind = HEADLESS_READ_MARKER_KIND_NAMES[kind],
+			conversationID = conversationID,
+			messageID = messageID,
+		},
+	)
 }
 
 headlessCommandWait :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {

@@ -417,15 +417,28 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 	case .Placeholder:
 		ui.label(ctx, ui.shrinkXY(rect, inset, 0), row.label, ctx.theme.fgMuted)
 	case .Channel:
-		options := ui.ButtonOptions {
-			selected = row.selected,
-			color    = row.selected ? ctx.theme.fg : ctx.theme.fgMuted,
-		}
 		id := ui.idOf("channel", serverID, row.id)
-		clicked := ui.button(ctx, id, rect, row.label, options)
-		if len(row.description) > 0 {
-			ui.tooltip(ctx, id, rect, row.description)
+		if row.unreadCount <= 0 {
+			options := ui.ButtonOptions {
+				selected = row.selected,
+				color    = row.selected ? ctx.theme.fg : ctx.theme.fgMuted,
+			}
+			clicked := ui.button(ctx, id, rect, row.label, options)
+			if len(row.description) > 0 {
+				ui.tooltip(ctx, id, rect, row.description)
+			}
+			return clicked
 		}
+		// Unread: the label is drawn below, bold, so the badge can sit beside it.
+		clicked := ui.button(ctx, id, rect, "", {selected = row.selected})
+		content := ui.shrinkXY(rect, inset, 0)
+		viewSidebarUnreadBadge(ctx, &content, row.unreadCount)
+		ui.label(ctx, content, row.label, ctx.theme.fg, .Bold)
+		tooltip := fmt.tprintf("%d unread", row.unreadCount)
+		if len(row.description) > 0 {
+			tooltip = fmt.tprintf("%s (%s)", row.description, tooltip)
+		}
+		ui.tooltip(ctx, id, rect, tooltip)
 		return clicked
 	case .Conversation, .Member:
 		name := row.kind == .Conversation ? "dm-conversation" : "dm-member"
@@ -442,16 +455,7 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 
 		unread := row.unreadCount > 0
 		if unread {
-			count := row.unreadCount > 99 ? "99+" : fmt.tprintf("%d", row.unreadCount)
-			badgeH := ui.dp(ctx, 18)
-			textW := ui.textSize(ui.textGet(ctx, 0, .Bold, count)).x
-			badgeW := max(badgeH, textW + ui.dp(ctx, 10))
-			badgeArea := ui.cutRight(&content, badgeW)
-			badgeY := badgeArea.y + (badgeArea.h - badgeH) / 2
-			badge := ui.Rect{badgeArea.x, badgeY, badgeW, badgeH}
-			ui.fillRoundedRect(ctx, badge, badgeH / 2, ctx.theme.primary)
-			ui.label(ctx, badge, count, ctx.theme.onPrimary, .Bold, .Center)
-			_ = ui.cutRight(&content, ui.dp(ctx, 6))
+			viewSidebarUnreadBadge(ctx, &content, row.unreadCount)
 		}
 		color := row.selected || unread || row.isOnline ? ctx.theme.fg : ctx.theme.fgMuted
 		ui.label(ctx, content, row.label, color, unread ? .Bold : .Regular)
@@ -463,6 +467,30 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		return clicked
 	}
 	return false
+}
+
+// The text of an unread badge: the count, or "99+" from 100 on (the server caps counts at
+// common.UNREAD_COUNT_CAP, so 100 means "100 or more").
+unreadBadgeText :: proc(count: int, allocator := context.temp_allocator) -> string {
+	if count > 99 {
+		return "99+"
+	}
+	return fmt.aprintf("%d", count, allocator = allocator)
+}
+
+// Draws an unread badge at the right of content and takes its width from content.
+@(private = "file")
+viewSidebarUnreadBadge :: proc(ctx: ^ui.Context, content: ^ui.Rect, count: int) {
+	text := unreadBadgeText(count)
+	badgeH := ui.dp(ctx, 18)
+	textW := ui.textSize(ui.textGet(ctx, 0, .Bold, text)).x
+	badgeW := max(badgeH, textW + ui.dp(ctx, 10))
+	badgeArea := ui.cutRight(content, badgeW)
+	badgeY := badgeArea.y + (badgeArea.h - badgeH) / 2
+	badge := ui.Rect{badgeArea.x, badgeY, badgeW, badgeH}
+	ui.fillRoundedRect(ctx, badge, badgeH / 2, ctx.theme.primary)
+	ui.label(ctx, badge, text, ctx.theme.onPrimary, .Bold, .Center)
+	_ = ui.cutRight(content, ui.dp(ctx, 6))
 }
 
 // Builds transcript units for room and direct messages. Consecutive messages from the same

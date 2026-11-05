@@ -18,6 +18,11 @@ set -euo pipefail
 #      and must report isAdmin; A creates a room, B must see room_membership and list it in
 #      `rooms`, and B sends to it; A renames it and B must see room_edited; A deletes it and B
 #      must see room_deleted and fall back to #general
+#   6. read state:     D signs up and goes offline; C sends two messages to room 1 and a direct
+#      message to D. D comes back and `rooms` shows 2 unread in room 1, `conversations` 1 from
+#      C. A second session of D (the same profile) is connected when D runs `read`; it must
+#      receive both read_marker events and then list 0, and a third session started afterwards
+#      must list 0 from the server
 #
 # dev/live-proof.sh --harness runs it against its throwaway server. It needs bash, coreutils,
 # and psql (for step 5, which reaches the server's database through the HAYCHAT_DATABASE_*
@@ -101,7 +106,7 @@ presence_line=$(wait_for_match a \
 	fail "[dm] client a did not receive a presence event for $nickname_b"
 echo "    a< $presence_line"
 expect_ok a users
-[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_b\",\"isOnline\":true\} ]] ||
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_b\",\"isOnline\":true, ]] ||
 	fail "[dm] client a's users do not list $nickname_b as online"
 user_b=${BASH_REMATCH[1]}
 dm_message="harness dm $run_tag"
@@ -141,7 +146,7 @@ rename_line=$(wait_for_match a "$rename_pattern" "$rename_start") ||
 	fail "[rename] client a did not see user $user_b come back as $renamed_b"
 echo "    a< $rename_line"
 expect_ok a users
-[[ "$last_result" == *"{\"id\":$user_b,\"nickname\":\"$renamed_b\",\"isOnline\":true}"* ]] ||
+[[ "$last_result" == *"{\"id\":$user_b,\"nickname\":\"$renamed_b\",\"isOnline\":true,"* ]] ||
 	fail "[rename] client a's users do not list user $user_b as $renamed_b"
 echo "==> [harness] rename passed"
 
@@ -197,6 +202,98 @@ expect_ok b2 status
 [[ "$last_result" == *'"selectedRoomID":1,'* ]] ||
 	fail "[admin] client b did not fall back to #general after the delete"
 echo "==> [harness] room admin passed"
+
+# Counts are matched exactly, so the readers are fresh accounts: nobody else writes to room 1
+# or to them while this runs, and a new account has nothing unread from before it joined.
+echo "==> [harness] read state: badges survive a reconnect and clear on a second session"
+nickname_c="harness-c-$run_tag"
+nickname_d="harness-d-$run_tag"
+start_client d "$nickname_d"
+expect_connected d
+expect_ok d wait room_list 5000
+stop_client d
+
+start_client c "$nickname_c"
+expect_connected c
+connected_c=$(wait_for_line c '{"event":"connected",' 0) || fail "[read] client c never connected"
+[[ "$connected_c" =~ \"userID\":([0-9]+), ]] || fail "[read] client c's connected line lacks userID"
+user_c=${BASH_REMATCH[1]}
+expect_ok c wait user_list 5000
+expect_ok c users
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_d\",\"isOnline\":false, ]] ||
+	fail "[read] client c's users do not list $nickname_d as offline"
+user_d=${BASH_REMATCH[1]}
+for text in "read one $run_tag" "read two $run_tag"; do
+	expect_ok c send "$room_id" "$text"
+	# The sender's own copy means the server stored it.
+	wait_for_line c "\"content\":\"$text\"" 0 >/dev/null ||
+		fail "[read] client c never saw its room message stored"
+done
+expect_ok c dm "$user_d" "read dm $run_tag"
+wait_for_match c "^\\{\"event\":\"direct_message\",.*\"content\":\"read dm $run_tag\"\\}$" \
+	>/dev/null || fail "[read] client c never saw its direct message stored"
+
+# room_list and conversations arrive by themselves after connecting; their counts come from
+# the server's read markers (D has none yet, so its join time decides for the room).
+room_unread_pattern="\\{\"id\":$room_id,\"name\":\"[^\"]*\",\"description\":\"[^\"]*\","
+room_unread_pattern+="\"lastReadMessageId\":[0-9]+,\"unreadCount\":"
+dm_unread_pattern="\\{\"peerUserID\":$user_c,[^}]*\"unreadCount\":"
+expect_room_unread() {
+	local client=$1 expected=$2 why=$3
+	expect_ok "$client" rooms
+	[[ "$last_result" =~ ${room_unread_pattern}${expected}\} ]] ||
+		fail "[read] client $client: expected $expected unread in room $room_id $why"
+}
+expect_dm_unread() {
+	local client=$1 expected=$2 why=$3
+	expect_ok "$client" conversations
+	[[ "$last_result" =~ ${dm_unread_pattern}${expected}\} ]] ||
+		fail "[read] client $client: expected $expected unread from user $user_c $why"
+}
+start_client d1 "$nickname_d" d
+expect_connected d1
+expect_ok d1 wait room_list 5000
+expect_ok d1 wait conversations 5000
+expect_room_unread d1 2 "after reconnecting"
+expect_dm_unread d1 1 "after reconnecting"
+
+start_client d2 "$nickname_d" d
+expect_connected d2
+expect_ok d2 wait room_list 5000
+expect_ok d2 wait conversations 5000
+expect_room_unread d2 2 "on a second session"
+# The reader loads what it reads; without MESSAGE_ID, `read` marks the newest loaded message.
+expect_ok d1 history "$room_id"
+expect_ok d1 wait room_history 5000
+expect_ok d1 dm-history "$user_c"
+expect_ok d1 wait direct_history 5000
+marker_start=$(wc -l <"$work_dir/d2.out")
+expect_ok d1 read room "$room_id"
+expect_ok d1 read dm "$user_c"
+for target in "room\",\"conversationID\":$room_id," "dm\",\"conversationID\":$user_c,"; do
+	marker_pattern="^\\{\"event\":\"read_marker\",\"serverID\":1,\"kind\":\"$target"
+	marker_pattern+="\"lastReadMessageId\":[0-9]+,\"unreadCount\":0\\}$"
+	marker_line=$(wait_for_match d2 "$marker_pattern" "$marker_start") ||
+		fail "[read] the second session did not receive a read_marker ($target)"
+	echo "    d2< $marker_line"
+	wait_for_match d1 "$marker_pattern" 0 >/dev/null ||
+		fail "[read] the session that read did not receive its own read_marker ($target)"
+done
+expect_room_unread d2 0 "after the other session read it"
+expect_dm_unread d2 0 "after the other session read it"
+
+# The cleared state is the server's, so a session started afterwards lists it too.
+start_client d3 "$nickname_d" d
+expect_connected d3
+expect_ok d3 wait room_list 5000
+expect_ok d3 wait conversations 5000
+expect_room_unread d3 0 "on a new session after the read"
+expect_dm_unread d3 0 "on a new session after the read"
+stop_client c
+stop_client d1
+stop_client d2
+stop_client d3
+echo "==> [harness] read state passed"
 
 stop_client a
 stop_client b2

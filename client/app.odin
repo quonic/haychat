@@ -3,6 +3,7 @@ package client
 import "core:fmt"
 import "core:os"
 import "core:sync"
+import "core:time"
 import "ui"
 import SDL "vendor:sdl3"
 import ttf "vendor:sdl3/ttf"
@@ -132,6 +133,12 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 	state := init(wakeProc, &wake)
 	// Deferred last so it runs first: the worker stops before the window and SDL go away.
 	defer State_deinit(&state)
+	// A conversation counts as viewed, and is marked read, only while the window has focus.
+	// A UI script drives the window like a user sitting at it, so it counts as focused even
+	// where the video driver (offscreen) never reports focus.
+	state.windowFocused = script != nil || .INPUT_FOCUS in SDL.GetWindowFlags(window)
+	// How long until a throttled mark-read may go out (State_updateReadMarkers), or -1.
+	readMarkerWait := time.Duration(-1)
 
 	running := true
 	for running {
@@ -157,12 +164,16 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			if script != nil {
 				waitMS = min(waitMS, UI_SCRIPT_TICK_MS)
 			}
+			if readMarkerWait >= 0 {
+				waitMS = min(waitMS, u64(time.duration_milliseconds(readMarkerWait)) + 1)
+			}
 			timeout = i32(waitMS)
 		}
 
 		event: SDL.Event
 		if SDL.WaitEventTimeout(&event, timeout) {
 			for {
+				appTrackWindowFocus(&state, &event, script != nil)
 				if handleAppEvent(&ctx, &event, &wake, &running) {
 					redraw = true
 				}
@@ -185,12 +196,26 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			viewApp(&state, &ctx)
 			ui.endFrame(&ctx)
 		}
+		// After the events and the frame's actions, so a conversation just opened or a message
+		// just arrived in the open one is marked read without waiting for another event.
+		readMarkerWait = State_updateReadMarkers(&state, time.tick_now())
 		free_all(context.temp_allocator)
 	}
 	if script != nil {
 		UIScriptRunner_stop(script, "the window was closed before the script finished")
 	}
 	return true
+}
+
+// Follows the window's input focus for State.windowFocused. A scripted window stays focused.
+@(private = "file")
+appTrackWindowFocus :: proc(state: ^State, event: ^SDL.Event, scripted: bool) {
+	#partial switch event.type {
+	case .WINDOW_FOCUS_GAINED:
+		state.windowFocused = true
+	case .WINDOW_FOCUS_LOST:
+		state.windowFocused = scripted
+	}
 }
 
 // Returns true when the event needs a new frame.

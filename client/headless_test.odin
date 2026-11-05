@@ -256,7 +256,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"Room 1","description":""}]}`,
+		`{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"Room 1","description":"",` +
+		`"lastReadMessageId":0,"unreadCount":0}]}`,
 		"the room_list JSON",
 	)
 	delete(line)
@@ -453,8 +454,9 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"event":"room_list","serverID":801,"rooms":[{"id":1,"name":"Room 1","description":""},` +
-		`{"id":2,"name":"Room 2","description":""}]}` +
+		`{"event":"room_list","serverID":801,"rooms":[{"id":1,"name":"Room 1","description":"",` +
+		`"lastReadMessageId":0,"unreadCount":0},` +
+		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0}]}` +
 		"\n",
 		"the printed room list",
 	)
@@ -475,7 +477,8 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"rooms","serverID":801,"loaded":true,"loading":false,"rooms":[` +
-		`{"id":1,"name":"Room 1","description":""},{"id":2,"name":"Room 2","description":""}]}` +
+		`{"id":1,"name":"Room 1","description":"","lastReadMessageId":0,"unreadCount":0},` +
+		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0}]}` +
 		"\n",
 		"the rooms result",
 	)
@@ -849,7 +852,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,` +
 		`"peerNickname":"bob","lastMessageID":12,"lastSenderID":3,"lastTimestamp":"t",` +
-		`"lastContent":"hi bob"}]}`,
+		`"lastContent":"hi bob","lastReadMessageId":0,"unreadCount":0}]}`,
 		"the conversations JSON",
 	)
 	delete(line)
@@ -891,8 +894,8 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"users","serverID":803,"loaded":true,"loading":false,"users":[` +
-		`{"id":3,"nickname":"alice","isOnline":true},{"id":4,"nickname":"bob",` +
-		`"isOnline":false}]}` +
+		`{"id":3,"nickname":"alice","isOnline":true,"lastReadMessageId":0,"unreadCount":0},` +
+		`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":0}]}` +
 		"\n",
 		"the users result",
 	)

@@ -34,6 +34,7 @@ PendingDBRequestType :: enum {
 	ListDirectConversations,
 	ListUsers,
 	JoinVoiceMemberCheck,
+	MarkRead,
 }
 
 PendingDBRequest :: struct {
@@ -45,6 +46,8 @@ PendingDBRequest :: struct {
 	description:      string,
 	// Room member mutations: the member. Direct messages and history: the peer account.
 	targetUserID:     int,
+	// Mark-read: which kind of conversation roomID or targetUserID names.
+	readMarkerKind:   common.ReadMarkerKind,
 	recipientUserIDs: [dynamic]int,
 	// ClientJoinVoice: the flags the joiner asked for, applied once the membership check passes.
 	voiceMuted:       bool,
@@ -594,7 +597,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .PostDirectMessage,
 		     .GetDirectHistory,
 		     .ListDirectConversations,
-		     .ListUsers:
+		     .ListUsers,
+		     .MarkRead:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
@@ -1213,6 +1217,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientLeaveVoice(pm, state, peerID, packet.payload)
 	case .ClientVoiceState:
 		MainRouterState_handleClientVoiceState(pm, state, peerID, packet.payload)
+	case .ClientMarkRead:
+		MainRouterState_handleClientMarkRead(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1817,6 +1823,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleUserDirectoryResult(pm, state, request, response)
 	case .JoinVoiceMemberCheck:
 		MainRouterState_handleJoinVoiceMemberCheckResult(pm, state, request, response)
+	case .MarkRead:
+		MainRouterState_handleMarkReadResult(pm, state, request, response)
 	}
 }
 
