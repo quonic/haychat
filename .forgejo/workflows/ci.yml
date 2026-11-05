@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Mirrors `./dev.sh ci`: the same Fedora 44 base, package script, Odin pins, ./check.sh (which
+# includes the Windows client check), and dev/live-proof.sh against PostgreSQL 17.
+jobs:
+  linux:
+    name: Checks, tests, and live auth proof
+    runs-on: ubuntu-latest
+    # The live proof needs io_uring in the job container, which the default seccomp profile
+    # and SELinux container_t both block. forgejo-runner ignores --security-opt in workflow
+    # container options, so the runner's config.yml must set them; see README "Continuous
+    # Integration". dev/live-proof.sh prints the sandbox it got before starting the server.
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    services:
+      postgres:
+        image: docker.io/library/postgres:17
+        env:
+          POSTGRES_USER: haychat
+          POSTGRES_PASSWORD: haychat
+          POSTGRES_DB: haychat
+        options: >-
+          --health-cmd "pg_isready -U haychat"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      HAYCHAT_DATABASE_URL: postgres
+      HAYCHAT_DATABASE_PORT: 5432
+      HAYCHAT_DATABASE_USER: haychat
+      HAYCHAT_DATABASE_PASS: haychat
+      HAYCHAT_DATABASE_NAME: haychat
+    steps:
+      # JavaScript actions (checkout, cache) run with the job container's node.
+      - name: Install Node.js and git for actions
+        run: dnf install -y --setopt=install_weak_deps=False nodejs git-core
+
+      - uses: actions/checkout@v4
+
+      - name: Install build packages
+        run: dev/install-packages.sh
+
+      - name: Cache Odin toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/Odin
+          key: odin-fedora44-${{ hashFiles('dev/bootstrap-odin.sh', 'dev/install-packages.sh') }}
+
+      - name: Bootstrap Odin and shared libraries
+        run: |
+          dev/bootstrap-odin.sh /opt/Odin
+          echo "/opt/Odin" >> "$GITHUB_PATH"
+
+      - name: Compile checks and leak-checked tests
+        run: ./check.sh
+
+      - name: Live startup auth proof
+        run: dev/live-proof.sh

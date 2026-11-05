@@ -27,129 +27,173 @@ HayChat is a self-hosted alternative to Discord. It features encrypted client-se
 
 ## Getting Started
 
-Clone the repository and follow the instructions in the `client/` and `server/` directories to set up the development environment and run the application locally.
+Clone the repository, install podman, and run `./dev.sh ci` to build the toolchain image and run every check. See Development Environment below to run a local server and clients.
 
 On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`, defaulting to `$HOME/.config/haychat/config.json` when `XDG_CONFIG_HOME` is unset. Startup also migrates the original historical malformed path formula `$HOME$XDG_CONFIG_HOME/haychat/config.json`, which means older installs are recovered from either the default `$HOME$HOME/.config/haychat/config.json` shape or a custom `XDG_CONFIG_HOME` variant if that file still exists.
 
-### Development Environment Setup
+### Development Environment
 
-The supported HC-201 bootstrap path is a Linux-first, source-based maintainer flow for Fedora 40+ (`dnf`) or Ubuntu 25.04+/Debian 13+ (`apt`). Earlier Ubuntu and Debian releases do not package SDL3 and SDL3_ttf, which the client links against. This matches the current internal tester handoff model: build from source, run PostgreSQL locally, run one HayChat server, and launch local clients against it.
+Development runs in [podman](https://podman.io/) containers, so the host needs only podman (`sudo dnf install podman` on Fedora, `sudo apt install podman` on Debian/Ubuntu). `./dev.sh` is the single entry point. Run `./dev.sh help` for the full command list.
 
-1. Run `./setup-dev-env.sh` on a clean supported machine. The script installs the supported OS packages, builds Odin, prepares the required shared libraries, starts PostgreSQL, and provisions the default local database role/database used by HayChat.
-   If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
-2. Ensure `odin` is on your `PATH`. The bootstrap script links it into `$HOME/.local/bin/odin`; if your shell does not already include `$HOME/.local/bin`, add that directory before continuing.
-3. Validate the supported source-build environment with `./check.sh`, which runs `odin check server`, `odin check client -target:linux_amd64`, and every test suite (including the client UI toolkit in `client/ui`) with leak detection enabled (a test fails on any leak or bad free). CI runs the same script on every push and pull request, plus `odin check client -target:windows_amd64` on Windows.
-4. Use the server helper seam below to seed auth data and launch the local MVP runtime.
+Every container uses the dev image built from `dev/Containerfile`: Fedora 44, the system libraries HayChat links against, and the Odin toolchain and shared libraries at the commits pinned in `dev/bootstrap-odin.sh`. The image tag is a hash of those inputs. Changing a package or a pin produces a new tag, and the next `./dev.sh` command rebuilds the image (the first build takes a few minutes). Containers never see the repository directly. Each gets a snapshot of the working tree: tracked files, including uncommitted edits, plus untracked files that `.gitignore` does not exclude. Local leftovers such as `logs/`, `storage/`, built binaries, and your `~/.config/haychat` never reach a container, and no command touches them.
+
+#### Checks
+
+| Command | What it runs |
+| --- | --- |
+| `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
+| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, then runs the live startup auth proof. `--all` adds the two-client chat proof (see Known Limitations) |
+| `./dev.sh ci` | `check`, then `live`: the same steps Forgejo CI runs |
+
+Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
+
+#### Dev Environment
+
+`./dev.sh up` starts the pod `haychat-dev`: PostgreSQL 17 and a server built from your working tree. The containers share the pod's network and reach each other on `127.0.0.1`. Clients connect on `localhost:12345/udp`, the only published port.
+
+| Command | Purpose |
+| --- | --- |
+| `./dev.sh up` | Build the server and start the pod |
+| `./dev.sh restart` | Rebuild the server from the working tree and restart it. A compile error leaves the running server up |
+| `./dev.sh status` | Containers, ports, and the web admin token |
+| `./dev.sh logs [-f]` | Server output |
+| `./dev.sh admin [-X METHOD] PATH` | Call a web admin route with the token filled in, e.g. `./dev.sh admin /peers` |
+| `./dev.sh seed` | Load the `server/sql/auth_bootstrap.sql` fixture (see Seeded test identities) |
+| `./dev.sh psql [ARGS...]` | psql on the dev database |
+| `./dev.sh client [PROFILE]` | Build the client and open its window on your Wayland or X11 display. Each profile has its own config and identity key, and a new profile's display name is the profile name, so two profiles are two users |
+| `./dev.sh key [PROFILE]` | Print a profile's public key, for `HAYCHAT_ADMIN_PUBLIC_KEY` |
+| `./dev.sh down` | Remove the pod. The database, server state, and client profiles are kept in volumes |
+| `./dev.sh reset` | `down`, then delete those volumes. The next `up` starts with an empty database and a new server identity key |
+| `./dev.sh shell` | Interactive shell in the dev image with the repository mounted read-write at `/src`, for ad-hoc `odin` commands |
+| `./dev.sh image [--pull]` | Rebuild the dev image; `--pull` also refreshes the Fedora base image |
+
+The server keeps its logs, storage, identity key, and web admin token in the `haychat-dev-state` volume, and PostgreSQL keeps its data in `haychat-dev-pgdata`. Client profiles live in `haychat-dev-client-<profile>` volumes. A client running on the host (`odin run client`) also reaches the dev server, at its default `localhost:12345`.
+
+The server's web admin uses `core:nbio`, which needs io_uring on Linux. Podman's default seccomp profile blocks io_uring, and so does the SELinux `container_t` policy on SELinux hosts. Containers that run the server therefore use podman's default seccomp profile plus the three io_uring syscalls (generated under `$XDG_RUNTIME_DIR/haychat-dev/`), and run without SELinux confinement. They remain rootless.
+
+`./dev.sh` reads these environment variables:
+
+- `HAYCHAT_DEV_PORT`: host UDP port published for client connections (default `12345`)
+- `HAYCHAT_DEV_ENV_FILE`: server overrides file (default `.env`, see below)
+- `HAYCHAT_DEV_POSTGRES_IMAGE`: PostgreSQL image (default `docker.io/library/postgres:17`)
+- `HAYCHAT_DEV_SECCOMP`: seccomp profile for containers that run the server, replacing the generated one (for example `unconfined`)
+- `HAYCHAT_SERVER_READY_TIMEOUT_SECS`: how long to wait for the server to report readiness. `./dev.sh up` and `restart` default to `120`; `dev/live-proof.sh` defaults to `60`, and `./dev.sh live` and `ci` pass the variable through to it when it is set
+
+#### Without Containers
+
+`./check.sh` and `dev/live-proof.sh` also run directly on a host that has `odin` on `PATH`. On Fedora 44, `sudo dev/install-packages.sh` installs the system packages and `dev/bootstrap-odin.sh [odin_root]` builds the pinned Odin toolchain and shared libraries. `dev/live-proof.sh` expects a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`, and that role must be able to create, alter, and drop the server-owned schema in `public`.
 
 ### Client Dependencies
 
 The client draws its own immediate-mode UI with `vendor:sdl3` (windowing, input, and the 2D renderer) and `vendor:sdl3/ttf` (text shaping and layout), both from Odin's vendor collection. No other GUI library is needed.
 
-- Linux: install SDL3 and SDL3_ttf development packages (`SDL3-devel SDL3_ttf-devel` on Fedora, `libsdl3-dev libsdl3-ttf-dev` on Ubuntu/Debian). `./setup-dev-env.sh` installs them.
-- Windows: Odin's vendor collection ships the import libraries. To run the client, copy `SDL3.dll` from `%ODIN_ROOT%\vendor\sdl3\` and `SDL3_ttf.dll` from `%ODIN_ROOT%\vendor\sdl3\ttf\` next to `client.exe`.
+- Linux: the dev image includes SDL3 and SDL3_ttf. On a host, install the development packages (`SDL3-devel SDL3_ttf-devel` on Fedora, `libsdl3-dev libsdl3-ttf-dev` on Ubuntu 25.04+/Debian 13+).
+- Windows: Odin's vendor collection ships the import libraries. To run the client, copy `SDL3.dll` from `%ODIN_ROOT%\vendor\sdl3\` and `SDL3_ttf.dll` from `%ODIN_ROOT%\vendor\sdl3\ttf\` next to `client.exe`. `./check.sh` type-checks the Windows client from Linux, but CI does not build or run it on Windows.
 
 The UI fonts (Inter, under the SIL Open Font License, and Twemoji, under CC-BY 4.0) are embedded into the client binary from `client/assets/fonts/`, where their license files live.
 
-The supported bootstrap script assumes these defaults unless you override them before running it:
+### Server Configuration
 
-- PostgreSQL host: `localhost`
-- PostgreSQL port: `5432`
-- PostgreSQL user: `haychat`
-- PostgreSQL password: `haychat`
-- PostgreSQL database: `haychat`
-- Odin root: `$HOME/Odin`
+The server reads its configuration from environment variables. In the dev pod, `./dev.sh` sets the database, listen, and path settings itself. Every other key can be set in `.env` (`cp .env.example .env`), which `./dev.sh up` and `./dev.sh restart` pass to the server. Running `odin run server` directly reads the same keys from the process environment.
 
-Supported environment overrides for the bootstrap script:
+Database (set by `./dev.sh` in the pod):
 
-- `HAYCHAT_DATABASE_URL`
-- `HAYCHAT_DATABASE_PORT`
-- `HAYCHAT_DATABASE_USER`
-- `HAYCHAT_DATABASE_PASS`
-- `HAYCHAT_DATABASE_NAME`
-- `HAYCHAT_ODIN_ROOT`
-- `HAYCHAT_LOCAL_BIN_DIR`
+- `HAYCHAT_DATABASE_URL` (default `localhost`)
+- `HAYCHAT_DATABASE_PORT` (default `5432`)
+- `HAYCHAT_DATABASE_USER` (default `haychat`)
+- `HAYCHAT_DATABASE_PASS` (default `haychat`)
+- `HAYCHAT_DATABASE_NAME` (default `haychat`)
 
-### Local Test Server Bootstrap
+Network and paths (set by `./dev.sh` in the pod):
 
-The repository includes one supported helper path for the MVP auth flow. The helper script seeds deterministic test identities for the server's existing nickname lookup contract.
+- `HAYCHAT_LISTEN_ADDR` (default `0.0.0.0`)
+- `HAYCHAT_LISTEN_PORT` (default `12345`)
+- `HAYCHAT_WEB_ADMIN_PORT` (default `8080`)
+- `HAYCHAT_LOG_DIR` (default `./logs`)
+- `HAYCHAT_FILE_STORAGE_PATH` (default `./storage`)
+- `HAYCHAT_SERVER_IDENTITY_FILE` (default `$HAYCHAT_FILE_STORAGE_PATH/server_identity.json`)
 
-### Server Environment Configuration
+Paths are resolved relative to the server's working directory.
 
-A checked-in example server environment file is provided at `.env.example` for local tester runs.
+Runtime (configurable in `.env`):
 
-1. Copy the example file with `cp .env.example .env`.
-2. Load it into your shell with `source ./.env >/dev/null 2>&1`.
-3. Adjust values only if your local PostgreSQL or runtime layout differs from the supported defaults.
-
-Required baseline values for the supported local MVP flow:
-
-- `HAYCHAT_DATABASE_URL`
-- `HAYCHAT_DATABASE_PORT`
-- `HAYCHAT_DATABASE_USER`
-- `HAYCHAT_DATABASE_PASS`
-- `HAYCHAT_DATABASE_NAME`
-
-Optional server/runtime values documented in the example file:
-
-- `HAYCHAT_WEB_ADMIN_PORT`
-- `HAYCHAT_LISTEN_ADDR`
-- `HAYCHAT_LISTEN_PORT`
-- `HAYCHAT_LOG_LEVEL`
-- `HAYCHAT_LOG_DIR`
-- `HAYCHAT_FILE_STORAGE_PATH`
-- `HAYCHAT_SERVER_IDENTITY_FILE`
-- `HAYCHAT_MAX_RESTARTS`
-- `HAYCHAT_RESTART_BACKOFF_MIN`
-- `HAYCHAT_RESTART_BACKOFF_MAX`
-- `HAYCHAT_MAX_NETWORK_THREADS`
-- `HAYCHAT_MAX_FILE_SIZE`
-- `HAYCHAT_MAX_STORAGE_CAPACITY`
-- `HAYCHAT_SERVER_PRIVATE_KEY`
-- `HAYCHAT_SERVER_PUBLIC_KEY`
-- `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname.
+- `HAYCHAT_LOG_LEVEL` (default `info`)
+- `HAYCHAT_MAX_RESTARTS` (default `5`)
+- `HAYCHAT_RESTART_BACKOFF_MIN` (seconds, default `0.1`)
+- `HAYCHAT_RESTART_BACKOFF_MAX` (seconds, default `10.0`)
+- `HAYCHAT_MAX_NETWORK_THREADS` (default `4`)
+- `HAYCHAT_MAX_FILE_SIZE` (bytes, default `10485760`)
+- `HAYCHAT_MAX_STORAGE_CAPACITY` (bytes, default `1073741824`)
+- `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`: fixed server identity. When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE`.
+- `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key.
 - `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
+
+The server owns table creation and validation. It creates or reconciles its schema before it reports readiness; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. The configured role must be able to create, alter, and drop objects in `public`. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
 ### Web Admin
 
-The web admin listens on `localhost` only. `GET /status` is an unauthenticated health probe. `GET /peers`, `GET /logs`, `POST /shutdown`, and `POST /restart` require the bearer token:
+The web admin listens on `127.0.0.1` only, so in the dev pod it is reachable from inside the pod but not from the host. `GET /status` is an unauthenticated health probe. `GET /peers`, `GET /logs`, `POST /shutdown`, and `POST /restart` require the bearer token. `./dev.sh admin` calls a route from inside the pod with the token filled in:
+
+```sh
+./dev.sh admin /peers
+./dev.sh admin -X POST /restart
+```
+
+For a server running directly on the host:
 
 ```sh
 curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:8080/peers
 ```
 
-Supported helper commands are exactly: `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, and `hc118-gate`.
+### Typical Workflow
 
-Primary local MVP workflow:
-
-1. Run `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`.
-2. Run `./run-test-server.sh start-background` as the primary MVP start path. The server creates or reconciles its required schema before reporting readiness.
-3. Confirm readiness with `GET http://localhost:8080/status`.
-4. Launch clients manually with `odin run client` in separate terminals.
-5. Shut the helper-managed server down with `./run-test-server.sh stop`.
-
-The helper owns only the server lifecycle. PostgreSQL remains a prerequisite, and clients are launched manually.
-
-Companion and lower-level helper flows:
-
-1. If your PostgreSQL setup differs from the supported defaults, load `.env` or export `HAYCHAT_DATABASE_URL`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_PASS`, and `HAYCHAT_DATABASE_NAME` before running the helper.
-2. Run `./run-test-server.sh start` to launch the server in the foreground. It creates or validates the database schema before listening for clients.
-3. For the Linux-first local confidence gate, use `./run-test-server.sh start-background` and then `./run-test-server.sh wait-ready` before running live client proofs. Shut the helper-managed server down with `./run-test-server.sh stop` when the proof completes or fails.
-4. `./run-test-server.sh hc118-gate` is the supported Linux-first validation gate. It runs `odin test common`, `odin test server`, `odin test client`, then the live startup/connect/auth/message proof with phase-labeled output. The configured database user must be able to create, alter, and drop the server-owned schema in `public`.
-
-Running `odin run server` directly now uses tester-safe local runtime paths by default, resolved relative to the server process working directory: logs in `./logs`, file storage in `./storage`, and the server identity file at `./storage/server_identity.json`. `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, and `HAYCHAT_SERVER_IDENTITY_FILE` still override those defaults.
+1. `./dev.sh up` to start PostgreSQL and the server.
+2. `./dev.sh seed` to load the fixture users and the `#general` room.
+3. To connect as `admin`: run `./dev.sh client admin` once to create the profile (it cannot claim `admin` yet) and close it. Put the output of `./dev.sh key admin` in `.env` as `HAYCHAT_ADMIN_PUBLIC_KEY=...`, run `./dev.sh restart`, then run `./dev.sh client admin` again.
+4. Open more clients with `./dev.sh client alice`, `./dev.sh client bob`, and so on. A profile's display name is its profile name, so each profile is a distinct user.
+5. After code changes, `./dev.sh restart` for the server and reopen clients to rebuild them.
+6. Before pushing, run `./dev.sh ci`.
+7. `./dev.sh down` when done, or `./dev.sh reset` to start over.
 
 Seeded test identities:
 
 - `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
 - `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
 
+### Continuous Integration
+
+HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
+
+The live proof needs io_uring in the job container (see Dev Environment), which takes two changes on a podman-backed runner host. Both apply to every container that runner starts.
+
+1. Seccomp: make the io_uring profile podman's default. forgejo-runner sends `--security-opt seccomp=FILE` as inline JSON, Docker style, which podman's Docker-compatible API rejects ("opening seccomp profile failed ... file name too long"). Instead, generate the profile from the host's own podman default and point `containers.conf` at it. Use `/etc/containers/containers.conf.d/` when the runner talks to rootful podman, or `~/.config/containers/containers.conf.d/` of the runner's user for rootless podman:
+
+   ```sh
+   ./dev.sh seccomp-profile /etc/forgejo-runner/seccomp-io-uring.json
+   ```
+
+   ```toml
+   # containers.conf.d/50-io-uring.conf
+   [containers]
+   seccomp_profile = "/etc/forgejo-runner/seccomp-io-uring.json"
+   ```
+
+   Restart the podman API service (`podman.socket` / `podman.service`) afterwards.
+
+2. SELinux (only on SELinux hosts): forgejo-runner ignores `--security-opt` in a workflow's `container.options`, so set it in the runner's `config.yml` and restart the runner:
+
+   ```yaml
+   container:
+     options: --security-opt label=disable
+   ```
+
+`dev/live-proof.sh` prints the sandbox it got before starting the server. A working runner shows `seccomp=filtered selinux=...spc_t... io_uring_disabled=0`. `container_t` means step 2 is missing; seccomp with io_uring still blocked shows up as the web admin's `acquire_err == nil` assertion.
+
 ### Known Limitations
 
-- New accounts are not added to any room. The seed fixture creates the `general` room with only `admin` as a member, so other users cannot chat until an admin adds them (`ClientAddRoomMember`). The two-client live chat proof (part of `hc118-gate`) fails for the same reason, so CI runs only the startup auth proof.
+- New accounts are not added to any room. The seed fixture creates the `general` room with only `admin` as a member, so other users cannot chat until an admin adds them (`ClientAddRoomMember`). The two-client live chat proof (`./dev.sh live --all`) fails for the same reason, so CI runs only the startup auth proof.
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new nickname first connects.
 - Messages are not end-to-end encrypted (see Features).
-
-The server owns table creation and validation. It starts successfully only after PostgreSQL contains the required schema; on an incompatible unreleased schema, it rebuilds the HayChat tables transactionally. `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
 ## License
 

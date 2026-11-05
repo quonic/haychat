@@ -6,6 +6,7 @@ ols.json
 *.bin
 logs/
 storage/
+# Left behind by the removed run-test-server.sh.
 .haychat-test-server/
 
 # Created by https://www.toptal.com/developers/gitignore/api/cmake,xmake,dotenv,powershell,visualstudiocode,executable,linux

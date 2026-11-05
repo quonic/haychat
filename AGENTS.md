@@ -39,11 +39,19 @@ Making breaking changes to the project is currently allowed, but it is recommend
 
 - Checking for compile errors for server component: `odin check server`
 - Checking for compile errors for client component: `odin check client -target:windows_amd64` and `odin check client -target:linux_amd64` for Windows and Linux respectively.
+- These need `odin` on `PATH`. Without a host toolchain, run them in the dev image: `./dev.sh check`, or `./dev.sh shell` for ad-hoc commands.
+
+## Development Environment
+
+- Development runs in podman containers through `./dev.sh` (`./dev.sh help` lists commands). The dev image (`dev/Containerfile`) holds Fedora 44, the system libraries, and the Odin toolchain pinned in `dev/bootstrap-odin.sh`; containers get a snapshot of the working tree, never the host's `logs/`, `storage/`, or `~/.config/haychat`.
+- Package and pin changes go in `dev/install-packages.sh` and `dev/bootstrap-odin.sh`. Both the dev image and Forgejo CI (`.forgejo/workflows/ci.yml`) use them, and the image tag is a hash of those files.
+- `./dev.sh up` / `restart` / `down` / `reset` manage the dev pod (PostgreSQL + server). `./dev.sh reset` deletes only the dev pod's volumes; no command touches the host's client config.
+- The forge is Forgejo with a Linux-only runner. Windows is covered by `odin check client -target:windows_amd64` in `./check.sh`.
 
 ## Testing
 
 - Test files: `*_test.odin` (e.g., `chat_test.odin`)
-- Full check (what CI runs): `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
+- Full gate (what CI runs): `./dev.sh ci`, which runs `./check.sh` and then `dev/live-proof.sh` against a throwaway PostgreSQL. `./dev.sh check` runs only `./check.sh`. Tests run with `ODIN_TEST_FAIL_ON_BAD_MEMORY`, so any leak or bad free fails the suite.
 - Prefer component-scoped checks while editing: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`. The serial server suite is the reliable default for router/database tests.
 - Use the built-in testing library from Odin. `import "core:testing"` and any procedures must have `t: ^testing.T,` as the first parameter.
 - Use `assert(a == VALUE, "message that test failed")` for assertions in tests, and provide a clear message that indicates what the expected value was and what the actual value is if the assertion fails.

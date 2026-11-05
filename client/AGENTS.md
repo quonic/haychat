@@ -19,11 +19,9 @@
 - Build sidebar rooms from the selected server's joined-room list. The chat view derives its transcript from structured cached messages and only shows pagination when `hasOlder` is true.
 - Add action tests for cache isolation, history page merge/de-duplication, and selected-room removal fallback whenever channel behavior changes.
 
-## MVP Workflow
+## Dev Workflow
 
-- Load the supported local env with `cp ./.env.example ./.env && source ./.env >/dev/null 2>&1`.
-- Before using `./run-test-server.sh start-background`, ensure local PostgreSQL is already available or matching `HAYCHAT_DATABASE_*` overrides are set. If you reuse an existing HayChat database instead of provisioning a fresh one, the configured role must own that database or have `USAGE, CREATE` on schema `public` before running the helper bootstrap.
-- Start the supported server helper seam with `./run-test-server.sh start-background` as the primary MVP start path. The server creates or validates its schema on startup; seed test data separately with `server/sql/auth_bootstrap.sql` (see `reset-local-env.sh`).
-- Supported helper commands are exactly: `start`, `start-background`, `wait-ready [timeout_secs]`, `stop`, and `hc118-gate`.
-- Helper ownership stops at the server lifecycle. Launch clients manually with `odin run client` in separate terminals.
-- Stop the helper-managed server with `./run-test-server.sh stop`.
+- Start the dev server with `./dev.sh up`; seed fixture users and `#general` with `./dev.sh seed`.
+- `./dev.sh client [PROFILE]` builds the client from the working tree and opens it on the host's Wayland or X11 display, inside the dev pod. Each profile keeps its config and identity key in its own volume, and a new profile's display name is the profile name, so profiles are distinct users. `./dev.sh key PROFILE` prints a profile's public key.
+- A client on the host (`odin run client`) also reaches the dev server at its default `localhost:12345`, but it uses the host's real `~/.config/haychat`.
+- Live client tests (`HAYCHAT_LIVE_STARTUP_AUTH=1`) run through `./dev.sh live`, which gives them a fresh server and database. They connect to `127.0.0.1:12345`.
