@@ -34,6 +34,21 @@ readMarkerTestStub :: proc(
 	return true
 }
 
+READ_MARKER_TEST_SEND_FAILURE :: "test send failure"
+
+// A bridge whose sends always fail and, like the real send, say why in lastError.
+@(private = "file")
+readMarkerTestFailingStub :: proc(
+	transport: ^ClientServerTransport,
+	kind: common.ReadMarkerKind,
+	conversationID: int,
+	messageID: int,
+) -> bool {
+	append(&readMarkerTestSends, ReadMarkerTestSend{kind, conversationID, messageID})
+	ClientServerTransport_setLastError(transport, READ_MARKER_TEST_SEND_FAILURE)
+	return false
+}
+
 // Swaps in the recording stub. Call with readMarkerSendBridgeTestMutex held; undo with
 // testReadMarkerRestore.
 @(private = "file")
@@ -536,5 +551,77 @@ testHeadlessReadStateCommandsAndEvents :: proc(t: ^testing.T) {
 		strings.contains(output, `{"usage":"read room|dm ID [MESSAGE_ID]",`) &&
 		strings.contains(output, `"read_marker"`),
 		fmt.tprintf("expected help to list read and read_marker, got %s", output),
+	)
+}
+
+@(test)
+testLosingFocusFlushesAThrottledMarkRead :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&readMarkerSendBridgeTestMutex)
+	defer sync.mutex_unlock(&readMarkerSendBridgeTestMutex)
+	testReadMarkerUseStub()
+	defer testReadMarkerRestore()
+
+	server := testDirectServer(905)
+	state := testStateWithServers({server})
+	defer State_deinit(&state)
+	testApplyConnected(&state, server.id, 7)
+	testApplyRoomsWithReadState(&state, server.id, {id = 1, name = "general"})
+	State_switchToChannel(&state, server.id, 1)
+	state.windowFocused = true
+	start := time.tick_now()
+	later := time.tick_add(start, 200 * time.Millisecond)
+
+	testApplyRoomChat(&state, server.id, 1, 8, 5, "first", "bob")
+	State_updateReadMarkers(&state, start)
+	assert(testReadMarkerTakeSends() == "Room:1:5", "expected the first message marked read")
+
+	// Inside the throttle a viewed message neither counts nor goes out yet.
+	testApplyRoomChat(&state, server.id, 1, 8, 6, "second", "bob")
+	assert(State_updateReadMarkers(&state, later) > 0, "expected the throttle to hold it")
+	assert(testReadMarkerTakeSends() == "", "expected nothing sent inside the second")
+	assert(testSidebarUnread(&state, .Channel, 1) == 0, "expected a viewed message not to count")
+
+	// Losing focus flushes it, ignoring the throttle, while the room still counts as viewed.
+	State_flushReadMarkers(&state, later)
+	assert(testReadMarkerTakeSends() == "Room:1:6", "expected the flush to mark it read")
+	state.windowFocused = false
+	State_flushReadMarkers(&state, later)
+	assert(testReadMarkerTakeSends() == "", "expected no flush without a viewed conversation")
+}
+
+@(test)
+testAutomaticMarkReadFailureLeavesTheStatusAlone :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&readMarkerSendBridgeTestMutex)
+	defer sync.mutex_unlock(&readMarkerSendBridgeTestMutex)
+	testReadMarkerUseStub()
+	defer testReadMarkerRestore()
+	readMarkerSendBridge = readMarkerTestFailingStub
+
+	server := testDirectServer(906)
+	state := testStateWithServers({server})
+	defer State_deinit(&state)
+	testApplyConnected(&state, server.id, 7)
+	testApplyRoomsWithReadState(&state, server.id, {id = 1, name = "general"})
+	State_switchToChannel(&state, server.id, 1)
+	state.windowFocused = true
+	testApplyRoomChat(&state, server.id, 1, 8, 5, "first", "bob")
+
+	// The automatic path tries, fails, and keeps quiet.
+	State_setChatStatus(&state, "Connected as me")
+	State_updateReadMarkers(&state, time.tick_now())
+	assert(testReadMarkerTakeSends() == "Room:1:5", "expected the automatic mark-read attempt")
+	assert(
+		state.chat_status_message == "Connected as me",
+		fmt.tprintf("expected the status untouched, got %q", state.chat_status_message),
+	)
+
+	// A user-initiated read reports the failure, replacing the unrelated status.
+	sent := State_markConversationRead(&state, .Room, server.id, 1, 5, time.tick_now())
+	assert(!sent, "expected the failing bridge to refuse the send")
+	assert(
+		state.chat_status_message == READ_MARKER_TEST_SEND_FAILURE,
+		fmt.tprintf("expected the failure reported, got %q", state.chat_status_message),
 	)
 }
