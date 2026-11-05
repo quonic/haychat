@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 11
+protocolVersion: ProtocolVersion = 12
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -603,8 +603,14 @@ VoiceParticipant :: struct {
 // live session of every room member whenever the set or any participant's state changes, and
 // to a joiner as the join acknowledgement. participants and each nickname are owned.
 ServerVoiceParticipantsPayload :: struct {
-	roomId:       int,
-	participants: [dynamic]VoiceParticipant,
+	roomId:          int,
+	participants:    [dynamic]VoiceParticipant,
+	// Whether the session receiving this message is itself in roomId's voice (protocol 12).
+	// The server sets it per recipient session. Participants carry user IDs, not sessions, so
+	// without it a client could not tell the acknowledgement of its own join from a list that
+	// names the same account on another device, or one sent before the server processed the
+	// join; it completes a join only on a list with this set.
+	recipientJoined: bool,
 }
 
 // ServerVoiceJoinRejected: a ClientJoinVoice for roomId was refused. reason is owned and

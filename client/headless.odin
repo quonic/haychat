@@ -453,10 +453,12 @@ HeadlessVoiceParticipantJSON :: struct {
 // ServerVoiceParticipants: a room's full voice participant set, sent for every room this
 // account is in whenever it changes (an empty list means nobody is in its voice any more).
 HeadlessVoiceParticipantsJSON :: struct {
-	event:        string,
-	serverID:     int,
-	roomID:       int,
-	participants: []HeadlessVoiceParticipantJSON,
+	event:           string,
+	serverID:        int,
+	roomID:          int,
+	// Whether this session itself is in the room's voice (the server's per-session flag).
+	recipientJoined: bool,
+	participants:    []HeadlessVoiceParticipantJSON,
 }
 
 // ServerVoiceJoinRejected and ServerVoiceLeft: the server's reason for refusing a join or
@@ -805,6 +807,7 @@ headlessRenderRuntimeEvent :: proc(
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
 				roomID = event.roomID,
+				recipientJoined = event.voiceRecipientJoined,
 				participants = participants,
 			},
 			allocator,

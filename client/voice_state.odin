@@ -444,20 +444,19 @@ State_voiceResumeAfterReconfigure :: proc(state: ^State) {
 }
 
 // Takes ownership of participants^ (it is cleared). Replaces the room's list; an empty list
-// removes it. A list for the room being joined that names this user completes the join.
+// removes it. A list for the room being joined completes the join only when the server says
+// this session is in it (recipientJoined): a list that merely names this user may be about the
+// same account on another device, or may have been sent before the server processed the join.
+// A list saying this session is not in voice never ends a joined session: the server sends
+// ServerVoiceLeft for every removal, and a list from before a quick leave and re-join of the
+// same room would otherwise undo the re-join.
 State_receiveVoiceParticipants :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	participants: ^[dynamic]common.VoiceParticipant,
+	recipientJoined: bool,
 ) {
 	State_voiceRemoveRoomParticipants(state, serverID, roomID)
-	listsSelf := false
-	selfUserID := State_selfUserID(state, serverID)
-	for participant in participants {
-		if selfUserID != 0 && participant.userId == selfUserID {
-			listsSelf = true
-		}
-	}
 	if len(participants) > 0 {
 		append(
 			&state.voice.roomParticipants,
@@ -475,20 +474,23 @@ State_receiveVoiceParticipants :: proc(
 	if state.voice.status == .Joining &&
 	   state.voice.serverID == serverID &&
 	   state.voice.roomID == roomID &&
-	   listsSelf {
+	   recipientJoined {
 		state.voice.status = .Joined
 		State_voiceStartEngine(state)
 	}
 }
 
-// ServerVoiceJoinRejected for the room being joined: back to Idle with the server's reason.
-// Takes ownership of reason^ when it applies.
+// ServerVoiceJoinRejected for the voice room: back to Idle with the server's reason. Takes
+// ownership of reason^ when it applies. It also ends a session that already counts as Joined:
+// after a quick leave and re-join of the same room, a list sent before the leave can complete
+// the re-join before the server has accepted it, and the server's refusal must still win.
 State_voiceJoinRejected :: proc(state: ^State, serverID, roomID: int, reason: ^string) {
-	if state.voice.status != .Joining ||
+	if (state.voice.status != .Joining && state.voice.status != .Joined) ||
 	   state.voice.serverID != serverID ||
 	   state.voice.roomID != roomID {
 		return
 	}
+	State_voiceStopEngine(state)
 	state.voice.status = .Idle
 	state.voice.serverID = 0
 	state.voice.roomID = 0

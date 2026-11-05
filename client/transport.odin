@@ -96,6 +96,9 @@ ClientTransportRuntimeEvent :: struct {
 	readMarker:        common.ServerReadMarkerPayload,
 	// Owned participant entries (nicknames included) on VoiceParticipants.
 	voiceParticipants: [dynamic]common.VoiceParticipant,
+	// VoiceParticipants: whether this session is itself in the room's voice (the server's
+	// per-recipient ServerVoiceParticipants.recipientJoined).
+	voiceRecipientJoined: bool,
 	// On Connected: the transport's session counter, which voice bindings are checked against
 	// (see ClientTransportVoiceBinding).
 	sessionGeneration: u64,
@@ -1186,6 +1189,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				serverID = transport.serverID,
 				roomID = payload.roomId,
 				voiceParticipants = payload.participants,
+				voiceRecipientJoined = payload.recipientJoined,
 			},
 			true
 

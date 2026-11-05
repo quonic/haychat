@@ -2,7 +2,6 @@
 package client
 
 import "../common"
-import "core:fmt"
 import "core:sync"
 import "core:testing"
 import "core:time"
@@ -269,10 +268,12 @@ testEstablishedSessionRoutesVoiceDatagramsWithoutEvents :: proc(t: ^testing.T) {
 	)
 	assert(transport.enetPeer != nil, "expected the client to start connecting")
 
+	// Generous deadlines for a loaded CI runner; both loops stop as soon as they succeed.
+	LOOPBACK_DEADLINE :: 15 * time.Second
 	serverPeer: ^ENet.Peer
 	clientConnected := false
 	start := time.tick_now()
-	for (serverPeer == nil || !clientConnected) && time.tick_since(start) < 5 * time.Second {
+	for (serverPeer == nil || !clientConnected) && time.tick_since(start) < LOOPBACK_DEADLINE {
 		event: ENet.Event
 		for ENet.host_service(serverHost, &event, 0) > 0 {
 			if event.type == .CONNECT {
@@ -288,7 +289,11 @@ testEstablishedSessionRoutesVoiceDatagramsWithoutEvents :: proc(t: ^testing.T) {
 		}
 		time.sleep(time.Millisecond)
 	}
-	assert(serverPeer != nil && clientConnected, "expected the loopback ENet connection")
+	assert(
+		serverPeer != nil && clientConnected,
+		"expected the loopback ENet connection on 127.0.0.1 within 15 s (server peer seen and " +
+		"client CONNECT event); check that UDP on the loopback interface works here",
+	)
 
 	engine := testOpenedInboundEngine()
 	defer VoiceEngine_destroy(engine)
@@ -322,7 +327,7 @@ testEstablishedSessionRoutesVoiceDatagramsWithoutEvents :: proc(t: ^testing.T) {
 	eventCount := 0
 	gotVoiceLeft := false
 	start = time.tick_now()
-	for time.tick_since(start) < 5 * time.Second {
+	for time.tick_since(start) < LOOPBACK_DEADLINE {
 		serverEvent: ENet.Event
 		for ENet.host_service(serverHost, &serverEvent, 0) > 0 {
 			if serverEvent.type == .RECEIVE {
@@ -495,12 +500,10 @@ testVoiceSendPathSealsFramesTheServerCanOpen :: proc(t: ^testing.T) {
 		!ClientServerTransport_sendVoiceFrame(&transport, link, frames[0]),
 		"expected a binding from the previous session to send nothing",
 	)
-	testing.expect(
+	testing.expectf(
 		t,
 		transport.voiceStats.sendDropped[.NotJoined] == 5,
-		fmt.tprintf(
-			"expected 5 NotJoined drops, got %d",
-			transport.voiceStats.sendDropped[.NotJoined],
-		),
+		"expected 5 NotJoined drops, got %d",
+		transport.voiceStats.sendDropped[.NotJoined],
 	)
 }

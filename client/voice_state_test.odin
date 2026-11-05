@@ -68,12 +68,33 @@ testVoiceState :: proc(serverID: int) -> State {
 	return state
 }
 
+// A participant list as this session would get it when it is one of the participants
+// whenever the list names this user, the common case of a single device.
 @(private = "file")
 testApplyVoiceParticipants :: proc(state: ^State, serverID, roomID: int, userIDs: ..int) {
+	recipientJoined := false
+	for userID in userIDs {
+		if userID == TEST_VOICE_SELF_USER_ID {
+			recipientJoined = true
+		}
+	}
+	testApplyVoiceParticipantsFor(state, serverID, roomID, recipientJoined, ..userIDs)
+}
+
+// A participant list with the server's per-session flag given explicitly, for the case where
+// the list names this user on another device (recipientJoined false).
+@(private = "file")
+testApplyVoiceParticipantsFor :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	recipientJoined: bool,
+	userIDs: ..int,
+) {
 	event := ClientTransportRuntimeEvent {
-		kind     = .VoiceParticipants,
-		serverID = serverID,
-		roomID   = roomID,
+		kind                 = .VoiceParticipants,
+		serverID             = serverID,
+		roomID               = roomID,
+		voiceRecipientJoined = recipientJoined,
 	}
 	for userID in userIDs {
 		append(
@@ -534,4 +555,106 @@ testVoiceJoinNeedsAConnectionAndARoom :: proc(t: ^testing.T) {
 		len(state.voice.lastError) > 0,
 		"expected a refused join to stay out of voice with a reason",
 	)
+}
+
+// The participant list names user IDs, not sessions. While this device is joining, a list that
+// names this account because of another device, and so says this session is not joined, must
+// not complete the join; only the server's acknowledgement of this session's join does.
+@(test)
+testVoiceJoinWaitsForThisSessionsAcknowledgement :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceState(925)
+	defer State_deinit(&state)
+	sync.mutex_lock(&voiceControlSendBridgeTestMutex)
+	defer sync.mutex_unlock(&voiceControlSendBridgeTestMutex)
+	testVoiceControlUseStub()
+	defer testVoiceControlRestore()
+
+	testing.expect(t, State_joinVoice(&state, 925, 2), "expected the join to go out")
+	testApplyVoiceParticipantsFor(&state, 925, 2, false, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		state.voice.status == .Joining && state.voice.engine == nil,
+		"expected another device's list to leave this session Joining with no engine",
+	)
+	testing.expect(
+		t,
+		len(State_voiceRoomParticipants(&state, 925, 2)) == 1,
+		"expected the other device kept in the room's participants for the sidebar",
+	)
+
+	testApplyVoiceParticipantsFor(
+		&state,
+		925,
+		2,
+		true,
+		TEST_VOICE_SELF_USER_ID,
+		TEST_VOICE_SELF_USER_ID,
+	)
+	testing.expect(
+		t,
+		state.voice.status == .Joined && state.voice.engine != nil,
+		"expected this session's acknowledgement to complete the join",
+	)
+
+	// A later list that says this session is not joined does not end it: only ServerVoiceLeft
+	// removes a joined session, so a stale list cannot undo a re-join.
+	testApplyVoiceParticipantsFor(&state, 925, 2, false, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		state.voice.status == .Joined && state.voice.engine != nil,
+		"expected a list without this session to leave the joined session alone",
+	)
+	State_leaveVoice(&state)
+}
+
+// After a quick leave and re-join of the same room, a list sent before the leave can complete
+// the re-join early. If the server then refuses the re-join, the refusal still ends the session.
+@(test)
+testVoiceRejectionEndsASessionThatAlreadyCountsAsJoined :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceState(926)
+	defer State_deinit(&state)
+	sync.mutex_lock(&voiceControlSendBridgeTestMutex)
+	defer sync.mutex_unlock(&voiceControlSendBridgeTestMutex)
+	testVoiceControlUseStub()
+	defer testVoiceControlRestore()
+
+	testing.expect(t, State_joinVoice(&state, 926, 2), "expected the join to go out")
+	testApplyVoiceParticipants(&state, 926, 2, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		state.voice.status == .Joined && state.voice.engine != nil,
+		"expected the (stale) acknowledgement to count as joined",
+	)
+
+	testApplyVoiceReason(&state, .VoiceJoinRejected, 926, 2, "voice room is full")
+	testing.expect(
+		t,
+		state.voice.status == .Idle &&
+		state.voice.engine == nil &&
+		state.voice.wantVoiceRoomID == 0 &&
+		testVoiceTransportEngine(&state, 926) == nil,
+		"expected the refusal to stop the engine, unbind it and clear the want",
+	)
+	testing.expectf(
+		t,
+		state.voice.lastError == "voice room is full",
+		"expected the server's reason kept, got %q",
+		state.voice.lastError,
+	)
+
+	// A refusal for another room changes nothing.
+	testing.expect(t, State_joinVoice(&state, 926, 3), "expected a second join to go out")
+	testApplyVoiceReason(&state, .VoiceJoinRejected, 926, 2, "stale refusal")
+	testing.expect(
+		t,
+		state.voice.status == .Joining && state.voice.roomID == 3,
+		"expected a refusal for another room to leave this join alone",
+	)
+	State_leaveVoice(&state)
 }

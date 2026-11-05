@@ -130,7 +130,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` |
 | `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
 | `read_marker` | `{"event":"read_marker","serverID":1,"kind":"room","conversationID":1,"lastReadMessageId":12,"unreadCount":0}` (`kind` is `room` or `dm`; for `dm`, `conversationID` is the peer's user ID) |
-| `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
+| `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"recipientJoined":true,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
 | `voice_join_rejected` | `{"event":"voice_join_rejected","serverID":1,"roomID":1,"reason":"voice room is full"}` |
 | `voice_left` | `{"event":"voice_left","serverID":1,"roomID":1,"reason":"the room was deleted"}` (the server removed this session from that room's voice) |
 
@@ -169,7 +169,9 @@ a silent source and a null sink, so it never opens an audio device.
 - `voice_participants` arrives for every room of the account whenever its voice participant set
   or a participant's mute or deafen changes, and after every `room_list` for each room with
   anyone in voice. It doubles as the join acknowledgement: a join is complete when a list for
-  that room names your `userID`. A second device of the same account is a second entry with the
+  that room arrives with `"recipientJoined":true`, which the server sets per session (protocol
+  12). Naming your `userID` is not enough, because a list also names you for your other
+  devices. A second device of the same account is a second entry with the
   same `userID`.
 - `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
   full`, `voice is disabled`, `invalid room`, or `voice is unavailable, try again`.

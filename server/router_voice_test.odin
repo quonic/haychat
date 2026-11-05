@@ -470,7 +470,17 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 		both.participants[1].userId == 42,
 		"expected the second device as a second participant with the same user ID",
 	)
+	assert(!both.recipientJoined, "expected user 43, not in voice, told it is not joined")
 	common.ServerVoiceParticipantsPayload_deinit(&both)
+	// Each device's list says whether that device itself is in voice; both are now.
+	for peerID in ([]u32{1, 3}) {
+		mine, mineFound := routerVoiceTestParticipants(&drain, peerID, 7)
+		assert(
+			mineFound && mine.recipientJoined,
+			fmt.tprintf("expected peer %d told it is joined", peerID),
+		)
+		common.ServerVoiceParticipantsPayload_deinit(&mine)
+	}
 	RouterVoiceTestDrain_deinit(&drain)
 
 	// Mute and deafen: route and participants change; the flags reach every member's sessions.
@@ -518,6 +528,15 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	after, afterFound := routerVoiceTestParticipants(&drain, 1, 7)
 	defer common.ServerVoiceParticipantsPayload_deinit(&after)
 	assert(afterFound && len(after.participants) == 1, "expected the leaver to see one left")
+	// The list still names user 42 (the other device), but tells peer 1 it is not joined: a
+	// client must not take that for its own join.
+	assert(
+		after.participants[0].userId == 42 && !after.recipientJoined,
+		"expected the leaver told it is not joined while its other device stays",
+	)
+	stayed, stayedFound := routerVoiceTestParticipants(&drain, 3, 7)
+	defer common.ServerVoiceParticipantsPayload_deinit(&stayed)
+	assert(stayedFound && stayed.recipientJoined, "expected the device that stayed told so")
 	assert(1 not_in h.state.peerVoiceRoom, "expected peer 1 out of voice")
 
 	// Leaving again, or changing state outside voice, is a no-op.

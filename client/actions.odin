@@ -527,6 +527,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.serverID,
 			event.roomID,
 			&event.voiceParticipants,
+			event.voiceRecipientJoined,
 		)
 	case .VoiceJoinRejected:
 		State_voiceJoinRejected(state, event.serverID, event.roomID, &event.message)

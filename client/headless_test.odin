@@ -964,9 +964,10 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 @(test)
 testHeadlessRendersVoiceEvents :: proc(t: ^testing.T) {
 	participants := ClientTransportRuntimeEvent {
-		kind     = .VoiceParticipants,
-		serverID = 1,
-		roomID   = 2,
+		kind                 = .VoiceParticipants,
+		serverID             = 1,
+		roomID               = 2,
+		voiceRecipientJoined = true,
 	}
 	append(
 		&participants.voiceParticipants,
@@ -979,7 +980,8 @@ testHeadlessRendersVoiceEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"voice_participants","serverID":1,"roomID":2,"participants":[` +
+		`{"event":"voice_participants","serverID":1,"roomID":2,"recipientJoined":true,` +
+		`"participants":[` +
 		`{"userID":3,"nickname":"alice","muted":true,"deafened":false},` +
 		`{"userID":4,"nickname":"bob","muted":false,"deafened":true}]}`,
 		"the voice_participants JSON",
@@ -995,7 +997,8 @@ testHeadlessRendersVoiceEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"voice_participants","serverID":1,"roomID":2,"participants":[]}`,
+		`{"event":"voice_participants","serverID":1,"roomID":2,"recipientJoined":false,` +
+		`"participants":[]}`,
 		"an empty participant list",
 	)
 	delete(line)

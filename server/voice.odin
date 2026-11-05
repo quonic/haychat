@@ -123,8 +123,20 @@ MainRouterState_voiceSendRoute :: proc(pm: ^ProcessManager, state: ^MainRouterSt
 	)
 }
 
+// Whether peerID's own session is in roomID's voice: what ServerVoiceParticipants tells that
+// session in recipientJoined, so a client completes its join only on its own acknowledgement.
+MainRouterState_voicePeerIsInRoom :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+	roomID: int,
+) -> bool {
+	inRoomID, inVoice := state.peerVoiceRoom[peerID]
+	return inVoice && inRoomID == roomID
+}
+
 // Builds roomID's full participant set. The nicknames are borrowed from the peer sessions, so
 // the caller frees only the array (delete(payload.participants)), right after sending.
+// recipientJoined is left false; senders set it per recipient session.
 MainRouterState_voiceBuildParticipants :: proc(
 	state: ^MainRouterState,
 	room: VoiceRoomState,
@@ -173,6 +185,11 @@ MainRouterState_voiceRoomChanged :: proc(
 			   room.memberUserIDs[:],
 			   recipientSession.authenticatedUserID,
 		   ) {
+			payload.recipientJoined = MainRouterState_voicePeerIsInRoom(
+				state,
+				recipientPeerID,
+				roomID,
+			)
 			MainRouterState_sendPeerMessage(
 				pm,
 				state,
@@ -526,6 +543,7 @@ MainRouterState_voiceSendActiveParticipants :: proc(
 		}
 		MainRouterState_voiceAddMemberUserID(room, session.authenticatedUserID)
 		payload := MainRouterState_voiceBuildParticipants(state, room^)
+		payload.recipientJoined = MainRouterState_voicePeerIsInRoom(state, peerID, summary.id)
 		MainRouterState_sendPeerMessage(pm, state, peerID, .ServerVoiceParticipants, payload)
 		delete(payload.participants)
 	}

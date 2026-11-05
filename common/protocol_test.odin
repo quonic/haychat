@@ -108,16 +108,17 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsElevenForReadState :: proc(t: ^testing.T) {
+testProtocolVersionIsTwelveForTheVoiceRecipientFlag :: proc(t: ^testing.T) {
 	_ = t
-	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule (four keys,
-	// channel-bound AAD); 10 added the voice control messages and bound the voice datagram's
-	// kind byte into its AAD; 11 added read state (ClientMarkRead, ServerReadMarker, and the
-	// read-state fields of RoomSummary and DirectConversationSummary), so peers on 10 or
-	// older cannot talk to this build.
+	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
+	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
+	// ServerVoiceParticipants.recipientJoined, so peers on 11 or older cannot talk to this build.
 	assert(
-		protocolVersion == 11,
-		fmt.tprintf("expected protocol version 11 for read state, got %d", protocolVersion),
+		protocolVersion == 12,
+		fmt.tprintf(
+			"expected protocol version 12 for the voice recipient flag, got %d",
+			protocolVersion,
+		),
 	)
 }
 
