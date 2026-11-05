@@ -19,7 +19,7 @@ What works today:
 | Room history | Works. Messages are stored on the server; **Load older messages** at the top of a room fetches earlier ones, also after a restart |
 | Direct messages | Works. Below the rooms, the sidebar lists **Direct Messages** (recent conversations) and **Members** (everyone on the server, online first, with a green dot when online). Click a person to message them |
 | Several servers | Works. The client can connect to more than one server at once |
-| Voice rooms | Not yet |
+| Voice rooms | Works. Every room has voice: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation) |
 | Creating rooms | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room |
 | Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity)) |
 
@@ -141,6 +141,35 @@ While the selected server is not connected, a **banner** above the room explains
 When the server restarts, every client reconnects on its own; you should not need to do
 anything.
 
+## Voice
+
+Every room has voice as well as text. You can be in one room's voice at a time, on one
+server, and keep chatting anywhere while you are.
+
+- **Joining:** open a room and press **Join voice** at the top right. The **voice bar** at the
+  bottom of the room list shows "Joining…", then "Voice connected: #room on Server". Under
+  the room in the list you see everyone in its voice; a green ring around the dot means that
+  person is speaking. This list also shows rooms you are not in.
+- **Mute and deafen:** **Mute** in the voice bar stops sending your microphone at once;
+  **Deafen** stops playing the others at once (and mutes you). The others see "muted" or
+  "deafened" next to your name. **Leave** (or **Leave voice** in the room's header) leaves.
+- **Headphones:** HayChat has **no echo cancellation** yet. With speakers, your microphone
+  picks up the others and they hear themselves. Use headphones. On Linux,
+  `pactl load-module module-echo-cancel` can help if you must use speakers.
+- **Settings → Voice:** choose the microphone and speakers (or "System default"), the mode,
+  and the levels. **Test microphone** plays your microphone back to you through the same
+  codec, so you can set the **voice activity threshold** against the live level meter (the
+  line on the meter) without joining a room.
+- **Voice activity or push-to-talk:** by default HayChat sends while you speak louder than the
+  threshold. In **Push-to-talk** mode it sends only while you hold the push-to-talk key
+  (Left Ctrl unless you change it). **Push-to-talk works only while the HayChat window has
+  focus**: if you click into another window while holding the key, HayChat stops sending.
+- **Linux needs libopus:** the `opus` package on Fedora and Arch, `libopus0` on Debian and
+  Ubuntu (it is in the install commands above). Without it the voice bar says "Voice
+  unavailable: libopus not found" and chat still works.
+- **Reconnects:** if the connection drops while you are in voice, the voice bar says
+  "Rejoining voice…" and you are back in the same room once the client reconnects.
+
 ## What to Test
 
 Use HayChat as you would use any chat app, and keep an eye on these:
@@ -167,6 +196,11 @@ Use HayChat as you would use any chat app, and keep an eye on these:
   clears once you open the room or conversation (with the HayChat window focused), and, if
   you can sign in on two computers with the same identity, that reading on one clears the
   count on the other. Your own messages should never count.
+- **Voice:** join a room's voice with another tester (with headphones), talk, mute, deafen,
+  and leave. Check that the speaking ring follows whoever talks, that mute and deafen show
+  for the others, and that voice comes back by itself after a reconnect. Try push-to-talk,
+  a different microphone in **Settings → Voice** while you are in a room, and **Test
+  microphone**. Tell us about delay, choppy sound, echo, or a level meter that does not move.
 - **The window:** resizing, high-DPI screens, typing with an input method (for example
   Japanese or Chinese), copy and paste.
 

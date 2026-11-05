@@ -59,6 +59,35 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	sectionGap := ui.dp(ctx, SETTINGS_SECTION_GAP)
 	title := firstRun ? "Welcome to HayChat" : "Settings"
 	ui.label(ctx, ui.cutTop(&column, ui.lineHeight(ctx, .Bold) * 1.5), title, ctx.theme.fg, .Bold)
+	if !firstRun {
+		// Tabs: General (name and servers) and Voice. Voice settings apply as they change.
+		tabs := ui.cutTop(&column, rowH)
+		tabW := ui.dp(ctx, 112)
+		clickedTab := form.tab
+		for tab in SettingsTab {
+			text := tab == .General ? "General" : "Voice"
+			tabOptions := ui.ButtonOptions {
+				align    = .Center,
+				selected = form.tab == tab,
+				color    = form.tab == tab ? ctx.theme.fg : ctx.theme.fgMuted,
+				font     = .Bold,
+			}
+			tabID := ui.idOf("settings-tab", int(tab))
+			if ui.button(ctx, tabID, ui.cutLeft(&tabs, tabW), text, tabOptions) {
+				clickedTab = tab
+			}
+			_ = ui.cutLeft(&tabs, ui.dp(ctx, 4))
+		}
+		ui.divider(ctx, ui.cutTop(&column, ui.dp(ctx, 4)))
+		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
+		if clickedTab != form.tab {
+			State_selectSettingsTab(state, clickedTab)
+		}
+		if form.tab == .Voice {
+			viewVoiceSettings(state, ctx, column)
+			return
+		}
+	}
 	intro := "Changing your name or a server's address reconnects to that server."
 	if firstRun {
 		intro = "Choose the name other people will see, then the server to connect to."

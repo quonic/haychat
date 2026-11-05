@@ -343,6 +343,11 @@ encoderGet :: proc(encoder: ^Encoder, request: i32) -> (value: i32, code: c.int)
 	return
 }
 
+// encoderSetBitrate changes a running encoder's bitrate (bit/s) without resetting it.
+encoderSetBitrate :: proc(encoder: ^Encoder, bitrate: i32) -> c.int {
+	return defaultLibrary.encoder_ctl(encoder, SET_BITRATE_REQUEST, bitrate)
+}
+
 encoderReset :: proc(encoder: ^Encoder) -> c.int {
 	return defaultLibrary.encoder_ctl(encoder, RESET_STATE)
 }

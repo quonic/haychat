@@ -311,3 +311,149 @@ testConfigWithRemovedFriendsKeyStillLoads :: proc(t: ^testing.T) {
 	)
 	_ = t
 }
+
+// A config without voice keys (written before voice existed, or a Config literal) gives the
+// design's defaults (voice-rooms-design.md 5.3).
+@(test)
+testVoiceConfigKeysDefaultWhenMissing :: proc(t: ^testing.T) {
+	data := `{"display_name":"Old Tester","servers":[]}`
+	config: Config
+	err := json.unmarshal(transmute([]u8)data, &config)
+	defer Config_deinit(&config)
+	assert(err == nil, fmt.tprintf("expected the config to load, got %v", err))
+	settings := Config_voiceSettings(config)
+	assert(
+		settings.inputDevice == "" &&
+		settings.outputDevice == "" &&
+		settings.mode == .VoiceActivity &&
+		settings.pttKey == "Left Ctrl" &&
+		settings.vadThresholdDB == -45 &&
+		settings.inputGain == 1 &&
+		settings.outputVolume == 1 &&
+		settings.bitrate == 24000,
+		fmt.tprintf("expected the default voice settings, got %v", settings),
+	)
+	assert(
+		Config_voiceSettings(Config{}) == settings,
+		"expected a Config literal to give the same defaults",
+	)
+	_ = t
+}
+
+// Every key is read, numbers are clamped to their ranges, and invalid values fall back to the
+// default instead of breaking voice.
+@(test)
+testVoiceConfigKeysAreValidatedAndClamped :: proc(t: ^testing.T) {
+	data :=
+		`{"voice_input_device":"USB Mic","voice_output_device":"Headset",` +
+		`"voice_mode":"push_to_talk","voice_ptt_key":"Space","voice_vad_threshold_db":-30.5,` +
+		`"voice_input_gain":0,"voice_output_volume":1.5,"voice_bitrate":32000}`
+	config: Config
+	err := json.unmarshal(transmute([]u8)data, &config)
+	defer Config_deinit(&config)
+	assert(err == nil, fmt.tprintf("expected the voice keys to load, got %v", err))
+	settings := Config_voiceSettings(config)
+	assert(
+		settings.inputDevice == "USB Mic" &&
+		settings.outputDevice == "Headset" &&
+		settings.mode == .PushToTalk &&
+		settings.pttKey == "Space" &&
+		settings.vadThresholdDB == -30.5 &&
+		settings.inputGain == 0 &&
+		settings.outputVolume == 1.5 &&
+		settings.bitrate == 32000,
+		fmt.tprintf("expected every voice key read, a gain of 0 included, got %v", settings),
+	)
+
+	high := Config {
+		voice_mode             = "shout",
+		voice_ptt_key          = "Bad\nKey",
+		voice_vad_threshold_db = f32(12),
+		voice_input_gain       = f32(9),
+		voice_output_volume    = f32(-1),
+		voice_bitrate          = 1_000_000,
+	}
+	clamped := Config_voiceSettings(high)
+	assert(
+		clamped.mode == .VoiceActivity &&
+		clamped.pttKey == "Left Ctrl" &&
+		clamped.vadThresholdDB == 0 &&
+		clamped.inputGain == 4 &&
+		clamped.outputVolume == 0 &&
+		clamped.bitrate == 64000,
+		fmt.tprintf("expected clamped values and default strings, got %v", clamped),
+	)
+	low := Config {
+		voice_vad_threshold_db = f32(-200),
+		voice_bitrate          = 100,
+	}
+	lowClamped := Config_voiceSettings(low)
+	assert(
+		lowClamped.vadThresholdDB == -80 && lowClamped.bitrate == 12000,
+		fmt.tprintf("expected the low ends of the ranges, got %v", lowClamped),
+	)
+	_ = t
+}
+
+// Saved settings round-trip through config.json, defaults are stored as unset (so a changed
+// default still reaches the user), and the clone keeps every voice key.
+@(test)
+testVoiceConfigKeysRoundTripAndStoreDefaultsAsUnset :: proc(t: ^testing.T) {
+	config: Config
+	defer Config_deinit(&config)
+	Config_setVoiceSettings(&config, VOICE_DEFAULT_SETTINGS)
+	defaultJSON, defaultErr := json.marshal(config)
+	defer delete(defaultJSON)
+	assert(defaultErr == nil, "expected the default config to marshal")
+	assert(
+		!strings.contains(string(defaultJSON), "voice_"),
+		fmt.tprintf("expected no voice keys for the defaults, got %s", string(defaultJSON)),
+	)
+
+	chosen := VoiceSettings {
+		inputDevice    = "USB Mic",
+		outputDevice   = "",
+		mode           = .PushToTalk,
+		pttKey         = "Right Alt",
+		vadThresholdDB = -52,
+		inputGain      = 0,
+		outputVolume   = 1,
+		bitrate        = 40000,
+	}
+	Config_setVoiceSettings(&config, chosen)
+	assert(
+		config.voice_output_volume == nil && config.voice_output_device == "",
+		"expected the default output volume and device stored as unset",
+	)
+	data, marshalErr := json.marshal(config)
+	defer delete(data)
+	assert(marshalErr == nil, "expected the voice config to marshal")
+	loaded: Config
+	defer Config_deinit(&loaded)
+	unmarshalErr := json.unmarshal(data, &loaded)
+	assert(unmarshalErr == nil, fmt.tprintf("expected %s to load, got %v", data, unmarshalErr))
+	expected := voiceSettingsValidate(chosen)
+	assert(
+		Config_voiceSettings(loaded) == expected,
+		fmt.tprintf(
+			"expected %v back from %s, got %v",
+			expected,
+			data,
+			Config_voiceSettings(loaded),
+		),
+	)
+
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	assert(
+		Config_voiceSettings(clone) == expected,
+		"expected Config_clone to keep every voice key",
+	)
+	// Setting values from the config's own strings must not read freed memory.
+	Config_setVoiceSettings(&clone, Config_voiceSettings(clone))
+	assert(
+		Config_voiceSettings(clone) == expected,
+		"expected re-applying the config's own settings to change nothing",
+	)
+	_ = t
+}

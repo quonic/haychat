@@ -78,6 +78,8 @@ SidebarRowKind :: enum u8 {
 	Conversation,
 	Member,
 	Placeholder, // A muted line such as "No conversations yet"
+	// A user in the voice of the Channel row above it (voice_view_model.odin), indented.
+	VoiceParticipant,
 }
 
 // A control drawn at the right of a section header.
@@ -97,6 +99,11 @@ SidebarRow :: struct {
 	// The server's unread count for a Channel or Conversation (read_state.odin), plus the live
 	// messages counted since; the view shows "99+" from 100 on.
 	unreadCount: int,
+	// Channel: how many users are in the room's voice (0 hides the voice indicator).
+	voiceUsers:  int,
+	// VoiceParticipant: id is the user ID, roomID the room the row sits under.
+	roomID:      int,
+	voice:       VoiceParticipantRow,
 }
 
 // Fallback label for an account the client has no nickname for.
@@ -185,6 +192,7 @@ buildSidebarRows :: proc(
 		roomsLoading = state.server_room_caches[index].roomsLoading
 	}
 	for room in rooms {
+		participants := buildVoiceParticipantRows(state, serverID, room.id, allocator)
 		append(
 			&rows,
 			SidebarRow {
@@ -194,8 +202,22 @@ buildSidebarRows :: proc(
 				description = room.description,
 				selected = inRoom && room.id == state.selected_channel_id,
 				unreadCount = room.unreadCount,
+				voiceUsers = len(participants),
 			},
 		)
+		// Rooms the user is not in voice of show their participants too.
+		for participant in participants {
+			append(
+				&rows,
+				SidebarRow {
+					kind = .VoiceParticipant,
+					id = participant.userID,
+					roomID = room.id,
+					label = participant.label,
+					voice = participant,
+				},
+			)
+		}
 	}
 	if len(rooms) == 0 {
 		text := roomsLoading ? "Loading channels…" : "No channels"

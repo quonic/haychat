@@ -48,7 +48,12 @@ The window opens at once; connecting happens in the background.
   - the client and server speak different protocol versions;
   - the display name is too short or too long, or the identity key in the config is corrupt.
 
-- **Voice rooms.** Every room carries voice. The client side works end to end: it joins a room's voice, sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. There are no voice controls in the window yet: the voice bar, the join buttons and the voice settings arrive with the next client update (H6), and the headless harness already drives voice from scripts (`voice-join`, `voice-source`, `voice-sink`, `voice-stats`; see [docs/testing-harness.md](docs/testing-harness.md#voice)). Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working.
+- **Voice rooms.** Every room carries voice, and the client is in at most one room's voice at a time. It sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working. There is no echo cancellation: use headphones. The headless harness drives voice from scripts too (`voice-join`, `voice-source`, `voice-sink`, `voice-stats`; see [docs/testing-harness.md](docs/testing-harness.md#voice)).
+  - **Room header:** **Join voice**, or **Leave voice** while in (or joining, or re-joining) that room's voice.
+  - **Channel list:** a room with anyone in its voice shows a speaker and a count, and lists the participants under it, also for rooms you are not in. A user on several devices is listed once, with "×2"; a dot ringed green means they are speaking (known for the room you are in), and "muted" or "deafened" follows the name when every device of theirs is.
+  - **Voice bar** (bottom of the sidebar): "Voice connected: #room on Server" with your own speaking dot, an input level meter, and **Mute**, **Deafen** and **Leave**; "Joining voice…" and "Rejoining voice…" while on the way; the error ("Voice unavailable: libopus not found", "Microphone not available: …", or the server's refusal) with **Dismiss** when voice failed.
+  - **Settings → Voice:** input and output device lists ("System default" first; a chosen device that is unplugged stays listed as "(not connected)", and the default plays meanwhile), voice activity or push-to-talk, the push-to-talk key (click it, press a key; Esc cancels), the voice activity threshold over a live input level meter, input gain, output volume, and the Opus bitrate. **Test microphone** runs a loopback (microphone → Opus → your own speakers) while the section is open and you are not in voice. Every change applies at once: levels, mode and bitrate to the running voice session in place, a new device by reopening the audio devices while the session stays joined. Devices are listed only while the section is open, and refreshed on hotplug; a session on a named device that is unplugged reopens on the system default, and returns to the named device when it is plugged back in.
+  - **Push-to-talk** reads the key only while the HayChat window has focus, and losing focus releases it. A global hotkey is not implemented.
 
 Client config keys (`config.json`):
 
@@ -58,6 +63,16 @@ Client config keys (`config.json`):
 | `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
 | `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
 | `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes; replaced by **Trust the new key** |
+| `voice_input_device` | Microphone, by SDL device name. Default `""`: the system default. A name that is not connected falls back to the system default |
+| `voice_output_device` | Speakers or headphones, by SDL device name. Default `""`: the system default |
+| `voice_mode` | `"voice_activity"` (default: send while louder than the threshold) or `"push_to_talk"` (send while the push-to-talk key is held and the window has focus) |
+| `voice_ptt_key` | The push-to-talk key as an SDL key name, e.g. `"Space"`. Default `"Left Ctrl"`; an unknown name uses the default |
+| `voice_vad_threshold_db` | Voice activity threshold in dBFS, −80 to 0. Default −45 |
+| `voice_input_gain` | Linear microphone gain, 0 to 4. Default 1 |
+| `voice_output_volume` | Linear output volume, 0 to 2. Default 1 |
+| `voice_bitrate` | Opus bitrate in bit/s, 12000 to 64000. Default 24000 |
+
+The voice keys are written by Settings → Voice and only when they differ from the default, so a later change of a default reaches everyone who did not choose otherwise. Out-of-range numbers are clamped and invalid strings fall back to the default when the config is read.
 
 ### Development Environment
 
@@ -281,7 +296,7 @@ The live proof needs io_uring in the job container (see Dev Environment), which 
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
-- Voice has no window controls yet (see Voice rooms); the client can join voice, but only code, tests and the headless harness call it until the voice UI lands.
+- Voice has no echo cancellation or noise suppression: use headphones. Push-to-talk works only while the window has focus.
 
 ## License
 

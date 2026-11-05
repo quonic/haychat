@@ -535,8 +535,10 @@ message under Direct Messages, opens it, asserts its text, and replies from the 
 bob must receive the reply as a `direct_message`. alice is an admin (her profile connects
 once headlessly before the window opens, so `make_admin` has an account to grant the role to):
 she clicks **+ New room**, types a name, clicks **Create**, and waits until the room is drawn;
-bob must receive `room_membership` and list the room. alice takes eight screenshots on the way and
-the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
+bob must receive `room_membership` and list the room. Then, on SDL's dummy audio driver, she
+clicks **Join voice**, waits for "Voice connected", mutes, opens Settings → Voice, and leaves
+again, while bob must see her join, mute and leave in `voice_participants`. alice takes twelve
+screenshots on the way and the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

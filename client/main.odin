@@ -76,6 +76,9 @@ State :: struct {
 	// Voice rooms (voice_state.odin): the session status, the participant lists, and the
 	// running engine.
 	voice:                          ClientVoiceState,
+	// The Settings → Voice section (voice_settings.odin): device lists and the microphone
+	// test, held only while the section is shown.
+	voicePanel:                     VoiceSettingsPanel,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -128,7 +131,7 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	if State_needsFirstRunSetup(init_state.config) {
 		State_openSettings(&init_state)
 	}
-	State_setVoiceEngineTemplate(&init_state, VOICE_DEFAULT_ENGINE_TEMPLATE)
+	State_setVoiceEngineTemplate(&init_state, voiceDefaultEngineTemplate(init_state.config))
 	return
 }
 
@@ -169,6 +172,7 @@ State_stopNetwork :: proc(state: ^State) {
 State_deinit :: proc(state: ^State) {
 	// The voice engine sends through the worker and its transports, so it stops first; then
 	// the worker stops before the transports it services are freed.
+	State_setVoiceSettingsVisible(state, false)
 	State_voiceShutdown(state)
 	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)
@@ -191,6 +195,7 @@ State_deinit :: proc(state: ^State) {
 	SettingsForm_deinit(&state.settings)
 	RoomEditor_deinit(&state.roomEditor)
 	ClientVoiceState_deinit(&state.voice)
+	VoiceSettingsPanel_deinit(&state.voicePanel)
 	state^ = {}
 }
 

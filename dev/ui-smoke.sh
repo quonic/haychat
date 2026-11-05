@@ -13,6 +13,11 @@ set -euo pipefail
 #   4. alice is an admin (her profile connects once headlessly first, so the account exists
 #      for deploy/sql/make-admin.sql): she clicks "+ New room", types a name, clicks Create,
 #      and waits until the room is drawn; bob must receive room_membership and list it
+#   5. alice clicks "Join voice" in #general and waits for the voice bar's "Voice connected";
+#      bob must see her in #general's voice participants. She mutes (bob sees her muted),
+#      opens Settings → Voice while joined, closes it, and leaves voice (bob sees the room's
+#      voice empty). The window runs on SDL's dummy audio driver (SDL_AUDIO_DRIVER), so the
+#      device engine opens without sound hardware.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -136,13 +141,31 @@ screenshot $screenshot_dir/07-new-room-form.bmp
 click-id room-editor-submit
 wait-text "# $admin_room" 10000
 screenshot $screenshot_dir/08-room-created.bmp
+# Voice in #general (room 1 on server 1): the header button, the voice bar, mute, settings.
+click "# general"
+click-id room-voice 1 1
+wait-text "Voice connected: #general on $server_address" 15000
+screenshot $screenshot_dir/09-voice-connected.bmp
+click-id voice-mute
+wait-text "Unmute" 5000
+screenshot $screenshot_dir/10-voice-muted.bmp
+click-id rail-settings
+click "Voice"
+wait-text "Your input in voice. Leave voice to test your microphone." 5000
+screenshot $screenshot_dir/11-voice-settings.bmp
+# The gear closes settings again (the section scrolls; its Done button is below the fold).
+click-id rail-settings
+click-id voice-leave
+wait-text "Join voice" 5000
+screenshot $screenshot_dir/12-voice-left.bmp
 quit
 EOF
 
 # Anything bob printed before the window opens cannot be about alice's new room.
 admin_start=$(wc -l <"$work_dir/bob.out")
 echo "==> [ui] starting the GUI as alice (SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen})"
-SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} "$client_bin" --ui-script "$script" \
+SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen} SDL_AUDIO_DRIVER=${SDL_AUDIO_DRIVER:-dummy} \
+	"$client_bin" --ui-script "$script" \
 	--name "$nickname_alice" --server "$server_address" \
 	--config-dir "$work_dir/profile-alice" --window 1280x800 \
 	>"$work_dir/alice.out" 2>"$work_dir/alice.err" &
@@ -185,6 +208,22 @@ expect_ok bob rooms
 [[ "$last_result" == *"\"name\":\"$admin_room\""* ]] ||
 	fail "[admin] bob's rooms do not list $admin_room"
 
+echo "==> [ui] alice joins voice in #general from the window, bob sees her, muted, then gone"
+voice_pattern="^\\{\"event\":\"voice_participants\",.*\"roomID\":1,.*"
+voice_pattern+="\\{\"userID\":$user_alice,\"nickname\":\"$nickname_alice\",\"muted\":false,"
+voice_line=$(wait_for_match bob "$voice_pattern" "$admin_start") ||
+	fail "[voice] bob never saw alice in #general's voice"
+echo "    bob< $voice_line"
+muted_pattern="^\\{\"event\":\"voice_participants\",.*\"roomID\":1,.*"
+muted_pattern+="\\{\"userID\":$user_alice,\"nickname\":\"$nickname_alice\",\"muted\":true,"
+muted_line=$(wait_for_match bob "$muted_pattern" "$admin_start") ||
+	fail "[voice] bob never saw alice muted"
+echo "    bob< $muted_line"
+empty_line=$(wait_for_match bob \
+	'^\{"event":"voice_participants",.*"roomID":1,.*"participants":\[\]\}$' "$admin_start") ||
+	fail "[voice] bob never saw #general's voice empty after alice left"
+echo "    bob< $empty_line"
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -197,10 +236,10 @@ stop_client bob
 
 echo "==> [ui] screenshots written:"
 written=0
-for shot in "$screenshot_dir"/0*.bmp; do
+for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	[[ -f "$shot" ]] || continue
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 8 ]] || fail "expected 8 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 12 ]] || fail "expected 12 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"
