@@ -235,20 +235,36 @@ databaseExecuteUserIdentityResolution :: proc(
 	return databaseSuccess(identity)
 }
 
+// The requester's rooms with their read state. Unread follows the rules of migration 2
+// (database_migrations.odin): messages from others above the marker, or, without a marker,
+// created after the requester joined the room. Each branch walks one index range,
+// chat_messages_by_room_id_and_id or chat_messages_by_room_id_and_created_at, and stops after
+// common.UNREAD_COUNT_CAP rows ($2); the branch that does not apply is skipped by its one-time
+// filter on the marker.
+DATABASE_LIST_ROOMS_FOR_USER_SQL ::
+	"SELECT r.id::text, r.name, r.description, " +
+	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text FROM rooms r " +
+	"JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
+	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
+	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
+	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NOT NULL AND cm.room_id = r.id " +
+	"AND cm.id > m.last_read_message_id AND cm.sender_user_id <> rm.user_id " +
+	"UNION ALL " +
+	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NULL AND cm.room_id = r.id " +
+	"AND cm.created_at > rm.joined_at AND cm.sender_user_id <> rm.user_id " +
+	"LIMIT $2::bigint) capped) unread " +
+	"ORDER BY r.name"
+
 databaseExecuteListRoomsForUser :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseRoomListRequest,
 ) -> common.DatabaseQueryResponse {
 	userIDParam := databaseIntParam(request.userId)
 	defer delete(userIDParam)
-	params := [?][^]byte{transmute([^]byte)userIDParam}
-	result := databaseExecParams(
-		conn,
-		"SELECT r.id::text, r.name, r.description FROM rooms r " +
-		"JOIN room_members rm ON rm.room_id = r.id " +
-		"WHERE rm.user_id = $1 ORDER BY r.name",
-		params[:],
-	)
+	capParam := databaseIntParam(common.UNREAD_COUNT_CAP)
+	defer delete(capParam)
+	params := [?][^]byte{transmute([^]byte)userIDParam, transmute([^]byte)capParam}
+	result := databaseExecParams(conn, DATABASE_LIST_ROOMS_FOR_USER_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
@@ -263,12 +279,16 @@ databaseExecuteListRoomsForUser :: proc(
 		if !roomIDOK {
 			continue
 		}
+		lastRead, _ := databaseGetInt(result, row, 3)
+		unread, _ := databaseGetInt(result, row, 4)
 		append(
 			&rooms,
 			common.RoomSummary {
 				id = roomID,
 				name = databaseGetText(result, row, 1),
 				description = databaseGetText(result, row, 2),
+				lastReadMessageId = lastRead,
+				unreadCount = unread,
 			},
 		)
 	}
@@ -657,6 +677,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteListDirectConversations(conn, r)
 	case common.DatabaseUserDirectoryRequest:
 		return databaseExecuteListUsers(conn)
+	case common.DatabaseMarkReadRequest:
+		return databaseExecuteMarkRead(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

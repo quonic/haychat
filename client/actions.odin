@@ -120,13 +120,14 @@ ServerRoomCache_removeRoom :: proc(cache: ^ServerRoomCache, roomID: int) {
 	}
 }
 
-RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMessage) {
+// Returns true when the message was new to the cache.
+RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMessage) -> bool {
 	if message.id <= 0 {
-		return
+		return false
 	}
 	for existing in cache.messages {
 		if existing.id == message.id {
-			return
+			return false
 		}
 	}
 	clone := common.StoredChatMessage {
@@ -152,6 +153,7 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 	if cache.oldestMessageID == 0 || message.id < cache.oldestMessageID {
 		cache.oldestMessageID = message.id
 	}
+	return true
 }
 
 // Requests are skipped while the server is not connected; the Connected event requests the
@@ -298,7 +300,8 @@ State_loadOlderRoomHistory :: proc(state: ^State) {
 	}
 }
 
-// Strings are borrowed; the room cache keeps its own copies.
+// Strings are borrowed; the room cache keeps its own copies. A new message from someone else
+// above the room's marker counts as unread unless the room is viewed (read_state.odin).
 State_receiveRoomChat :: proc(
 	state: ^State,
 	serverID, roomID, senderID, messageID: int,
@@ -309,7 +312,7 @@ State_receiveRoomChat :: proc(
 	}
 	cache := State_serverRoomCache(state, serverID)
 	roomCache := ServerRoomCache_roomCache(cache, roomID)
-	RoomCache_mergeMessage(
+	merged := RoomCache_mergeMessage(
 		roomCache,
 		common.StoredChatMessage {
 			id = messageID,
@@ -320,6 +323,20 @@ State_receiveRoomChat :: proc(
 			content = content,
 		},
 	)
+	if summary := State_roomSummary(state, serverID, roomID);
+	   merged &&
+	   summary != nil &&
+	   readStateCountsMessage(
+		   state,
+		   .Room,
+		   serverID,
+		   roomID,
+		   senderID,
+		   messageID,
+		   summary.lastReadMessageId,
+	   ) {
+		summary.unreadCount = min(summary.unreadCount + 1, common.UNREAD_COUNT_CAP)
+	}
 	State_clearChatStatus(state)
 }
 
@@ -402,7 +419,8 @@ State_roomMembershipChanged :: proc(state: ^State, serverID, roomID: int, joined
 }
 
 // Takes ownership of room when it replaces a joined room and clears the caller's copy;
-// otherwise the caller still owns it.
+// otherwise the caller still owns it. ServerEditRoom carries no read state, so the room keeps
+// its marker and unread count.
 State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.RoomSummary) {
 	// The form would otherwise save over a change it never showed.
 	State_roomEditorRoomChanged(state, serverID, roomID)
@@ -411,7 +429,10 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 		if cache.rooms[index].id == roomID {
 			delete(cache.rooms[index].name)
 			delete(cache.rooms[index].description)
-			cache.rooms[index] = room^
+			edited := room^
+			edited.lastReadMessageId = cache.rooms[index].lastReadMessageId
+			edited.unreadCount = cache.rooms[index].unreadCount
+			cache.rooms[index] = edited
 			room^ = {}
 			return
 		}
@@ -496,6 +517,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_receiveDirectConversations(state, event.serverID, &event.conversations)
 	case .UserPresenceChanged:
 		State_userPresenceChanged(state, event.serverID, &event.user)
+	case .ReadMarkerReceived:
+		State_receiveReadMarker(state, event.serverID, event.readMarker)
 	case .None:
 	}
 }

@@ -29,9 +29,9 @@ DirectConversationCache :: struct {
 	isLoadingHistory:     bool,
 	oldestMessageID:      int,
 	hasOlder:             bool,
-	// Messages from the peer that arrived while the conversation was not open. The server
-	// keeps no read state, so this starts at zero on every client start.
-	unreadCount:          int,
+	// The conversation's last mark-read (read_state.odin). Its marker and unread count are
+	// the server's and live in the conversation's DirectConversationSummary.
+	readSend:             ReadMarkerSendState,
 }
 
 // Everything direct-message related for one server. Every string and array is owned.
@@ -206,12 +206,13 @@ directMessagePeerUserID :: proc(message: common.StoredDirectMessage, selfUserID:
 }
 
 // Moves the peer's conversation to the top with message as its latest, adding it when the
-// list has none yet. An older message than the one listed changes nothing.
+// list has none yet, and returns true. An older message than the one listed changes nothing
+// and returns false. The summary keeps its read state.
 ServerDirectCache_noteLatestMessage :: proc(
 	cache: ^ServerDirectCache,
 	peerUserID: int,
 	message: common.StoredDirectMessage,
-) {
+) -> bool {
 	peerNickname := message.recipientNickname
 	if message.senderId == peerUserID {
 		peerNickname = message.senderNickname
@@ -219,7 +220,7 @@ ServerDirectCache_noteLatestMessage :: proc(
 	summary: common.DirectConversationSummary
 	if index := ServerDirectCache_conversationIndex(cache^, peerUserID); index >= 0 {
 		if cache.conversations[index].lastMessageID >= message.id {
-			return
+			return false
 		}
 		summary = cache.conversations[index]
 		ordered_remove(&cache.conversations, index)
@@ -238,9 +239,11 @@ ServerDirectCache_noteLatestMessage :: proc(
 	summary.lastTimestamp = strings.clone(message.timestamp)
 	summary.lastContent = strings.clone(message.content)
 	inject_at(&cache.conversations, 0, summary)
+	return true
 }
 
-// True while the user is looking at this conversation.
+// True while this conversation is the one selected on the selected server, whether or not the
+// window has focus (for that, see State_isConversationViewed).
 State_isDirectConversationOpen :: proc(state: ^State, serverID, peerUserID: int) -> bool {
 	return(
 		peerUserID != 0 &&
@@ -325,9 +328,9 @@ State_requestDirectHistory :: proc(
 
 // ── User actions ──────────────────────────────────────────────────
 
-// Opens the conversation with peerUserID on serverID in the main pane, marks it read, and
-// fetches its newest page unless it is already loaded. The selected room is kept, so going
-// back to a room shows the one that was open before.
+// Opens the conversation with peerUserID on serverID in the main pane and fetches its newest
+// page unless it is already loaded; the GUI then marks it read (State_updateReadMarkers). The
+// selected room is kept, so going back to a room shows the one that was open before.
 State_openDirectConversation :: proc(state: ^State, serverID, peerUserID: int) {
 	if peerUserID <= 0 || peerUserID == State_selfUserID(state, serverID) {
 		return
@@ -345,7 +348,6 @@ State_openDirectConversation :: proc(state: ^State, serverID, peerUserID: int) {
 	state.selected_dm_peer_id = peerUserID
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)
-	conversation.unreadCount = 0
 	if !conversation.initialHistoryLoaded {
 		State_requestDirectHistory(state, serverID, peerUserID, 0)
 	}
@@ -438,9 +440,9 @@ State_loadOlderDirectHistory :: proc(state: ^State) {
 
 // ── Receive handlers ──────────────────────────────────────────────
 
-// The message is borrowed; the cache keeps its own copy. A message from the peer in a
-// conversation that is not open counts as unread, and every new message moves its
-// conversation to the top of the list.
+// The message is borrowed; the cache keeps its own copy. Every new message moves its
+// conversation to the top of the list, and one from the peer that is newer than the listed
+// latest and the marker counts as unread unless the conversation is viewed (read_state.odin).
 State_receiveDirectMessage :: proc(
 	state: ^State,
 	serverID: int,
@@ -459,11 +461,23 @@ State_receiveDirectMessage :: proc(
 	if !DirectConversationCache_mergeMessage(conversation, message) {
 		return
 	}
-	if message.senderId == peerUserID &&
-	   !State_isDirectConversationOpen(state, serverID, peerUserID) {
-		conversation.unreadCount += 1
+	// A message older than the listed latest was already in the list's count.
+	if !ServerDirectCache_noteLatestMessage(cache, peerUserID, message) {
+		return
 	}
-	ServerDirectCache_noteLatestMessage(cache, peerUserID, message)
+	summary := &cache.conversations[0]
+	if message.senderId == peerUserID &&
+	   readStateCountsMessage(
+		   state,
+		   .Direct,
+		   serverID,
+		   peerUserID,
+		   message.senderId,
+		   message.id,
+		   summary.lastReadMessageId,
+	   ) {
+		summary.unreadCount = min(summary.unreadCount + 1, common.UNREAD_COUNT_CAP)
+	}
 }
 
 // Messages are borrowed; each merged message is cloned into the conversation cache.

@@ -82,16 +82,17 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | --- | --- |
 | `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `isAdmin` (the server's admin flag for this session, see `connected`), `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
 | `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
-| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms`. When the list is not loaded yet it is requested and arrives as a `room_list` event. |
+| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount"}]`, see [Read State](#read-state)). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
-| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline"}]`, ordered by nickname). The list is fetched when the client connects and kept current by `presence` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
+| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount"}]`, ordered by nickname; the last two are the read state of your conversation with that account, 0 without one). The list is fetched when the client connects and kept current by `presence` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
 | `room-create NAME [DESCRIPTION...]` | Admins: asks the server for a new room named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. The result echoes `serverID`, `roomID` (0), `name`, and `description` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room), and every connected client, yours included, gets `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
 | `room-edit ROOM_ID NAME [DESCRIPTION...]` | Admins: renames the room and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. |
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
+| `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
 | `sleep MS` | Keeps servicing the connection for `MS` milliseconds, printing events. |
 | `help` | Lists the commands and event kinds. |
@@ -114,7 +115,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `connecting` | `{"event":"connecting","serverID":1,"attempt":1}` (`attempt` counts from 1 since the last `connected` or `disconnected`) |
 | `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}` (`isAdmin`: the account holds the server's `admin` role) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
-| `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}` |
+| `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0}]}` |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
 | `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true}` |
@@ -126,8 +127,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
 | `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}]}` |
 | `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true}]}` |
-| `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi"}]}` |
+| `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` |
 | `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
+| `read_marker` | `{"event":"read_marker","serverID":1,"kind":"room","conversationID":1,"lastReadMessageId":12,"unreadCount":0}` (`kind` is `room` or `dm`; for `dm`, `conversationID` is the peer's user ID) |
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
@@ -153,6 +155,23 @@ Direct messages belong to one server: user IDs from different servers are unrela
 `deploy/sql/make-admin.sql`) learns it on its next connection: send `reconnect` and wait for
 `connected`. The server checks the role again for every room request, so a stale `true` only
 earns a `protocol_error "Admin permission required"`.
+
+## Read State
+
+The server keeps a read marker (the newest message ID read) per account and room and per
+account and direct conversation (protocol 11). `rooms`, `room_list`, `conversations`, and
+`users` carry each conversation's `lastReadMessageId` (0 when never marked) and
+`unreadCount`: in a room, messages from others after the marker, or without a marker, those
+that arrived after you joined; in a conversation, the peer's messages after the marker, or all
+of them without one. Counts stop at 100. Between lists, the harness counts live messages the
+way the GUI does: a `room_chat` or `direct_message` from someone else, newer than the marker,
+adds one; your own never do. A `read_marker` event replaces the marker and the count.
+
+**The harness never marks anything read by itself.** The GUI marks the conversation that is
+selected while its window has input focus; the harness has no window, so nothing is ever
+"viewed" and every message from someone else counts until an agent sends `read`. That keeps
+counts deterministic for scripts: `send` selects its room, but nothing clears a badge behind
+the agent's back.
 
 ## Example: Two Agents Chatting
 
@@ -247,6 +266,12 @@ grep -F '"cmd":"send"' alice.out
    client must print `room_membership`, list the room in `rooms`, and send to it. The first
    renames the room and the second must print `room_edited`; the first deletes it and the
    second must print `room_deleted` and report `#general` (room 1) as its selected room.
+6. Read state: a new client D signs up and quits; a new client C sends two messages to room 1
+   and a direct message to D. D comes back from its profile and must list 2 unread in room 1
+   (`rooms`) and 1 from C (`conversations`). A second session of D, from the same profile, is
+   connected when D loads both conversations and sends `read room 1` and `read dm C`; the
+   second session must print both `read_marker` events with `unreadCount` 0 and then list 0,
+   and a third session started afterwards must list 0 straight from the server.
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
@@ -287,6 +312,10 @@ opengl`). `SDL_VIDEO_DRIVER=dummy` works too, with SDL's `software` renderer. On
 leave the variable unset (or set `wayland`/`x11`) to watch the window being driven.
 Use `--config-dir` (or an isolated `XDG_CONFIG_HOME`) so a scripted run never touches your own
 identity in `~/.config/haychat`.
+
+A scripted window counts as focused whatever the driver reports (`offscreen` never reports
+focus), so, unlike the headless harness, it marks the room or conversation it shows read, as a
+user sitting at it would (see [Read State](#read-state)).
 
 ### Script Language
 

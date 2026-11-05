@@ -40,6 +40,13 @@ SQL_TESTS+=,server.testMigrationsRefuseNewerSchemaAgainstPostgreSQL
 SQL_TESTS+=,server.testMigrationsRefuseUnrecognisedSchemaAgainstPostgreSQL
 SQL_TESTS+=,server.testMigrationsRollBackFailedMigrationAgainstPostgreSQL
 SQL_TESTS+=,server.testMigrationsApplyNewMigrationOnceAgainstPostgreSQL
+SQL_TESTS+=,server.testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL
+SQL_TESTS+=,server.testReadMarkersMigrationOnFreshSchemaAgainstPostgreSQL
+SQL_TESTS+=,server.testReadMarkersMigrationBackfillsRC1AgainstPostgreSQL
+SQL_TESTS+=,server.testReadMarkersMigrationUpgradesVersion1AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomUnreadRulesAgainstPostgreSQL
+SQL_TESTS+=,server.testMarkRoomReadMovesForwardClampsAndChecksMembershipAgainstPostgreSQL
+SQL_TESTS+=,server.testDirectUnreadAndMarkReadAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

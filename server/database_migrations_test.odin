@@ -1,5 +1,6 @@
 package server
 
+import "../common"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -138,12 +139,20 @@ testDatabaseMigrationListErrorRejectsBadLists :: proc(t: ^testing.T) {
 	}
 	cases := [?]Case {
 		{"empty", {}, "empty"},
-		{"starts at 2", {{2, "two", "SELECT 1"}}, "has version 2"},
-		{"gap", {{1, "one", "SELECT 1"}, {3, "three", "SELECT 1"}}, "has version 3"},
-		{"duplicate version", {{1, "one", "SELECT 1"}, {1, "again", "SELECT 1"}}, "version 1"},
-		{"empty name", {{1, "", "SELECT 1"}}, "no name"},
-		{"duplicate name", {{1, "same", "SELECT 1"}, {2, "same", "SELECT 1"}}, "share the name"},
-		{"empty SQL", {{1, "one", "  "}}, "no SQL"},
+		{"starts at 2", {{2, "two", "SELECT 1", ""}}, "has version 2"},
+		{"gap", {{1, "one", "SELECT 1", ""}, {3, "three", "SELECT 1", ""}}, "has version 3"},
+		{
+			"duplicate version",
+			{{1, "one", "SELECT 1", ""}, {1, "again", "SELECT 1", ""}},
+			"version 1",
+		},
+		{"empty name", {{1, "", "SELECT 1", ""}}, "no name"},
+		{
+			"duplicate name",
+			{{1, "same", "SELECT 1", ""}, {2, "same", "SELECT 1", ""}},
+			"share the name",
+		},
+		{"empty SQL", {{1, "one", "  ", ""}}, "no SQL"},
 	}
 	for testCase in cases {
 		listErr := databaseMigrationListError(testCase.migrations)
@@ -159,7 +168,7 @@ testDatabaseMigrationListErrorRejectsBadLists :: proc(t: ^testing.T) {
 		)
 	}
 	okErr := databaseMigrationListError(
-		[]DatabaseMigration{{1, "one", "SELECT 1"}, {2, "two", "SELECT 2"}},
+		[]DatabaseMigration{{1, "one", "SELECT 1", ""}, {2, "two", "SELECT 2", ""}},
 	)
 	assert(len(okErr) == 0, fmt.tprintf("expected a gapless list to pass, got %q", okErr))
 }
@@ -625,4 +634,296 @@ testMigrationsApplyNewMigrationOnceAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 	rows := databaseMigrationTestValue(conn, "SELECT count(*)::text FROM migration_probe")
 	assert(rows == "1", fmt.tprintf("expected migration 2 to run exactly once, got %q rows", rows))
+}
+
+@(test)
+testDatabaseSchemaValidationMatchesTheMigrationList :: proc(t: ^testing.T) {
+	_ = t
+	// The runner validates with the query built from its list; for the production list that
+	// must be exactly the documented constant.
+	built := databaseSchemaValidationQuery(DATABASE_MIGRATIONS[:])
+	defer delete(built)
+	assert(
+		built == DATABASE_SCHEMA_VALIDATION_SQL,
+		"expected DATABASE_SCHEMA_VALIDATION_SQL to hold every migration's checks, in order",
+	)
+	baselineOnly := databaseSchemaValidationQuery(DATABASE_MIGRATIONS[:1])
+	defer delete(baselineOnly)
+	assert(
+		!strings.contains(baselineOnly, "room_read_markers"),
+		"expected a version 1 list to validate without the read marker checks",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "room_read_markers_by_room_id") &&
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "direct_read_markers_by_peer_user_id") &&
+		strings.contains(
+			DATABASE_SCHEMA_VALIDATION_SQL,
+			"chat_messages_by_room_id_and_created_at",
+		),
+		"expected schema validation to require migration 2's indexes",
+	)
+}
+
+@(test)
+testReadMarkersMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		DATABASE_MIGRATIONS[1].version == 2 && DATABASE_MIGRATIONS[1].name == "read markers",
+		fmt.tprintf("expected migration 2 to be the read markers, got %v", DATABASE_MIGRATIONS[1]),
+	)
+	sql := DATABASE_MIGRATIONS[1].sql
+	for required in ([]string {
+			"CREATE TABLE room_read_markers",
+			"CREATE TABLE direct_read_markers",
+			"PRIMARY KEY (user_id, room_id)",
+			"PRIMARY KEY (user_id, peer_user_id)",
+			"CHECK (user_id <> peer_user_id)",
+			"INSERT INTO room_read_markers",
+			"INSERT INTO direct_read_markers",
+		}) {
+		assert(
+			strings.contains(sql, required),
+			fmt.tprintf("expected migration 2 to contain %q", required),
+		)
+	}
+	// Every foreign key cascades, so a deleted room or account takes its markers with it.
+	assert(
+		strings.count(sql, "REFERENCES") == 4 && strings.count(sql, "ON DELETE CASCADE") == 4,
+		"expected the four foreign keys of migration 2 to cascade",
+	)
+	assert(!strings.contains(sql, "DROP "), "expected migration 2 to drop nothing")
+}
+
+// Every marker, user:conversation:marker, rooms then direct conversations.
+DATABASE_MIGRATION_TEST_MARKERS_SQL ::
+	"SELECT concat_ws(' | ', " +
+	"COALESCE((SELECT string_agg(user_id || ':' || room_id || ':' || last_read_message_id, ',' " +
+	"ORDER BY user_id, room_id) FROM room_read_markers), '-'), " +
+	"COALESCE((SELECT string_agg(user_id || ':' || peer_user_id || ':' || " +
+	"last_read_message_id, ',' ORDER BY user_id, peer_user_id) FROM direct_read_markers), '-'))"
+
+// Every user's unread counts through the real list statements, as
+// "user:room=count,...;dm=peer=count,..." per user, joined with spaces.
+databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> string {
+	builder := strings.builder_make(context.temp_allocator)
+	for userID, index in userIDs {
+		if index > 0 {
+			strings.write_byte(&builder, ' ')
+		}
+		fmt.sbprintf(&builder, "%d:", userID)
+		rooms := databaseExecuteRequest(conn, common.DatabaseRoomListRequest{userId = userID})
+		defer IPC__database_query_response_deinit(rooms)
+		roomList, roomListOK := rooms.result.(common.DatabaseRoomListResult)
+		assert(rooms.success && roomListOK, fmt.tprintf("expected a room list: %v", rooms))
+		for room, roomIndex in roomList.rooms {
+			fmt.sbprintf(&builder, "%s%d=%d", roomIndex > 0 ? "," : "", room.id, room.unreadCount)
+		}
+		strings.write_string(&builder, ";dm=")
+		directs := databaseExecuteRequest(
+			conn,
+			common.DatabaseDirectConversationListRequest{userId = userID},
+		)
+		defer IPC__database_query_response_deinit(directs)
+		directList, directListOK := directs.result.(common.DatabaseDirectConversationListResult)
+		assert(
+			directs.success && directListOK,
+			fmt.tprintf("expected a conversation list: %v", directs),
+		)
+		for conversation, conversationIndex in directList.conversations {
+			fmt.sbprintf(
+				&builder,
+				"%s%d=%d",
+				conversationIndex > 0 ? "," : "",
+				conversation.peerUserId,
+				conversation.unreadCount,
+			)
+		}
+	}
+	return strings.to_string(builder)
+}
+
+@(test)
+testReadMarkersMigrationOnFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen("markers_fresh")
+	defer databaseMigrationTestClose(conn, schema)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	assert(outcome.version == 2, fmt.tprintf("expected version 2, got %v", outcome))
+	databaseMigrationTestValidationPasses(conn)
+	markers := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
+	assert(
+		markers == "- | -",
+		fmt.tprintf("expected no markers on a fresh schema, got %q", markers),
+	)
+	// The new objects really are what validation says: four cascading keys, and a marker for
+	// a conversation with oneself is refused.
+	cascades := databaseMigrationTestValue(
+		conn,
+		"SELECT (SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid IN " +
+		"(to_regclass('room_read_markers'), to_regclass('direct_read_markers')) " +
+		"AND confdeltype = 'c')::text",
+	)
+	assert(cascades == "4", fmt.tprintf("expected four cascading foreign keys, got %q", cascades))
+	databaseDefaultRoomTestExec(
+		conn,
+		"probe the self check",
+		"INSERT INTO users (nickname) VALUES ('mig-ivan'); " +
+		"DO $$ BEGIN " +
+		"INSERT INTO direct_read_markers (user_id, peer_user_id, last_read_message_id) " +
+		"VALUES (1, 1, 0); RAISE EXCEPTION 'self marker accepted'; " +
+		"EXCEPTION WHEN check_violation THEN NULL; END $$",
+	)
+}
+
+@(test)
+testReadMarkersMigrationBackfillsRC1AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen("markers_rc1")
+	defer databaseMigrationTestClose(conn, schema)
+
+	// The rc1 rows plus more history, so a marker at the newest message is distinguishable
+	// from one at the first: room 1 holds messages 1, 3, 4 and room 2 message 2; alice and bob
+	// exchanged messages 1 to 3, and carol (keyless) got one from bob.
+	databaseDefaultRoomTestExec(conn, "create rc1 schema", DATABASE_MIGRATION_TEST_RC1_CREATE_SQL)
+	databaseDefaultRoomTestExec(conn, "fill rc1 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+	databaseDefaultRoomTestExec(
+		conn,
+		"add rc1 history",
+		"INSERT INTO chat_messages (room_id, sender_user_id, content) VALUES " +
+		"(1, 2, 'bob in general'), (1, 3, 'carol in general'); " +
+		"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content) VALUES " +
+		"(1, 2, 'again bob'), (2, 3, 'hi carol')",
+	)
+	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	unreadBefore := databaseMigrationTestValue(
+		conn,
+		"SELECT count(*)::text FROM chat_messages",
+	)
+	assert(unreadBefore == "4", fmt.tprintf("expected four room messages, got %q", unreadBefore))
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 0, version = 2, adopted = true},
+		fmt.tprintf("expected rc1 adopted and migrated to 2, got %v", outcome),
+	)
+	databaseMigrationTestValidationPasses(conn)
+	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	assert(
+		after == before,
+		fmt.tprintf("expected every rc1 row intact:\nbefore %q\nafter  %q", before, after),
+	)
+	// Every member of a room with messages sits at that room's newest message; both sides of
+	// every conversation at its newest message, whoever sent it.
+	markers := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
+	expected := "1:1:4,1:2:2,2:1:4,2:2:2,3:1:4 | 1:2:3,2:1:3,2:3:4,3:2:4"
+	assert(markers == expected, fmt.tprintf("expected markers %q, got %q", expected, markers))
+	unread := databaseMigrationTestUnreadCounts(conn, {1, 2, 3})
+	expectedUnread := "1:1=0,2=0;dm=2=0 2:1=0,2=0;dm=3=0,1=0 3:1=0;dm=2=0"
+	assert(
+		unread == expectedUnread,
+		fmt.tprintf("expected zero unread after the upgrade, got %q", unread),
+	)
+}
+
+@(test)
+testReadMarkersMigrationUpgradesVersion1AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen("markers_v1")
+	defer databaseMigrationTestClose(conn, schema)
+
+	// A database a version 1 server migrated: the baseline, recorded, with rows.
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:1])
+	assert(databaseMigrationTestRecorded(conn) == "1:baseline", "expected version 1 recorded")
+	databaseDefaultRoomTestExec(conn, "fill version 1 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 1, version = 2},
+		fmt.tprintf("expected only migration 2 to run, got %v", outcome),
+	)
+	recorded := databaseMigrationTestRecorded(conn)
+	assert(
+		recorded == "1:baseline,2:read markers",
+		fmt.tprintf("expected both versions recorded, got %q", recorded),
+	)
+	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	assert(after == before, "expected every version 1 row intact")
+	markers := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
+	expected := "1:1:1,1:2:2,2:1:1,2:2:2,3:1:1 | 1:2:2,2:1:2"
+	assert(markers == expected, fmt.tprintf("expected markers %q, got %q", expected, markers))
+	unread := databaseMigrationTestUnreadCounts(conn, {1, 2, 3})
+	assert(
+		unread == "1:1=0,2=0;dm=2=0 2:1=0,2=0;dm=1=0 3:1=0;dm=",
+		fmt.tprintf("expected zero unread after the upgrade, got %q", unread),
+	)
+}
+
+@(test)
+testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	// Two later test migrations, so a database recorded at 1, 2, and 4 is not newer than the
+	// list, only inconsistent with it.
+	extended := make([dynamic]DatabaseMigration, context.temp_allocator)
+	append(&extended, ..DATABASE_MIGRATIONS[:])
+	append(&extended, DatabaseMigration{3, "probe three", "SELECT 3", ""})
+	append(&extended, DatabaseMigration{4, "probe four", "SELECT 4", ""})
+	Case :: struct {
+		label:      string,
+		damage:     string,
+		migrations: []DatabaseMigration,
+	}
+	cases := [?]Case {
+		// Versions 1, 2, and 4: a gap below the newest recorded version.
+		{
+			"gap",
+			"INSERT INTO schema_migrations (version, name) VALUES (4, 'probe four')",
+			extended[:],
+		},
+		// Version 2 alone: someone deleted the baseline's row.
+		{"no_baseline", "DELETE FROM schema_migrations WHERE version = 1", DATABASE_MIGRATIONS[:]},
+	}
+	for testCase in cases {
+		conn, schema := databaseMigrationTestOpen(testCase.label)
+		defer databaseMigrationTestClose(conn, schema)
+
+		databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+		databaseDefaultRoomTestExec(conn, "fill schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+		databaseDefaultRoomTestExec(conn, "damage schema_migrations", testCase.damage)
+		before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+		recordedBefore := databaseMigrationTestRecorded(conn)
+		markersBefore := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
+
+		databaseMigrationTestRefuse(conn, testCase.migrations, "schema_migrations is inconsistent")
+		after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+		recordedAfter := databaseMigrationTestRecorded(conn)
+		markersAfter := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
+		assert(
+			after == before,
+			fmt.tprintf("expected the %s refusal to keep every row", testCase.label),
+		)
+		assert(
+			recordedAfter == recordedBefore,
+			fmt.tprintf(
+				"expected the %s refusal to leave schema_migrations as %q, got %q",
+				testCase.label,
+				recordedBefore,
+				recordedAfter,
+			),
+		)
+		assert(markersAfter == markersBefore, "expected the refusal to leave the markers alone")
+	}
 }

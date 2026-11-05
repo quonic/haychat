@@ -161,7 +161,12 @@ Use HayChat as you would use any chat app, and keep an eye on these:
 - **Direct messages:** click another tester under **Members** and message them. Check that
   both of you see the conversation, that it moves to the top of **Direct Messages** with an
   unread count when you are looking at something else, and that it is still there after
-  restarting the client. Unread counts start at zero each time the client starts.
+  restarting the client.
+- **Unread counts:** rooms and conversations show a bold name and a count of messages you
+  have not read yet. Check that a count is still there after you restart the client, that it
+  clears once you open the room or conversation (with the HayChat window focused), and, if
+  you can sign in on two computers with the same identity, that reading on one clears the
+  count on the other. Your own messages should never count.
 - **The window:** resizing, high-DPI screens, typing with an input method (for example
   Japanese or Chinese), copy and paste.
 

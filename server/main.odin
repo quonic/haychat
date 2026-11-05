@@ -33,6 +33,7 @@ PendingDBRequestType :: enum {
 	GetDirectHistory,
 	ListDirectConversations,
 	ListUsers,
+	MarkRead,
 }
 
 PendingDBRequest :: struct {
@@ -44,6 +45,8 @@ PendingDBRequest :: struct {
 	description:      string,
 	// Room member mutations: the member. Direct messages and history: the peer account.
 	targetUserID:     int,
+	// Mark-read: which kind of conversation roomID or targetUserID names.
+	readMarkerKind:   common.ReadMarkerKind,
 	recipientUserIDs: [dynamic]int,
 }
 
@@ -567,7 +570,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .PostDirectMessage,
 		     .GetDirectHistory,
 		     .ListDirectConversations,
-		     .ListUsers:
+		     .ListUsers,
+		     .MarkRead:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case:
 		}
@@ -1171,6 +1175,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientListDirectConversations(pm, state, peerID, packet.payload)
 	case .ClientUserList:
 		MainRouterState_handleClientListUsers(pm, state, peerID, packet.payload)
+	case .ClientMarkRead:
+		MainRouterState_handleClientMarkRead(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1751,6 +1757,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleDirectConversationListResult(pm, state, request, response)
 	case .ListUsers:
 		MainRouterState_handleUserDirectoryResult(pm, state, request, response)
+	case .MarkRead:
+		MainRouterState_handleMarkReadResult(pm, state, request, response)
 	}
 }
 

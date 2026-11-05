@@ -270,7 +270,7 @@ testDirectMessagesSetUnreadAndMoveConversationToTop :: proc(t: ^testing.T) {
 	testExpectString(t, cache.conversations[0].lastContent, "hi", "the latest content")
 	testing.expect(
 		t,
-		testDirectCache(&state, server.id, 11).unreadCount == 1,
+		State_directSummary(&state, server.id, 11).unreadCount == 1,
 		"expected a message in a closed conversation to count as unread",
 	)
 
@@ -283,7 +283,7 @@ testDirectMessagesSetUnreadAndMoveConversationToTop :: proc(t: ^testing.T) {
 	testExpectString(t, cache.conversations[0].peerNickname, "cy", "the new peer's nickname")
 	testing.expect(
 		t,
-		testDirectCache(&state, server.id, 12).unreadCount == 0,
+		State_directSummary(&state, server.id, 12).unreadCount == 0,
 		"expected the user's own message not to count as unread",
 	)
 
@@ -296,19 +296,16 @@ testDirectMessagesSetUnreadAndMoveConversationToTop :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, foundUnread, "expected the sidebar to show bob's unread message")
 
-	// Opening the conversation marks it read; messages while it is open stay read.
+	// Opening the conversation does not clear the badge by itself; the server's marker does.
+	// While the window has focus, a message in the open conversation stays read.
+	state.windowFocused = true
 	State_openDirectConversation(&state, server.id, 11)
 	testing.expect(t, state.selected_dm_peer_id == 11, "expected bob's conversation to open")
-	testing.expect(
-		t,
-		testDirectCache(&state, server.id, 11).unreadCount == 0,
-		"expected opening a conversation to clear its unread count",
-	)
 	testApplyDirectMessage(&state, server.id, 202, 11, 7, "still here", "bob", "me")
 	testing.expect(
 		t,
-		testDirectCache(&state, server.id, 11).unreadCount == 0,
-		"expected a message in the open conversation not to count as unread",
+		State_directSummary(&state, server.id, 11).unreadCount == 1,
+		"expected a message in the viewed conversation not to count as unread",
 	)
 
 	// An older message than the listed one leaves the order alone.

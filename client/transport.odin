@@ -47,6 +47,8 @@ ClientTransportRuntimeEventKind :: enum {
 	UserPresenceChanged,
 	// The creator's answer to ClientCreateRoom (protocol 8): room holds the new room.
 	RoomCreated,
+	// ServerReadMarker (protocol 11): readMarker holds the moved marker. Nothing to free.
+	ReadMarkerReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -85,6 +87,7 @@ ClientTransportRuntimeEvent :: struct {
 	users:             [dynamic]common.UserSummary,
 	conversations:     [dynamic]common.DirectConversationSummary,
 	user:              common.UserSummary,
+	readMarker:        common.ServerReadMarkerPayload,
 }
 
 ClientServerTransport :: struct {
@@ -802,6 +805,25 @@ ClientServerTransport_requestUserList :: proc(transport: ^ClientServerTransport)
 	)
 }
 
+// Read state (protocol 11): the server answers with ServerReadMarker on every session of the
+// account when the marker moved, and with nothing when it did not.
+ClientServerTransport_markRead :: proc(
+	transport: ^ClientServerTransport,
+	kind: common.ReadMarkerKind,
+	conversationID: int,
+	messageID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientMarkRead,
+		common.ClientMarkReadPayload {
+			kind = kind,
+			conversationId = conversationID,
+			messageId = messageID,
+		},
+	)
+}
+
 ClientServerTransport_requestDirectConversations :: proc(
 	transport: ^ClientServerTransport,
 ) -> bool {
@@ -1108,6 +1130,23 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 					nickname = payload.nickname,
 					isOnline = payload.isOnline,
 				},
+			},
+			true
+
+	case .ServerReadMarker:
+		payload: common.ServerReadMarkerPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   (payload.kind != .Room && payload.kind != .Direct) {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid read marker payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .ReadMarkerReceived,
+				serverID = transport.serverID,
+				readMarker = payload,
 			},
 			true
 
