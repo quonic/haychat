@@ -218,12 +218,18 @@ Every package above landed on `main` the same day, each as its own reviewed PR o
 | #10 | G | `deploy/Containerfile`, quadlet units, release workflow (Linux and Windows clients), `docs/tester-guide.md` |
 | #11 | A3 | Changing the display name renames the same account; startup failures exit 1 |
 | #12 | D2 | `client --ui-script`: scripted clicks, typing and screenshots of the real window; offscreen GUI proof in CI |
+| #13 | F | Admins create, rename and delete rooms from the client; `isAdmin` on sign-in, protocol 8; harness `room-create`/`room-edit`/`room-delete` |
 
 Acceptance (see above) was checked against the dev server with the headless harness and the
 GUI: two fresh users chat in `#general` with nicknames, exchange direct messages and see the
 history after a restart, reconnect without user action after a server restart, and get clear
-messages for a wrong address, a taken name and a changed server key. `./dev.sh ci` is green.
+messages for a wrong address, a taken name and a changed server key. After #13 an admin made
+with `deploy/sql/make-admin.sql` created, renamed and deleted a room from the harness while a
+second user saw each change. `./dev.sh ci` is green.
 
-Still open: F (admin room management in the client), the voice steps H1–H8, schema migrations
-before testers have data worth keeping, server-side read state for DM unread counts, and the
-`IPC__route_to` bug noted in #8.
+The first pre-release is tag `v0.1.0-rc1`: the Release workflow builds the server image and
+the Linux and Windows client archives and attaches them to a Forgejo pre-release. Testers get
+`docs/tester-guide.md`; whoever hosts the server follows `deploy/README.md`.
+
+Still open: the voice steps H1–H8, schema migrations before testers have data worth keeping,
+server-side read state for DM unread counts, and the `IPC__route_to` bug noted in #8.
