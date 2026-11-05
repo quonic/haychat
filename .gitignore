@@ -6,6 +6,8 @@ ols.json
 *.bin
 logs/
 storage/
+# Headless client profiles and builds made while trying the harness on the host.
+.headless-profiles/
 # Left behind by the removed run-test-server.sh.
 .haychat-test-server/
 

@@ -10,9 +10,11 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | test_name...]
 #   (no arguments)  the startup auth proof
-#   --all           also the two-client room chat proof (what CI and `./dev.sh ci` run)
+#   --all           also the two-client room chat proof and the headless harness smoke test
+#                   (what CI and `./dev.sh ci` run)
+#   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
 #   test_name...    the given client test procedures, e.g. client.testFoo
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -22,12 +24,19 @@ STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOve
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
 
 tests=("$STARTUP_AUTH_TEST")
+run_harness=false
 if [[ $# -gt 0 ]]; then
-	if [[ "$1" == "--all" ]]; then
-		tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST")
-	else
-		tests=("$@")
-	fi
+	case "$1" in
+		--all)
+			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST")
+			run_harness=true
+			;;
+		--harness)
+			tests=()
+			run_harness=true
+			;;
+		*) tests=("$@") ;;
+	esac
 fi
 
 runtime_dir=$(mktemp -d -t haychat-live.XXXXXX)
@@ -116,7 +125,7 @@ server_pid=$!
 wait_for_server_ready
 echo "==> [live] server is ready"
 
-# The server creates the schema but no rooms, and the chat proof posts to #general. The
+# The server creates the schema but no rooms, and the chat proofs post to #general. The
 # fixture is loaded before any live client connects, so their new accounts join #general.
 echo "==> [live] loading server/sql/auth_bootstrap.sql"
 PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
@@ -124,10 +133,17 @@ PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
 	-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
 	-f server/sql/auth_bootstrap.sql >/dev/null
 
-test_names=$(IFS=,; echo "${tests[*]}")
-echo "==> [live] running ${test_names}"
-HAYCHAT_LIVE_STARTUP_AUTH=1 odin test client \
-	-define:ODIN_TEST_FANCY=false \
-	-define:ODIN_TEST_NAMES="$test_names"
+if [[ ${#tests[@]} -gt 0 ]]; then
+	test_names=$(IFS=,; echo "${tests[*]}")
+	echo "==> [live] running ${test_names}"
+	HAYCHAT_LIVE_STARTUP_AUTH=1 odin test client \
+		-define:ODIN_TEST_FANCY=false \
+		-define:ODIN_TEST_NAMES="$test_names"
+fi
+
+if [[ "$run_harness" == true ]]; then
+	echo "==> [live] running dev/harness-smoke.sh"
+	dev/harness-smoke.sh 127.0.0.1:12345
+fi
 
 echo "==> [live] passed"

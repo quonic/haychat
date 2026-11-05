@@ -39,6 +39,10 @@ appWakeFromWorker :: proc(userdata: rawptr) {
 }
 
 main :: proc() {
+	// The headless harness (headless.odin) never initialises SDL.
+	if headlessRequested(os.args[1:]) {
+		os.exit(headlessMain(os.args[1:]))
+	}
 	if !runApp() {
 		os.exit(1)
 	}
