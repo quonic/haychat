@@ -161,15 +161,58 @@ Q10: every artifact ships the notices its contents require. Found on 2026-11-05:
 archive and image compile in `odin-http` and the `pg` bindings (both MIT) but ship only
 HayChat's licence, and the Windows client ships FreeType inside `SDL3_ttf.dll` without the
 FreeType licence's required credit sentence. Opus, SDL3, SDL3_ttf, HarfBuzz, PlutoSVG, PlutoVG,
-ENet, Inter and Twemoji are already covered.
+ENet, Inter and Twemoji are already covered. A follow-up (#28) adds the code SDL compiles into
+`SDL3.dll`: HIDAPI (under its BSD option, the maintainer's choice), yuv2rgb and SDL's fdlibm
+notice, and pins `SDL3.dll`'s hash so that an SDL update makes the licence check fail until
+someone re-reads what the new SDL bundles.
 
 ### A4. Room voice settings and room types (later, after v1)
 
 Q1: admins turn voice off per room and change a room's type. Needs a migration, a protocol
 change, server enforcement in the voice join path, and admin UI.
 
+## Status (2026-11-05, evening)
+
+Every package of this phase except A4 has merged:
+
+| Package | PR | Merged as |
+| --- | --- | --- |
+| L1 `IPC__route_to` | #14 | 4d636c8 |
+| H1 per-channel keys (protocol 9) | #15 | fbce66f |
+| M1 schema migrations | #16 | 80ef1c8 |
+| H4 audio and Opus | #17 | 53aa456 |
+| H2 voice wire format (protocol 10) | #18 | d2807c6 |
+| B3 read state (protocol 11, migration 2) | #19, polish #21 | e357351, 6f522f6 |
+| H3 server voice relay | #20 | c1559f4 |
+| H5 client voice networking (protocol 12) | #22 | 60d3d3d |
+| H7 harness voice and live proof | #23 | 3267cad |
+| H6 voice UI and settings | #24 | c484ed7 |
+| H8a voice hardening | #25 | 30a3725 |
+| L2 release notices | #26, follow-up #28 | f047c5c, 6227cf3 |
+| V1 one voice session per user (protocol 13) | #27 | 8534308 |
+| H8b manual voice test kit | #29 | 08d4521 |
+
+## Follow-ups
+
+Found while building and reviewing this phase; none blocks a release candidate.
+
+- **Voice gate look-back.** The gate drops the frame that opens it, so each talk spurt loses
+  about 20 ms of its first word (H8b measured it). Sending the frame before the opening one, a
+  one-frame look-back in the engine, would recover it without the false openings of a
+  one-frame attack.
+- **Headless client and SIGTERM.** With SDL audio open, the headless client turns SIGTERM into
+  an SDL quit event that its loop never reads, so it keeps running; scripts close its stdin
+  instead. It should exit on SIGTERM.
+- **SDL disk-driver voice proof timing.** One `./dev.sh ci` run during H8b failed the SDL
+  disk-driver stage of `dev/voice-proof.sh` (65 late frames, 1.24 s of tone) and passed on the
+  rerun. Watch it in CI and loosen or fix it if it fails again.
+- **Windows voice checklist.** `docs/voice-manual-test.md` has the checklist; it needs a person
+  on Windows before the release notes can say voice works there.
+- **A4** (above), after v1.
+
 ## Release
 
-When M1 and B3 have merged, the maintainer can tag `v0.1.0-rc2`. That server adopts an rc1
-database in place. Protocol 9 and later need every tester to update the client too; the
-release notes must say so.
+`v0.1.0-rc2` can be tagged from `main` once its CI is green; tagging is the maintainer's call.
+That server adopts an rc1 database in place (migration 1) and adds read markers (migration 2).
+The protocol is now 13, so every tester must update the client together with the server; the
+release notes must say so, and that voice is new (Linux tested, Windows unchecked by hand).
