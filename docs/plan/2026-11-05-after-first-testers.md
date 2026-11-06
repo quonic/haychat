@@ -22,23 +22,24 @@ a package. Voice packages also read `docs/plan/voice-rooms-design.md` in full.
    `docs/plan/voice-rooms-design.md` section 7. H0 already landed as PR #8.
 4. Fix the latent `IPC__route_to` bug noted in PR #8 before voice depends on that path.
 
-## Decisions taken for the voice design's open questions
+## Decisions on the voice design's open questions
 
-The lead adopted the recommendation of every question in `voice-rooms-design.md` section 8.
-The maintainer can overturn any of them; packages follow these until then.
+The lead first adopted the recommendation of every question in `voice-rooms-design.md`
+section 8 so work could start. The maintainer answered them on 2026-11-05; this table records
+those answers, and packages follow it.
 
 | # | Decision |
 | --- | --- |
-| Q1 | Every room carries voice. No schema change, no room type, no admin toggle in v1. |
-| Q2 | A voice session belongs to a client session (device). The participant list shows a user once and marks a second device. |
-| Q3 | Push-to-talk works while the window has focus. Voice activity is the default mode. No global hotkeys. |
+| Q1 | Every room carries voice in v1. After v1, admins can turn voice off per room and change a room's type; that needs a migration and admin UI (package A4, later). |
+| Q2 | **One voice session per user.** The participant list shows each user once, and a newer join replaces the user's older voice session (package V1). Built first as one session per device (H3/H5/H6); V1 changes that. |
+| Q3 | Push-to-talk works while the window has focus. Voice activity is the default mode. A global hotkey can come later. |
 | Q4 | Opus DTX off; the VAD gate covers silence. |
-| Q5 | Constrained VBR. |
+| Q5 | Constrained VBR. The bitrate setting is capped at 64 kbit/s (Opus itself stops at 510 kbit/s); the maintainer's "about 6000 Kbps" is read as this cap until confirmed. |
 | Q6 | No noise suppression or echo cancellation in v1. The tester guide recommends headphones. |
-| Q7 | Hop-by-hop encryption, as for chat. The binary envelope leaves room for end-to-end keys later. |
+| Q7 | Hop-by-hop encryption, as for chat (left to the lead). The binary envelope leaves room for end-to-end keys later. |
 | Q8 | The network thread owns each peer's voice crypto state and relays frames (`VoiceRelay`). Voice frames never pass through the router, the IPC queues or the database. |
 | Q9 | Voice counters (frames in, out and dropped; rooms; participants) on web admin `/status`. |
-| Q10 | Windows release archives ship `libopus-0.dll` and its licence from `$ODIN_ROOT/vendor/sdl3/mixer/`, next to `SDL3.dll`. |
+| Q10 | Windows release archives ship `libopus-0.dll` next to `SDL3.dll`, **with every third-party credit its licence requires**. Package L2 audits all release artifacts and completes the notices. |
 
 ## Coordination rules
 
@@ -141,6 +142,28 @@ H8 also takes two jitter buffer edges from the review of PR #17: `JitterBuffer_e
 may clip the start of a spurt after a fast push-to-talk re-press, and a spurt that starts
 from idle after a sender restart may keep a high `hasTransit`-based depth for a few spurts.
 H8 adds a test or a manual checklist item for each.
+
+### V1. One voice session per user (`voice-single-session`, after H8a)
+
+Q2: the participant list shows each user once, and a newer voice session of the same user
+replaces the older one. A manual join from another device takes over and the older session gets
+`ServerVoiceLeft` ("joined voice on another device"). An automatic re-join after a reconnect only
+replaces a session of the same device (a stale session the server has not timed out yet); it
+never takes voice away from another device. That needs a per-device ID the server can compare,
+and a protocol bump.
+
+### L2. Third-party notices in every release artifact (`release-notices`)
+
+Q10: every artifact ships the notices its contents require. Found on 2026-11-05: the server
+archive and image compile in `odin-http` and the `pg` bindings (both MIT) but ship only
+HayChat's licence, and the Windows client ships FreeType inside `SDL3_ttf.dll` without the
+FreeType licence's required credit sentence. Opus, SDL3, SDL3_ttf, HarfBuzz, PlutoSVG, PlutoVG,
+ENet, Inter and Twemoji are already covered.
+
+### A4. Room voice settings and room types (later, after v1)
+
+Q1: admins turn voice off per room and change a room's type. Needs a migration, a protocol
+change, server enforcement in the voice join path, and admin UI.
 
 ## Release
 
