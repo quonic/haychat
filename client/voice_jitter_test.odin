@@ -175,6 +175,28 @@ testJitterBufferRebuildsAGapFromTheNextFrame :: proc(t: ^testing.T) {
 	assert(jb.stats.fec == 1 && jb.stats.plc == 0, fmt.tprintf("unexpected stats %v", jb.stats))
 }
 
+// One lost frame rebuilt from the next one's FEC is no audible gap; pre-roll is none either.
+@(test)
+testJitterBufferCountsOnlyUnrepairedFramesAsAGap :: proc(t: ^testing.T) {
+	jb: JitterBuffer
+	JitterBuffer_init(&jb)
+	_ = jitterPush(&jb, 100)
+	_ = jitterPush(&jb, 102)
+	_ = jitterPush(&jb, 105)
+	jitterExpectPreroll(&jb, 100)
+	jitterExpect(&jb, .Decode, 100)
+	jitterExpect(&jb, .DecodeFEC, 101)
+	jitterExpect(&jb, .Decode, 102)
+	assert(jb.stats.maxGapRun == 0, "expected neither pre-roll nor FEC to count as a gap")
+	jitterExpect(&jb, .Conceal, 103)
+	jitterExpect(&jb, .DecodeFEC, 104)
+	jitterExpect(&jb, .Decode, 105)
+	assert(
+		jb.stats.maxGapRun == 1,
+		fmt.tprintf("expected a gap run of 1, got %d", jb.stats.maxGapRun),
+	)
+}
+
 @(test)
 testJitterBufferConcealsAGapWithoutANextFrame :: proc(t: ^testing.T) {
 	jb: JitterBuffer
@@ -209,6 +231,11 @@ testJitterBufferLimitsConcealmentInsideASpurt :: proc(t: ^testing.T) {
 	jitterExpect(&jb, .DecodeFEC, 108)
 	jitterExpect(&jb, .Decode, 109)
 	assert(jb.stats.silent == 2, fmt.tprintf("expected 2 silent frames, got %d", jb.stats.silent))
+	// Five concealed and two silent frames in a row; the FEC-rebuilt one ends the run.
+	assert(
+		jb.stats.maxGapRun == 7,
+		fmt.tprintf("expected a gap run of 7, got %d", jb.stats.maxGapRun),
+	)
 }
 
 @(test)

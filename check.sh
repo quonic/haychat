@@ -31,6 +31,12 @@ odin test common "${test_flags[@]}"
 echo "==> odin test client"
 odin test client "${test_flags[@]}"
 
+# The voice fault hook (client/voice_faults.odin) exists only in a HAYCHAT_TEST_FAULTS build,
+# so its unit test runs in one; dev/voice-proof.sh exercises the hook end to end.
+echo "==> odin test client (HAYCHAT_TEST_FAULTS, fault hook only)"
+odin test client "${test_flags[@]}" -define:HAYCHAT_TEST_FAULTS=true \
+	-define:ODIN_TEST_NAMES=client.testVoiceReceiveFaultsAreAbsentFromNormalBuilds,client.testVoiceReceiveFaultsDropAndDelayDeterministically
+
 echo "==> odin test client/ui"
 odin test client/ui "${test_flags[@]}"
 

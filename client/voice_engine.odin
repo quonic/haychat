@@ -114,6 +114,21 @@ VoiceOutboundFrame :: struct {
 // Called on the voice thread for every encoded frame.
 VoiceOutboundProc :: #type proc(userdata: rawptr, frame: VoiceOutboundFrame)
 
+// One frame's timing, for latency measurements (voice-rooms-design.md 6.4). Encoded: this
+// engine encoded its own frame `sequence` (speakerUserID 0). Played: it decoded frame
+// `sequence` of speakerUserID for its sink (a normal decode, not FEC or concealment). at is
+// the monotonic clock, which every engine and process on one host shares, so a test can
+// match a sender's Encoded to a receiver's Played by sequence.
+VoiceFrameTiming :: struct {
+	played:        bool,
+	speakerUserID: u32,
+	sequence:      u32,
+	at:            time.Tick,
+}
+
+// Called on the voice thread; it must be quick and must not call back into the engine.
+VoiceFrameTimingProc :: #type proc(userdata: rawptr, timing: VoiceFrameTiming)
+
 VoiceEngineConfig :: struct {
 	source:           VoiceSourceConfig,
 	sink:             VoiceSinkConfig,
@@ -144,6 +159,9 @@ VoiceEngineConfig :: struct {
 	// Zero values start at 0.
 	resumeSequence:   u32,
 	resumeSequenceAt: time.Tick,
+	// Optional, for latency tests: every encoded and every played frame.
+	onFrameTiming:    VoiceFrameTimingProc,
+	timingUserdata:   rawptr,
 }
 
 VoiceEngineStats :: struct {
@@ -163,6 +181,16 @@ VoiceEngineStats :: struct {
 	sinkWriteErrors: u64, // file sink writes that failed (a full disk truncates the file)
 	speakersCreated: u64,
 	speakersExpired: u64,
+	// Received frames decoded for playout (normal decodes), and how long they waited between
+	// arriving and being decoded: the jitter buffer's delay. A device sink adds the SDL
+	// stream's queue (up to VOICE_PLAYBACK_TARGET_FRAMES) on top.
+	playoutDelayFrames:  u64,
+	playoutDelayTotalMS: f64,
+	playoutDelayMaxMS:   f64,
+	// HAYCHAT_TEST_FAULTS builds only (voice_faults.odin): received frames the fault hook
+	// dropped, and frames it delayed. Always 0 in normal builds.
+	faultDropped:        u64,
+	faultDelayed:        u64,
 }
 
 VoiceSpeakerSnapshot :: struct {
@@ -276,6 +304,8 @@ VoiceEngine :: struct {
 	// thread, which owns the file, flushes and then publishes the ticket it served.
 	sinkFlushRequested:  u64,
 	sinkFlushCompleted:  u64,
+	// Empty unless built with HAYCHAT_TEST_FAULTS.
+	faults:              VoiceReceiveFaults,
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────
@@ -484,6 +514,9 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	engine.faultState = engine.config.loopbackFaults.seed ~ 0x9E37_79B9_7F4A_7C15
 	engine.loopbackCount = 0
 	engine.hasHeldFrame = false
+	when HAYCHAT_TEST_FAULTS {
+		VoiceReceiveFaults_initFromEnvironment(&engine.faults)
+	}
 	engine.clockStart = time.tick_now()
 	sync.mutex_lock(&engine.inboundMutex)
 	engine.inboundHead = 0
@@ -940,6 +973,12 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		opus          = engine.encodeBuffer[:length],
 	}
 	engine.stats.framesSent += 1
+	if engine.config.onFrameTiming != nil {
+		engine.config.onFrameTiming(
+			engine.config.timingUserdata,
+			{sequence = sequence, at = time.tick_now()},
+		)
+	}
 	if engine.config.onOutbound != nil {
 		engine.config.onOutbound(engine.config.outboundUserdata, outbound)
 	}
@@ -950,7 +989,6 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 
 // voiceNextRandom is splitmix64: tiny, seedable, and the same on every platform, so loopback
 // loss patterns are reproducible.
-@(private = "file")
 voiceNextRandom :: proc(state: ^u64) -> u64 {
 	state^ += 0x9E37_79B9_7F4A_7C15
 	z := state^
@@ -1066,6 +1104,7 @@ jitterStatsAdd :: proc(total: ^JitterStats, add: JitterStats) {
 	total.silent += add.silent
 	total.resets += add.resets
 	total.spurts += add.spurts
+	total.maxGapRun = max(total.maxGapRun, add.maxGapRun)
 }
 
 @(private = "file")
@@ -1095,22 +1134,38 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 		}
 		deafenedDiscards = u64(count)
 		count = 0
+		when HAYCHAT_TEST_FAULTS {
+			VoiceReceiveFaults_clear(&engine.faults)
+		}
+	}
+	when HAYCHAT_TEST_FAULTS {
+		if engine.faults.enabled {
+			// Delayed frames that are due go first: they arrived earlier.
+			released: VoiceInboundFrame
+			for VoiceReceiveFaults_release(&engine.faults, now, &released) {
+				if !VoiceEngine_deliverInbound(engine, &released, now) {
+					noSpeaker += 1
+				}
+			}
+		}
 	}
 	for &frame in engine.drainBatch[:count] {
-		speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
-		if speaker == nil {
-			noSpeaker += 1
-			continue
+		when HAYCHAT_TEST_FAULTS {
+			if engine.faults.enabled {
+				switch VoiceReceiveFaults_admit(&engine.faults, &frame, now) {
+				case .Deliver:
+				case .Drop:
+					engine.stats.faultDropped += 1
+					continue
+				case .Hold:
+					engine.stats.faultDelayed += 1
+					continue
+				}
+			}
 		}
-		speaker.lastArrivalMS = now
-		engine.stats.inboundAccepted += 1
-		_ = JitterBuffer_push(
-			&speaker.jitter,
-			frame.frameSequence,
-			frame.flags,
-			frame.data[:frame.length],
-			now,
-		)
+		if !VoiceEngine_deliverInbound(engine, &frame, now) {
+			noSpeaker += 1
+		}
 	}
 
 	sync.mutex_lock(&engine.inboundMutex)
@@ -1122,9 +1177,58 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 	sync.mutex_unlock(&engine.inboundMutex)
 }
 
+// Pushes one frame into its speaker's jitter buffer. Returns false when there is no free
+// speaker slot.
+@(private = "file")
+VoiceEngine_deliverInbound :: proc(
+	engine: ^VoiceEngine,
+	frame: ^VoiceInboundFrame,
+	now: f64,
+) -> bool {
+	speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
+	if speaker == nil {
+		return false
+	}
+	speaker.lastArrivalMS = now
+	engine.stats.inboundAccepted += 1
+	_ = JitterBuffer_push(
+		&speaker.jitter,
+		frame.frameSequence,
+		frame.flags,
+		frame.data[:frame.length],
+		now,
+	)
+	return true
+}
+
 @(private = "file")
 voicePacketIsOneFrame :: proc(packet: []u8) -> bool {
 	return opus.packetSampleCount(packet, common.VOICE_SAMPLE_RATE) == common.VOICE_FRAME_SAMPLES
+}
+
+// Counts a received frame's wait in the jitter buffer and reports its playout.
+@(private = "file")
+VoiceEngine_notePlayed :: proc(
+	engine: ^VoiceEngine,
+	speaker: ^VoiceSpeaker,
+	output: JitterOutput,
+	now: f64,
+) {
+	delay := max(now - output.arrivalMS, 0)
+	engine.stats.playoutDelayFrames += 1
+	engine.stats.playoutDelayTotalMS += delay
+	engine.stats.playoutDelayMaxMS = max(engine.stats.playoutDelayMaxMS, delay)
+	if engine.config.onFrameTiming != nil {
+		engine.config.onFrameTiming(
+			engine.config.timingUserdata,
+			{
+				played = true,
+				speakerUserID = speaker.userID,
+				sequence = output.sequence,
+				at = time.tick_now(),
+			},
+		)
+	}
 }
 
 // VoiceEngine_decode turns one jitter-buffer decision into 20 ms of PCM in decodeFrame.
@@ -1133,6 +1237,7 @@ VoiceEngine_decode :: proc(
 	engine: ^VoiceEngine,
 	speaker: ^VoiceSpeaker,
 	output: JitterOutput,
+	now: f64,
 ) -> []f32 {
 	pcm := engine.decodeFrame[:]
 	decoded: c.int = -1
@@ -1141,6 +1246,7 @@ VoiceEngine_decode :: proc(
 		mem.zero_slice(pcm)
 		return pcm
 	case .Decode:
+		VoiceEngine_notePlayed(engine, speaker, output, now)
 		if voicePacketIsOneFrame(output.data) {
 			decoded = opus.decodeFloat(speaker.decoder, output.data, pcm)
 		} else {
@@ -1182,13 +1288,13 @@ VoiceEngine_playout :: proc(engine: ^VoiceEngine, now: f64) {
 					speaker.levelDB = VOICE_LEVEL_FLOOR_DB
 					break
 				}
-				pcm := VoiceEngine_decode(engine, &speaker, output)
+				pcm := VoiceEngine_decode(engine, &speaker, output, now)
 				_ = SDL.PutAudioStreamData(speaker.stream, raw_data(pcm), VOICE_FRAME_BYTES)
 			}
 		}
 	case .File, .Null:
 		if engine.config.unpaced {
-			VoiceEngine_playMixedFrame(engine)
+			VoiceEngine_playMixedFrame(engine, now)
 			return
 		}
 		if now - engine.nextPlayoutMS > VOICE_CAPTURE_MAX_BACKLOG_FRAMES * VOICE_FRAME_MS {
@@ -1196,14 +1302,14 @@ VoiceEngine_playout :: proc(engine: ^VoiceEngine, now: f64) {
 			engine.nextPlayoutMS = now
 		}
 		for now >= engine.nextPlayoutMS {
-			VoiceEngine_playMixedFrame(engine)
+			VoiceEngine_playMixedFrame(engine, now)
 			engine.nextPlayoutMS += VOICE_FRAME_MS
 		}
 	}
 }
 
 @(private = "file")
-VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine) {
+VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine, now: f64) {
 	mix := engine.mixFrame[:]
 	mem.zero_slice(mix)
 	for &speaker in engine.speakers {
@@ -1215,7 +1321,7 @@ VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine) {
 			speaker.levelDB = VOICE_LEVEL_FLOOR_DB
 			continue
 		}
-		pcm := VoiceEngine_decode(engine, &speaker, output)
+		pcm := VoiceEngine_decode(engine, &speaker, output, now)
 		for sample, index in pcm {
 			mix[index] += sample
 		}
