@@ -269,7 +269,8 @@ CI only type-checks the Windows client (`./check.sh`), so a person runs this lis
 before a release that changes voice (design section 9). Use the release zip, or a build with
 the DLLs copied as the README says.
 
-1. **libopus:** `libopus-0.dll` (and `LICENSE.opus.txt`) sit next to `haychat-client.exe`.
+1. **libopus:** `libopus-0.dll` sits next to `haychat-client.exe`, and its licence is in
+   `licenses\opus-LICENSE.txt`.
    Start the client and join voice: the voice bar says "Voice connected", not "Voice
    unavailable: libopus not found". Rename the DLL and restart: chat still works, and voice
    says libopus is missing. Put the DLL back.
