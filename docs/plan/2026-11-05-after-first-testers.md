@@ -31,10 +31,10 @@ those answers, and packages follow it.
 | # | Decision |
 | --- | --- |
 | Q1 | Every room carries voice in v1. After v1, admins can turn voice off per room and change a room's type; that needs a migration and admin UI (package A4, later). |
-| Q2 | **One voice session per user.** The participant list shows each user once, and a newer join replaces the user's older voice session (package V1). Built first as one session per device (H3/H5/H6); V1 changes that. |
+| Q2 | **One voice session per user.** The participant list shows each user once, and a newer join replaces the user's older voice session (package V1). The automatic re-join after a reconnect stays; it only replaces a stale session of the same device, never another device's voice. Built first as one session per device (H3/H5/H6); V1 changes that. |
 | Q3 | Push-to-talk works while the window has focus. Voice activity is the default mode. A global hotkey can come later. |
 | Q4 | Opus DTX off; the VAD gate covers silence. |
-| Q5 | Constrained VBR. The bitrate setting is capped at 64 kbit/s (Opus itself stops at 510 kbit/s); the maintainer's "about 6000 Kbps" is read as this cap until confirmed. |
+| Q5 | Constrained VBR, 24 kbit/s by default, and the bitrate setting capped at 64 kbit/s (confirmed by the maintainer). |
 | Q6 | No noise suppression or echo cancellation in v1. The tester guide recommends headphones. |
 | Q7 | Hop-by-hop encryption, as for chat (left to the lead). The binary envelope leaves room for end-to-end keys later. |
 | Q8 | The network thread owns each peer's voice crypto state and relays frames (`VoiceRelay`). Voice frames never pass through the router, the IPC queues or the database. |
