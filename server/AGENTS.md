@@ -76,6 +76,7 @@
 - Per-packet logging goes behind `serverLogLevelIsDebug(config.logLevel)` (`HAYCHAT_LOG_LEVEL=debug`). Never log every packet at the default level.
 - `NetworkSendData.unreliable` and `NetworkBroadcast.unreliable` default to `false`, which is reliable delivery. Only real-time media should set it.
 - There is no network worker pool. Do work that must happen on the network thread in the loop itself, or design a pool that parks on a condition variable.
+- No server loop calls `free_all(context.temp_allocator)`, so whatever the router, database, network, or web admin loop allocates from the temporary allocator stays allocated for the life of the process. Allocate per-message and per-request scratch on the heap and free it (`make` with `defer delete`), as `MainRouterState_handleJoinVoiceMemberCheckResult` does. Only code that runs once at startup, such as config loading and migrations, uses `context.temp_allocator`.
 
 ## Dev Workflow
 
