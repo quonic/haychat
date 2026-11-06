@@ -257,35 +257,42 @@ HeadlessVoiceSpeakerJSON :: struct {
 	jitterMS:       f32,
 }
 
-// voice-stats. The flat fields first, for scripts: sent (frames this engine encoded and
-// handed to the network), received (frames accepted into the jitter buffers), lost (missing
-// at playout: fec + plc + silent), fec, plc, late, and the largest jitterMS and depth over
-// the current speakers. Then the engine's full counters (VoiceEngineStats and JitterStats),
-// its speakers, and the transport's voice counters (ClientVoiceNetworkStats, read under the
-// worker lock). joinedMS is the time since the join completed (0 when not joined).
+// voice-stats. The flat fields first, for scripts: sent (frames this engine encoded and handed to
+// the network), received (frames accepted into the jitter buffers), lost (missing at playout: fec
+// + plc + silent), fec, plc, late, and the largest jitterMS and depth over the current speakers;
+// maxGapRun (the longest run of frames inside a spurt heard as neither decoded nor FEC-rebuilt),
+// playoutDelayMS and playoutDelayMaxMS (mean and largest wait of a received frame between arrival
+// and decoding), and injectedLoss (frames the HAYCHAT_TEST_FAULTS hook dropped; 0 in normal
+// builds). Then the engine's full counters (VoiceEngineStats and JitterStats), its speakers, and
+// the transport's voice counters (ClientVoiceNetworkStats, read under the worker lock). joinedMS
+// is the time since the join completed (0 when not joined).
 HeadlessVoiceStatsJSON :: struct {
-	ok:            bool,
-	cmd:           string,
-	status:        string,
-	serverID:      int,
-	roomID:        int,
-	running:       bool,
-	joinedMS:      int,
-	sent:          u64,
-	received:      u64,
-	lost:          u64,
-	fec:           u64,
-	plc:           u64,
-	late:          u64,
-	jitterMS:      f32,
-	depth:         int,
-	inputLevelDB:  f32,
-	transmitting:  bool,
-	frameSequence: u32,
-	engine:        VoiceEngineStats,
-	jitter:        JitterStats,
-	speakers:      []HeadlessVoiceSpeakerJSON,
-	network:       ClientVoiceNetworkStats,
+	ok:                bool,
+	cmd:               string,
+	status:            string,
+	serverID:          int,
+	roomID:            int,
+	running:           bool,
+	joinedMS:          int,
+	sent:              u64,
+	received:          u64,
+	lost:              u64,
+	fec:               u64,
+	plc:               u64,
+	late:              u64,
+	jitterMS:          f32,
+	depth:             int,
+	maxGapRun:         u64,
+	playoutDelayMS:    f64,
+	playoutDelayMaxMS: f64,
+	injectedLoss:      u64,
+	inputLevelDB:      f32,
+	transmitting:      bool,
+	frameSequence:     u32,
+	engine:            VoiceEngineStats,
+	jitter:            JitterStats,
+	speakers:          []HeadlessVoiceSpeakerJSON,
+	network:           ClientVoiceNetworkStats,
 }
 
 // voice-flush: the file sink's path and its size once the flush was served. running is false
@@ -328,6 +335,13 @@ headlessVoiceStatsJSON :: proc(
 	result.fec = jitter.fec
 	result.plc = jitter.plc
 	result.late = jitter.late
+	result.maxGapRun = jitter.maxGapRun
+	if snapshot.stats.playoutDelayFrames > 0 {
+		result.playoutDelayMS =
+			snapshot.stats.playoutDelayTotalMS / f64(snapshot.stats.playoutDelayFrames)
+	}
+	result.playoutDelayMaxMS = snapshot.stats.playoutDelayMaxMS
+	result.injectedLoss = snapshot.stats.faultDropped
 	result.inputLevelDB = snapshot.inputLevelDB
 	result.transmitting = snapshot.transmitting
 	result.frameSequence = snapshot.frameSequence

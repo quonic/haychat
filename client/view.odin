@@ -27,11 +27,9 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 		state.settings.tab == .Voice
 	State_setVoiceSettingsVisible(state, voicePanelVisible)
 	State_voiceSettingsFrame(state)
-	// Meters and speaking indicators change without any event, so they need redraws; nothing
-	// else wakes the loop for voice.
-	if State_voiceNeedsRedraws(state) {
-		ui.requestFrameAt(ctx, ctx.nowMS + VOICE_REDRAW_INTERVAL_MS)
-	}
+	// Meters and speaking indicators change without any event. The frame loop polls them
+	// (app.odin) and redraws only when they would look different from this frame.
+	state.voice.drawnVisual = State_voiceVisualKey(state)
 	root := ctx.windowRect
 	// First run has nothing to show beside the form, so it takes the whole window.
 	if state.settingsOpen && State_needsFirstRunSetup(state.config) {

@@ -175,6 +175,28 @@ testJitterBufferRebuildsAGapFromTheNextFrame :: proc(t: ^testing.T) {
 	assert(jb.stats.fec == 1 && jb.stats.plc == 0, fmt.tprintf("unexpected stats %v", jb.stats))
 }
 
+// One lost frame rebuilt from the next one's FEC is no audible gap; pre-roll is none either.
+@(test)
+testJitterBufferCountsOnlyUnrepairedFramesAsAGap :: proc(t: ^testing.T) {
+	jb: JitterBuffer
+	JitterBuffer_init(&jb)
+	_ = jitterPush(&jb, 100)
+	_ = jitterPush(&jb, 102)
+	_ = jitterPush(&jb, 105)
+	jitterExpectPreroll(&jb, 100)
+	jitterExpect(&jb, .Decode, 100)
+	jitterExpect(&jb, .DecodeFEC, 101)
+	jitterExpect(&jb, .Decode, 102)
+	assert(jb.stats.maxGapRun == 0, "expected neither pre-roll nor FEC to count as a gap")
+	jitterExpect(&jb, .Conceal, 103)
+	jitterExpect(&jb, .DecodeFEC, 104)
+	jitterExpect(&jb, .Decode, 105)
+	assert(
+		jb.stats.maxGapRun == 1,
+		fmt.tprintf("expected a gap run of 1, got %d", jb.stats.maxGapRun),
+	)
+}
+
 @(test)
 testJitterBufferConcealsAGapWithoutANextFrame :: proc(t: ^testing.T) {
 	jb: JitterBuffer
@@ -209,6 +231,11 @@ testJitterBufferLimitsConcealmentInsideASpurt :: proc(t: ^testing.T) {
 	jitterExpect(&jb, .DecodeFEC, 108)
 	jitterExpect(&jb, .Decode, 109)
 	assert(jb.stats.silent == 2, fmt.tprintf("expected 2 silent frames, got %d", jb.stats.silent))
+	// Five concealed and two silent frames in a row; the FEC-rebuilt one ends the run.
+	assert(
+		jb.stats.maxGapRun == 7,
+		fmt.tprintf("expected a gap run of 7, got %d", jb.stats.maxGapRun),
+	)
 }
 
 @(test)
@@ -327,4 +354,108 @@ testJitterBufferRejectsInvalidPayloads :: proc(t: ^testing.T) {
 		"expected an oversize payload to be rejected",
 	)
 	assert(jb.stats.invalid == 2 && !jb.inSpurt, "expected invalid frames not to start a spurt")
+}
+
+// PR #17 edge (a): a fast push-to-talk re-press. The next spurt's first frames arrive while
+// the END_OF_SPURT frame is still waiting its turn (the buffer holds targetDepth frames), and
+// ending the spurt must not throw them away.
+@(test)
+testJitterBufferKeepsTheNextSpurtQueuedBehindAnEndOfSpurt :: proc(t: ^testing.T) {
+	jb: JitterBuffer
+	JitterBuffer_init(&jb)
+	for sequence in u32(100) ..< 105 {
+		flags := sequence == 104 ? common.VOICE_FRAME_FLAG_END_OF_SPURT : 0
+		_ = jitterPush(&jb, sequence, flags)
+	}
+	// Released at 104 and pressed again two frames later, before 104 has played.
+	assert(jitterPush(&jb, 107), "expected the re-press's first frame to be accepted")
+	assert(jitterPush(&jb, 108), "expected the re-press's second frame to be accepted")
+	jitterExpectPreroll(&jb, 100)
+	for sequence in u32(100) ..< 105 {
+		jitterExpect(&jb, .Decode, sequence)
+	}
+	assert(jb.inSpurt, "expected the queued frames to start the next spurt at once")
+	// The gap the sender's gate left closed is pre-roll silence, not loss.
+	jitterExpect(&jb, .Silence, 105)
+	jitterExpect(&jb, .Silence, 106)
+	jitterExpect(&jb, .Decode, 107)
+	jitterExpect(&jb, .Decode, 108)
+	assert(jb.stats.spurts == 2, fmt.tprintf("expected 2 spurts, got %d", jb.stats.spurts))
+	assert(
+		jb.stats.plc == 0 && jb.stats.fec == 0,
+		fmt.tprintf("expected no repair, got fec %d plc %d", jb.stats.fec, jb.stats.plc),
+	)
+	// Stragglers from before the end are still late, and a frame of the new spurt is not.
+	assert(!jitterPush(&jb, 103), "expected a straggler from the ended spurt to be late")
+	assert(jitterPush(&jb, 109), "expected the new spurt to keep accepting frames")
+	jitterExpect(&jb, .Decode, 109)
+}
+
+// The end of a spurt still discards what belongs to it: a duplicate of an earlier frame that
+// sits in the ring must not start a spurt of its own.
+@(test)
+testJitterBufferEndOfSpurtDropsItsOwnLeftovers :: proc(t: ^testing.T) {
+	jb: JitterBuffer
+	JitterBuffer_init(&jb)
+	_ = jitterPush(&jb, 100)
+	_ = jitterPush(&jb, 101)
+	_ = jitterPush(&jb, 102, common.VOICE_FRAME_FLAG_END_OF_SPURT)
+	jitterExpectPreroll(&jb, 100)
+	jitterExpect(&jb, .Decode, 100)
+	jitterExpect(&jb, .Decode, 101)
+	jitterExpect(&jb, .Decode, 102)
+	assert(!jb.inSpurt, "expected the spurt to end with nothing queued after it")
+	jitterExpect(&jb, .Idle, 0)
+	assert(jb.stats.spurts == 1, fmt.tprintf("expected 1 spurt, got %d", jb.stats.spurts))
+}
+
+// PR #17 edge (b): the sender restarts (a re-join, or a client restart) while this receiver
+// still holds its speaker, so the next spurt starts from idle at a sequence far behind the
+// old one. That jump in transit time is a new clock, not network jitter, and must not push
+// the depth of the following spurts to the maximum.
+@(test)
+testJitterBufferIgnoresASenderRestartInTheJitterEstimate :: proc(t: ^testing.T) {
+	jb: JitterBuffer
+	JitterBuffer_init(&jb)
+	// Arrival is the sender's media time plus a constant offset: a perfectly steady network.
+	// The offset changes only when the sender restarts and its clock starts over.
+	spurt :: proc(jb: ^JitterBuffer, first: u32, count: u32, offsetMS: f64) {
+		for offset in u32(0) ..< count {
+			sequence := first + offset
+			flags := offset == count - 1 ? common.VOICE_FRAME_FLAG_END_OF_SPURT : 0
+			_ = jitterPush(jb, sequence, flags, f64(sequence) * VOICE_FRAME_MS + offsetMS)
+			_ = JitterBuffer_next(jb)
+		}
+		for JitterBuffer_next(jb).action != .Idle {}
+	}
+	// Two steady spurts with silence between them.
+	spurt(&jb, 5000, 30, 0)
+	spurt(&jb, 5100, 30, 0)
+	steadyJitter := jb.jitterMS
+	assert(steadyJitter < 1, fmt.tprintf("expected no jitter yet, got %f ms", steadyJitter))
+	// The sender restarts at real time 5200 frames and counts from 0 again.
+	clock := 5200 * VOICE_FRAME_MS
+	spurt(&jb, 0, 30, clock)
+	assert(
+		jb.jitterMS < 1,
+		fmt.tprintf("expected the restart not to count as jitter, got %f ms", jb.jitterMS),
+	)
+	_ = jitterPush(&jb, 100, 0, clock + 100 * VOICE_FRAME_MS)
+	assert(
+		jb.targetDepth == JITTER_MIN_DEPTH,
+		fmt.tprintf(
+			"expected depth %d after a restart, got %d",
+			JITTER_MIN_DEPTH,
+			jb.targetDepth,
+		),
+	)
+
+	// A sender restart that jumps forward (a long-running sender's clock seen for the first
+	// time after a short one) is the same step the other way.
+	for JitterBuffer_next(&jb).action != .Idle {}
+	spurt(&jb, 900_000, 30, clock - 900_000 * VOICE_FRAME_MS + 200 * VOICE_FRAME_MS)
+	assert(
+		jb.jitterMS < 1,
+		fmt.tprintf("expected a forward clock step not to count, got %f ms", jb.jitterMS),
+	)
 }

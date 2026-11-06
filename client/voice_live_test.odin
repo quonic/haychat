@@ -6,6 +6,8 @@ import "core:fmt"
 import "core:log"
 import "core:mem"
 import "core:os"
+import "core:slice"
+import "core:sync"
 import "core:testing"
 import "core:time"
 
@@ -16,6 +18,64 @@ LIVE_VOICE_TONE_AMPLITUDE :: 0.5
 // How long A talks while B is joined. The check needs a second of tone after the first
 // 200 ms, which leaves room for the jitter buffer's start-up.
 LIVE_VOICE_TALK_TIME :: 2500 * time.Millisecond
+
+// Encode-to-playout latency (voice-rooms-design.md 6.4) without a protocol change: both
+// clients run in this process, so A's engine and B's engine report frames on the same
+// monotonic clock (VoiceEngineConfig.onFrameTiming). A's Encoded and B's Played events are
+// matched by frameSequence. The measured span runs from the moment A has a whole 20 ms frame
+// and encodes it to the moment B decodes it into its file sink: encoding, sealing, the
+// server relay, ENet on loopback, the inbound queue and the jitter buffer. Mouth-to-ear adds
+// the 20 ms the first sample of a frame waits for the rest of it, plus the audio devices'
+// own buffers, which a file sink does not have.
+LIVE_VOICE_TIMING_RING :: 1024
+// The CI bound on the 95th percentile. The target is 150 ms; the bound leaves room for a
+// loaded runner, so it catches a regression (a jitter buffer stuck deep, a stalled thread)
+// without flaking.
+LIVE_VOICE_P95_LIMIT_MS :: 300.0
+
+@(private = "file")
+LiveVoiceTimingRecorder :: struct {
+	mutex:      sync.Mutex,
+	encodedAt:  [LIVE_VOICE_TIMING_RING]time.Tick,
+	encodedSeq: [LIVE_VOICE_TIMING_RING]u32,
+	hasEncoded: [LIVE_VOICE_TIMING_RING]bool,
+	latencies:  [dynamic]f64,
+	unmatched:  int,
+}
+
+// On the voice threads of both engines.
+@(private = "file")
+liveVoiceRecordTiming :: proc(userdata: rawptr, timing: VoiceFrameTiming) {
+	recorder := (^LiveVoiceTimingRecorder)(userdata)
+	sync.mutex_lock(&recorder.mutex)
+	defer sync.mutex_unlock(&recorder.mutex)
+	slot := timing.sequence % LIVE_VOICE_TIMING_RING
+	if !timing.played {
+		recorder.encodedAt[slot] = timing.at
+		recorder.encodedSeq[slot] = timing.sequence
+		recorder.hasEncoded[slot] = true
+		return
+	}
+	if !recorder.hasEncoded[slot] || recorder.encodedSeq[slot] != timing.sequence {
+		recorder.unmatched += 1
+		return
+	}
+	// Reserved up front on the test thread, so the voice thread never allocates.
+	if len(recorder.latencies) < cap(recorder.latencies) {
+		delay := time.duration_milliseconds(time.tick_diff(recorder.encodedAt[slot], timing.at))
+		append(&recorder.latencies, delay)
+	}
+}
+
+// The pth percentile (0..100) of sorted values, nearest rank.
+@(private = "file")
+liveVoicePercentile :: proc(sorted: []f64, p: f64) -> f64 {
+	if len(sorted) == 0 {
+		return 0
+	}
+	rank := int(p / 100 * f64(len(sorted)) + 0.999999) - 1
+	return sorted[clamp(rank, 0, len(sorted) - 1)]
+}
 
 // Applies every queued event on each state, the way the frame loop does.
 @(private = "file")
@@ -130,6 +190,12 @@ testClientVoiceLiveToneReachesSecondClientThroughServer :: proc(t: ^testing.T) {
 	)
 	defer os.remove(sinkPath)
 
+	recorder := new(LiveVoiceTimingRecorder)
+	reserve(&recorder.latencies, LIVE_VOICE_TIMING_RING)
+	defer {
+		delete(recorder.latencies)
+		free(recorder)
+	}
 	stateA := State_initFromConfig(configA)
 	defer State_deinit(&stateA)
 	stateB := State_initFromConfig(configB)
@@ -144,13 +210,20 @@ testClientVoiceLiveToneReachesSecondClientThroughServer :: proc(t: ^testing.T) {
 			},
 			sink = {kind = .Null},
 			gateMode = .PushToTalk,
+			onFrameTiming = liveVoiceRecordTiming,
+			timingUserdata = recorder,
 		},
 	)
 	// Push-to-talk held: every frame is sent, so the tone needs no voice activity check.
 	State_setVoicePushToTalk(&stateA, true)
 	State_setVoiceEngineTemplate(
 		&stateB,
-		{source = {kind = .Silence}, sink = {kind = .File, path = sinkPath}},
+		{
+			source = {kind = .Silence},
+			sink = {kind = .File, path = sinkPath},
+			onFrameTiming = liveVoiceRecordTiming,
+			timingUserdata = recorder,
+		},
 	)
 
 	if !liveTestConnect(t, &stateA, "client A") || !liveTestConnect(t, &stateB, "client B") {
@@ -183,6 +256,45 @@ testClientVoiceLiveToneReachesSecondClientThroughServer :: proc(t: ^testing.T) {
 	snapshotB, _ := State_voiceEngineSnapshot(&stateB)
 	statsA := liveVoiceStats(&stateA)
 	statsB := liveVoiceStats(&stateB)
+	sync.mutex_lock(&recorder.mutex)
+	latencies := slice.clone(recorder.latencies[:])
+	unmatched := recorder.unmatched
+	sync.mutex_unlock(&recorder.mutex)
+	defer delete(latencies)
+	slice.sort(latencies)
+	p50 := liveVoicePercentile(latencies, 50)
+	p95 := liveVoicePercentile(latencies, 95)
+	meanPlayoutDelay := 0.0
+	if snapshotB.stats.playoutDelayFrames > 0 {
+		meanPlayoutDelay =
+			snapshotB.stats.playoutDelayTotalMS / f64(snapshotB.stats.playoutDelayFrames)
+	}
+	log.infof(
+		"voice latency: encode to playout over %d frames: p50 %.1f ms, p95 %.1f ms, " +
+		"max %.1f ms (mouth-to-ear adds 20 ms of framing); B's jitter buffer delay mean " +
+		"%.1f ms, max %.1f ms; %d played frames unmatched",
+		len(latencies),
+		p50,
+		p95,
+		len(latencies) > 0 ? latencies[len(latencies) - 1] : 0,
+		meanPlayoutDelay,
+		snapshotB.stats.playoutDelayMaxMS,
+		unmatched,
+	)
+	testing.expectf(
+		t,
+		len(latencies) >= 80 && unmatched == 0,
+		"expected at least 80 timed frames, all matched, got %d (%d unmatched)",
+		len(latencies),
+		unmatched,
+	)
+	testing.expectf(
+		t,
+		p95 > 0 && p95 < LIVE_VOICE_P95_LIMIT_MS,
+		"expected the 95th percentile of encode-to-playout latency under %.0f ms, got %.1f",
+		LIVE_VOICE_P95_LIMIT_MS,
+		p95,
+	)
 
 	State_leaveVoice(&stateA)
 	sawLeave := liveVoiceWaitUntil(

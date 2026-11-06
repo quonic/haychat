@@ -139,6 +139,10 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 	state.windowFocused = script != nil || .INPUT_FOCUS in SDL.GetWindowFlags(window)
 	// How long until a throttled mark-read may go out (State_updateReadMarkers), or -1.
 	readMarkerWait := time.Duration(-1)
+	// Voice meters and speaking dots change with no event. While they are on screen the loop
+	// wakes every VOICE_REDRAW_INTERVAL_MS to compare what they would show with what the last
+	// frame drew, and redraws only on a change: an idle voice session renders nothing.
+	voicePollAtMS: u64
 
 	running := true
 	for running {
@@ -167,6 +171,10 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			if readMarkerWait >= 0 {
 				waitMS = min(waitMS, u64(time.duration_milliseconds(readMarkerWait)) + 1)
 			}
+			if State_voiceNeedsRedraws(&state) {
+				now := u64(SDL.GetTicks())
+				waitMS = voicePollAtMS > now ? min(waitMS, voicePollAtMS - now) : 0
+			}
 			timeout = i32(waitMS)
 		}
 
@@ -174,7 +182,7 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		if SDL.WaitEventTimeout(&event, timeout) {
 			for {
 				appTrackWindowFocus(&state, &event, script != nil)
-				if appHandleVoiceEvent(&state, &event) {
+				if appHandleVoiceEvent(&state, &event, ui.hasTextFocus(&ctx)) {
 					redraw = true
 				}
 				if handleAppEvent(&ctx, &event, &wake, &running) {
@@ -192,6 +200,9 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			redraw = true
 		}
 		if ctx.nextDeadlineMS != ui.NO_DEADLINE && u64(SDL.GetTicks()) >= ctx.nextDeadlineMS {
+			redraw = true
+		}
+		if State_voiceRedrawDue(&state, u64(SDL.GetTicks()), &voicePollAtMS) {
 			redraw = true
 		}
 		if redraw {
@@ -228,18 +239,26 @@ appTrackWindowFocus :: proc(state: ^State, event: ^SDL.Event, scripted: bool) {
 
 // Push-to-talk and audio hotplug. The push-to-talk key is read from the window's own key
 // events, so it works only while the window has focus (Q3: no global hotkeys), and losing
-// focus releases it, because the key-up then goes to another window. Returns true when the
-// event needs a new frame.
+// focus releases it, because the key-up then goes to another window. textFocused says a
+// text field had keyboard focus in the last frame: a push-to-talk key that types is then
+// left to the text field (voicePushToTalkKeyEvent). Returns true when the event needs a new
+// frame.
 @(private = "file")
-appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event) -> bool {
+appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event, textFocused: bool) -> bool {
 	#partial switch event.type {
 	case .KEY_DOWN, .KEY_UP:
 		if event.key.repeat || state.voicePanel.capturingKey {
 			return false
 		}
-		key := State_voicePushToTalkKeycode(state)
-		if key != 0 && event.key.key == key {
-			State_voicePushToTalkChanged(state, event.type == .KEY_DOWN)
+		change, held := voicePushToTalkKeyEvent(
+			State_voicePushToTalkKeycode(state),
+			event.key.key,
+			event.type == .KEY_DOWN,
+			state.voice.pushToTalkHeld,
+			textFocused,
+		)
+		if change {
+			State_voicePushToTalkChanged(state, held)
 		}
 	case .WINDOW_FOCUS_LOST:
 		if state.voice.pushToTalkHeld {
