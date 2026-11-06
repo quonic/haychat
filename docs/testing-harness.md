@@ -201,9 +201,8 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   or a participant's mute or deafen changes, and after every `room_list` for each room with
   anyone in voice. It doubles as the join acknowledgement: a join is complete when a list for
   that room arrives with `"recipientJoined":true`, which the server sets per session (protocol
-  12). Naming your `userID` is not enough, because a list also names you for your other
-  devices. A second device of the same account is a second entry with the
-  same `userID`.
+  12). Naming your `userID` is not enough, because a list also names you while your account is
+  in voice on another device. A list names each user at most once (protocol 13).
 - `voice_status` is the harness's view of the client's voice state, printed whenever it
   changes: `joining` after `voice-join` (or a re-join after a reconnect), `joined` once the
   server acknowledged this session and the engine runs, `idle` after a leave, a rejection, a
@@ -218,11 +217,20 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   attack and hangover), so the edges are stable enough to `wait` for; when the engine stops,
   every speaker still speaking gets a `false` edge.
 - `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
-  full`, `voice is disabled`, `invalid room`, or `voice is unavailable, try again`.
+  full`, `voice is disabled`, `invalid room`, `voice is unavailable, try again`, `invalid voice
+  device ID`, or `voice is active on another device` (an automatic re-join while another device
+  of the account is in voice).
 - `voice_left` means the server took this session out of a room's voice: `removed from the
-  room`, `the room was deleted` (it comes before `room_deleted`), or `joined another voice room`.
+  room`, `the room was deleted` (it comes before `room_deleted`), `joined another voice room`,
+  or `joined voice on another device` (another session of the account joined voice).
+- An account has one voice session (protocol 13). `voice-join` is a join the user asked for, so
+  it takes voice over from the account's other session. Two harness clients count as two
+  devices only with different `device_id` values in their profiles' `config.json`: a profile
+  copied for the same identity keeps the original's ID, so change or delete the key in the copy.
 - Voice does not survive a reconnect. The client joins the same room again after `connected`
-  (until it leaves, or a rejection or `voice_left` ends voice).
+  (until it leaves, or a rejection or `voice_left` ends voice). That re-join is automatic: it
+  replaces only a stale session of the same device and is refused while another device is in
+  voice.
 - Voice frames are never events: they go from the network thread straight to the voice engine.
 
 ### Voice Stats

@@ -9,19 +9,17 @@ import "../common"
 import "core:fmt"
 import "core:math"
 
-// One user in a room's voice. The server lists each session (device) separately (Q2); the
-// list shows the user once, with how many devices they joined from.
+// One user in a room's voice. The server keeps one voice session per user (Q2, protocol 13),
+// so each user is listed once.
 VoiceParticipantRow :: struct {
-	userID:      int,
-	label:       string, // Borrowed from State, or allocated with the view allocator
-	deviceCount: int,
-	isSelf:      bool,
+	userID:   int,
+	label:    string, // Borrowed from State, or allocated with the view allocator
+	isSelf:   bool,
 	// Only known for the room this client is joined to, from the engine's speakers (and the
 	// gate for this user).
-	speaking:    bool,
-	// Every device of the user is muted or deafened.
-	muted:       bool,
-	deafened:    bool,
+	speaking: bool,
+	muted:    bool,
+	deafened: bool,
 }
 
 // Everything on screen that the voice engines change without an event: the level meter
@@ -123,8 +121,9 @@ VoiceSpeechState :: struct {
 	selfTransmitting: bool,
 }
 
-// Groups the server's per-session list by user (Q2). A user is muted or deafened only when
-// every device is; they speak when any device does. speech is nil outside the joined room.
+// One row per user, in the server's order. The server lists each user once (Q2); a repeated
+// user ID, which only a server older than protocol 13 could send, keeps its first entry, so
+// the sidebar never shows anyone twice. speech is nil outside the joined room.
 voiceParticipantRows :: proc(
 	participants: []common.VoiceParticipant,
 	selfUserID: int,
@@ -133,18 +132,11 @@ voiceParticipantRows :: proc(
 ) -> []VoiceParticipantRow {
 	rows := make([dynamic]VoiceParticipantRow, 0, len(participants), allocator)
 	for participant in participants {
-		found := -1
-		for row, index in rows {
-			if row.userID == participant.userId {
-				found = index
-				break
-			}
+		listed := false
+		for row in rows {
+			listed ||= row.userID == participant.userId
 		}
-		if found >= 0 {
-			row := &rows[found]
-			row.deviceCount += 1
-			row.muted &&= participant.muted
-			row.deafened &&= participant.deafened
+		if listed {
 			continue
 		}
 		append(
@@ -152,7 +144,6 @@ voiceParticipantRows :: proc(
 			VoiceParticipantRow {
 				userID = participant.userId,
 				label = userLabel(participant.nickname, participant.userId, allocator),
-				deviceCount = 1,
 				isSelf = selfUserID != 0 && participant.userId == selfUserID,
 				muted = participant.muted,
 				deafened = participant.deafened,
@@ -161,7 +152,6 @@ voiceParticipantRows :: proc(
 	}
 	if speech != nil {
 		for &row in rows {
-			// Another device of this user may be speaking too; the server relays it here.
 			row.speaking = voiceSnapshotSpeaking(&speech.snapshot, row.userID)
 			if row.isSelf && speech.selfTransmitting {
 				row.speaking = true

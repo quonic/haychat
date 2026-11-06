@@ -9,6 +9,13 @@ package client
 //   Joining ──VoiceJoinRejected──▶ Idle (want cleared, lastError = reason)
 //   Joined ──VoiceLeft / room deleted──▶ Idle (want cleared, lastError = reason)
 //   Joining/Joined ──Disconnected──▶ Idle (want kept) ──Connected──▶ Joining (re-join)
+//
+// One voice session per user (protocol 13): a join the user asked for (State_joinVoice) takes
+// voice over from this account's other device, which gets VoiceLeft "joined voice on another
+// device". The re-join on Connected is sent with rejoin set and the profile's device ID, and
+// the server refuses it with "voice is active on another device" while another device is in
+// voice, so coming back from a network drop never pulls voice away from the device the user
+// moved to. Both reasons end in Idle with the want cleared and show in the voice bar.
 //   Joined ──engine cannot start──▶ Unavailable (want cleared, leave sent; chat unaffected)
 //
 // The engine runs only while Joined. Starting it binds it to the server's transport
@@ -216,8 +223,16 @@ State_voiceSendControl :: proc(
 	return
 }
 
+// rejoin is true only for the automatic re-join after a reconnect (State_voiceConnected).
 @(private = "file")
-State_voiceSendJoin :: proc(state: ^State, serverID, roomID: int) -> (bool, string) {
+State_voiceSendJoin :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	rejoin: bool,
+) -> (
+	bool,
+	string,
+) {
 	return State_voiceSendControl(
 		state,
 		serverID,
@@ -226,6 +241,8 @@ State_voiceSendJoin :: proc(state: ^State, serverID, roomID: int) -> (bool, stri
 			roomID = roomID,
 			muted = state.voice.muted,
 			deafened = state.voice.deafened,
+			rejoin = rejoin,
+			deviceID = state.config.device_id,
 		},
 	)
 }
@@ -255,7 +272,7 @@ State_joinVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 		)
 		return false
 	}
-	sent, sendError := State_voiceSendJoin(state, serverID, roomID)
+	sent, sendError := State_voiceSendJoin(state, serverID, roomID, rejoin = false)
 	if !sent {
 		state.voice.status = .Idle
 		ClientVoiceState_setError(&state.voice, sendError)
@@ -530,8 +547,9 @@ State_voiceJoinRejected :: proc(state: ^State, serverID, roomID: int, reason: ^s
 }
 
 // ServerVoiceLeft: the server removed this session from voice (removed from the room, the
-// room was deleted, or the session joined another room). Takes ownership of reason^ when it
-// applies to the current voice room.
+// room was deleted, the session joined another room, or another device of this account joined
+// voice). Takes ownership of reason^ when it applies to the current voice room. The want is
+// cleared, so a voice session taken over by another device is never re-joined from here.
 State_voiceLeft :: proc(state: ^State, serverID, roomID: int, reason: ^string) {
 	if !State_voiceIsActive(state) ||
 	   state.voice.serverID != serverID ||
@@ -569,7 +587,8 @@ State_voiceConnectionLost :: proc(state: ^State, serverID: int) {
 	}
 }
 
-// A session on serverID was established: re-join the wanted room.
+// A session on serverID was established: re-join the wanted room. The join is marked as
+// automatic, so the server refuses it instead of taking voice from another device.
 State_voiceConnected :: proc(state: ^State, serverID: int) {
 	if state.voice.serverID != serverID ||
 	   state.voice.wantVoiceRoomID == 0 ||
@@ -577,7 +596,7 @@ State_voiceConnected :: proc(state: ^State, serverID: int) {
 		return
 	}
 	roomID := state.voice.wantVoiceRoomID
-	sent, sendError := State_voiceSendJoin(state, serverID, roomID)
+	sent, sendError := State_voiceSendJoin(state, serverID, roomID, rejoin = true)
 	if !sent {
 		// Keep the want: the next Connected tries again.
 		ClientVoiceState_setError(&state.voice, sendError)

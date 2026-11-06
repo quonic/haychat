@@ -10,8 +10,13 @@ import "core:encoding/cbor"
 // (voice_relay.odin). The router never sees a frame and never touches voice crypto after it
 // hands a session's voice halves over at auth success.
 //
-// A voice session belongs to a client session (Q2): a user with two devices in voice is two
-// participants with the same userId, and the client shows the user once.
+// One voice session per user (Q2, protocol 13): a voice session belongs to a client session,
+// but an account has at most one, so a participant list names each user once. A join the user
+// asked for takes voice over from the account's other session (ServerVoiceLeft "joined voice on
+// another device"). The client's automatic re-join after a reconnect (ClientJoinVoice.rejoin)
+// replaces only a session with the same device ID, a stale one the server has not timed out
+// yet, and is refused while another device is in voice, so a laptop coming back from a network
+// drop never pulls voice away from the phone the user switched to.
 
 // Reasons sent to people in ServerVoiceJoinRejected and ServerVoiceLeft.
 VOICE_REJECT_NOT_AUTHENTICATED :: "not authenticated"
@@ -20,15 +25,21 @@ VOICE_REJECT_DISABLED :: "voice is disabled"
 VOICE_REJECT_NOT_MEMBER :: "not a room member"
 VOICE_REJECT_FULL :: "voice room is full"
 VOICE_REJECT_UNAVAILABLE :: "voice is unavailable, try again"
+VOICE_REJECT_INVALID_DEVICE :: "invalid voice device ID"
+VOICE_REJECT_ACTIVE_ON_OTHER_DEVICE :: "voice is active on another device"
 VOICE_LEFT_JOINED_OTHER_ROOM :: "joined another voice room"
 VOICE_LEFT_REMOVED_FROM_ROOM :: "removed from the room"
 VOICE_LEFT_ROOM_DELETED :: "the room was deleted"
+VOICE_LEFT_JOINED_ON_OTHER_DEVICE :: "joined voice on another device"
 
 VoiceParticipantState :: struct {
 	peerID:   u32,
 	userID:   int,
 	muted:    bool,
 	deafened: bool,
+	// The device ID the session joined with. Compared only when an automatic re-join of the
+	// same user arrives, never sent to anyone.
+	deviceID: common.VoiceDeviceID,
 }
 
 VoiceRoomState :: struct {
@@ -206,6 +217,30 @@ MainRouterState_voiceRoomChanged :: proc(
 	}
 }
 
+// peerID's participant entry, if it is in voice.
+MainRouterState_voiceFindParticipant :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+) -> (
+	participant: VoiceParticipantState,
+	found: bool,
+) {
+	roomID, inVoice := state.peerVoiceRoom[peerID]
+	if !inVoice {
+		return {}, false
+	}
+	room, ok := state.voiceRooms[roomID]
+	if !ok {
+		return {}, false
+	}
+	for candidate in room.participants {
+		if candidate.peerID == peerID {
+			return candidate, true
+		}
+	}
+	return {}, false
+}
+
 // Takes peerID out of its voice room without telling anyone, and reports which room it was in.
 MainRouterState_voiceRemoveParticipant :: proc(
 	state: ^MainRouterState,
@@ -299,6 +334,7 @@ MainRouterState_handleClientJoinVoice :: proc(
 	payload: []u8,
 ) {
 	req: common.ClientJoinVoicePayload
+	defer common.ClientJoinVoicePayload_deinit(&req)
 	if cbor.unmarshal(payload, &req) != nil {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientJoinVoice payload")
 		return
@@ -328,6 +364,19 @@ MainRouterState_handleClientJoinVoice :: proc(
 		)
 		return
 	}
+	// A malformed device ID is the client's mistake, not an attack worth a disconnect: refuse
+	// the join and keep the session.
+	deviceID, deviceOK := common.voiceDeviceIDFromHex(req.deviceId)
+	if !deviceOK {
+		MainRouterState_sendVoiceJoinRejected(
+			pm,
+			state,
+			peerID,
+			req.roomId,
+			VOICE_REJECT_INVALID_DEVICE,
+		)
+		return
+	}
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
@@ -338,6 +387,8 @@ MainRouterState_handleClientJoinVoice :: proc(
 			roomID = req.roomId,
 			voiceMuted = req.muted,
 			voiceDeafened = req.deafened,
+			voiceRejoin = req.rejoin,
+			voiceDeviceID = deviceID,
 		},
 	)
 }
@@ -364,26 +415,76 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		return
 	}
 
-	currentRoomID, inVoice := state.peerVoiceRoom[peerID]
-	if !inVoice || currentRoomID != roomID {
-		// Checked before leaving the current room, so a refused switch keeps the session where
-		// it was.
-		if room, ok := state.voiceRooms[roomID];
-		   ok && len(room.participants) >= pm.config.voiceMaxParticipants {
-			MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_FULL)
-			return
+	// The account's other session in voice, if any (one at most, but the scan does not rely on
+	// it). The decisions come first, before anything changes, so a refused join leaves every
+	// session where it was.
+	userID := session.authenticatedUserID
+	otherPeerIDs := make([dynamic]u32, 0, 1, context.temp_allocator)
+	otherInTarget := 0
+	for otherPeerID, otherRoomID in state.peerVoiceRoom {
+		if otherPeerID == peerID {
+			continue
 		}
-		if inVoice {
-			MainRouterState_voiceRemoveParticipant(state, peerID)
-			MainRouterState_sendVoiceLeft(
+		participant, found := MainRouterState_voiceFindParticipant(state, otherPeerID)
+		if !found || participant.userID != userID {
+			continue
+		}
+		// An automatic re-join never takes voice from another device; it replaces only a
+		// session of its own device that the server has not seen go yet.
+		if request.voiceRejoin && participant.deviceID != request.voiceDeviceID {
+			MainRouterState_sendVoiceJoinRejected(
 				pm,
 				state,
 				peerID,
-				currentRoomID,
-				VOICE_LEFT_JOINED_OTHER_ROOM,
+				roomID,
+				VOICE_REJECT_ACTIVE_ON_OTHER_DEVICE,
 			)
-			MainRouterState_voiceRoomChanged(pm, state, currentRoomID)
+			return
 		}
+		append(&otherPeerIDs, otherPeerID)
+		if otherRoomID == roomID {
+			otherInTarget += 1
+		}
+	}
+
+	currentRoomID, inVoice := state.peerVoiceRoom[peerID]
+	if !inVoice || currentRoomID != roomID {
+		// Checked before leaving the current room, so a refused switch keeps the session where
+		// it was. A session this join replaces frees its place.
+		if room, ok := state.voiceRooms[roomID];
+		   ok && len(room.participants) - otherInTarget >= pm.config.voiceMaxParticipants {
+			MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_FULL)
+			return
+		}
+	}
+
+	// Take voice over from the account's other session. Its room gets its own route and
+	// participant update unless it is the room being joined, whose update below already shows
+	// the replacement, so the user never shows twice or drops out of the list in between.
+	for otherPeerID in otherPeerIDs {
+		otherRoomID, _ := MainRouterState_voiceRemoveParticipant(state, otherPeerID)
+		MainRouterState_sendVoiceLeft(
+			pm,
+			state,
+			otherPeerID,
+			otherRoomID,
+			VOICE_LEFT_JOINED_ON_OTHER_DEVICE,
+		)
+		if otherRoomID != roomID {
+			MainRouterState_voiceRoomChanged(pm, state, otherRoomID)
+		}
+	}
+
+	if inVoice && currentRoomID != roomID {
+		MainRouterState_voiceRemoveParticipant(state, peerID)
+		MainRouterState_sendVoiceLeft(
+			pm,
+			state,
+			peerID,
+			currentRoomID,
+			VOICE_LEFT_JOINED_OTHER_ROOM,
+		)
+		MainRouterState_voiceRoomChanged(pm, state, currentRoomID)
 	}
 
 	if roomID not_in state.voiceRooms {
@@ -398,6 +499,7 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		if participant.peerID == peerID {
 			participant.muted = request.voiceMuted
 			participant.deafened = request.voiceDeafened
+			participant.deviceID = request.voiceDeviceID
 			found = true
 		}
 	}
@@ -409,6 +511,7 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 				userID = session.authenticatedUserID,
 				muted = request.voiceMuted,
 				deafened = request.voiceDeafened,
+				deviceID = request.voiceDeviceID,
 			},
 		)
 		state.peerVoiceRoom[peerID] = roomID

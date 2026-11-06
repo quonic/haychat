@@ -171,6 +171,8 @@ server, and keep chatting anywhere while you are.
   unavailable: libopus not found" and chat still works.
 - **Reconnects:** if the connection drops while you are in voice, the voice bar says
   "Rejoining voice…" and you are back in the same room once the client reconnects.
+- **Two devices:** joining voice on a second device moves you there; the first device leaves
+  voice with "joined voice on another device".
 
 ## What to Test
 

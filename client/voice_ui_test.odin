@@ -94,8 +94,9 @@ testVoiceUIRestore :: proc() {
 // ── Channel list ──────────────────────────────────────────────────
 
 // Each room with anyone in voice gets an indicator and its participants under it, also for
-// rooms this client is not in voice of. A user on two devices appears once, with the count;
-// they count as muted only while every device is.
+// rooms this client is not in voice of. The server lists each user once (protocol 13); a
+// repeated user ID, which only an older server could send, still shows once, with the first
+// entry's flags and no device count.
 @(test)
 testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 	state := testVoiceUIState(941)
@@ -105,9 +106,9 @@ testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 		941,
 		2,
 		false,
-		{userID = 9, muted = true},
-		{userID = UI_VOICE_SELF_USER_ID, muted = true, deafened = true},
 		{userID = 9},
+		{userID = UI_VOICE_SELF_USER_ID, muted = true, deafened = true},
+		{userID = 9, muted = true},
 		{userID = 12, muted = true},
 	)
 
@@ -135,18 +136,16 @@ testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 		first.roomID == 2 &&
 		first.id == 9 &&
 		first.label == "user-9" &&
-		first.voice.deviceCount == 2 &&
 		!first.voice.muted &&
 		!first.voice.speaking,
-		fmt.tprintf("expected user 9 once, on 2 devices, one unmuted, got %v", first),
+		fmt.tprintf("expected user 9 once, unmuted as first listed, got %v", first),
 	)
 	assert(
 		selfRow.voice.isSelf && selfRow.voice.muted && selfRow.voice.deafened,
 		fmt.tprintf("expected this user marked muted and deafened, got %v", selfRow),
 	)
 	assert(
-		third.id == 12 && third.voice.muted && !third.voice.deafened &&
-		third.voice.deviceCount == 1,
+		third.id == 12 && third.voice.muted && !third.voice.deafened,
 		fmt.tprintf("expected user 12 muted, got %v", third),
 	)
 	if len(rows) > channelIndex + 4 {

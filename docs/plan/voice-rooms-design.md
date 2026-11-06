@@ -24,6 +24,10 @@ H6 reopens the engine for a device change instead of a command queue to a runnin
 (1.2, 1.4): the session stays joined and the gap is a few tens of milliseconds, and every other
 setting reaches the running engine through its atomic controls. H7's files are raw F32LE rather than WAV (5.4), and a
 harness source or sink change applies at the next join instead of reopening a running engine.
+V1 (after H8a, protocol 13) replaces one voice session per device with one voice session per
+user (Q2, maintainer's decision): a manual join takes voice over from the account's other
+session, and the automatic re-join after a reconnect, which carries the profile's device ID,
+replaces only a stale session of the same device.
 **Audience:** HayChat maintainers and the agents that will implement package H
 
 This document designs voice rooms for HayChat: audio I/O, codec, wire format, transport
@@ -1233,7 +1237,7 @@ channel 3 (it reuses the per-channel transport from H1), and server metrics.
 | # | Question | Recommendation |
 | --- | --- | --- |
 | Q1 | Which rooms carry voice? The schema has no room type. | **v1: every room can carry voice** (chat-and-voice). No schema change, no admin UI. Add a `voice_enabled` column with package F's admin room management if you want text-only rooms later. |
-| Q2 | One voice session per **user** or per **session** (device)? | Per session, which is simpler. Show a user once in the participant list even if two of their devices are joined, and mark it. |
+| Q2 | One voice session per **user** or per **session** (device)? | Per session, which is simpler. Show a user once in the participant list even if two of their devices are joined, and mark it. **Decided: one session per user** (package V1, protocol 13). A join the user asked for ends the account's other voice session with `ServerVoiceLeft` "joined voice on another device"; the automatic re-join after a reconnect sends `rejoin` and the profile's `device_id`, replaces only a stale session of the same device, and is refused with "voice is active on another device" otherwise. The "×2" marking is gone. |
 | Q3 | Push-to-talk while the window is unfocused? | Not in v1: PTT works while the window has focus; voice activity is the default. Global hotkeys need X11/Wayland-portal/Windows code; schedule them after testers ask. |
 | Q4 | Opus DTX on? | Off in v1; the VAD gate covers silence. Revisit if bandwidth on idle open mics matters. |
 | Q5 | Constrained VBR or CBR? VBR packet sizes leak some speech content to network observers. | Constrained VBR. CBR costs about 10% more bandwidth; add `voice_cbr` if anyone needs it. |
