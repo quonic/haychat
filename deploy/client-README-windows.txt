@@ -38,9 +38,9 @@ https://git.spyingwind.com/jim/haychat (this build is tag @VERSION@).
 
 THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
 licences, and their copyright lines; the licence texts are in licenses\. They cover SDL3 and
-SDL3_ttf (zlib licence), the FreeType, HarfBuzz, PlutoSVG and PlutoVG code inside
-SDL3_ttf.dll, libopus (BSD licence), the ENet library, the Odin core library, and the
-embedded Inter and Twemoji fonts.
+SDL3_ttf (zlib licence), the HIDAPI, yuv2rgb and fdlibm code inside SDL3.dll, the FreeType,
+HarfBuzz, PlutoSVG and PlutoVG code inside SDL3_ttf.dll, libopus (BSD licence), the ENet
+library, the Odin core library, and the embedded Inter and Twemoji fonts.
 
 This software is based in part on the work of the FreeType Team.
 Portions of this software are copyright © 2023 The FreeType Project (www.freetype.org).

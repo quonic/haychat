@@ -21,8 +21,9 @@ set -euo pipefail
 # Every archive carries THIRD_PARTY_NOTICES.txt and the licence texts its contents need (the
 # *_LICENCES tables below). --check-licences verifies, without building anything or needing
 # the Windows SDK, that every licence source exists in the repository and the pinned Odin
-# toolchain and that the FreeType credit still matches the shipped SDL3_ttf.dll; ./check.sh
-# runs it, and every build runs it first. --stage-licences copies one artifact's notices and
+# toolchain, that SDL3.dll and SDL3_ttf.dll are still the builds THIRD_PARTY_NOTICES.md
+# describes, and that the required credits are present; ./check.sh runs it, and every build
+# runs it first. --stage-licences copies one artifact's notices and
 # licences into DIR, which is what the builds below and deploy/Containerfile use.
 #
 # --windows needs two things the dev image does not have:
@@ -44,6 +45,13 @@ XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
 # updates the year in THIRD_PARTY_NOTICES.md and deploy/client-README-windows.txt, and pins
 # the new hash here.
 SDL3_TTF_DLL_SHA256=95a20af07f194f057b6e778bee0ce608d3c90c3dbd64a4b5120dc4879f43a6be
+
+# THIRD_PARTY_NOTICES.md lists the third-party code inside SDL3.dll (SDL 3.4.18: HIDAPI,
+# yuv2rgb, fdlibm and others), read from that SDL's source and the VisualC/SDL/SDL.vcxproj
+# that builds the release DLL. A new SDL may bundle other code, so a change of the DLL's hash
+# fails --check-licences until someone re-checks that list and the licence texts in
+# deploy/licenses/, and pins the new hash here.
+SDL3_DLL_SHA256=2b4b128d8d510cc2d442693cf848c050d700d43dc667afe9e5fd82b0570d667e
 FREETYPE_CREDIT="Portions of this software are copyright © 2023 The FreeType Project"
 TWEMOJI_CREDIT="Twemoji by Twitter, Inc. and contributors"
 
@@ -77,6 +85,8 @@ WINDOWS_CLIENT_LICENCES=(
 	odin:vendor/sdl3/ttf/LICENSE.plutosvg.txt:licenses/LICENSE.plutosvg.txt
 	odin:vendor/sdl3/ttf/LICENSE.plutovg.txt:licenses/LICENSE.plutovg.txt
 	odin:vendor/sdl3/mixer/LICENSE.opus.txt:licenses/opus-LICENSE.txt
+	repo:deploy/licenses/hidapi-LICENSE-bsd.txt:licenses/hidapi-LICENSE-bsd.txt
+	repo:deploy/licenses/yuv2rgb-LICENSE.txt:licenses/yuv2rgb-LICENSE.txt
 )
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -155,6 +165,20 @@ content_sha256() {
 	fi
 }
 
+# Prints a problem when a shipped DLL is missing or is not the build THIRD_PARTY_NOTICES.md
+# describes; ADVICE says what to re-check before pinning the new hash.
+pinned_dll_problem() {
+	local path=$1 expected_sha=$2 advice=$3 sha
+	if [[ ! -f "$path" ]]; then
+		echo "windows: missing $path"
+		return 0
+	fi
+	sha=$(content_sha256 "$path")
+	if [[ "$sha" != "$expected_sha" ]]; then
+		echo "windows: ${path##*/} changed (sha256 $sha): $advice"
+	fi
+}
+
 # Checks every artifact's licence sources and the required credits. Needs only the
 # repository and the Odin root: no build, no Windows SDK, no Git LFS download.
 check_licences() {
@@ -165,16 +189,18 @@ check_licences() {
 		done < <(licence_table_problems "$artifact")
 	done
 
-	local ttf_dll="$odin_root/vendor/sdl3/ttf/SDL3_ttf.dll" ttf_sha
-	if [[ ! -f "$ttf_dll" ]]; then
-		problems+=("windows: missing $ttf_dll")
-	else
-		ttf_sha=$(content_sha256 "$ttf_dll")
-		if [[ "$ttf_sha" != "$SDL3_TTF_DLL_SHA256" ]]; then
-			line="windows: SDL3_ttf.dll changed (sha256 $ttf_sha): check the FreeType version"
-			line+=" inside it, update the FreeType credit year, and pin the new SDL3_TTF_DLL_SHA256"
-			problems+=("$line")
-		fi
+	local sdl_dir="$odin_root/vendor/sdl3" advice
+	advice="re-check the third-party code it bundles (THIRD_PARTY_NOTICES.md) and the licence"
+	advice+=" texts in deploy/licenses/, and pin the new SDL3_DLL_SHA256"
+	line=$(pinned_dll_problem "$sdl_dir/SDL3.dll" "$SDL3_DLL_SHA256" "$advice")
+	if [[ -n "$line" ]]; then
+		problems+=("$line")
+	fi
+	advice="check the FreeType version inside it, update the FreeType credit year, and pin"
+	advice+=" the new SDL3_TTF_DLL_SHA256"
+	line=$(pinned_dll_problem "$sdl_dir/ttf/SDL3_ttf.dll" "$SDL3_TTF_DLL_SHA256" "$advice")
+	if [[ -n "$line" ]]; then
+		problems+=("$line")
 	fi
 
 	local file

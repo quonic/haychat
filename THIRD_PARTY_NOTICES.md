@@ -38,6 +38,7 @@ the copy installed on the machine, which comes with its own licence from the dis
 | ENet | MIT | system | Fedora `enet` | system | compiled in |
 | libpq (PostgreSQL client) | PostgreSQL | system | Fedora `libpq` | - | - |
 | SDL3 | zlib | - | - | system | `SDL3.dll` |
+| Third-party code in SDL3 (below) | various | - | - | system | in `SDL3.dll` |
 | SDL3_ttf | zlib | - | - | system | `SDL3_ttf.dll` |
 | FreeType 2.13.2 | FreeType License | - | - | system | in `SDL3_ttf.dll` |
 | HarfBuzz 8.5.0 | Old MIT | - | - | system | in `SDL3_ttf.dll` |
@@ -113,6 +114,28 @@ notices are kept for all of them.
 - Required in binaries: nothing (an acknowledgement is appreciated). `SDL3.dll` and
   `SDL3_ttf.dll` are the builds that Odin's `vendor/sdl3` ships.
 
+### Third-Party Code in SDL3 (Windows client, inside `SDL3.dll`)
+
+`SDL3.dll` is SDL 3.4.18, the version in the pinned Odin `vendor/sdl3`. SDL compiles these
+parts of other projects into it (read from SDL 3.4.18's source and `VisualC/SDL/SDL.vcxproj`,
+the project SDL builds its Windows release with). The licence texts SDL keeps beside them are
+copied unchanged into this repository's `deploy/licenses/`.
+
+| Code | Origin | Licence | Required in binaries |
+| --- | --- | --- | --- |
+| HID device access for game controllers (`src/hidapi`) | HIDAPI (Alan Ott, Signal 11 Software) | GPL-3.0, BSD-style, or the original HIDAPI licence, at the user's choice; HayChat takes the **BSD-style** licence | the notice, `licenses/hidapi-LICENSE-bsd.txt` |
+| YUV to RGB conversion (`src/video/yuv2rgb`) | yuv2rgb (Adrien Descamps) | BSD-3-Clause | the notice, `licenses/yuv2rgb-LICENSE.txt` |
+| Math functions SDL does not take from the C runtime (`src/libm`) | fdlibm (Sun Microsystems) | fdlibm notice | the notice ([fdlibm, in SDL3](#fdlibm-in-sdl3)) |
+| PNG and JPEG decoding (`stb_image.h` 2.30) | stb (Sean Barrett) | MIT or public domain; HayChat takes public domain | nothing |
+| Deflate for PNG writing (`miniz.h` 1.15) | miniz (Rich Geldreich) | public domain (Unlicense) | nothing |
+| Controller tables and Steam controller support | Valve Corporation | zlib | nothing |
+| Surface rotation (`SDL_rotate.c`) | SDL_gfx (Andreas Schiffler) | zlib | nothing |
+| Several HIDAPI controller and haptics drivers | their authors, named in each file | zlib | nothing |
+
+SDL's other third-party files are interface headers (Khronos EGL, OpenGL and Vulkan; Microsoft
+Direct3D 12) and code for other platforms (X11, Wayland, macOS, Android, OpenVR), which the
+Windows build does not compile.
+
 ### FreeType (Windows client, inside `SDL3_ttf.dll`)
 
 - Licence: the FreeType License (FTL), `licenses/LICENSE.freetype.txt`. FreeType is
@@ -176,8 +199,8 @@ distribution's packages carry their licences.
 
 ## Notice Texts
 
-These notices exist in the Odin toolchain only as source comments, so they are reproduced
-here as they appear there.
+These notices exist only as source comments in the Odin toolchain or in SDL, so they are
+reproduced here as they appear there.
 
 ### Go (BSD-3-Clause)
 
@@ -217,6 +240,19 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
 
 Developed at SunSoft, a Sun Microsystems, Inc. business.
+Permission to use, copy, modify, and distribute this
+software is freely granted, provided that this notice
+is preserved.
+```
+
+### fdlibm, in SDL3
+
+SDL's copy (`src/libm`) carries the same notice with one word changed.
+
+```text
+Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+
+Developed at SunPro, a Sun Microsystems, Inc. business.
 Permission to use, copy, modify, and distribute this
 software is freely granted, provided that this notice
 is preserved.
@@ -336,8 +372,10 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## Keeping This File Current
 
 `deploy/release-artifacts.sh --check-licences` (run by `./check.sh` and at the start of every
-release build) fails when a licence file this file refers to is missing from the pinned
-toolchain, or when `SDL3_ttf.dll` changes: a new SDL3_ttf build may carry a different
-FreeType, so the version and year above must be checked again before the pin moves. After an
-Odin pin bump, also look for new third-party code in the packages HayChat compiles
+release build) fails when a licence file this file refers to is missing from the repository or
+the pinned toolchain, or when `SDL3.dll` or `SDL3_ttf.dll` changes. A new SDL may bundle other
+third-party code, so the SDL3 list above and the texts in `deploy/licenses/` must be checked
+against its source; a new SDL3_ttf build may carry a different FreeType, so the version and
+year above must be checked again. Do both before the pin moves. After an Odin pin bump, also
+look for new third-party code in the packages HayChat compiles
 (`odin build ... -export-dependencies:json` lists them).
