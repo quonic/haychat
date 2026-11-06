@@ -255,7 +255,7 @@ clientVoiceOutbound :: proc(userdata: rawptr, frame: VoiceOutboundFrame) {
 // ── Voice control messages (CBOR, control channel) ─────────────────
 
 VoiceControlRequestKind :: enum u8 {
-	Join, // ClientJoinVoice{roomID, muted, deafened}
+	Join, // ClientJoinVoice{roomID, muted, deafened, rejoin, deviceID}
 	Leave, // ClientLeaveVoice
 	State, // ClientVoiceState{muted, deafened}
 }
@@ -265,6 +265,11 @@ VoiceControlRequest :: struct {
 	roomID:   int,
 	muted:    bool,
 	deafened: bool,
+	// Join only (protocol 13): whether this is the automatic re-join after a reconnect, which
+	// the server never lets take voice from another device, and the profile's device ID
+	// (borrowed from State.config).
+	rejoin:   bool,
+	deviceID: string,
 }
 
 VoiceControlSendBridge :: #type proc(
@@ -289,6 +294,8 @@ ClientServerTransport_sendVoiceControl :: proc(
 				roomId = request.roomID,
 				muted = request.muted,
 				deafened = request.deafened,
+				rejoin = request.rejoin,
+				deviceId = request.deviceID,
 			},
 		)
 	case .Leave:

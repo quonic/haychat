@@ -19,9 +19,28 @@ set -euo pipefail
 #                   (SDL_AUDIO_DISK_INPUT_FILE) and D plays through `voice-sink device`
 #                   (SDL_AUDIO_DISK_OUTPUT_FILE, F32 stereo). voice-check must find the tone in
 #                   D's output, and D must have received 95 % of what C sent.
+#   3. faults:      the file path again, but F is a client built with
+#                   -define:HAYCHAT_TEST_FAULTS=true that drops 5 % of the frames it receives
+#                   and delays each kept one by 0-20 ms (HAYCHAT_TEST_VOICE_LOSS and
+#                   HAYCHAT_TEST_VOICE_JITTER_MS, client/voice_faults.odin), with a fixed seed.
+#                   The pass criteria of voice-rooms-design.md 6.5: voice-check finds the tone
+#                   in F's file; FEC plus PLC matches the frames lost (the injected drops plus
+#                   any late frames) within 3 frames plus 10 % of the drops; F never heard more
+#                   than 2 frames in a row inside the spurt as neither decoded nor rebuilt by
+#                   FEC (maxGapRun); and F received at least 95 % of what E sent and the hook
+#                   did not drop.
+#   4. one session per user (protocol 13): G and H share one identity key (H's profile is a
+#                   copy of G's) but have different device IDs (the copy's `device_id` is
+#                   changed in its config.json). G joins room 1, then H joins room 1: G must get
+#                   voice_left "joined voice on another device" and go idle without a re-join,
+#                   and both must see a participant list that names the user exactly once,
+#                   joined only on H.
 #
 # dev/live-proof.sh --voice runs it against its throwaway server (and --all, so CI does too).
-# HAYCHAT_VOICE_PROOF_SECONDS sets how long A talks while both are joined (default 4).
+# HAYCHAT_VOICE_PROOF_SECONDS sets how long A talks while both are joined (default 4), and
+# HAYCHAT_VOICE_PROOF_FAULT_SECONDS how long E talks (default 8, so 5 % is about 20 frames).
+# HAYCHAT_VOICE_PROOF_FAULTS=0 skips the faults stage; HAYCHAT_TEST_VOICE_SEED changes its
+# loss pattern (default 1).
 #
 # Usage: dev/voice-proof.sh [HOST:PORT]   (default 127.0.0.1:12345)
 
@@ -30,12 +49,19 @@ server_address=${1:-127.0.0.1:12345}
 room_id=1
 command_timeout_secs=15
 talk_seconds=${HAYCHAT_VOICE_PROOF_SECONDS:-4}
+fault_talk_seconds=${HAYCHAT_VOICE_PROOF_FAULT_SECONDS:-8}
+run_faults=${HAYCHAT_VOICE_PROOF_FAULTS:-1}
+fault_loss=0.05
+fault_jitter_ms=20
+fault_seed=${HAYCHAT_TEST_VOICE_SEED:-1}
 tone_hz=440
 tone_amplitude=0.5
 smoke_label=voice
 
 work_dir=$(mktemp -d -t haychat-voice.XXXXXX)
 client_bin="$work_dir/haychat-client"
+plain_client_bin=$client_bin
+faults_client_bin="$work_dir/haychat-client-faults"
 check_bin="$work_dir/voice-check"
 run_tag=$(date +%s%N)
 
@@ -168,13 +194,60 @@ check_counters() {
 	echo "==> [voice] $label counters: sent $sent in ${joined_ms} ms, received $received," \
 		"FEC $fec, PLC $plc, late $(json_number "$listener_stats" late)," \
 		"jitter $(json_number "$listener_stats" jitterMS) ms," \
-		"depth $(json_number "$listener_stats" depth)"
+		"depth $(json_number "$listener_stats" depth)," \
+		"jitter buffer delay $(json_number "$listener_stats" playoutDelayMS) ms" \
+		"(max $(json_number "$listener_stats" playoutDelayMaxMS) ms)"
+}
+
+# check_fault_counters: the 6.5 criteria on speaker_stats and listener_stats for the faults
+# stage.
+check_fault_counters() {
+	local sent received fec plc late injected gap expected tolerance repaired
+	sent=$(json_number "$speaker_stats" sent)
+	received=$(json_number "$listener_stats" received)
+	fec=$(json_number "$listener_stats" fec)
+	plc=$(json_number "$listener_stats" plc)
+	late=$(json_number "$listener_stats" late)
+	injected=$(json_number "$listener_stats" injectedLoss)
+	gap=$(json_number "$listener_stats" maxGapRun)
+	((injected > 0)) || fail "[faults] the fault hook dropped nothing: is F a faults build?"
+	expect_ratio "[faults] frames received or dropped by the hook of those sent" \
+		"$((received + injected))" "$sent" 95
+	# Every dropped or late frame is repaired once, by FEC or PLC. The stats are read while E
+	# still talks, so a drop of the last few frames may not have been played yet, and a drop
+	# of the spurt's very first frame is pre-roll, not a repair: hence the slack.
+	expected=$((injected + late))
+	repaired=$((fec + plc))
+	tolerance=$((3 + injected / 10))
+	if ((repaired < expected - tolerance || repaired > expected + tolerance)); then
+		fail "[faults] FEC $fec + PLC $plc = $repaired, expected $expected (dropped $injected" \
+			"+ late $late) within $tolerance"
+	fi
+	echo "    [faults] FEC $fec + PLC $plc = $repaired for $injected dropped + $late late" \
+		"(tolerance $tolerance)"
+	((gap <= 2)) || fail "[faults] $gap frames in a row were concealed or silent (limit 2)"
+	echo "    [faults] longest unrepaired run inside the spurt: $gap frames (limit 2)"
+	echo "==> [voice] faults counters: sent $sent, received $received, dropped $injected," \
+		"FEC $fec, PLC $plc, late $late, silent $(json_number "$listener_stats" silent)," \
+		"max gap $gap, jitter $(json_number "$listener_stats" jitterMS) ms," \
+		"depth $(json_number "$listener_stats" depth)," \
+		"jitter buffer delay $(json_number "$listener_stats" playoutDelayMS) ms" \
+		"(max $(json_number "$listener_stats" playoutDelayMaxMS) ms)"
 }
 
 cd "$repo_dir"
 echo "==> [voice] building the client and dev/tools/voice-check"
 odin build client -out:"$client_bin"
 odin build dev/tools/voice-check -out:"$check_bin"
+if [[ "$run_faults" == 1 ]]; then
+	odin build client -define:HAYCHAT_TEST_FAULTS=true -out:"$faults_client_bin"
+	# The hook must be absent from the normal build: its environment names are not in it.
+	if grep -q HAYCHAT_TEST_VOICE_LOSS "$plain_client_bin"; then
+		fail "the normal client build contains the voice fault hook"
+	fi
+	grep -q HAYCHAT_TEST_VOICE_LOSS "$faults_client_bin" ||
+		fail "the HAYCHAT_TEST_FAULTS build lacks the voice fault hook"
+fi
 min_tone_seconds=$((talk_seconds - 1))
 
 echo "==> [voice] file path: A sends a ${tone_hz} Hz tone, B records it into a file"
@@ -231,5 +304,87 @@ check_counters device false
 stop_client c
 stop_client d
 echo "==> [voice] SDL devices passed"
+
+if [[ "$run_faults" == 1 ]]; then
+	echo "==> [voice] faults: E sends the tone, F receives it through ${fault_loss} loss and" \
+		"0-${fault_jitter_ms} ms jitter (seed $fault_seed)"
+	start_client e "voice-e-$run_tag"
+	client_bin=$faults_client_bin
+	export HAYCHAT_TEST_VOICE_LOSS=$fault_loss HAYCHAT_TEST_VOICE_JITTER_MS=$fault_jitter_ms
+	export HAYCHAT_TEST_VOICE_SEED=$fault_seed
+	start_client f "voice-f-$run_tag"
+	unset HAYCHAT_TEST_VOICE_LOSS HAYCHAT_TEST_VOICE_JITTER_MS HAYCHAT_TEST_VOICE_SEED
+	client_bin=$plain_client_bin
+	expect_connected e
+	expect_connected f
+	user_e=$(connected_user_id e)
+	user_f=$(connected_user_id f)
+	fault_sink_file="$work_dir/f.f32"
+	expect_ok e voice-source "tone:$tone_hz:$tone_amplitude"
+	expect_ok e voice-gate open
+	expect_ok f voice-sink "file:$fault_sink_file"
+	saved_talk_seconds=$talk_seconds
+	talk_seconds=$fault_talk_seconds
+	talk e f "$user_e" "$user_f"
+	talk_seconds=$saved_talk_seconds
+	expect_ok f voice-flush
+	"$check_bin" "$fault_sink_file" --freq "$tone_hz" --tolerance 5 \
+		--min-seconds "$((fault_talk_seconds - 1))" --amplitude "$tone_amplitude" ||
+		fail "[faults] voice-check rejected F's recording"
+	check_fault_counters
+	expect_ok f voice-leave
+	stop_client e
+	stop_client f
+	echo "==> [voice] faults passed"
+fi
+
+echo "==> [voice] one session per user: G and H, one identity, two device IDs"
+start_client g "voice-g-$run_tag"
+expect_connected g
+user_g=$(connected_user_id g)
+# loadConfig saved G's profile, device ID included, before G connected. H gets a copy of it:
+# the same identity key and, until it is changed here, the same device ID.
+cp -r -- "$work_dir/profile-g" "$work_dir/profile-h"
+h_config="$work_dir/profile-h/haychat/config.json"
+g_device=$(grep -oE '"device_id":"[0-9a-f]{32}"' "$work_dir/profile-g/haychat/config.json") ||
+	fail "[session] G's config.json has no device_id"
+h_device_id=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+[[ "$h_device_id" =~ ^[0-9a-f]{32}$ ]] || fail "[session] could not make a device ID"
+[[ "$g_device" != "\"device_id\":\"$h_device_id\"" ]] || fail "[session] the IDs collided"
+sed -i -E "s/\"device_id\":\"[0-9a-f]{32}\"/\"device_id\":\"$h_device_id\"/" "$h_config"
+grep -qF "\"device_id\":\"$h_device_id\"" "$h_config" ||
+	fail "[session] could not change the copy's device_id"
+echo "    copied G's profile for H and gave the copy its own device_id"
+start_client h "voice-g-$run_tag" h
+expect_connected h
+user_h=$(connected_user_id h)
+[[ "$user_h" == "$user_g" ]] || fail "[session] H is user $user_h, expected G's user $user_g"
+join_voice g
+g_start=$(wc -l <"$work_dir/g.out")
+h_start=$(wc -l <"$work_dir/h.out")
+join_voice h
+takeover_reason="joined voice on another device"
+voice_left_line="^\\{\"event\":\"voice_left\",\"serverID\":[0-9]+,\"roomID\":$room_id,"
+voice_left_line+="\"reason\":\"$takeover_reason\"\\}$"
+expect_event g "$voice_left_line" "$g_start" "G was not told that another device took voice"
+# Idle with no room to re-join, and the reason the voice bar shows.
+idle_line="^\\{\"event\":\"voice_status\",.*\"status\":\"idle\",\"wantRoomID\":0,"
+idle_line+="\"error\":\"$takeover_reason\"\\}$"
+expect_event g "$idle_line" "$g_start" "G did not go idle without a re-join"
+# One participant object, the shared user, joined on H and not on G.
+only_user="\"participants\":\\[\\{\"userID\":$user_g,[^{}]*\\}\\]\\}$"
+expect_event h "${participants_acked}${only_user}" "$h_start" \
+	"H's list does not name the user exactly once"
+participants_elsewhere="^\\{\"event\":\"voice_participants\",\"serverID\":[0-9]+,"
+participants_elsewhere+="\"roomID\":$room_id,\"recipientJoined\":false,"
+expect_event g "${participants_elsewhere}${only_user}" "$g_start" \
+	"G's list does not name the user exactly once, joined on the other device"
+if tail -n "+$((g_start + 1))" "$work_dir/g.out" | grep -qF '"status":"joining"'; then
+	fail "[session] G tried to join voice again after the takeover"
+fi
+expect_ok h voice-leave
+stop_client g
+stop_client h
+echo "==> [voice] one session per user passed"
 
 echo "==> [voice] passed"

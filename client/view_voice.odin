@@ -16,6 +16,7 @@ VOICE_SLIDER_HEIGHT :: 22
 // While audio meters move, the frame loop redraws this often (design 5.3: about 100 ms).
 VOICE_REDRAW_INTERVAL_MS :: 100
 VOICE_SPEAKER_ICON :: "🔊"
+VOICE_INDICATOR_END_GAP :: 4
 
 // A round dot; with ring set, a ring of that color around the dot's own fill.
 @(private = "file")
@@ -37,12 +38,19 @@ viewChannelVoiceIndicator :: proc(ctx: ^ui.Context, content: ^ui.Rect, voiceUser
 	}
 	text := fmt.tprintf("%s %d", VOICE_SPEAKER_ICON, voiceUsers)
 	width := ui.textSize(ui.textGet(ctx, 0, .Regular, text)).x
-	ui.label(ctx, ui.cutRight(content, width), text, ctx.theme.fgMuted)
+	// A little room before the row's end, which the selected highlight rounds off.
+	endGap := ui.dp(ctx, VOICE_INDICATOR_END_GAP)
+	_ = ui.cutRight(content, endGap)
+	r := ui.cutRight(content, width)
+	// The count's last glyph can draw a pixel past its measured advance; a clip exactly as
+	// wide as the text shaved it off, so the clip reaches into the end gap.
+	r.w += endGap
+	ui.label(ctx, r, text, ctx.theme.fgMuted)
 	_ = ui.cutRight(content, ui.dp(ctx, 6))
 }
 
 // One user in a room's voice, indented under the room: a dot ringed green while they speak,
-// their name, how many devices they joined from, and mute and deafen marks.
+// their name, and mute and deafen marks.
 viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: ui.Rect) {
 	participant := row.voice
 	content := ui.shrinkXY(rect, ui.dp(ctx, ctx.theme.padding), 0)
@@ -62,10 +70,6 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 	} else if participant.muted {
 		marks = "muted"
 	}
-	if participant.deviceCount > 1 {
-		devices := fmt.tprintf("×%d", participant.deviceCount)
-		marks = len(marks) > 0 ? fmt.tprintf("%s %s", devices, marks) : devices
-	}
 	if len(marks) > 0 {
 		width := ui.textSize(ui.textGet(ctx, 0, .Regular, marks)).x
 		marked := participant.muted || participant.deafened
@@ -81,9 +85,6 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 		status = fmt.tprintf("%s, deafened", status)
 	} else if participant.muted {
 		status = fmt.tprintf("%s, muted", status)
-	}
-	if participant.deviceCount > 1 {
-		status = fmt.tprintf("%s, on %d devices", status, participant.deviceCount)
 	}
 	id := ui.idOf("voice-participant", serverID, row.roomID, participant.userID)
 	ui.tooltip(ctx, id, rect, status)
@@ -361,7 +362,7 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 		}
 		keyClicked = ui.button(ctx, ui.idOf("voice-ptt-key"), keyRow, keyText, keyOptions)
 		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
-		voiceSettingsWrapped(ctx, &column, VOICE_PTT_FOCUS_NOTICE, ctx.theme.fgMuted)
+		voiceSettingsWrapped(ctx, &column, view.pttNotice, ctx.theme.fgMuted)
 		_ = ui.cutTop(&column, sectionGap)
 	}
 

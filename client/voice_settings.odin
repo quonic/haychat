@@ -443,9 +443,22 @@ State_voiceMeterEngine :: proc(state: ^State) -> ^VoiceEngine {
 	return state.voicePanel.testEngine
 }
 
-// Whether audio meters move, so the frame loop should redraw about every 100 ms.
+// Whether audio meters and speaking dots may move, so the frame loop should check them about
+// every VOICE_REDRAW_INTERVAL_MS (and redraw when State_voiceVisualKey changed).
 State_voiceNeedsRedraws :: proc(state: ^State) -> bool {
 	return state.voice.status == .Joined || state.voicePanel.testEngine != nil
+}
+
+// For the frame loop, on every pass: whether the engine-driven voice state on screen
+// (State_voiceVisualKey) changed since the last frame drew it. It checks only while
+// State_voiceNeedsRedraws and at most every VOICE_REDRAW_INTERVAL_MS, keeping the next check's
+// time in pollAtMS; the loop wakes for that time.
+State_voiceRedrawDue :: proc(state: ^State, nowMS: u64, pollAtMS: ^u64) -> bool {
+	if !State_voiceNeedsRedraws(state) || nowMS < pollAtMS^ {
+		return false
+	}
+	pollAtMS^ = nowMS + VOICE_REDRAW_INTERVAL_MS
+	return State_voiceVisualKey(state) != state.voice.drawnVisual
 }
 
 // Starts or stops capturing the push-to-talk key.
@@ -485,11 +498,46 @@ State_voicePushToTalkKeycode :: proc(state: ^State) -> SDL.Keycode {
 	if settings.mode != .PushToTalk {
 		return 0
 	}
-	key := SDL.GetKeyFromName(strings.clone_to_cstring(settings.pttKey, context.temp_allocator))
+	return voicePushToTalkKeyFromName(settings.pttKey)
+}
+
+voicePushToTalkKeyFromName :: proc(name: string) -> SDL.Keycode {
+	key := SDL.GetKeyFromName(strings.clone_to_cstring(name, context.temp_allocator))
 	if key == SDL.K_UNKNOWN {
 		key = SDL.GetKeyFromName(VOICE_DEFAULT_PTT_KEY)
 	}
 	return key
+}
+
+// Whether a focused text field uses key: a character key (letters, digits, punctuation,
+// Space) or Enter, Tab, Backspace, Delete or Esc. These are exactly the SDL keycodes without
+// SDLK_SCANCODE_MASK; modifiers, function keys, arrows and the like carry it.
+voiceKeyEditsText :: proc(key: SDL.Keycode) -> bool {
+	return key != SDL.K_UNKNOWN && key & SDL.K_SCANCODE_MASK == 0
+}
+
+// What one key event does to push-to-talk. pttKey is 0 when push-to-talk is off. A key that
+// edits text is ignored while a text field has keyboard focus, so a letter or Space chosen as
+// the push-to-talk key types normally in the message box instead of opening the microphone;
+// keys a text field does not use (the default Left Ctrl, F-keys, ...) work everywhere. A key
+// up always releases a held key, even if a text field took focus in between.
+voicePushToTalkKeyEvent :: proc(
+	pttKey, key: SDL.Keycode,
+	down, held, textFocused: bool,
+) -> (
+	change: bool,
+	nextHeld: bool,
+) {
+	if pttKey == 0 || key != pttKey {
+		return false, held
+	}
+	if !down {
+		return held, false
+	}
+	if held || (textFocused && voiceKeyEditsText(key)) {
+		return false, held
+	}
+	return true, true
 }
 
 // Whether name is among the listed devices.

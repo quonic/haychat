@@ -23,6 +23,10 @@ JITTER_MAX_PLC_RUN :: 5
 // Arrivals measured before the depth adapts; until then it stays at JITTER_DEFAULT_DEPTH.
 JITTER_MIN_SAMPLES_TO_ADAPT :: 16
 VOICE_FRAME_MS :: 20.0
+// A change in transit time larger than the ring (640 ms) is a clock step, not jitter: inside
+// a spurt such a frame already resets the buffer, and between spurts it means the sender's
+// sequence started over. Counting it would hold the depth at the maximum for many spurts.
+JITTER_CLOCK_STEP_MS :: f64(JITTER_SLOT_COUNT) * VOICE_FRAME_MS
 
 // Wrapping difference a − b, so sequence 0 comes after 0xFFFF_FFFF.
 voiceSequenceDiff :: proc(a, b: u32) -> i32 {
@@ -32,9 +36,11 @@ voiceSequenceDiff :: proc(a, b: u32) -> i32 {
 JitterSlot :: struct {
 	used:     bool,
 	sequence: u32,
-	flags:    u8,
-	length:   int,
-	data:     [common.VOICE_OPUS_MAX_BYTES]u8,
+	flags:     u8,
+	length:    int,
+	// The receiver's clock when the frame arrived, for the playout delay.
+	arrivalMS: f64,
+	data:      [common.VOICE_OPUS_MAX_BYTES]u8,
 }
 
 JitterStats :: struct {
@@ -48,6 +54,10 @@ JitterStats :: struct {
 	silent:     u64, // missing frames after the PLC limit, played as silence
 	resets:     u64, // far-ahead frames that restarted the buffer
 	spurts:     u64,
+	// The longest run of frames inside a spurt that the listener heard as neither a decoded
+	// nor an FEC-rebuilt frame (concealment, or silence after the PLC limit; not pre-roll).
+	// A maximum, not a sum: jitterStatsAdd keeps the larger.
+	maxGapRun:  u64,
 }
 
 JitterAction :: enum {
@@ -65,10 +75,12 @@ JitterAction :: enum {
 }
 
 JitterOutput :: struct {
-	action:   JitterAction,
-	sequence: u32,
+	action:    JitterAction,
+	sequence:  u32,
 	// Borrowed from a slot: valid until the next JitterBuffer_push or JitterBuffer_next.
-	data:     []u8,
+	data:      []u8,
+	// Decode only: when the frame arrived (JitterBuffer_push's arrivalMS).
+	arrivalMS: f64,
 }
 
 JitterBuffer :: struct {
@@ -84,6 +96,8 @@ JitterBuffer :: struct {
 	lastPlayedSeq: u32,
 	targetDepth:   int,
 	plcRun:        int,
+	// Frames in a row heard as neither decoded nor FEC-rebuilt (stats.maxGapRun).
+	gapRun:        int,
 	// RFC 3550-style interarrival jitter, in milliseconds.
 	hasTransit:    bool,
 	lastTransitMS: f64,
@@ -123,15 +137,44 @@ JitterBuffer_startSpurt :: proc(jb: ^JitterBuffer, sequence: u32) {
 	jb.spurtStartSeq = sequence
 	jb.newestSeq = sequence
 	jb.plcRun = 0
+	jb.gapRun = 0
 	jb.stats.spurts += 1
 }
 
+// Ends the spurt whose last frame (END_OF_SPURT, or the last before a timeout) was the one
+// just before playoutSeq. Frames of that spurt still in the ring are dropped, but frames
+// after it already belong to the next spurt: after a quick push-to-talk re-press they arrive
+// while the END_OF_SPURT frame still waits its turn behind the buffer's depth. They start the
+// next spurt at once and keep the playout position, so they play as far behind their arrival
+// as the old spurt did, and the frames the sender's gate skipped play as pre-roll silence.
 @(private = "file")
 JitterBuffer_endSpurt :: proc(jb: ^JitterBuffer) {
-	jb.inSpurt = false
+	endedSeq := jb.playoutSeq - 1
 	jb.hasLastPlayed = true
-	jb.lastPlayedSeq = jb.playoutSeq - 1
-	JitterBuffer_clearSlots(jb)
+	jb.lastPlayedSeq = endedSeq
+	hasNext := false
+	nextSeq: u32
+	for &slot in jb.slots {
+		if !slot.used {
+			continue
+		}
+		if voiceSequenceDiff(slot.sequence, endedSeq) <= 0 {
+			slot.used = false
+			continue
+		}
+		if !hasNext || voiceSequenceDiff(slot.sequence, nextSeq) < 0 {
+			nextSeq = slot.sequence
+			hasNext = true
+		}
+	}
+	if !hasNext {
+		jb.inSpurt = false
+		return
+	}
+	jb.spurtStartSeq = nextSeq
+	jb.plcRun = 0
+	jb.gapRun = 0
+	jb.stats.spurts += 1
 }
 
 @(private = "file")
@@ -139,6 +182,13 @@ JitterBuffer_measureArrival :: proc(jb: ^JitterBuffer, sequence: u32, arrivalMS:
 	// Transit is arrival minus media time; only its changes matter, so the sender's clock
 	// offset cancels out. u32 media time wraps after 2.7 years, far beyond a session.
 	transit := arrivalMS - f64(sequence) * VOICE_FRAME_MS
+	if jb.hasTransit && abs(transit - jb.lastTransitMS) > JITTER_CLOCK_STEP_MS {
+		// A step no queue could cause: the sender restarted and its sequence started over (a
+		// re-join or a new client while this speaker was still held), or the receiver's clock
+		// jumped. Only the transit baseline is stale; the jitter measured so far still
+		// describes the path, so it is kept.
+		jb.hasTransit = false
+	}
 	if jb.hasTransit {
 		deviation := abs(transit - jb.lastTransitMS)
 		jb.jitterMS += (deviation - jb.jitterMS) / 16.0
@@ -191,6 +241,7 @@ JitterBuffer_push :: proc(
 	slot.used = true
 	slot.sequence = sequence
 	slot.flags = flags
+	slot.arrivalMS = arrivalMS
 	slot.length = copy(slot.data[:], opus)
 	if voiceSequenceDiff(sequence, jb.newestSeq) > 0 {
 		jb.newestSeq = sequence
@@ -230,11 +281,13 @@ JitterBuffer_next :: proc(jb: ^JitterBuffer) -> JitterOutput {
 	if slot := JitterBuffer_slotFor(jb, sequence); slot != nil {
 		slot.used = false
 		jb.plcRun = 0
+		jb.gapRun = 0
 		jb.stats.played += 1
 		output := JitterOutput {
-			action   = .Decode,
-			sequence = sequence,
-			data     = slot.data[:slot.length],
+			action    = .Decode,
+			sequence  = sequence,
+			data      = slot.data[:slot.length],
+			arrivalMS = slot.arrivalMS,
 		}
 		if slot.flags & common.VOICE_FRAME_FLAG_END_OF_SPURT != 0 {
 			// The slot's bytes stay in place until the next push, so data is still valid.
@@ -248,9 +301,12 @@ JitterBuffer_next :: proc(jb: ^JitterBuffer) -> JitterOutput {
 	}
 	if next := JitterBuffer_slotFor(jb, sequence + 1); next != nil {
 		jb.plcRun = 0
+		jb.gapRun = 0
 		jb.stats.fec += 1
 		return {action = .DecodeFEC, sequence = sequence, data = next.data[:next.length]}
 	}
+	jb.gapRun += 1
+	jb.stats.maxGapRun = max(jb.stats.maxGapRun, u64(jb.gapRun))
 	if jb.plcRun < JITTER_MAX_PLC_RUN {
 		jb.plcRun += 1
 		jb.stats.plc += 1

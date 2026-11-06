@@ -15,6 +15,7 @@ import "core:sync"
 import "core:testing"
 import "core:time"
 import "opus"
+import SDL "vendor:sdl3"
 
 UI_VOICE_SELF_USER_ID :: 3
 
@@ -93,8 +94,9 @@ testVoiceUIRestore :: proc() {
 // ── Channel list ──────────────────────────────────────────────────
 
 // Each room with anyone in voice gets an indicator and its participants under it, also for
-// rooms this client is not in voice of. A user on two devices appears once, with the count;
-// they count as muted only while every device is.
+// rooms this client is not in voice of. The server lists each user once (protocol 13); a
+// repeated user ID, which only an older server could send, still shows once, with the first
+// entry's flags and no device count.
 @(test)
 testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 	state := testVoiceUIState(941)
@@ -104,9 +106,9 @@ testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 		941,
 		2,
 		false,
-		{userID = 9, muted = true},
-		{userID = UI_VOICE_SELF_USER_ID, muted = true, deafened = true},
 		{userID = 9},
+		{userID = UI_VOICE_SELF_USER_ID, muted = true, deafened = true},
+		{userID = 9, muted = true},
 		{userID = 12, muted = true},
 	)
 
@@ -134,18 +136,16 @@ testVoiceSidebarListsParticipantsOncePerUser :: proc(t: ^testing.T) {
 		first.roomID == 2 &&
 		first.id == 9 &&
 		first.label == "user-9" &&
-		first.voice.deviceCount == 2 &&
 		!first.voice.muted &&
 		!first.voice.speaking,
-		fmt.tprintf("expected user 9 once, on 2 devices, one unmuted, got %v", first),
+		fmt.tprintf("expected user 9 once, unmuted as first listed, got %v", first),
 	)
 	assert(
 		selfRow.voice.isSelf && selfRow.voice.muted && selfRow.voice.deafened,
 		fmt.tprintf("expected this user marked muted and deafened, got %v", selfRow),
 	)
 	assert(
-		third.id == 12 && third.voice.muted && !third.voice.deafened &&
-		third.voice.deviceCount == 1,
+		third.id == 12 && third.voice.muted && !third.voice.deafened,
 		fmt.tprintf("expected user 12 muted, got %v", third),
 	)
 	if len(rows) > channelIndex + 4 {
@@ -458,6 +458,8 @@ testVoiceSettingsReapplyToTheJoinedEngine :: proc(t: ^testing.T) {
 		"expected push-to-talk released when the mode leaves push-to-talk",
 	)
 
+	// Let the engine count a few frames, so the restart has a sequence to carry.
+	sequenceBefore := testVoiceUIWaitForSequence(engine, 5)
 	settings.inputDevice = "Other Mic"
 	State_applyVoiceSettings(&state, settings)
 	reopened := state.voice.engine
@@ -485,6 +487,18 @@ testVoiceSettingsReapplyToTheJoinedEngine :: proc(t: ^testing.T) {
 		transmute(f32)sync.atomic_load(&reopened.inputGainBits) == 2 &&
 		sync.atomic_load(&reopened.bitrateRequest) == 40000,
 		"expected the reopened engine to carry the device, the mute and the settings",
+	)
+	// Listeners are still in the old engine's spurt: a new engine that counted from 0 again
+	// would have its frames dropped as late.
+	sequenceAfter := VoiceEngine_snapshot(reopened).frameSequence
+	testing.expect(
+		t,
+		sequenceBefore >= 5 && sequenceAfter > sequenceBefore,
+		fmt.tprintf(
+			"expected the restart to continue frameSequence past %d, got %d",
+			sequenceBefore,
+			sequenceAfter,
+		),
 	)
 	testing.expect(
 		t,
@@ -744,4 +758,205 @@ testVoiceEngineAppliesGainVolumeAndBitrate :: proc(t: ^testing.T) {
 		fmt.tprintf("expected gain 0 and threshold 0 kept as given, got %v dBFS", silentLevel),
 	)
 	_ = t
+}
+
+// Polls the engine's published frameSequence until it reaches atLeast (or 5 s pass) and
+// returns the last value seen.
+@(private = "file")
+testVoiceUIWaitForSequence :: proc(engine: ^VoiceEngine, atLeast: u32) -> u32 {
+	started := time.tick_now()
+	for {
+		sequence := VoiceEngine_snapshot(engine).frameSequence
+		if sequence >= atLeast || time.tick_since(started) > 5 * time.Second {
+			return sequence
+		}
+		time.sleep(5 * time.Millisecond)
+	}
+}
+
+// A push-to-talk key that types (a letter, Space, Enter...) is left to a focused text field,
+// so typing "t" in the message box never opens the microphone; keys a text field does not
+// use work everywhere, and a key up always releases.
+@(test)
+testVoicePushToTalkIgnoresTypingKeysInTextFields :: proc(t: ^testing.T) {
+	letter := voicePushToTalkKeyFromName("T")
+	ctrl := voicePushToTalkKeyFromName("Left Ctrl")
+	testing.expect(t, letter == SDL.K_T && ctrl == SDL.K_LCTRL, "expected SDL key names")
+	testing.expect(
+		t,
+		voiceKeyEditsText(SDL.K_T) &&
+		voiceKeyEditsText(SDL.K_SPACE) &&
+		voiceKeyEditsText(SDL.K_RETURN) &&
+		voiceKeyEditsText(SDL.K_BACKSPACE),
+		"expected letters, Space, Enter and Backspace to edit text",
+	)
+	testing.expect(
+		t,
+		!voiceKeyEditsText(SDL.K_LCTRL) &&
+		!voiceKeyEditsText(SDL.K_F13) &&
+		!voiceKeyEditsText(SDL.K_RALT) &&
+		!voiceKeyEditsText(SDL.K_UNKNOWN),
+		"expected modifiers and function keys not to edit text",
+	)
+	testing.expect(
+		t,
+		voicePushToTalkKeyFromName("No Such Key") == ctrl,
+		"expected an unknown name to fall back to the default key",
+	)
+
+	Case :: struct {
+		pttKey, key:                SDL.Keycode,
+		down, held, textFocused:    bool,
+		wantChange, wantHeld:       bool,
+		name:                       string,
+	}
+	cases := [?]Case {
+		{letter, letter, true, false, false, true, true, "letter, no text field: press"},
+		{letter, letter, true, false, true, false, false, "letter while typing: ignored"},
+		{letter, letter, false, false, true, false, false, "letter up while typing: nothing"},
+		{letter, letter, false, true, true, true, false, "held letter: up releases anyway"},
+		{ctrl, ctrl, true, false, true, true, true, "Ctrl while typing: press"},
+		{ctrl, ctrl, false, true, true, true, false, "Ctrl up while typing: release"},
+		{ctrl, ctrl, true, true, false, false, true, "already held: no change"},
+		{ctrl, letter, true, false, false, false, false, "another key: nothing"},
+		{0, ctrl, true, false, false, false, false, "push-to-talk off: nothing"},
+	}
+	for c in cases {
+		change, held := voicePushToTalkKeyEvent(c.pttKey, c.key, c.down, c.held, c.textFocused)
+		testing.expectf(
+			t,
+			change == c.wantChange && held == c.wantHeld,
+			"%s: expected change %v held %v, got %v %v",
+			c.name,
+			c.wantChange,
+			c.wantHeld,
+			change,
+			held,
+		)
+	}
+}
+
+// The settings note warns when the chosen key types.
+@(test)
+testVoiceSettingsViewWarnsAboutATypingPushToTalkKey :: proc(t: ^testing.T) {
+	state := testVoiceUIState(946)
+	defer State_deinit(&state)
+	settings := State_voiceSettings(&state)
+	settings.mode = .PushToTalk
+	State_applyVoiceSettings(&state, settings, persist = false)
+	view := buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expectf(t, view.pttNotice == VOICE_PTT_FOCUS_NOTICE, "Left Ctrl: %q", view.pttNotice)
+	settings.pttKey = "Space"
+	State_applyVoiceSettings(&state, settings, persist = false)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expectf(t, view.pttNotice == VOICE_PTT_TYPING_NOTICE, "Space: %q", view.pttNotice)
+}
+
+// The frame loop redraws for voice only when the key changes: a level that rounds to the same
+// dB, or that stays below the meter's floor, is no change; speaking or transmitting is.
+@(test)
+testVoiceVisualKeyChangesOnlyWithWhatIsDrawn :: proc(t: ^testing.T) {
+	snapshot: VoiceEngineSnapshot
+	snapshot.speakerCount = 2
+	snapshot.speakers[0] = {userID = 5}
+	snapshot.speakers[1] = {userID = 9}
+	quiet := voiceVisualKey(-42.2, false, &snapshot)
+	testing.expect(
+		t,
+		voiceVisualKey(-41.8, false, &snapshot) == quiet,
+		"expected a level within the same whole dB to be no change",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-100, false, nil) == voiceVisualKey(-90, false, nil),
+		"expected levels below the meter's floor to look the same",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-40, false, &snapshot) != quiet,
+		"expected a 2 dB move of the meter to be a change",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-42.2, true, &snapshot) != quiet,
+		"expected transmitting to be a change",
+	)
+	snapshot.speakers[1].speaking = true
+	speaking := voiceVisualKey(-42.2, false, &snapshot)
+	testing.expect(t, speaking != quiet, "expected a speaker starting to speak to be a change")
+	testing.expect(
+		t,
+		speaking.speakingUsers[1] == 9 && speaking.speakingUsers[0] == 0,
+		"expected only the speaking user in the key",
+	)
+
+	// A state with no engine has a constant key, so an idle window never redraws for voice.
+	state := testVoiceUIState(947)
+	defer State_deinit(&state)
+	testing.expect(
+		t,
+		State_voiceVisualKey(&state) == voiceVisualKey(VOICE_LEVEL_FLOOR_DB, false, nil),
+		"expected the resting key without an engine",
+	)
+}
+
+// The frame loop's voice redraw decision against a running engine: nothing to check while no
+// meter is on screen, one redraw when the microphone test's level first moves, none while it
+// stays put, and checks no more often than VOICE_REDRAW_INTERVAL_MS.
+@(test)
+testVoiceRedrawDueFollowsTheEngine :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceUIState(948)
+	defer State_deinit(&state)
+	pollAt: u64
+	testing.expect(
+		t,
+		!State_voiceRedrawDue(&state, 1000, &pollAt) && pollAt == 0,
+		"expected no voice checks without an engine",
+	)
+	template := state.voice.engineTemplate
+	template.source = {kind = .Tone, toneHz = 440}
+	template.gateMode = .VoiceActivity
+	State_setVoiceEngineTemplate(&state, template)
+	state.voice.drawnVisual = State_voiceVisualKey(&state)
+	testing.expect(t, State_startVoiceTest(&state), "expected the microphone test to start")
+
+	// Wait for the tone's level to reach the meter, as the loop would.
+	now := u64(1000)
+	changed := false
+	started := time.tick_now()
+	for !changed && time.tick_since(started) < 5 * time.Second {
+		changed = State_voiceRedrawDue(&state, now, &pollAt)
+		testing.expect(t, pollAt == now + VOICE_REDRAW_INTERVAL_MS, "expected the next check")
+		testing.expect(
+			t,
+			!State_voiceRedrawDue(&state, now + 1, &pollAt),
+			"expected no second check inside the interval",
+		)
+		now += VOICE_REDRAW_INTERVAL_MS
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, changed, "expected the tone's level to ask for a redraw")
+	// The gate opens a frame or two after the level rises, which is a change of its own. Once
+	// the frame has drawn the settled state, a steady tone looks the same on every check.
+	time.sleep(200 * time.Millisecond)
+	state.voice.drawnVisual = State_voiceVisualKey(&state)
+	testing.expect(t, state.voice.drawnVisual.transmitting, "expected the tone to open the gate")
+	for _ in 0 ..< 5 {
+		time.sleep(20 * time.Millisecond)
+		testing.expect(
+			t,
+			!State_voiceRedrawDue(&state, now, &pollAt),
+			"expected no redraw while the meter stays put",
+		)
+		now += VOICE_REDRAW_INTERVAL_MS
+	}
+	State_stopVoiceTest(&state)
+	testing.expect(
+		t,
+		!State_voiceRedrawDue(&state, now, &pollAt),
+		"expected no checks once the test stopped",
+	)
 }

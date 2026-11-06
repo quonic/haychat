@@ -49,9 +49,12 @@ PendingDBRequest :: struct {
 	// Mark-read: which kind of conversation roomID or targetUserID names.
 	readMarkerKind:   common.ReadMarkerKind,
 	recipientUserIDs: [dynamic]int,
-	// ClientJoinVoice: the flags the joiner asked for, applied once the membership check passes.
+	// ClientJoinVoice: the flags the joiner asked for, applied once the membership check passes,
+	// whether it is the client's automatic re-join, and its parsed device ID (protocol 13).
 	voiceMuted:       bool,
 	voiceDeafened:    bool,
+	voiceRejoin:      bool,
+	voiceDeviceID:    common.VoiceDeviceID,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {

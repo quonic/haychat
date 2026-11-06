@@ -15,6 +15,11 @@ test_flags=(-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_FANCY=fa
 # silently, so a missing libopus fails the suite here. HAYCHAT_REQUIRE_OPUS=0 allows the skip.
 export HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1}
 
+# Release archives and the server image must carry every licence their contents need. This
+# needs only the Odin root, so a pin bump that drops or moves a licence file fails here.
+echo "==> deploy/release-artifacts.sh --check-licences"
+deploy/release-artifacts.sh --check-licences
+
 echo "==> odin check server"
 odin check server
 
@@ -30,6 +35,14 @@ odin test common "${test_flags[@]}"
 
 echo "==> odin test client"
 odin test client "${test_flags[@]}"
+
+# The voice fault hook (client/voice_faults.odin) exists only in a HAYCHAT_TEST_FAULTS build,
+# so its unit test runs in one; dev/voice-proof.sh exercises the hook end to end.
+echo "==> odin test client (HAYCHAT_TEST_FAULTS, fault hook only)"
+fault_tests=client.testVoiceReceiveFaultsAreAbsentFromNormalBuilds
+fault_tests+=,client.testVoiceReceiveFaultsDropAndDelayDeterministically
+odin test client "${test_flags[@]}" -define:HAYCHAT_TEST_FAULTS=true \
+	-define:ODIN_TEST_NAMES="$fault_tests"
 
 echo "==> odin test client/ui"
 odin test client/ui "${test_flags[@]}"

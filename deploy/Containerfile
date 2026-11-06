@@ -30,6 +30,13 @@ RUN mkdir -p /out \
 	&& echo "Shared libraries the server links:" \
 	&& objdump -p /out/haychat-server | grep NEEDED
 
+# The notices and licence texts the server binary needs, from the toolchain that built it.
+# The same table as the server release archive (deploy/release-artifacts.sh); it fails the
+# build when one is missing. Copied after the build so editing the script keeps that layer.
+COPY LICENSE THIRD_PARTY_NOTICES.md ./
+COPY deploy/release-artifacts.sh deploy/
+RUN deploy/release-artifacts.sh --stage-licences server /out/licenses
+
 # ── Runtime ───────────────────────────────────────────────────────
 
 FROM registry.fedoraproject.org/fedora-minimal:44
@@ -51,7 +58,7 @@ RUN echo 'haychat:x:10001:10001:HayChat server:/var/lib/haychat:/sbin/nologin' >
 	&& chmod 0700 /var/lib/haychat/storage
 
 COPY --from=build /out/haychat-server /usr/local/bin/haychat-server
-COPY LICENSE /usr/share/licenses/haychat/LICENSE
+COPY --from=build /out/licenses/ /usr/share/licenses/haychat-server/
 COPY server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql /usr/share/haychat/sql/
 
 # Fail the build when a linked library is missing from the runtime stage.

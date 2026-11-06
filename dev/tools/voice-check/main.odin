@@ -26,6 +26,8 @@ DEFAULT_RATE :: 48000
 DEFAULT_AMPLITUDE :: 0.5
 MAX_CHANNELS :: 8
 MAX_TONE_SECONDS :: 600
+FREQ_RANGE_ERROR :: "--freq must be inside the analyser's scan range (50 to 4050 Hz)"
+#assert(toneanalysis.SCAN_MIN_HZ == 50 && toneanalysis.SCAN_MAX_HZ == 4050, "update USAGE")
 
 USAGE ::
 	"usage: voice-check FILE --freq HZ [--tolerance HZ] [--min-seconds S] [--amplitude A]\n" +
@@ -33,7 +35,7 @@ USAGE ::
 	"       voice-check --write-tone FILE --freq HZ --seconds S [--amplitude A]\n" +
 	"                   [--channels N] [--rate HZ]\n" +
 	"  FILE                raw F32LE samples (the client's file sink: mono, 48 kHz)\n" +
-	"  --freq HZ           the expected tone\n" +
+	"  --freq HZ           the expected tone, 50 to 4050 Hz (the analyser's scan range)\n" +
 	"  --tolerance HZ      how far the dominant frequency may be off (default 5)\n" +
 	"  --min-seconds S     the shortest stretch of tone that passes (default 1)\n" +
 	"  --amplitude A       the source's peak amplitude, which sets the expected level\n" +
@@ -139,6 +141,11 @@ parseOptions :: proc(args: []string) -> (options: Options, err: string) {
 		return {}, "--write-tone needs --seconds"
 	case options.rate / 2 <= options.freq:
 		return {}, "--freq must be below half of --rate"
+	case !options.writeTone &&
+	     (options.freq < toneanalysis.SCAN_MIN_HZ || options.freq > toneanalysis.SCAN_MAX_HZ):
+		// The analyser only looks for the dominant tone in this band, so a check outside it
+		// would always fail for a reason that has nothing to do with the recording.
+		return {}, FREQ_RANGE_ERROR
 	}
 	return options, ""
 }

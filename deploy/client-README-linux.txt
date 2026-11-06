@@ -36,8 +36,15 @@ Your settings and your identity key are stored in ~/.config/haychat/config.json 
 $XDG_CONFIG_HOME/haychat/config.json). The identity key is what lets the server recognise
 you: keep that file private, and do not copy it to another person.
 
-Licences
---------
+Licences and credits
+--------------------
 
-HayChat is licensed under the GNU AGPL v3 (LICENSE.txt). The embedded Inter and Twemoji
-fonts and the ENet library are covered by the licences in licenses/.
+HayChat is licensed under the GNU AGPL v3 (LICENSE.txt). Its source code is at
+https://git.spyingwind.com/jim/haychat (this build is tag @VERSION@).
+
+THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
+licences, and their copyright lines; the licence texts are in licenses/. They cover the
+Odin core library, the ENet library, and the embedded Inter and Twemoji fonts. SDL3,
+SDL3_ttf, ENet and libopus themselves come from your distribution, with its licences.
+
+Emoji: Twemoji by Twitter, Inc. and contributors — CC-BY 4.0 — https://twemoji.twitter.com

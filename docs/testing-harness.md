@@ -201,9 +201,8 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   or a participant's mute or deafen changes, and after every `room_list` for each room with
   anyone in voice. It doubles as the join acknowledgement: a join is complete when a list for
   that room arrives with `"recipientJoined":true`, which the server sets per session (protocol
-  12). Naming your `userID` is not enough, because a list also names you for your other
-  devices. A second device of the same account is a second entry with the
-  same `userID`.
+  12). Naming your `userID` is not enough, because a list also names you while your account is
+  in voice on another device. A list names each user at most once (protocol 13).
 - `voice_status` is the harness's view of the client's voice state, printed whenever it
   changes: `joining` after `voice-join` (or a re-join after a reconnect), `joined` once the
   server acknowledged this session and the engine runs, `idle` after a leave, a rejection, a
@@ -218,11 +217,20 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   attack and hangover), so the edges are stable enough to `wait` for; when the engine stops,
   every speaker still speaking gets a `false` edge.
 - `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
-  full`, `voice is disabled`, `invalid room`, or `voice is unavailable, try again`.
+  full`, `voice is disabled`, `invalid room`, `voice is unavailable, try again`, `invalid voice
+  device ID`, or `voice is active on another device` (an automatic re-join while another device
+  of the account is in voice).
 - `voice_left` means the server took this session out of a room's voice: `removed from the
-  room`, `the room was deleted` (it comes before `room_deleted`), or `joined another voice room`.
+  room`, `the room was deleted` (it comes before `room_deleted`), `joined another voice room`,
+  or `joined voice on another device` (another session of the account joined voice).
+- An account has one voice session (protocol 13). `voice-join` is a join the user asked for, so
+  it takes voice over from the account's other session. Two harness clients count as two
+  devices only with different `device_id` values in their profiles' `config.json`: a profile
+  copied for the same identity keeps the original's ID, so change or delete the key in the copy.
 - Voice does not survive a reconnect. The client joins the same room again after `connected`
-  (until it leaves, or a rejection or `voice_left` ends voice).
+  (until it leaves, or a rejection or `voice_left` ends voice). That re-join is automatic: it
+  replaces only a stale session of the same device and is refused while another device is in
+  voice.
 - Voice frames are never events: they go from the network thread straight to the voice engine.
 
 ### Voice Stats
@@ -232,7 +240,8 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
 ```json
 {"ok":true,"cmd":"voice-stats","status":"joined","serverID":1,"roomID":1,"running":true,
  "joinedMS":4104,"sent":0,"received":211,"lost":0,"fec":0,"plc":0,"late":0,"jitterMS":1.18,
- "depth":3,"inputLevelDB":-100.0,"transmitting":false,"frameSequence":233,
+ "depth":3,"maxGapRun":0,"playoutDelayMS":60.4,"playoutDelayMaxMS":66.1,"injectedLoss":0,
+ "inputLevelDB":-100.0,"transmitting":false,"frameSequence":233,
  "engine":{"framesCaptured":233,"framesSent":0,...},"jitter":{"received":211,...},
  "speakers":[{"userID":3,"speaking":true,"levelDB":-9.0,"bufferedFrames":3,"targetDepth":3,
  "jitterMS":1.18}],
@@ -252,6 +261,9 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
 | `lost`, `fec`, `plc` | Frames missing at playout (`fec + plc + silent`), those rebuilt from the next frame's redundancy, and those concealed |
 | `late` | Frames that arrived after their playout time |
 | `jitterMS`, `depth` | The largest interarrival jitter estimate and jitter-buffer target depth (frames) over the current speakers |
+| `maxGapRun` | The longest run of frames inside a talk spurt that were heard as neither decoded nor rebuilt by FEC (concealed, or silent after the PLC limit; pre-roll does not count). A maximum over every speaker, not a sum |
+| `playoutDelayMS`, `playoutDelayMaxMS` | The mean and largest time a received frame waited between arriving and being decoded for playout: the jitter buffer's share of the latency. A device sink adds SDL's stream queue (up to 40 ms) on top |
+| `injectedLoss` | Frames the test-only fault hook dropped ([Loss and Jitter Injection](#loss-and-jitter-injection)); always 0 in a normal build |
 | `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level, whether the gate sent it, and the capture sequence |
 | `engine` | `VoiceEngineStats` (`client/voice_engine.odin`): capture, gate, encode, inbound, decode and sink counters |
 | `jitter` | `JitterStats` (`client/voice_jitter.odin`) summed over every speaker |
@@ -280,7 +292,9 @@ bin over the median bin) at least `--min-snr` dB (default 20); the stretch's RMS
 `--min-seconds` long. It prints the measured frequency (median and worst window), level and
 SNR either way, and exits 0 on a pass, 1 on a failure and 2 on a usage or file error.
 `--channels N` reads interleaved files (the first channel is checked) and `--rate HZ` another
-sample rate.
+sample rate. `--freq` must lie inside the analyser's scan range, 50 to 4050 Hz; anything else
+is a usage error (exit 2), since the check could only fail. `--write-tone` takes any frequency
+below half the rate.
 
 `./dev.sh live --voice` runs `dev/voice-proof.sh` against a throwaway server (`--all`, and so
 `./dev.sh ci` and Forgejo CI, run it too):
@@ -298,9 +312,48 @@ sample rate.
    D's disk output (stereo) must pass `voice-check --channels 2`, and D must receive 95 % of
    what C sent with FEC plus PLC under 2 %. The disk driver paces capture by its own clock, so
    C's frame count is not checked against time.
+3. Faults: the file path again, E speaking for `HAYCHAT_VOICE_PROOF_FAULT_SECONDS` (default 8)
+   to F, a client built with `-define:HAYCHAT_TEST_FAULTS=true` and started with
+   `HAYCHAT_TEST_VOICE_LOSS=0.05`, `HAYCHAT_TEST_VOICE_JITTER_MS=20` and
+   `HAYCHAT_TEST_VOICE_SEED=1`. The pass criteria are those of design 6.5: `voice-check` passes
+   on F's file with at least 7 s of tone; FEC plus PLC equals the frames lost (`injectedLoss`
+   plus `late`) within 3 frames plus 10 % of `injectedLoss` (the stats are read while E still
+   talks, so the last drop may not have been played yet, and a dropped first frame of the
+   spurt is pre-roll rather than a repair); `maxGapRun` is at most 2; and F received at least
+   95 % of what E sent and the hook did not drop. The script also checks that the normal
+   client binary does not contain the hook. `HAYCHAT_VOICE_PROOF_FAULTS=0` skips the stage.
 
 It needs libopus (in the dev image and CI) and nothing else: no audio server, no device, no
-display.
+display. Each stage prints its counters, including the jitter buffer's playout delay.
+
+### Loss and Jitter Injection
+
+Rootless CI has no `tc netem`, so a test build of the client can impair its own voice receive
+path (design 6.5). Build it with `-define:HAYCHAT_TEST_FAULTS=true`; then, as frames leave the
+engine's inbound queue on the voice thread:
+
+| Variable | Effect |
+| --- | --- |
+| `HAYCHAT_TEST_VOICE_LOSS` | Fraction of received frames dropped, 0 to 1 (e.g. `0.05`) |
+| `HAYCHAT_TEST_VOICE_JITTER_MS` | Each kept frame is held for a uniformly random 0 to N ms (at most 500), so frames also arrive out of order |
+| `HAYCHAT_TEST_VOICE_SEED` | Seed of the splitmix64 generator (default 1). One sender gives the same loss pattern on every run |
+
+The network counters still count every frame as delivered; the drops and delays are counted
+in `voice-stats` (`injectedLoss`, and `engine.faultDropped` and `engine.faultDelayed`). A
+normal build compiles none of it and ignores the variables. Across five runs of the faults
+stage at seed 1 the counts were identical (23 dropped, FEC 22, PLC 1, longest gap 1 frame),
+and seeds 2 to 5 passed with 19 to 22 drops and gaps of at most 1.
+
+### Latency
+
+The in-process live voice test (`testClientVoiceLiveToneReachesSecondClientThroughServer`,
+run by `dev/live-proof.sh --all`) measures latency without a protocol change: both clients run
+in one process, and `VoiceEngineConfig.onFrameTiming` reports each frame A encodes and each
+frame B decodes on the shared monotonic clock, matched by `frameSequence`. The span runs from
+A having a whole 20 ms frame to B writing it to its file sink: encoding, sealing, the server
+relay, ENet on loopback, the inbound queue and the jitter buffer. Mouth-to-ear adds 20 ms of
+framing and the audio devices' buffers. The test logs p50, p95 and the maximum and fails if
+p95 reaches 300 ms; on loopback it measures about 65 ms at p50 and 69 ms at p95 (target 150 ms).
 
 ## Read State
 

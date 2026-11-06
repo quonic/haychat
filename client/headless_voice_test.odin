@@ -444,3 +444,34 @@ testHeadlessVoiceFlushWritesTheFileSinkOut :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, common.VOICE_SAMPLE_RATE == 48000, "the file format assumes 48 kHz")
 }
+
+// voice-stats' flat latency and loss fields: the mean playout delay, its maximum, the longest
+// gap inside a spurt, and the fault hook's drops.
+@(test)
+testHeadlessVoiceStatsSummarisesDelayAndGaps :: proc(t: ^testing.T) {
+	voice := ClientVoiceState {
+		status = .Joined,
+	}
+	snapshot: VoiceEngineSnapshot
+	snapshot.running = true
+	snapshot.stats.playoutDelayFrames = 4
+	snapshot.stats.playoutDelayTotalMS = 200
+	snapshot.stats.playoutDelayMaxMS = 80
+	snapshot.stats.faultDropped = 3
+	snapshot.jitter.maxGapRun = 2
+	snapshot.jitter.fec = 2
+	snapshot.jitter.plc = 1
+	result := headlessVoiceStatsJSON(&voice, &snapshot, {}, 1000, context.temp_allocator)
+	testing.expectf(
+		t,
+		result.playoutDelayMS == 50 &&
+		result.playoutDelayMaxMS == 80 &&
+		result.maxGapRun == 2 &&
+		result.injectedLoss == 3 &&
+		result.lost == 3,
+		"unexpected summary %v",
+		result,
+	)
+	idle := headlessVoiceStatsJSON(&voice, nil, {}, 0, context.temp_allocator)
+	testing.expect(t, idle.playoutDelayMS == 0, "expected no delay without an engine")
+}

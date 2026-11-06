@@ -54,7 +54,9 @@ newest release for your system:
   the maintainer.
 - **macOS** is not supported yet.
 
-`README.txt` inside each download repeats these steps.
+`README.txt` inside each download repeats these steps. `THIRD_PARTY_NOTICES.txt`, `LICENSE.txt`
+and the `licenses` folder hold the licences and credits of HayChat and the code and fonts it
+includes; keep them with the app if you pass it on.
 
 ### Build From Source
 
@@ -164,11 +166,15 @@ server, and keep chatting anywhere while you are.
   threshold. In **Push-to-talk** mode it sends only while you hold the push-to-talk key
   (Left Ctrl unless you change it). **Push-to-talk works only while the HayChat window has
   focus**: if you click into another window while holding the key, HayChat stops sending.
+  A push-to-talk key that types (a letter, a digit or Space) does nothing while you are typing
+  in a text field, so pick a key such as Ctrl or an F-key if you want to talk while typing.
 - **Linux needs libopus:** the `opus` package on Fedora and Arch, `libopus0` on Debian and
   Ubuntu (it is in the install commands above). Without it the voice bar says "Voice
   unavailable: libopus not found" and chat still works.
 - **Reconnects:** if the connection drops while you are in voice, the voice bar says
   "Rejoining voice…" and you are back in the same room once the client reconnects.
+- **Two devices:** joining voice on a second device moves you there; the first device leaves
+  voice with "joined voice on another device".
 
 ### When Voice Does Not Work
 

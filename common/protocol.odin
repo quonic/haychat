@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 12
+protocolVersion: ProtocolVersion = 13
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -569,16 +569,28 @@ ServerUserPresencePayload :: struct {
 	isOnline: bool,
 }
 
-// Voice control payloads (protocol 10, voice-rooms-design.md 3.4). A voice session belongs to
-// one client session (device): a user with two devices can be in voice on each.
+// Voice control payloads (protocol 10, voice-rooms-design.md 3.4). Since protocol 13 an
+// account has at most one voice session: a join from one of its sessions ends the voice
+// session of any other (ServerVoiceLeft "joined voice on another device"), so a participant
+// list names each user once.
 
 // ClientJoinVoice: join roomId's voice session, leaving any other one this session is in.
 // The server checks room membership and answers with ServerVoiceParticipants (which lists the
 // joiner) or ServerVoiceJoinRejected.
+//
+// rejoin and deviceId (protocol 13): rejoin is false for a join the user asked for, which takes
+// voice over from the account's other sessions, and true for the client's automatic re-join
+// after a reconnect, which may replace only a session with the same deviceId (a stale one the
+// server has not timed out yet) and is refused with "voice is active on another device"
+// otherwise. deviceId is the profile's device ID, 32 lowercase hex characters
+// (voice_device.odin); the server refuses a join without a valid one. deviceId is owned once
+// decoded.
 ClientJoinVoicePayload :: struct {
 	roomId:   int,
 	muted:    bool,
 	deafened: bool,
+	rejoin:   bool,
+	deviceId: string,
 }
 
 // ClientLeaveVoice: leave the current voice session. It carries no fields; the server knows
@@ -621,7 +633,8 @@ ServerVoiceJoinRejectedPayload :: struct {
 }
 
 // ServerVoiceLeft: the server removed this session from roomId's voice session: removed from
-// the room, the room was deleted, or the session joined another room. reason is owned.
+// the room, the room was deleted, the session joined another room, or another session of the
+// account joined voice (protocol 13, "joined voice on another device"). reason is owned.
 ServerVoiceLeftPayload :: struct {
 	roomId: int,
 	reason: string,
@@ -640,6 +653,13 @@ ServerVoiceParticipantsPayload_deinit :: proc(payload: ^ServerVoiceParticipantsP
 	}
 	delete(payload.participants)
 	payload.participants = nil
+}
+
+// Frees the device ID a decoded join owns. CBOR allocates even an empty string, so a decoded
+// join is always deinitialized.
+ClientJoinVoicePayload_deinit :: proc(payload: ^ClientJoinVoicePayload) {
+	delete(payload.deviceId)
+	payload.deviceId = ""
 }
 
 ServerVoiceJoinRejectedPayload_deinit :: proc(payload: ^ServerVoiceJoinRejectedPayload) {
