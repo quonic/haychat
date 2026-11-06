@@ -156,7 +156,8 @@ Over a LAN, add the network's round trip to the delays; the design's target is u
 
 Measured on 2026-11-05 on the maintainer's Fedora 44 host: PipeWire 1.6.11 with a quantum of
 2048 (min-quantum 1024), SDL 3.4's PipeWire driver, and a server from `main` at `c484ed7` in a
-local pod (loopback). Each line is one run of the kit. A variant is a client built with one
+local pod (loopback); runs 7 and 8 use `main` after H8a and V1 (protocol 13), client and
+server. Each line is one run of the kit. A variant is a client built with one
 constant changed (`HAYCHAT_VOICE_MANUAL_CLIENT`), or the default client at another threshold
 (`HAYCHAT_VOICE_MANUAL_THRESHOLD_DB`).
 
@@ -169,12 +170,15 @@ Delay and losses, with the defaults:
 | 3 | PASS, 440.00 Hz, −9.04 dBFS, SNR 74.2 dB, 0 dropouts | 143.8 / 143.8 ms | 150.4 / 162.0 ms | 2.0 ms, 3 | 0, 0, 0 |
 | 4 | PASS, 440.00 Hz, −9.03 dBFS, SNR 73.4 dB, 0 dropouts | 135.8 / 135.8 ms | 150.4 / 158.2 ms | 2.4 ms, 3 | 0, 0, 0 |
 | 5 | PASS, 440.00 Hz, −9.03 dBFS, SNR 74.1 dB, 0 dropouts | 131.8 / 131.8 ms | 148.2 / 160.3 ms | 2.1 ms, 3 | 0, 0, 0 |
+| 6 | PASS, 440.00 Hz, −9.05 dBFS, SNR 73.6 dB, 0 dropouts | 141.1 / 141.1 ms | 150.5 / 162.5 ms | 2.9 ms, 3 | 0, 0, 0 |
+| 7 | PASS, 440.00 Hz, −9.04 dBFS, SNR 73.4 dB, 0 dropouts | 145.1 / 145.1 ms | 150.5 / 162.0 ms | 2.4 ms, 3 | 0, 0, 0 |
+| 8 | PASS, 440.00 Hz, −9.03 dBFS, SNR 75.1 dB, 0 dropouts | 146.5 / 146.5 ms | 150.4 / 162.0 ms | 2.5 ms, 3 | 0, 0, 0 |
 
 Runs 1 and 2 spaced the bursts exactly 1.5 s apart, so every burst of a run started at the
 same position in a frame; later runs use 1.507 s, and their p95 covers every position. The
-click delay does not vary within a run (p50 = p95), but it moves between runs by up to 16 ms.
+click delay does not vary within a run (p50 = p95), but it moves between runs by up to 19 ms.
 That depends on where A's capture and B's playback quanta happen to fall relative to the 20 ms
-frames, which is fixed when the devices open. A spurt starts 7 to 30 ms later than the steady
+frames, which is fixed when the devices open. A spurt starts 4 to 30 ms later than the steady
 state of the same run: the gate drops the first loud frame (its attack), and where the onset
 falls inside a frame adds up to one frame more.
 
@@ -186,9 +190,9 @@ cell gives three numbers:
   −50 dBFS noise, where the noise splits words), with the mean clip in brackets;
 - how much background was sent beyond the hangover.
 
-All rows come from one session (run 3 and its variants). The default kit in runs 4 and 5 heard
-99.6 % / 99.6 % of the −24 dBFS speech, 98.3 % / 97.7 % at −36 dBFS and 80.7 % / 76.8 % at
-−47 dBFS, with the same clipping, and 5 and 4 of 20 taps opened the gate.
+All rows come from one session (run 3 and its variants). Across runs 3 to 8 the defaults heard
+99.6–99.9 % of the −24 dBFS speech, 97.7–98.3 % at −36 dBFS and 66–81 % at −47 dBFS, with
+the same clipping, and 4 or 5 of 20 taps opened the gate.
 
 | Gate | Speech −24 dBFS | Speech −36 dBFS | Speech −47 dBFS (−43 over −50 noise) | Taps opening the gate |
 | --- | --- | --- | --- | --- |
