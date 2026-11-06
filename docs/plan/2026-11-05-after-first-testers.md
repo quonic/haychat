@@ -129,14 +129,17 @@ test.
 
 ### Voice H2–H8 (in order; see `voice-rooms-design.md` section 7)
 
-| Step | Branch | Starts after |
-| --- | --- | --- |
-| H2 voice wire format and control protocol | `voice-wire-protocol` | H1 |
-| H3 server voice: router control plane and network-thread relay | `server-voice-relay` | H2, L1 |
-| H5 client voice networking and actions | `client-voice-networking` | H3, H4 |
-| H6 client voice UI | `client-voice-ui` | H5 |
-| H7 harness commands and live voice proof | `voice-live-proof` | H5 |
-| H8 manual test kit and tuning | `voice-manual-test-kit` | H6, H7 |
+H0–H8 are implemented (H0 in PR #8, H1–H7 in their own PRs, H8 in two parts).
+
+| Step | Branch | Starts after | Status |
+| --- | --- | --- | --- |
+| H2 voice wire format and control protocol | `voice-wire-protocol` | H1 | Implemented |
+| H3 server voice: router control plane and network-thread relay | `server-voice-relay` | H2, L1 | Implemented |
+| H5 client voice networking and actions | `client-voice-networking` | H3, H4 | Implemented |
+| H6 client voice UI | `client-voice-ui` | H5 | Implemented |
+| H7 harness commands and live voice proof | `voice-live-proof` | H5 | Implemented |
+| H8a voice hardening | `voice-hardening` | H6, H7 | Implemented |
+| H8b manual test kit and tuning | `voice-manual-test-kit` | H6, H7 | Implemented: `dev/voice-manual-test.sh`, `docs/voice-manual-test.md` |
 
 H8 also takes two jitter buffer edges from the review of PR #17: `JitterBuffer_endSpurt`
 may clip the start of a spurt after a fast push-to-talk re-press, and a spurt that starts

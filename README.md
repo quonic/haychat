@@ -93,6 +93,8 @@ Every container uses the dev image built from `dev/Containerfile`: Fedora 44, th
 | `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 
+Voice on real audio devices is a manual check, outside CI: `dev/voice-manual-test.sh [HOST:PORT]` runs on a Linux host with PipeWire against a running server (the dev pod by default). It creates virtual PipeWire devices (never touching your speakers, microphone or default devices, and removing them afterwards), plays a tone, espeak-ng speech at several levels and click trains through two headless clients on SDL's PipeWire driver, and reports frequency, level and SNR, how much speech the voice activity gate passed or clipped, and the mouth-to-ear delay (p50 and p95). See [docs/voice-manual-test.md](docs/voice-manual-test.md), which also has the Windows voice checklist.
+
 Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
 
 #### Dev Environment
@@ -112,7 +114,7 @@ Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a
 | `./dev.sh key [PROFILE]` | Print a profile's public key, for `HAYCHAT_ADMIN_PUBLIC_KEY` |
 | `./dev.sh down` | Remove the pod. The database, server state, and client profiles are kept in volumes |
 | `./dev.sh reset` | `down`, then delete those volumes. The next `up` starts with an empty database and a new server identity key |
-| `./dev.sh shell` | Interactive shell in the dev image with the repository mounted read-write at `/src`, for ad-hoc `odin` commands |
+| `./dev.sh shell` | Interactive shell in the dev image with the repository mounted read-write at `/src`, for ad-hoc `odin` commands; `./dev.sh shell CMD [ARGS...]` runs one command there without a terminal |
 | `./dev.sh image [--pull]` | Rebuild the dev image; `--pull` also refreshes the Fedora base image |
 
 The server keeps its logs, storage, identity key, and web admin token in the `haychat-dev-state` volume, and PostgreSQL keeps its data in `haychat-dev-pgdata`. Client profiles live in `haychat-dev-client-<profile>` volumes. A client running on the host (`odin run client`) also reaches the dev server, at its default `localhost:12345`.

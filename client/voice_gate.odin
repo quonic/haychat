@@ -11,6 +11,12 @@ VoiceGateMode :: enum u8 {
 	PushToTalk,
 }
 
+// The three VAD constants were checked with dev/voice-manual-test.sh (H8, numbers in
+// docs/voice-manual-test.md). −45 dBFS passes 98 % of speech at −36 dBFS and none of a
+// −50 dBFS noise floor; −50 dBFS would hear more of a −47 dBFS voice but never closed over that
+// floor. An attack of one frame starts spurts 10 ms sooner but opened on 20 of 20 5 ms taps
+// (two frames: 5 of 20) and let a −50 dBFS floor through. A 200 ms hangover clipped no word
+// ends either, but split sentences into more spurts, each losing its attack frame.
 VOICE_VAD_DEFAULT_THRESHOLD_DB :: f32(-45)
 // Frames in a row above the threshold before the gate opens (40 ms).
 VOICE_VAD_ATTACK_FRAMES :: 2
