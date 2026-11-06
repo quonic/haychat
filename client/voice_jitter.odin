@@ -10,8 +10,8 @@ import "../common"
 // All sequence comparisons wrap (voiceSequenceDiff).
 
 JITTER_SLOT_COUNT :: 32
-// The depth until a speaker's jitter is measured. dev/voice-manual-test.sh (H8) measured 2 to
-// 3.5 ms of jitter on loopback with SDL's PipeWire driver, which jitterDepthForJitter also maps
+// The depth until a speaker's jitter is measured. dev/voice-manual-test.sh (H8) measured 1.9 to
+// 3.4 ms of jitter on loopback with SDL's PipeWire driver, which jitterDepthForJitter also maps
 // to 3, with no late or concealed frames (docs/voice-manual-test.md).
 JITTER_DEFAULT_DEPTH :: 3
 JITTER_MIN_DEPTH :: 2

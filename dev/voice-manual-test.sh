@@ -69,10 +69,17 @@ tone_hz=440
 # The gate's default threshold and hangover, for the analysis: read from the client source,
 # so a change of either default is measured without editing this script.
 gate_source="$repo_dir/client/voice_gate.odin"
-default_threshold=$(sed -n 's/^VOICE_VAD_DEFAULT_THRESHOLD_DB :: f32(\(.*\))$/\1/p' "$gate_source")
+default_threshold=$(sed -n 's/^VOICE_VAD_DEFAULT_THRESHOLD_DB :: f32(\(-\{0,1\}[0-9.]*\))$/\1/p' \
+	"$gate_source")
+hangover_frames=$(sed -n 's/^VOICE_VAD_HANGOVER_FRAMES :: \([0-9][0-9]*\)$/\1/p' "$gate_source")
+# Nothing is set up yet, so a mismatch (a renamed or reformatted constant) just stops here.
+if [[ -z "$default_threshold" || -z "$hangover_frames" ]]; then
+	echo "voice-manual-test: VOICE_VAD_DEFAULT_THRESHOLD_DB or VOICE_VAD_HANGOVER_FRAMES" \
+		"not found in $gate_source; update the sed patterns here" >&2
+	exit 2
+fi
 gate_threshold=${threshold_db:-$default_threshold}
-gate_hangover_ms=$(($(sed -n 's/^VOICE_VAD_HANGOVER_FRAMES :: \([0-9]*\)$/\1/p' \
-	"$gate_source") * 20))
+gate_hangover_ms=$((hangover_frames * 20))
 tone_amplitude=0.5
 
 feed_sink=hc_mt_feed
