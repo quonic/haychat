@@ -54,7 +54,9 @@ newest release for your system:
   the maintainer.
 - **macOS** is not supported yet.
 
-`README.txt` inside each download repeats these steps.
+`README.txt` inside each download repeats these steps. `THIRD_PARTY_NOTICES.txt`, `LICENSE.txt`
+and the `licenses` folder hold the licences and credits of HayChat and the code and fonts it
+includes; keep them with the app if you pass it on.
 
 ### Build From Source
 

@@ -15,6 +15,11 @@ test_flags=(-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_FANCY=fa
 # silently, so a missing libopus fails the suite here. HAYCHAT_REQUIRE_OPUS=0 allows the skip.
 export HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1}
 
+# Release archives and the server image must carry every licence their contents need. This
+# needs only the Odin root, so a pin bump that drops or moves a licence file fails here.
+echo "==> deploy/release-artifacts.sh --check-licences"
+deploy/release-artifacts.sh --check-licences
+
 echo "==> odin check server"
 odin check server
 

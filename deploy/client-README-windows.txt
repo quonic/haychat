@@ -30,10 +30,20 @@ it to another person.
 This build is cross-compiled from Linux and has had less testing than the Linux build.
 Please report anything that behaves differently from Linux.
 
-Licences
---------
+Licences and credits
+--------------------
 
-HayChat is licensed under the GNU AGPL v3 (LICENSE.txt). SDL3 and SDL3_ttf (zlib licence),
-the FreeType, HarfBuzz, PlutoSVG and PlutoVG code inside SDL3_ttf.dll, libopus (BSD
-licence), the ENet library, and the embedded Inter and Twemoji fonts are covered by the
-licences in licenses\.
+HayChat is licensed under the GNU AGPL v3 (LICENSE.txt). Its source code is at
+https://git.spyingwind.com/jim/haychat (this build is tag @VERSION@).
+
+THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
+licences, and their copyright lines; the licence texts are in licenses\. They cover SDL3 and
+SDL3_ttf (zlib licence), the FreeType, HarfBuzz, PlutoSVG and PlutoVG code inside
+SDL3_ttf.dll, libopus (BSD licence), the ENet library, the Odin core library, and the
+embedded Inter and Twemoji fonts.
+
+This software is based in part on the work of the FreeType Team.
+Portions of this software are copyright © 2023 The FreeType Project (www.freetype.org).
+All rights reserved.
+
+Emoji: Twemoji by Twitter, Inc. and contributors — CC-BY 4.0 — https://twemoji.twitter.com
