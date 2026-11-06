@@ -309,14 +309,15 @@ If a user wants to use HayChat in a commercial product, they would need to compl
 ### Licences and Credits
 
 Release builds contain third-party code, libraries and fonts: the Odin core library, the
-`odin-http` and `pg` packages in the server, ENet, SDL3 and SDL3_ttf (with FreeType,
-HarfBuzz, PlutoSVG and PlutoVG) and libopus in the Windows client, and the Inter and Twemoji
-fonts in both clients. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each
-release artifact contains, with each licence, copyright line, and required credit. Every
-archive ships it as `THIRD_PARTY_NOTICES.txt` beside a `licenses/` folder, and the server
-image has both in `/usr/share/licenses/haychat-server/`. `./check.sh` runs
+`odin-http` and `pg` packages in the server, ENet, SDL3 (with HIDAPI, yuv2rgb and fdlibm
+code), SDL3_ttf (with FreeType, HarfBuzz, PlutoSVG and PlutoVG) and libopus in the Windows
+client, and the Inter and Twemoji fonts in both clients.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each release artifact contains,
+with each licence, copyright line, and required credit. Every archive ships it as
+`THIRD_PARTY_NOTICES.txt` beside a `licenses/` folder, and the server image has both in
+`/usr/share/licenses/haychat-server/`. `./check.sh` runs
 `deploy/release-artifacts.sh --check-licences`, which fails when a licence file is missing
-from the pinned toolchain.
+from the repository or the pinned toolchain, or when `SDL3.dll` or `SDL3_ttf.dll` changes.
 
 ### Modding
 
