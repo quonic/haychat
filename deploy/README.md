@@ -461,9 +461,9 @@ the maintainer's behalf; remove `--windows` from the `archives` job if you do no
 The script also fetches `SDL3.dll`, `SDL3.lib`, the SDL3_ttf files, and
 `vendor/sdl3/mixer/libopus-0.dll` with `git lfs`: the pinned Odin checkout stores them as
 Git LFS pointers, so a plain clone has 130-byte placeholders. The zip ships `SDL3.dll` and
-`SDL3_ttf.dll` with their licences (zlib; SDL3_ttf.dll also contains FreeType, HarfBuzz,
-PlutoSVG, and PlutoVG, whose licences are included, and its `README.txt` carries the FreeType
-credit), and `libopus-0.dll` (the copy Odin ships for SDL3_mixer, which the client loads at
+`SDL3_ttf.dll` with their licences (zlib; SDL3.dll also contains HIDAPI, yuv2rgb, and fdlibm
+code, and SDL3_ttf.dll FreeType, HarfBuzz, PlutoSVG, and PlutoVG, whose licences and notices
+are included, and its `README.txt` carries the FreeType credit), and `libopus-0.dll` (the copy Odin ships for SDL3_mixer, which the client loads at
 runtime for voice) with its BSD licence as `licenses/opus-LICENSE.txt`. The cross-built
 client was run under Wine in headless mode against the release image and connected and
 chatted; it has not been run on a real Windows machine yet.
