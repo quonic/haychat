@@ -21,6 +21,7 @@ and the release builds that produce the image and the client downloads. Testers 
 | `deploy/sql/make-admin.sql` | Gives one existing account the admin role |
 | `deploy/release-artifacts.sh` | Builds the server binary and client archives for a release |
 | `deploy/client-README-*.txt` | The `README.txt` shipped in each client archive |
+| `THIRD_PARTY_NOTICES.md` | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt` |
 | `.forgejo/workflows/release.yml` | Release builds on Forgejo (see [Release Builds](#release-builds)) |
 | `.containerignore` | Limits the image's build context to the files it needs |
 
@@ -55,7 +56,7 @@ the dev image and CI use.
 | Volumes | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key, web admin token) |
 | Port | `12345/udp` (clients) |
 | Stop signal | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0 |
-| Also included | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`) and the licence |
+| Also included | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt, odin-http and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`,
 `HAYCHAT_WEB_ADMIN_PORT=8080`, and the three path variables (`HAYCHAT_LOG_DIR`,
@@ -381,8 +382,9 @@ environment, `./dev.sh reset` does this.
 ## Running the Server Binary Without Containers
 
 Each release also attaches `haychat-server-VERSION-linux-x86_64.tar.gz`: the server binary,
-`env.example`, this guide as `DEPLOY.md`, and the SQL helpers. It is built on Fedora 44 and
-needs glibc 2.34 or newer, `libpq.so.5`, and `libenet.so.7` (Fedora `libpq enet`, Debian and
+`env.example`, this guide as `DEPLOY.md`, the SQL helpers, `LICENSE`,
+`THIRD_PARTY_NOTICES.txt`, and `licenses/`. It is built on Fedora 44 and needs glibc 2.34 or
+newer, `libpq.so.5`, and `libenet.so.7` (Fedora `libpq enet`, Debian and
 Ubuntu `libpq5 libenet7`), plus a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`. Run it
 from a directory it can write to (relative paths resolve against the working directory) and
 stop it with SIGINT. Outside a container io_uring is available unless the host disables it.
@@ -407,10 +409,21 @@ Release assets:
 
 | Asset | Contents |
 | --- | --- |
-| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, licence |
-| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, licences |
-| `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, licences |
+| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, odin-http, pg) |
+| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji) |
+| `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus) |
 | `SHA256SUMS` | Checksums of the three archives |
+
+**Licences.** [THIRD_PARTY_NOTICES.md](https://git.spyingwind.com/jim/haychat/src/branch/main/THIRD_PARTY_NOTICES.md)
+says what each artifact contains and what each licence requires; the Windows `README.txt`
+carries the FreeType credit, and both client READMEs the Twemoji attribution. The per-artifact
+file lists are the `*_LICENCES` tables in `deploy/release-artifacts.sh`; the image build
+stages the server list with `deploy/release-artifacts.sh --stage-licences server`. Every
+build first runs `--check-licences`, which `./check.sh` also runs: it fails when a licence
+file is missing, empty or a Git LFS pointer in the pinned toolchain, or when
+`SDL3_ttf.dll` changes, because the FreeType credit year depends on the FreeType inside it
+(2.13.2, 2023). After an Odin pin bump, re-check the notices as `THIRD_PARTY_NOTICES.md`
+describes.
 
 **Token.** The jobs authenticate with the repository secret `RELEASE_TOKEN` when it exists,
 otherwise with the automatic job token. Create `RELEASE_TOKEN` (Settings, Actions, Secrets)
@@ -449,11 +462,11 @@ The script also fetches `SDL3.dll`, `SDL3.lib`, the SDL3_ttf files, and
 `vendor/sdl3/mixer/libopus-0.dll` with `git lfs`: the pinned Odin checkout stores them as
 Git LFS pointers, so a plain clone has 130-byte placeholders. The zip ships `SDL3.dll` and
 `SDL3_ttf.dll` with their licences (zlib; SDL3_ttf.dll also contains FreeType, HarfBuzz,
-PlutoSVG, and PlutoVG, whose licences are included), and `libopus-0.dll` (the copy Odin ships
-for SDL3_mixer, which the client loads at runtime for voice) with its BSD licence as
-`licenses/opus-LICENSE.txt`. The cross-built client was run
-under Wine in headless mode against the release image and connected and chatted; it has not
-been run on a real Windows machine yet.
+PlutoSVG, and PlutoVG, whose licences are included, and its `README.txt` carries the FreeType
+credit), and `libopus-0.dll` (the copy Odin ships for SDL3_mixer, which the client loads at
+runtime for voice) with its BSD licence as `licenses/opus-LICENSE.txt`. The cross-built
+client was run under Wine in headless mode against the release image and connected and
+chatted; it has not been run on a real Windows machine yet.
 
 To reproduce a release build locally (the archives land in `dist/`, which `.gitignore`
 excludes):
@@ -493,6 +506,7 @@ Without the cross-build, build on a Windows machine with the same Odin commit as
    copy C:\Odin\vendor\sdl3\mixer\libopus-0.dll .
    ```
 
-   Ship `haychat-client.exe` with the three DLLs, `C:\Odin\vendor\sdl3\LICENSE.txt`, the
-   `LICENSE*.txt` files from `C:\Odin\vendor\sdl3\ttf\`, and
-   `C:\Odin\vendor\sdl3\mixer\LICENSE.opus.txt`.
+   Ship `haychat-client.exe` with the three DLLs and everything the release zip carries
+   besides them: `LICENSE`, `THIRD_PARTY_NOTICES.md`, `deploy/client-README-windows.txt` (it
+   holds the FreeType credit), and the licence files that `WINDOWS_CLIENT_LICENCES` in
+   `deploy/release-artifacts.sh` lists, from the repository and `C:\Odin`.

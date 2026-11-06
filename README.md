@@ -306,6 +306,18 @@ Remember that if you distribute modified versions of the software, you must also
 
 If a user wants to use HayChat in a commercial product, they would need to comply with the AGPLv3 License terms, which may require them to release their own source code under the same license if they distribute the software. This is a key aspect of the AGPLv3 License, which promotes open-source software and ensures that derivative works also remain open-source.
 
+### Licences and Credits
+
+Release builds contain third-party code, libraries and fonts: the Odin core library, the
+`odin-http` and `pg` packages in the server, ENet, SDL3 and SDL3_ttf (with FreeType,
+HarfBuzz, PlutoSVG and PlutoVG) and libopus in the Windows client, and the Inter and Twemoji
+fonts in both clients. [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each
+release artifact contains, with each licence, copyright line, and required credit. Every
+archive ships it as `THIRD_PARTY_NOTICES.txt` beside a `licenses/` folder, and the server
+image has both in `/usr/share/licenses/haychat-server/`. `./check.sh` runs
+`deploy/release-artifacts.sh --check-licences`, which fails when a licence file is missing
+from the pinned toolchain.
+
 ### Modding
 
 If you sell a mod publicly, it must be dynamically linked. This means that you can create a mod that interacts with HayChat, but you cannot include the entire HayChat codebase in your mod. Instead, your mod should be a separate module that communicates with HayChat through defined interfaces or APIs. This allows for greater flexibility and ensures that the core HayChat code remains open and accessible to the community while still allowing for creative modifications and extensions.

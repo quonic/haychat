@@ -3,6 +3,7 @@
 # reach a build. dev/Containerfile uses dev/ as its context and is not affected.
 *
 !LICENSE
+!THIRD_PARTY_NOTICES.md
 !common/
 !server/
 # Built binaries left in the tree by `odin build server`.
@@ -10,3 +11,4 @@ server/server
 !dev/install-packages.sh
 !dev/bootstrap-odin.sh
 !deploy/sql/
+!deploy/release-artifacts.sh

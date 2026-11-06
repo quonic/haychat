@@ -5,14 +5,25 @@ set -euo pipefail
 # --windows) the Windows client, cross-built from Linux. Runs where the pinned Odin toolchain
 # is on PATH: the dev image (`./dev.sh shell`) or the release workflow's Fedora 44 job.
 #
-# Usage: deploy/release-artifacts.sh VERSION OUT_DIR [--windows]
+# Usage:
+#   deploy/release-artifacts.sh VERSION OUT_DIR [--windows]
+#   deploy/release-artifacts.sh --check-licences
+#   deploy/release-artifacts.sh --stage-licences server|linux|windows DIR
 #
 # Output in OUT_DIR:
-#   haychat-server-VERSION-linux-x86_64.tar.gz    server binary, SQL helpers, deploy docs
-#   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, README.txt, licences
+#   haychat-server-VERSION-linux-x86_64.tar.gz    server binary, SQL helpers, deploy docs,
+#                                                 notices, licences
+#   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, README.txt, notices, licences
 #   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3 and libopus DLLs, README.txt,
-#                                                 licences
+#                                                 notices, licences
 #   SHA256SUMS
+#
+# Every archive carries THIRD_PARTY_NOTICES.txt and the licence texts its contents need (the
+# *_LICENCES tables below). --check-licences verifies, without building anything or needing
+# the Windows SDK, that every licence source exists in the repository and the pinned Odin
+# toolchain and that the FreeType credit still matches the shipped SDL3_ttf.dll; ./check.sh
+# runs it, and every build runs it first. --stage-licences copies one artifact's notices and
+# licences into DIR, which is what the builds below and deploy/Containerfile use.
 #
 # --windows needs two things the dev image does not have:
 #   - git-lfs: the pinned Odin checkout holds vendor/sdl3/SDL3.dll, SDL3.lib, the SDL3_ttf
@@ -27,6 +38,47 @@ set -euo pipefail
 XWIN_VERSION=0.10.0
 XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
 
+# The FreeType credit names the year of the FreeType inside SDL3_ttf.dll (FreeType 2.13.2,
+# 2023, read with TTF_GetFreeTypeVersion under Wine). A different DLL may carry a different
+# FreeType, so a change of its hash fails --check-licences until someone re-checks the version,
+# updates the year in THIRD_PARTY_NOTICES.md and deploy/client-README-windows.txt, and pins
+# the new hash here.
+SDL3_TTF_DLL_SHA256=95a20af07f194f057b6e778bee0ce608d3c90c3dbd64a4b5120dc4879f43a6be
+FREETYPE_CREDIT="Portions of this software are copyright © 2023 The FreeType Project"
+TWEMOJI_CREDIT="Twemoji by Twitter, Inc. and contributors"
+
+# Licence files per artifact, as SOURCE:DEST. SOURCE is repo:PATH (in this repository) or
+# odin:PATH (in the pinned Odin root); DEST is relative to the artifact's top folder.
+# THIRD_PARTY_NOTICES.md says why each artifact needs each file.
+SERVER_LICENCES=(
+	repo:LICENSE:LICENSE
+	repo:THIRD_PARTY_NOTICES.md:THIRD_PARTY_NOTICES.txt
+	odin:LICENSE:licenses/Odin-LICENSE.txt
+	odin:base/runtime/LICENSE-compiler-rt.txt:licenses/compiler-rt-LICENSE.txt
+	odin:shared/odin-http/LICENSE:licenses/odin-http-LICENSE.txt
+	odin:shared/pg/LICENSE:licenses/pg-LICENSE.txt
+)
+LINUX_CLIENT_LICENCES=(
+	repo:LICENSE:LICENSE.txt
+	repo:THIRD_PARTY_NOTICES.md:THIRD_PARTY_NOTICES.txt
+	repo:client/assets/fonts/InterVariable-OFL.txt:licenses/InterVariable-OFL.txt
+	repo:client/assets/fonts/Twemoji-Mozilla-CCBY.txt:licenses/Twemoji-Mozilla-CCBY.txt
+	odin:LICENSE:licenses/Odin-LICENSE.txt
+	odin:base/runtime/LICENSE-compiler-rt.txt:licenses/compiler-rt-LICENSE.txt
+	odin:vendor/ENet/LICENSE:licenses/ENet-LICENSE.txt
+)
+# The Windows client also ships the DLLs (and the code inside them) and links ENet statically.
+WINDOWS_CLIENT_LICENCES=(
+	"${LINUX_CLIENT_LICENCES[@]}"
+	odin:vendor/sdl3/LICENSE.txt:licenses/SDL3-LICENSE.txt
+	odin:vendor/sdl3/ttf/LICENSE.txt:licenses/SDL3_ttf-LICENSE.txt
+	odin:vendor/sdl3/ttf/LICENSE.freetype.txt:licenses/LICENSE.freetype.txt
+	odin:vendor/sdl3/ttf/LICENSE.harfbuzz.txt:licenses/LICENSE.harfbuzz.txt
+	odin:vendor/sdl3/ttf/LICENSE.plutosvg.txt:licenses/LICENSE.plutosvg.txt
+	odin:vendor/sdl3/ttf/LICENSE.plutovg.txt:licenses/LICENSE.plutovg.txt
+	odin:vendor/sdl3/mixer/LICENSE.opus.txt:licenses/opus-LICENSE.txt
+)
+
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
 
 die() {
@@ -38,7 +90,153 @@ log_step() {
 	echo "==> $*"
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || die "usage: deploy/release-artifacts.sh VERSION OUT_DIR [--windows]"
+usage_error() {
+	die "usage: deploy/release-artifacts.sh VERSION OUT_DIR [--windows]" \
+		"| --check-licences | --stage-licences server|linux|windows DIR"
+}
+
+resolve_odin_root() {
+	if [[ -n "${ODIN_ROOT:-}" ]]; then
+		echo "$ODIN_ROOT"
+		return 0
+	fi
+	command -v odin >/dev/null 2>&1 || die "odin is not on PATH (run inside ./dev.sh shell)"
+	odin root
+}
+
+is_lfs_pointer() {
+	head -c 64 "$1" | grep -q '^version https://git-lfs'
+}
+
+# Prints the licence table of one artifact, one SOURCE:DEST entry per line.
+licence_table() {
+	case "$1" in
+		server) printf '%s\n' "${SERVER_LICENCES[@]}" ;;
+		linux) printf '%s\n' "${LINUX_CLIENT_LICENCES[@]}" ;;
+		windows) printf '%s\n' "${WINDOWS_CLIENT_LICENCES[@]}" ;;
+		*) die "unknown artifact: $1 (server, linux, or windows)" ;;
+	esac
+}
+
+licence_source_path() {
+	local source=$1
+	case "$source" in
+		repo:*) echo "$repo_dir/${source#repo:}" ;;
+		odin:*) echo "$odin_root/${source#odin:}" ;;
+		*) die "bad licence source: $source" ;;
+	esac
+}
+
+# Prints one line per problem with ARTIFACT's licence sources. A licence file that is
+# missing, empty, or a Git LFS placeholder would otherwise ship broken or not at all.
+licence_table_problems() {
+	local artifact=$1 entry source path
+	while IFS= read -r entry; do
+		source=${entry%:*}
+		path=$(licence_source_path "$source")
+		if [[ ! -f "$path" ]]; then
+			echo "$artifact: missing $path"
+		elif [[ ! -s "$path" ]]; then
+			echo "$artifact: empty $path"
+		elif is_lfs_pointer "$path"; then
+			echo "$artifact: $path is a Git LFS pointer, not the licence text"
+		fi
+	done < <(licence_table "$artifact")
+}
+
+# SHA-256 of a file, or of the file a Git LFS pointer stands for (its oid), so the check
+# works on a checkout whose DLLs were never fetched.
+content_sha256() {
+	local path=$1
+	if is_lfs_pointer "$path"; then
+		sed -n 's/^oid sha256:\([0-9a-f]\{64\}\)$/\1/p' "$path"
+	else
+		sha256sum "$path" | cut -d' ' -f1
+	fi
+}
+
+# Checks every artifact's licence sources and the required credits. Needs only the
+# repository and the Odin root: no build, no Windows SDK, no Git LFS download.
+check_licences() {
+	local problems=() line artifact
+	for artifact in server linux windows; do
+		while IFS= read -r line; do
+			problems+=("$line")
+		done < <(licence_table_problems "$artifact")
+	done
+
+	local ttf_dll="$odin_root/vendor/sdl3/ttf/SDL3_ttf.dll" ttf_sha
+	if [[ ! -f "$ttf_dll" ]]; then
+		problems+=("windows: missing $ttf_dll")
+	else
+		ttf_sha=$(content_sha256 "$ttf_dll")
+		if [[ "$ttf_sha" != "$SDL3_TTF_DLL_SHA256" ]]; then
+			line="windows: SDL3_ttf.dll changed (sha256 $ttf_sha): check the FreeType version"
+			line+=" inside it, update the FreeType credit year, and pin the new SDL3_TTF_DLL_SHA256"
+			problems+=("$line")
+		fi
+	fi
+
+	local file
+	for file in THIRD_PARTY_NOTICES.md deploy/client-README-windows.txt; do
+		grep -qF "$FREETYPE_CREDIT" "$repo_dir/$file" \
+			|| problems+=("$file lacks the FreeType credit: $FREETYPE_CREDIT")
+	done
+	for file in THIRD_PARTY_NOTICES.md deploy/client-README-windows.txt \
+		deploy/client-README-linux.txt; do
+		grep -qF "$TWEMOJI_CREDIT" "$repo_dir/$file" \
+			|| problems+=("$file lacks the Twemoji attribution: $TWEMOJI_CREDIT")
+		grep -qF "THIRD_PARTY_NOTICES" "$repo_dir/$file" \
+			|| [[ "$file" == THIRD_PARTY_NOTICES.md ]] \
+			|| problems+=("$file does not point to THIRD_PARTY_NOTICES.txt")
+	done
+
+	if [[ ${#problems[@]} -gt 0 ]]; then
+		printf 'release-artifacts.sh: %s\n' "${problems[@]}" >&2
+		die "licence check failed (Odin root $odin_root)"
+	fi
+	log_step "Licence sources present for the server, Linux client, and Windows client"
+}
+
+# Copies ARTIFACT's notices and licence files into DIR (created if needed).
+stage_licences() {
+	local artifact=$1 dest=$2 problems entry source path
+	# Validated here because licence_table runs in a subshell below, where die cannot stop us.
+	case "$artifact" in
+		server | linux | windows) ;;
+		*) die "unknown artifact: $artifact (server, linux, or windows)" ;;
+	esac
+	problems=$(licence_table_problems "$artifact")
+	[[ -z "$problems" ]] || die "$problems"
+	while IFS= read -r entry; do
+		source=${entry%:*}
+		path=$(licence_source_path "$source")
+		mkdir -p "$dest/$(dirname -- "${entry##*:}")"
+		cp "$path" "$dest/${entry##*:}"
+	done < <(licence_table "$artifact")
+	if [[ "$artifact" == windows ]]; then
+		# Like README.txt: CRLF line ends for Windows text editors.
+		sed -i 's/$/\r/' "$dest/THIRD_PARTY_NOTICES.txt"
+	fi
+}
+
+case "${1:-}" in
+	--check-licences)
+		[[ $# -eq 1 ]] || usage_error
+		odin_root=$(resolve_odin_root)
+		check_licences
+		exit 0
+		;;
+	--stage-licences)
+		[[ $# -eq 3 ]] || usage_error
+		odin_root=$(resolve_odin_root)
+		stage_licences "$2" "$3"
+		log_step "Staged the $2 notices and licences in $3"
+		exit 0
+		;;
+esac
+
+[[ $# -ge 2 && $# -le 3 ]] || usage_error
 version=$1
 out_dir=$2
 build_windows=false
@@ -49,7 +247,9 @@ fi
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || die "VERSION may use letters, digits, . _ -"
 
 command -v odin >/dev/null 2>&1 || die "odin is not on PATH (run inside ./dev.sh shell)"
-odin_root=${ODIN_ROOT:-$(odin root)}
+odin_root=$(resolve_odin_root)
+# Fail before a long build, so a toolchain pin bump can never drop a licence silently.
+check_licences
 mkdir -p "$out_dir"
 out_dir=$(cd -- "$out_dir" && pwd)
 work_dir=$(mktemp -d -t haychat-release.XXXXXX)
@@ -64,22 +264,13 @@ make_zip() {
 	(cd "$(dirname -- "$dir")" && python3 -m zipfile -c "$archive" "$(basename -- "$dir")")
 }
 
-copy_client_licences() {
-	local dest=$1
-	mkdir -p "$dest/licenses"
-	cp LICENSE "$dest/LICENSE.txt"
-	cp client/assets/fonts/InterVariable-OFL.txt client/assets/fonts/Twemoji-Mozilla-CCBY.txt \
-		"$dest/licenses/"
-	cp "$odin_root/vendor/ENet/LICENSE" "$dest/licenses/ENet-LICENSE.txt"
-}
-
 # ── Server ────────────────────────────────────────────────────────
 
 log_step "Building the server"
 server_dir="$work_dir/haychat-server-$version"
 mkdir -p "$server_dir/sql"
 odin build server -o:speed -out:"$server_dir/haychat-server"
-cp LICENSE "$server_dir/LICENSE"
+stage_licences server "$server_dir"
 cp deploy/README.md "$server_dir/DEPLOY.md"
 cp .env.example "$server_dir/env.example"
 cp server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql "$server_dir/sql/"
@@ -92,16 +283,12 @@ log_step "Building the Linux client"
 linux_dir="$work_dir/haychat-$version-linux"
 mkdir -p "$linux_dir"
 odin build client -o:speed -out:"$linux_dir/haychat-client"
-copy_client_licences "$linux_dir"
+stage_licences linux "$linux_dir"
 sed "s/@VERSION@/$version/g" deploy/client-README-linux.txt >"$linux_dir/README.txt"
 tar -C "$work_dir" -czf "$out_dir/haychat-client-$version-linux-x86_64.tar.gz" \
 	"haychat-$version-linux"
 
 # ── Windows client ────────────────────────────────────────────────
-
-is_lfs_pointer() {
-	head -c 64 "$1" | grep -q '^version https://git-lfs'
-}
 
 fetch_sdl_lfs_files() {
 	local sdl_dir="$odin_root/vendor/sdl3"
@@ -168,13 +355,7 @@ if $build_windows; then
 	# voice, looking next to haychat-client.exe first (client/opus).
 	cp "$odin_root/vendor/sdl3/SDL3.dll" "$odin_root/vendor/sdl3/ttf/SDL3_ttf.dll" \
 		"$odin_root/vendor/sdl3/mixer/libopus-0.dll" "$windows_dir/"
-	copy_client_licences "$windows_dir"
-	cp "$odin_root/vendor/sdl3/LICENSE.txt" "$windows_dir/licenses/SDL3-LICENSE.txt"
-	cp "$odin_root/vendor/sdl3/ttf/LICENSE.txt" "$windows_dir/licenses/SDL3_ttf-LICENSE.txt"
-	cp "$odin_root/vendor/sdl3/mixer/LICENSE.opus.txt" "$windows_dir/licenses/opus-LICENSE.txt"
-	for licence in freetype harfbuzz plutosvg plutovg; do
-		cp "$odin_root/vendor/sdl3/ttf/LICENSE.$licence.txt" "$windows_dir/licenses/"
-	done
+	stage_licences windows "$windows_dir"
 	sed "s/@VERSION@/$version/g" deploy/client-README-windows.txt \
 		| sed 's/$/\r/' >"$windows_dir/README.txt"
 	rm -f "$out_dir/haychat-client-$version-windows-x86_64.zip"
