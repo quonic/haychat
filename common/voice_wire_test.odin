@@ -456,6 +456,8 @@ testVoiceControlPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		roomId   = 12,
 		muted    = true,
 		deafened = false,
+		rejoin   = true,
+		deviceId = "0123456789abcdef0123456789abcdef",
 	}
 	joinBytes, joinErr := cbor.marshal(join)
 	assert(joinErr == nil, "expected ClientJoinVoicePayload encoding to succeed")
@@ -465,7 +467,15 @@ testVoiceControlPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		cbor.unmarshal(joinBytes, &decodedJoin) == nil,
 		"expected ClientJoinVoicePayload to decode",
 	)
-	assert(decodedJoin == join, fmt.tprintf("expected %v, got %v", join, decodedJoin))
+	defer ClientJoinVoicePayload_deinit(&decodedJoin)
+	assert(
+		decodedJoin.roomId == join.roomId &&
+		decodedJoin.muted == join.muted &&
+		decodedJoin.deafened == join.deafened &&
+		decodedJoin.rejoin == join.rejoin &&
+		decodedJoin.deviceId == join.deviceId,
+		fmt.tprintf("expected %v, got %v", join, decodedJoin),
+	)
 
 	leaveBytes, leaveErr := cbor.marshal(ClientLeaveVoicePayload{})
 	assert(leaveErr == nil, "expected ClientLeaveVoicePayload encoding to succeed")

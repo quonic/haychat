@@ -108,7 +108,13 @@ routerVoiceTestDisconnectAll :: proc(clients: []RouterVoiceTestClient) {
 	}
 }
 
-// Sends ClientJoinVoice and answers the membership check with memberUserIDs.
+// Each test peer's own device ID unless a test passes another: 32 lowercase hex digits.
+routerVoiceTestDeviceID :: proc(peerID: u32) -> string {
+	return fmt.tprintf("%032x", peerID)
+}
+
+// Sends ClientJoinVoice and answers the membership check with memberUserIDs. The join carries
+// the peer's own device ID (routerVoiceTestDeviceID) unless deviceID is given.
 routerVoiceTestJoin :: proc(
 	h: ^RouterTestHarness,
 	client: ^RouterVoiceTestClient,
@@ -116,14 +122,43 @@ routerVoiceTestJoin :: proc(
 	memberUserIDs: []int,
 	muted := false,
 	deafened := false,
+	rejoin := false,
+	deviceID := "",
+) {
+	routerVoiceTestSendJoin(h, client, roomID, muted, deafened, rejoin, deviceID)
+	routerVoiceTestAnswerMemberCheck(h, roomID, memberUserIDs)
+}
+
+routerVoiceTestSendJoin :: proc(
+	h: ^RouterTestHarness,
+	client: ^RouterVoiceTestClient,
+	roomID: int,
+	muted := false,
+	deafened := false,
+	rejoin := false,
+	deviceID := "",
 ) {
 	routerTestSendSealed(
 		h,
 		&client.transport,
 		client.peerID,
 		.ClientJoinVoice,
-		common.ClientJoinVoicePayload{roomId = roomID, muted = muted, deafened = deafened},
+		common.ClientJoinVoicePayload {
+			roomId = roomID,
+			muted = muted,
+			deafened = deafened,
+			rejoin = rejoin,
+			deviceId = len(deviceID) > 0 ? deviceID : routerVoiceTestDeviceID(client.peerID),
+		},
 	)
+}
+
+// Answers the pending membership check for roomID with memberUserIDs.
+routerVoiceTestAnswerMemberCheck :: proc(
+	h: ^RouterTestHarness,
+	roomID: int,
+	memberUserIDs: []int,
+) {
 	query := routerPollDatabaseQuery(h)
 	defer IPC__database_query_request_deinit(query.request)
 	memberRequest, ok := query.request.(common.DatabaseRoomMemberListRequest)
@@ -370,7 +405,7 @@ testVoiceRouterRejectsFullRoomsDisabledVoiceAndBadRooms :: proc(t: ^testing.T) {
 		&clients[1].transport,
 		2,
 		.ClientJoinVoice,
-		common.ClientJoinVoicePayload{roomId = 8},
+		common.ClientJoinVoicePayload{roomId = 8, deviceId = routerVoiceTestDeviceID(2)},
 	)
 	query := routerPollDatabaseQuery(&h)
 	IPC__database_query_request_deinit(query.request)
@@ -442,7 +477,8 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	h := routerTestHarness_init()
 	defer routerTestHarness_deinit(&h)
 
-	// User 42 on two devices (peers 1 and 3), user 43, and user 44, who is not a member.
+	// User 42 on two devices (peers 1 and 3, only peer 1 in voice), user 43, and user 44, who
+	// is not a member.
 	clients := [?]RouterVoiceTestClient {
 		{peerID = 1, userID = 42},
 		{peerID = 2, userID = 43},
@@ -454,7 +490,7 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	members := []int{42, 43}
 
 	routerVoiceTestJoin(&h, &clients[0], 7, members)
-	routerVoiceTestJoin(&h, &clients[2], 7, members)
+	routerVoiceTestJoin(&h, &clients[1], 7, members)
 	drain := routerVoiceTestDrain(&h, clients[:])
 	recipients := routerVoiceTestRecipients(&drain, .ServerVoiceParticipants)
 	assert(
@@ -462,18 +498,18 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 		routerVoiceTestSamePeers(recipients[3:], {1, 2, 3}),
 		fmt.tprintf("expected each join to reach peers 1, 2 and 3, got %v", recipients),
 	)
-	both, found := routerVoiceTestParticipants(&drain, 2, 7)
+	// The list names user 42, but peer 3 is that user's other device, not in voice: it must be
+	// told it is not joined, or it would take the list for its own join.
+	other, otherFound := routerVoiceTestParticipants(&drain, 3, 7)
 	assert(
-		found &&
-		len(both.participants) == 2 &&
-		both.participants[0].userId == 42 &&
-		both.participants[1].userId == 42,
-		"expected the second device as a second participant with the same user ID",
+		otherFound &&
+		len(other.participants) == 2 &&
+		other.participants[0].userId == 42 &&
+		!other.recipientJoined,
+		"expected user 42's other device to see user 42 listed but not be told it joined",
 	)
-	assert(!both.recipientJoined, "expected user 43, not in voice, told it is not joined")
-	common.ServerVoiceParticipantsPayload_deinit(&both)
-	// Each device's list says whether that device itself is in voice; both are now.
-	for peerID in ([]u32{1, 3}) {
+	common.ServerVoiceParticipantsPayload_deinit(&other)
+	for peerID in ([]u32{1, 2}) {
 		mine, mineFound := routerVoiceTestParticipants(&drain, peerID, 7)
 		assert(
 			mineFound && mine.recipientJoined,
@@ -494,7 +530,7 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	routerTestExpectNoDatabaseQuery(&h, "expected a state change to use the cached members")
 	drain = routerVoiceTestDrain(&h, clients[:])
 	route, routed := routerVoiceTestLastRoute(&drain, 7)
-	assert(routed && routerVoiceTestRouteHas(route, 1, 3), "expected both devices routed")
+	assert(routed && routerVoiceTestRouteHas(route, 1, 2), "expected both sessions routed")
 	for member in route.members {
 		assert(
 			(member.peerId == 1) == (member.muted && member.deafened),
@@ -519,7 +555,7 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	drain = routerVoiceTestDrain(&h, clients[:])
 	defer RouterVoiceTestDrain_deinit(&drain)
 	route, routed = routerVoiceTestLastRoute(&drain, 7)
-	assert(routed && routerVoiceTestRouteHas(route, 3), "expected only the second device left")
+	assert(routed && routerVoiceTestRouteHas(route, 2), "expected only user 43 left")
 	recipients = routerVoiceTestRecipients(&drain, .ServerVoiceParticipants)
 	assert(
 		routerVoiceTestSamePeers(recipients[:], {1, 2, 3}),
@@ -527,16 +563,13 @@ testVoiceRouterFansLeaveAndStateOutToEverySessionOfEveryMember :: proc(t: ^testi
 	)
 	after, afterFound := routerVoiceTestParticipants(&drain, 1, 7)
 	defer common.ServerVoiceParticipantsPayload_deinit(&after)
-	assert(afterFound && len(after.participants) == 1, "expected the leaver to see one left")
-	// The list still names user 42 (the other device), but tells peer 1 it is not joined: a
-	// client must not take that for its own join.
 	assert(
-		after.participants[0].userId == 42 && !after.recipientJoined,
-		"expected the leaver told it is not joined while its other device stays",
+		afterFound &&
+		len(after.participants) == 1 &&
+		after.participants[0].userId == 43 &&
+		!after.recipientJoined,
+		"expected the leaver to see only user 43 and be told it is not joined",
 	)
-	stayed, stayedFound := routerVoiceTestParticipants(&drain, 3, 7)
-	defer common.ServerVoiceParticipantsPayload_deinit(&stayed)
-	assert(stayedFound && stayed.recipientJoined, "expected the device that stayed told so")
 	assert(1 not_in h.state.peerVoiceRoom, "expected peer 1 out of voice")
 
 	// Leaving again, or changing state outside voice, is a no-op.
@@ -566,13 +599,14 @@ testVoiceRouterEvictsOnMemberRemovalAndRoomDeletion :: proc(t: ^testing.T) {
 	}
 	routerVoiceTestConnect(&h, clients[:])
 	defer routerVoiceTestDisconnectAll(clients[:])
-	for &client in clients {
-		routerVoiceTestJoin(&h, &client, 7, {42, 43})
-	}
+	// User 43 has two sessions; only peer 2 is in voice (an account has one voice session).
+	routerVoiceTestJoin(&h, &clients[0], 7, {42, 43})
+	routerVoiceTestJoin(&h, &clients[1], 7, {42, 43})
 	drain := routerVoiceTestDrain(&h, clients[:])
 	RouterVoiceTestDrain_deinit(&drain)
 
-	// An admin (peer 1) removed user 43 from room 7: both of 43's sessions leave voice.
+	// An admin (peer 1) removed user 43 from room 7: 43's voice session leaves, and neither of
+	// 43's sessions hears about the room's voice any more.
 	removeID := MainRouterState_generateRequestID(&h.state)
 	h.state.pendingDatabaseRequests[removeID] = PendingDBRequest {
 		requestID    = removeID,
@@ -591,13 +625,13 @@ testVoiceRouterEvictsOnMemberRemovalAndRoomDeletion :: proc(t: ^testing.T) {
 		},
 	)
 	drain = routerVoiceTestDrain(&h, clients[:])
-	for peerID in ([]u32{2, 3}) {
-		roomID, reason, left := routerVoiceTestReason(&drain, peerID, .ServerVoiceLeft)
-		assert(
-			left && roomID == 7 && reason == VOICE_LEFT_REMOVED_FROM_ROOM,
-			fmt.tprintf("expected peer %d evicted from 7, got %q", peerID, reason),
-		)
-	}
+	roomID, reason, left := routerVoiceTestReason(&drain, 2, .ServerVoiceLeft)
+	assert(
+		left && roomID == 7 && reason == VOICE_LEFT_REMOVED_FROM_ROOM,
+		fmt.tprintf("expected peer 2 evicted from 7, got %q", reason),
+	)
+	_, _, otherLeft := routerVoiceTestReason(&drain, 3, .ServerVoiceLeft)
+	assert(!otherLeft, "expected no ServerVoiceLeft for 43's session that was not in voice")
 	route, routed := routerVoiceTestLastRoute(&drain, 7)
 	assert(routed && routerVoiceTestRouteHas(route, 1), "expected only peer 1 routed")
 	recipients := routerVoiceTestRecipients(&drain, .ServerVoiceParticipants)
@@ -629,7 +663,7 @@ testVoiceRouterEvictsOnMemberRemovalAndRoomDeletion :: proc(t: ^testing.T) {
 	)
 	drain = routerVoiceTestDrain(&h, clients[:])
 	defer RouterVoiceTestDrain_deinit(&drain)
-	roomID, reason, left := routerVoiceTestReason(&drain, 1, .ServerVoiceLeft)
+	roomID, reason, left = routerVoiceTestReason(&drain, 1, .ServerVoiceLeft)
 	assert(
 		left && roomID == 7 && reason == VOICE_LEFT_ROOM_DELETED,
 		fmt.tprintf("expected the deletion reason, got %q", reason),

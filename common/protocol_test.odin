@@ -108,17 +108,58 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsTwelveForTheVoiceRecipientFlag :: proc(t: ^testing.T) {
+testProtocolVersionIsThirteenForOneVoiceSessionPerUser :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
-	// ServerVoiceParticipants.recipientJoined, so peers on 11 or older cannot talk to this build.
+	// ServerVoiceParticipants.recipientJoined; 13 added ClientJoinVoice.rejoin and deviceId for
+	// one voice session per user, so peers on 12 or older cannot talk to this build.
 	assert(
-		protocolVersion == 12,
+		protocolVersion == 13,
 		fmt.tprintf(
-			"expected protocol version 12 for the voice recipient flag, got %d",
+			"expected protocol version 13 for one voice session per user, got %d",
 			protocolVersion,
 		),
+	)
+}
+
+// The join's new fields survive CBOR, and an older join without them decodes with rejoin false
+// and no device ID, which the server then refuses.
+@(test)
+testClientJoinVoiceCarriesRejoinAndDeviceID :: proc(t: ^testing.T) {
+	_ = t
+	original := ClientJoinVoicePayload {
+		roomId   = 7,
+		muted    = true,
+		rejoin   = true,
+		deviceId = "00112233445566778899aabbccddeeff",
+	}
+	encoded, encodeErr := cbor.marshal(original)
+	assert(encodeErr == nil, fmt.tprintf("expected the join to encode, got %v", encodeErr))
+	defer delete(encoded)
+	decoded: ClientJoinVoicePayload
+	assert(cbor.unmarshal(encoded, &decoded) == nil, "expected the join to decode")
+	defer ClientJoinVoicePayload_deinit(&decoded)
+	assert(
+		decoded.roomId == 7 && decoded.muted && !decoded.deafened && decoded.rejoin &&
+		decoded.deviceId == original.deviceId,
+		fmt.tprintf("expected the join to survive the round trip, got %v", decoded),
+	)
+
+	OldJoin :: struct {
+		roomId:   int,
+		muted:    bool,
+		deafened: bool,
+	}
+	oldEncoded, oldErr := cbor.marshal(OldJoin{roomId = 3})
+	assert(oldErr == nil, "expected the old join to encode")
+	defer delete(oldEncoded)
+	old: ClientJoinVoicePayload
+	assert(cbor.unmarshal(oldEncoded, &old) == nil, "expected the old join to decode")
+	defer ClientJoinVoicePayload_deinit(&old)
+	assert(
+		old.roomId == 3 && !old.rejoin && !voiceDeviceIDIsValid(old.deviceId),
+		fmt.tprintf("expected no rejoin and no valid device ID, got %v", old),
 	)
 }
 

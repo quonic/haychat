@@ -446,8 +446,7 @@ HeadlessReadMarkerJSON :: struct {
 	unreadCount:       int,
 }
 
-// One voice participant. A second device of the same account is a second entry with the
-// same userID.
+// One voice participant. The server lists each user at most once (protocol 13).
 HeadlessVoiceParticipantJSON :: struct {
 	userID:   int,
 	nickname: string,

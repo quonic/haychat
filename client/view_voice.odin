@@ -50,7 +50,7 @@ viewChannelVoiceIndicator :: proc(ctx: ^ui.Context, content: ^ui.Rect, voiceUser
 }
 
 // One user in a room's voice, indented under the room: a dot ringed green while they speak,
-// their name, how many devices they joined from, and mute and deafen marks.
+// their name, and mute and deafen marks.
 viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: ui.Rect) {
 	participant := row.voice
 	content := ui.shrinkXY(rect, ui.dp(ctx, ctx.theme.padding), 0)
@@ -70,10 +70,6 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 	} else if participant.muted {
 		marks = "muted"
 	}
-	if participant.deviceCount > 1 {
-		devices := fmt.tprintf("×%d", participant.deviceCount)
-		marks = len(marks) > 0 ? fmt.tprintf("%s %s", devices, marks) : devices
-	}
 	if len(marks) > 0 {
 		width := ui.textSize(ui.textGet(ctx, 0, .Regular, marks)).x
 		marked := participant.muted || participant.deafened
@@ -89,9 +85,6 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 		status = fmt.tprintf("%s, deafened", status)
 	} else if participant.muted {
 		status = fmt.tprintf("%s, muted", status)
-	}
-	if participant.deviceCount > 1 {
-		status = fmt.tprintf("%s, on %d devices", status, participant.deviceCount)
 	}
 	id := ui.idOf("voice-participant", serverID, row.roomID, participant.userID)
 	ui.tooltip(ctx, id, rect, status)

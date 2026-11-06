@@ -112,6 +112,9 @@ State_serverForTransport :: proc(
 // on localhost) can call Config_fillLocalDefaults first.
 State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	init_state.config = Config_clone(config)
+	// loadConfig gives every profile a device ID; a config built in code (tests, tools) gets one
+	// for this run only, so every voice join can carry a valid one.
+	ensureDeviceID(&init_state.config)
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
 	for index in 0 ..< len(init_state.serverTransports) {
 		transport := &init_state.serverTransports[index]

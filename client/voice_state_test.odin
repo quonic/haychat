@@ -658,3 +658,151 @@ testVoiceRejectionEndsASessionThatAlreadyCountsAsJoined :: proc(t: ^testing.T) {
 	)
 	State_leaveVoice(&state)
 }
+
+// One voice session per user (protocol 13): a join the user asks for goes out with rejoin
+// false, the automatic re-join after a reconnect with rejoin true, and both carry the
+// profile's device ID.
+@(test)
+testVoiceJoinsCarryTheRejoinFlagAndTheDeviceID :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceState(927)
+	defer State_deinit(&state)
+	sync.mutex_lock(&voiceControlSendBridgeTestMutex)
+	defer sync.mutex_unlock(&voiceControlSendBridgeTestMutex)
+	testVoiceControlUseStub()
+	defer testVoiceControlRestore()
+
+	deviceID := state.config.device_id
+	testing.expectf(
+		t,
+		common.voiceDeviceIDIsValid(deviceID),
+		"expected the state to have a valid device ID, got %q",
+		deviceID,
+	)
+	_ = State_joinVoice(&state, 927, 2)
+	manual := testVoiceLastRequest()
+	testing.expectf(
+		t,
+		manual.kind == .Join && manual.roomID == 2 && !manual.rejoin &&
+		manual.deviceID == deviceID,
+		"expected a manual join without rejoin and with the device ID, got %v",
+		manual,
+	)
+	testApplyVoiceParticipants(&state, 927, 2, TEST_VOICE_SELF_USER_ID)
+
+	testApplyDisconnected(&state, 927)
+	requestsBefore := voiceControlTestCount
+	testApplyConnected(&state, 927, TEST_VOICE_SELF_USER_ID)
+	automatic := testVoiceLastRequest()
+	testing.expectf(
+		t,
+		voiceControlTestCount == requestsBefore + 1 &&
+		automatic.kind == .Join &&
+		automatic.roomID == 2 &&
+		automatic.rejoin &&
+		automatic.deviceID == deviceID,
+		"expected the re-join marked automatic with the same device ID, got %v",
+		automatic,
+	)
+
+	// A join the user asks for while the re-join waits is a manual one again.
+	_ = State_joinVoice(&state, 927, 3)
+	again := testVoiceLastRequest()
+	testing.expectf(
+		t,
+		again.kind == .Join && again.roomID == 3 && !again.rejoin,
+		"expected a manual join after the re-join, got %v",
+		again,
+	)
+}
+
+// Another device taking voice over (ServerVoiceLeft) and the server refusing an automatic
+// re-join because another device is in voice both stop voice for good: the want is cleared,
+// so the next reconnect joins nothing, and the reason shows in the voice bar.
+@(test)
+testVoiceTakeoverAndOtherDeviceRefusalClearTheWantAndShowInTheBar :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceState(928)
+	defer State_deinit(&state)
+	sync.mutex_lock(&voiceControlSendBridgeTestMutex)
+	defer sync.mutex_unlock(&voiceControlSendBridgeTestMutex)
+	testVoiceControlUseStub()
+	defer testVoiceControlRestore()
+
+	TAKEOVER :: "joined voice on another device"
+	REFUSAL :: "voice is active on another device"
+
+	_ = State_joinVoice(&state, 928, 2)
+	testApplyVoiceParticipants(&state, 928, 2, TEST_VOICE_SELF_USER_ID)
+	testing.expect(t, state.voice.status == .Joined, "expected Joined before the takeover")
+	testApplyVoiceReason(&state, .VoiceLeft, 928, 2, TAKEOVER)
+	// The other device's acknowledgement lists this user once, but not as this session.
+	testApplyVoiceParticipantsFor(&state, 928, 2, false, TEST_VOICE_SELF_USER_ID)
+	testing.expectf(
+		t,
+		state.voice.status == .Idle &&
+		state.voice.wantVoiceRoomID == 0 &&
+		state.voice.engine == nil &&
+		state.voice.lastError == TAKEOVER,
+		"expected Idle, no want and the takeover reason, got %v %d %q",
+		state.voice.status,
+		state.voice.wantVoiceRoomID,
+		state.voice.lastError,
+	)
+	bar := buildVoiceBarView(&state)
+	testing.expectf(
+		t,
+		bar.kind == .Notice && bar.isError && bar.text == TAKEOVER,
+		"expected the bar to show the takeover reason, got %v",
+		bar,
+	)
+	testApplyDisconnected(&state, 928)
+	requestsBefore := voiceControlTestCount
+	testApplyConnected(&state, 928, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		voiceControlTestCount == requestsBefore && state.voice.status == .Idle,
+		"expected no re-join after another device took voice over",
+	)
+
+	// The re-join after a drop is refused because another device is in voice now.
+	_ = State_joinVoice(&state, 928, 2)
+	testApplyVoiceParticipants(&state, 928, 2, TEST_VOICE_SELF_USER_ID)
+	testApplyDisconnected(&state, 928)
+	testApplyConnected(&state, 928, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		state.voice.status == .Joining && testVoiceLastRequest().rejoin,
+		"expected the automatic re-join to be on its way",
+	)
+	testApplyVoiceReason(&state, .VoiceJoinRejected, 928, 2, REFUSAL)
+	testing.expectf(
+		t,
+		state.voice.status == .Idle &&
+		state.voice.wantVoiceRoomID == 0 &&
+		state.voice.lastError == REFUSAL,
+		"expected Idle, no want and the refusal, got %v %d %q",
+		state.voice.status,
+		state.voice.wantVoiceRoomID,
+		state.voice.lastError,
+	)
+	bar = buildVoiceBarView(&state)
+	testing.expectf(
+		t,
+		bar.kind == .Notice && bar.isError && bar.text == REFUSAL,
+		"expected the bar to show the refusal, got %v",
+		bar,
+	)
+	testApplyDisconnected(&state, 928)
+	requestsBefore = voiceControlTestCount
+	testApplyConnected(&state, 928, TEST_VOICE_SELF_USER_ID)
+	testing.expect(
+		t,
+		voiceControlTestCount == requestsBefore,
+		"expected no further re-join after the refusal",
+	)
+}

@@ -19,7 +19,9 @@ set -euo pipefail
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
-#                   with dev/tools/voice-check, then the same through SDL's disk audio driver
+#                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
+#                   through injected loss, and one voice session per user (two profiles with
+#                   one identity key and different device IDs: the second join takes over)
 #   --ui            only the GUI automation smoke test (dev/ui-smoke.sh): the real window on
 #                   SDL's offscreen video driver, driven by --ui-script; screenshots go to
 #                   HAYCHAT_UI_SCREENSHOT_DIR when it is set

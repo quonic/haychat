@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -456,4 +457,125 @@ testVoiceConfigKeysRoundTripAndStoreDefaultsAsUnset :: proc(t: ^testing.T) {
 		"expected re-applying the config's own settings to change nothing",
 	)
 	_ = t
+}
+
+// Loads the profile under configHome the way the client starts, and frees the XDG_CONFIG_HOME
+// copy loadConfig allocates, so a test can load the same profile several times.
+@(private = "file")
+configTestLoadFrom :: proc(configHome: string) -> Config {
+	configTestSetEnv("XDG_CONFIG_HOME", configHome)
+	XDG_CONFIG_HOME = ""
+	config := loadConfig()
+	delete(XDG_CONFIG_HOME)
+	XDG_CONFIG_HOME = ""
+	return config
+}
+
+// Rewrites device_id in configHome's config.json; an empty value removes the key.
+@(private = "file")
+configTestSetStoredDeviceID :: proc(configHome: string, deviceID: string) {
+	path := configTestExpectedCurrentLinuxConfigPath(configHome)
+	data, readErr := os.read_entire_file_from_path(path, context.temp_allocator)
+	assert(readErr == nil, "expected the saved config to be readable")
+	stored: Config
+	defer Config_deinit(&stored)
+	assert(json.unmarshal(data, &stored) == nil, "expected the saved config to parse")
+	delete(stored.device_id)
+	stored.device_id = strings.clone(deviceID)
+	encoded, encodeErr := json.marshal(stored, allocator = context.temp_allocator)
+	assert(encodeErr == nil, "expected the edited config to encode")
+	assert(os.write_entire_file_from_bytes(path, encoded) == nil, "expected the config written")
+}
+
+// The voice device ID (protocol 13) is generated once per profile and saved, survives a save
+// and a load, comes back new when it is missing or malformed, and differs between profiles that
+// share an identity key.
+@(test)
+testDeviceIDIsGeneratedOnceAndSurvivesSaveAndLoad :: proc(t: ^testing.T) {
+	when ODIN_OS != .Linux {
+		_ = t
+		return
+	}
+
+	sync.mutex_lock(&configTestMutex)
+	defer sync.mutex_unlock(&configTestMutex)
+	snapshot := configTestCaptureEnv()
+	defer configTestRestoreEnv(snapshot)
+	tempDir := configTestCreateTempDir("hc_client_device_id")
+	defer configTestRemovePathIfExists(tempDir)
+	configHome := configTestJoinPath({tempDir, "xdg"})
+	otherHome := configTestJoinPath({tempDir, "other_xdg"})
+	assert(os.make_directory(configHome) == nil, "expected the XDG directory created")
+	assert(os.make_directory(otherHome) == nil, "expected the other XDG directory created")
+	// loadConfig also looks for a legacy profile under HOME; keep that inside the test too.
+	configTestSetEnv("HOME", tempDir)
+
+	first := configTestLoadFrom(configHome)
+	defer Config_deinit(&first)
+	testing.expectf(
+		t,
+		common.voiceDeviceIDIsValid(first.device_id),
+		"expected a new profile to get a valid device ID, got %q",
+		first.device_id,
+	)
+
+	second := configTestLoadFrom(configHome)
+	defer Config_deinit(&second)
+	testing.expect(t, second.device_id == first.device_id, "expected the same ID after a load")
+
+	// Saving and loading again, as every settings change does, keeps it.
+	saveTarget := Config_clone(second)
+	defer Config_deinit(&saveTarget)
+	testing.expect(t, saveTarget.device_id == first.device_id, "expected the clone to keep it")
+	configTestSetEnv("XDG_CONFIG_HOME", configHome)
+	XDG_CONFIG_HOME = configHome
+	saveConfig(saveTarget)
+	XDG_CONFIG_HOME = ""
+	saved := configTestLoadFrom(configHome)
+	defer Config_deinit(&saved)
+	testing.expect(t, saved.device_id == first.device_id, "expected the ID to survive a save")
+
+	// A malformed or missing value is replaced and saved.
+	configTestSetStoredDeviceID(configHome, "NOT-A-DEVICE-ID")
+	repaired := configTestLoadFrom(configHome)
+	defer Config_deinit(&repaired)
+	testing.expectf(
+		t,
+		common.voiceDeviceIDIsValid(repaired.device_id) && repaired.device_id != first.device_id,
+		"expected a malformed ID replaced by a new one, got %q",
+		repaired.device_id,
+	)
+	reloaded := configTestLoadFrom(configHome)
+	defer Config_deinit(&reloaded)
+	testing.expect(t, reloaded.device_id == repaired.device_id, "expected the new ID saved")
+	configTestSetStoredDeviceID(configHome, "")
+	reset := configTestLoadFrom(configHome)
+	defer Config_deinit(&reset)
+	testing.expect(
+		t,
+		common.voiceDeviceIDIsValid(reset.device_id) && reset.device_id != repaired.device_id,
+		"expected deleting the key to reset the ID",
+	)
+
+	// Another profile with the same identity key is another device.
+	otherPath := configTestExpectedCurrentLinuxConfigPath(otherHome)
+	assert(os.make_directory_all(configTestJoinPath({otherHome, "haychat"})) == nil, "mkdir")
+	shared := Config {
+		private_key = reset.private_key,
+		public_key  = reset.public_key,
+	}
+	sharedJSON, sharedErr := json.marshal(shared, allocator = context.temp_allocator)
+	assert(sharedErr == nil, "expected the shared-key profile to encode")
+	assert(os.write_entire_file_from_bytes(otherPath, sharedJSON) == nil, "expected it written")
+	other := configTestLoadFrom(otherHome)
+	defer Config_deinit(&other)
+	testing.expectf(
+		t,
+		other.public_key == reset.public_key &&
+		common.voiceDeviceIDIsValid(other.device_id) &&
+		other.device_id != reset.device_id,
+		"expected the same identity with its own device ID, got %q and %q",
+		other.device_id,
+		reset.device_id,
+	)
 }

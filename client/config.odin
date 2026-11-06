@@ -28,6 +28,12 @@ Config :: struct {
 	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
 	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
 	voice_bitrate:          Maybe(int) `json:"voice_bitrate,omitempty"`,
+	// This profile's voice device ID (protocol 13, common/voice_device.odin): 32 lowercase hex
+	// characters, random, generated on first use and sent with every voice join so the server
+	// can tell this device's stale voice session from another device's. loadConfig replaces a
+	// missing or malformed value with a new one, so deleting the key resets it. A copied profile
+	// directory keeps the same ID; reset it in the copy so the two count as different devices.
+	device_id:              string `json:"device_id,omitempty"`,
 }
 
 Server :: struct {
@@ -97,6 +103,9 @@ loadConfig :: proc() -> (config: Config) {
 	}
 
 	if ensureIdentityKeys(&config) {
+		shouldPersist = true
+	}
+	if ensureDeviceID(&config) {
 		shouldPersist = true
 	}
 
@@ -257,6 +266,22 @@ ensureIdentityKeys :: proc(config: ^Config) -> bool {
 	return true
 }
 
+// Gives the config a voice device ID unless it has a valid one. Returns true when it changed and
+// should be saved. The ID is not a secret, but it identifies the profile, so it is not printed.
+ensureDeviceID :: proc(config: ^Config) -> bool {
+	if common.voiceDeviceIDIsValid(config.device_id) {
+		return false
+	}
+	id, ok := common.generateVoiceDeviceID()
+	if !ok {
+		fmt.println("[Error] Failed to generate a voice device ID")
+		return false
+	}
+	delete(config.device_id)
+	config.device_id = common.voiceDeviceIDToHex(id)
+	return true
+}
+
 // Replaces a server's pins with clones of the given hex key and fingerprint.
 Server_setPins :: proc(server: ^Server, publicKey, fingerprint: string) {
 	delete(server.pinned_server_public_key)
@@ -302,6 +327,7 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_input_gain = config.voice_input_gain,
 		voice_output_volume = config.voice_output_volume,
 		voice_bitrate = config.voice_bitrate,
+		device_id = strings.clone(config.device_id),
 	}
 	for server in config.servers {
 		append(&clone.servers, Server_clone(server))
@@ -321,6 +347,7 @@ Config_deinit :: proc(config: ^Config) {
 	delete(config.voice_output_device)
 	delete(config.voice_mode)
 	delete(config.voice_ptt_key)
+	delete(config.device_id)
 	config^ = {}
 }
 
