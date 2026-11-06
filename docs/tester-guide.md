@@ -170,6 +170,28 @@ server, and keep chatting anywhere while you are.
 - **Reconnects:** if the connection drops while you are in voice, the voice bar says
   "Rejoining voice…" and you are back in the same room once the client reconnects.
 
+### When Voice Does Not Work
+
+- **Nobody hears you, or you hear nobody:**
+  - On Linux, check that libopus is installed (the voice bar says so if it is missing).
+  - In **Settings → Voice**, check that the right microphone and speakers are chosen.
+  - Check that you are not muted or deafened.
+  - Open **Test microphone** and speak: the meter should move, and its bar should cross the
+    threshold line while you talk. If it stays under the line, move the **voice activity
+    threshold** to the left (lower) or raise the **input gain**.
+- **The start of your words is cut off:** your microphone is quiet. Raise the input gain or
+  lower the threshold until normal speech is well past the line, or use push-to-talk.
+- **Others hear your room (a fan, typing) all the time:** the threshold is too low. Move it to
+  the right until the meter stays under the line while you are silent.
+- **Choppy or robotic sound:** usually the network. Tell us your connection (Wi-Fi or cable,
+  how far from the server) and whether it happens to everyone in the room or one person.
+- **Others hear an echo of themselves:** somebody is using speakers. HayChat has no echo
+  cancellation; that person should use headphones.
+
+When you report a voice problem, include a screenshot of **Settings → Voice** (devices, mode,
+threshold and the meter while you talk), the text of the voice bar, and the client log. If you
+run the headless client, the output of its `voice-stats` command helps too.
+
 ## What to Test
 
 Use HayChat as you would use any chat app, and keep an eye on these:

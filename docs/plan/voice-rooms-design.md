@@ -16,7 +16,10 @@ eight client config keys of 5.3, and push-to-talk while the window has focus; no
 change) and H7 (harness voice commands, `voice_status` and `voice_speaking` events,
 `dev/tools/voice-check` on the shared `client/toneanalysis` package, and `dev/voice-proof.sh`
 in `dev/live-proof.sh --voice` and `--all`, both over the file sink and SDL's disk driver; no
-protocol change) are implemented; H8 follows section 7. H3 chose the cached member list for leave and
+protocol change) and H8 (the manual PipeWire test kit `dev/voice-manual-test.sh` with
+`docs/voice-manual-test.md`, the tuning of the voice defaults from its measurements, a Windows
+manual checklist and the tester guide's voice troubleshooting, in two parts: H8a hardening and
+H8b the kit; no protocol change) are implemented: H0–H8. H3 chose the cached member list for leave and
 state fan-out (4.2), and atomics for the `/status` counters (Q9). H5 seals and sends voice under
 the worker lock instead of moving `voiceSend` to the voice thread (1.4), because a reconnect
 rewrites it on the worker, and checks a per-session generation before every send and delivery.

@@ -49,7 +49,9 @@ VOICE_TICK_INTERVAL :: 5 * time.Millisecond
 // Captured frames allowed to queue up before the oldest are dropped, so a stalled voice
 // thread does not leave a lasting delay.
 VOICE_CAPTURE_MAX_BACKLOG_FRAMES :: 3
-// Decoded audio kept queued in each speaker's SDL stream.
+// Decoded audio kept queued in each speaker's SDL stream. One frame (20 ms) is less than a
+// PipeWire quantum of 1024 frames (21.3 ms): dev/voice-manual-test.sh measured 290 dropouts in
+// 6 s of tone and a 400 ms click delay with 1, and none with 2 (docs/voice-manual-test.md).
 VOICE_PLAYBACK_TARGET_FRAMES :: 2
 // The sender ID of loopback frames; real user IDs are small positive integers.
 VOICE_LOOPBACK_USER_ID :: u32(0xFFFF_FFFF)
