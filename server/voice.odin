@@ -419,7 +419,10 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 	// it). The decisions come first, before anything changes, so a refused join leaves every
 	// session where it was.
 	userID := session.authenticatedUserID
-	otherPeerIDs := make([dynamic]u32, 0, 1, context.temp_allocator)
+	// The router loop never frees the temporary allocator, so this uses the heap and frees
+	// itself; a per-join temporary allocation would grow for as long as the server runs.
+	otherPeerIDs := make([dynamic]u32, 0, 1)
+	defer delete(otherPeerIDs)
 	otherInTarget := 0
 	for otherPeerID, otherRoomID in state.peerVoiceRoom {
 		if otherPeerID == peerID {
