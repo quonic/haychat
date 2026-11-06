@@ -852,3 +852,112 @@ testVoiceSettingsViewWarnsAboutATypingPushToTalkKey :: proc(t: ^testing.T) {
 	view = buildVoiceSettingsView(&state, context.temp_allocator)
 	testing.expectf(t, view.pttNotice == VOICE_PTT_TYPING_NOTICE, "Space: %q", view.pttNotice)
 }
+
+// The frame loop redraws for voice only when the key changes: a level that rounds to the same
+// dB, or that stays below the meter's floor, is no change; speaking or transmitting is.
+@(test)
+testVoiceVisualKeyChangesOnlyWithWhatIsDrawn :: proc(t: ^testing.T) {
+	snapshot: VoiceEngineSnapshot
+	snapshot.speakerCount = 2
+	snapshot.speakers[0] = {userID = 5}
+	snapshot.speakers[1] = {userID = 9}
+	quiet := voiceVisualKey(-42.2, false, &snapshot)
+	testing.expect(
+		t,
+		voiceVisualKey(-41.8, false, &snapshot) == quiet,
+		"expected a level within the same whole dB to be no change",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-100, false, nil) == voiceVisualKey(-90, false, nil),
+		"expected levels below the meter's floor to look the same",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-40, false, &snapshot) != quiet,
+		"expected a 2 dB move of the meter to be a change",
+	)
+	testing.expect(
+		t,
+		voiceVisualKey(-42.2, true, &snapshot) != quiet,
+		"expected transmitting to be a change",
+	)
+	snapshot.speakers[1].speaking = true
+	speaking := voiceVisualKey(-42.2, false, &snapshot)
+	testing.expect(t, speaking != quiet, "expected a speaker starting to speak to be a change")
+	testing.expect(
+		t,
+		speaking.speakingUsers[1] == 9 && speaking.speakingUsers[0] == 0,
+		"expected only the speaking user in the key",
+	)
+
+	// A state with no engine has a constant key, so an idle window never redraws for voice.
+	state := testVoiceUIState(947)
+	defer State_deinit(&state)
+	testing.expect(
+		t,
+		State_voiceVisualKey(&state) == voiceVisualKey(VOICE_LEVEL_FLOOR_DB, false, nil),
+		"expected the resting key without an engine",
+	)
+}
+
+// The frame loop's voice redraw decision against a running engine: nothing to check while no
+// meter is on screen, one redraw when the microphone test's level first moves, none while it
+// stays put, and checks no more often than VOICE_REDRAW_INTERVAL_MS.
+@(test)
+testVoiceRedrawDueFollowsTheEngine :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceUIState(948)
+	defer State_deinit(&state)
+	pollAt: u64
+	testing.expect(
+		t,
+		!State_voiceRedrawDue(&state, 1000, &pollAt) && pollAt == 0,
+		"expected no voice checks without an engine",
+	)
+	template := state.voice.engineTemplate
+	template.source = {kind = .Tone, toneHz = 440}
+	template.gateMode = .VoiceActivity
+	State_setVoiceEngineTemplate(&state, template)
+	state.voice.drawnVisual = State_voiceVisualKey(&state)
+	testing.expect(t, State_startVoiceTest(&state), "expected the microphone test to start")
+
+	// Wait for the tone's level to reach the meter, as the loop would.
+	now := u64(1000)
+	changed := false
+	started := time.tick_now()
+	for !changed && time.tick_since(started) < 5 * time.Second {
+		changed = State_voiceRedrawDue(&state, now, &pollAt)
+		testing.expect(t, pollAt == now + VOICE_REDRAW_INTERVAL_MS, "expected the next check")
+		testing.expect(
+			t,
+			!State_voiceRedrawDue(&state, now + 1, &pollAt),
+			"expected no second check inside the interval",
+		)
+		now += VOICE_REDRAW_INTERVAL_MS
+		time.sleep(10 * time.Millisecond)
+	}
+	testing.expect(t, changed, "expected the tone's level to ask for a redraw")
+	// The gate opens a frame or two after the level rises, which is a change of its own. Once
+	// the frame has drawn the settled state, a steady tone looks the same on every check.
+	time.sleep(200 * time.Millisecond)
+	state.voice.drawnVisual = State_voiceVisualKey(&state)
+	testing.expect(t, state.voice.drawnVisual.transmitting, "expected the tone to open the gate")
+	for _ in 0 ..< 5 {
+		time.sleep(20 * time.Millisecond)
+		testing.expect(
+			t,
+			!State_voiceRedrawDue(&state, now, &pollAt),
+			"expected no redraw while the meter stays put",
+		)
+		now += VOICE_REDRAW_INTERVAL_MS
+	}
+	State_stopVoiceTest(&state)
+	testing.expect(
+		t,
+		!State_voiceRedrawDue(&state, now, &pollAt),
+		"expected no checks once the test stopped",
+	)
+}

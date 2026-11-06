@@ -139,6 +139,10 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 	state.windowFocused = script != nil || .INPUT_FOCUS in SDL.GetWindowFlags(window)
 	// How long until a throttled mark-read may go out (State_updateReadMarkers), or -1.
 	readMarkerWait := time.Duration(-1)
+	// Voice meters and speaking dots change with no event. While they are on screen the loop
+	// wakes every VOICE_REDRAW_INTERVAL_MS to compare what they would show with what the last
+	// frame drew, and redraws only on a change: an idle voice session renders nothing.
+	voicePollAtMS: u64
 
 	running := true
 	for running {
@@ -167,6 +171,10 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			if readMarkerWait >= 0 {
 				waitMS = min(waitMS, u64(time.duration_milliseconds(readMarkerWait)) + 1)
 			}
+			if State_voiceNeedsRedraws(&state) {
+				now := u64(SDL.GetTicks())
+				waitMS = voicePollAtMS > now ? min(waitMS, voicePollAtMS - now) : 0
+			}
 			timeout = i32(waitMS)
 		}
 
@@ -192,6 +200,9 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			redraw = true
 		}
 		if ctx.nextDeadlineMS != ui.NO_DEADLINE && u64(SDL.GetTicks()) >= ctx.nextDeadlineMS {
+			redraw = true
+		}
+		if State_voiceRedrawDue(&state, u64(SDL.GetTicks()), &voicePollAtMS) {
 			redraw = true
 		}
 		if redraw {

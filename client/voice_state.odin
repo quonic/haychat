@@ -57,6 +57,8 @@ ClientVoiceState :: struct {
 	// The config each new engine starts from (its strings owned here). The GUI uses devices
 	// and voice activity; tests and the harness swap in tone, file, silence and null.
 	engineTemplate:   VoiceEngineConfig,
+	// What the last frame showed of the engine-driven voice state (State_voiceVisualKey).
+	drawnVisual:      VoiceVisualKey,
 }
 
 VOICE_DEFAULT_ENGINE_TEMPLATE :: VoiceEngineConfig {

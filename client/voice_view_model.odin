@@ -7,6 +7,7 @@ package client
 
 import "../common"
 import "core:fmt"
+import "core:math"
 
 // One user in a room's voice. The server lists each session (device) separately (Q2); the
 // list shows the user once, with how many devices they joined from.
@@ -21,6 +22,55 @@ VoiceParticipantRow :: struct {
 	// Every device of the user is muted or deafened.
 	muted:       bool,
 	deafened:    bool,
+}
+
+// Everything on screen that the voice engines change without an event: the level meter
+// (the voice bar's, or Settings → Voice's, which show the same engine), whether that engine
+// transmits, and who speaks. Comparable with ==, so the frame loop redraws only when one of
+// them would look different (app.odin, State_voiceNeedsRedraws). Mute, deafen and the
+// participant lists arrive as events, which redraw anyway.
+VoiceVisualKey :: struct {
+	// Clamped to the meter's range and rounded to whole dB: a smaller change moves the meter
+	// by at most a pixel or two.
+	meterLevelDB:  i32,
+	transmitting:  bool,
+	// The joined engine's speakers that are speaking, in slot order (0 elsewhere).
+	speakingUsers: [VOICE_MAX_SPEAKERS]u32,
+}
+
+// The key from an engine's level and snapshot; snapshot may be nil.
+voiceVisualKey :: proc(
+	levelDB: f32,
+	transmitting: bool,
+	snapshot: ^VoiceEngineSnapshot,
+) -> VoiceVisualKey {
+	key := VoiceVisualKey {
+		meterLevelDB = i32(
+			math.round(clamp(levelDB, VOICE_METER_FLOOR_DB, VOICE_METER_CEILING_DB)),
+		),
+		transmitting = transmitting,
+	}
+	if snapshot != nil {
+		for speaker, index in snapshot.speakers[:snapshot.speakerCount] {
+			if speaker.speaking {
+				key.speakingUsers[index] = speaker.userID
+			}
+		}
+	}
+	return key
+}
+
+State_voiceVisualKey :: proc(state: ^State) -> VoiceVisualKey {
+	levelDB := VOICE_LEVEL_FLOOR_DB
+	transmitting := false
+	if engine := State_voiceMeterEngine(state); engine != nil {
+		levelDB, transmitting = VoiceEngine_inputLevel(engine)
+	}
+	if state.voice.engine == nil {
+		return voiceVisualKey(levelDB, transmitting, nil)
+	}
+	snapshot := VoiceEngine_snapshot(state.voice.engine)
+	return voiceVisualKey(levelDB, transmitting, &snapshot)
 }
 
 // Whether userID is speaking in the joined room's engine.
