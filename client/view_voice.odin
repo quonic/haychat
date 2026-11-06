@@ -16,6 +16,7 @@ VOICE_SLIDER_HEIGHT :: 22
 // While audio meters move, the frame loop redraws this often (design 5.3: about 100 ms).
 VOICE_REDRAW_INTERVAL_MS :: 100
 VOICE_SPEAKER_ICON :: "🔊"
+VOICE_INDICATOR_END_GAP :: 4
 
 // A round dot; with ring set, a ring of that color around the dot's own fill.
 @(private = "file")
@@ -37,7 +38,14 @@ viewChannelVoiceIndicator :: proc(ctx: ^ui.Context, content: ^ui.Rect, voiceUser
 	}
 	text := fmt.tprintf("%s %d", VOICE_SPEAKER_ICON, voiceUsers)
 	width := ui.textSize(ui.textGet(ctx, 0, .Regular, text)).x
-	ui.label(ctx, ui.cutRight(content, width), text, ctx.theme.fgMuted)
+	// A little room before the row's end, which the selected highlight rounds off.
+	endGap := ui.dp(ctx, VOICE_INDICATOR_END_GAP)
+	_ = ui.cutRight(content, endGap)
+	r := ui.cutRight(content, width)
+	// The count's last glyph can draw a pixel past its measured advance; a clip exactly as
+	// wide as the text shaved it off, so the clip reaches into the end gap.
+	r.w += endGap
+	ui.label(ctx, r, text, ctx.theme.fgMuted)
 	_ = ui.cutRight(content, ui.dp(ctx, 6))
 }
 
