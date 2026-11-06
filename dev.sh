@@ -92,6 +92,7 @@ Toolchain:
                         throwaway database and connects a headless client (deploy/README.md)
   shell                 interactive shell in the dev image with the repo mounted at /src
                         read-write (changes made there land in your working tree)
+                        (shell CMD [ARGS...] runs one command there instead)
 
 Environment:
   HAYCHAT_DEV_PORT          host UDP port for client connections (default 12345)
@@ -691,9 +692,16 @@ smoke_release_image() {
 
 cmd_shell() {
 	ensure_image
+	# With arguments, run them as one command without a terminal (dev/voice-manual-test.sh
+	# builds the client this way on a host without a working odin).
+	local tty_args=(-it) shell_command=(bash)
+	if [[ $# -gt 0 ]]; then
+		tty_args=()
+		shell_command=("$@")
+	fi
 	# SELinux labelling is disabled rather than relabelling the repository with :z.
-	podman run --rm -it --init --security-opt label=disable \
-		-v "$repo_dir:/src" -w /src "$(image_ref)" bash
+	podman run --rm "${tty_args[@]}" --init --security-opt label=disable \
+		-v "$repo_dir:/src" -w /src "$(image_ref)" "${shell_command[@]}"
 }
 
 main() {
