@@ -23,7 +23,7 @@
 | [development.md](development.md) | The podman dev environment (`./dev.sh`), checks, the dev pod, client dependencies, and CI |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | How to contribute: branches, code style, pull requests |
 | [AGENTS.md](../AGENTS.md), [client/AGENTS.md](../client/AGENTS.md), [server/AGENTS.md](../server/AGENTS.md) | Project conventions and component internals, written for coding agents and useful to anyone changing the code |
-| [protocol.md](protocol.md) | Transport encryption and what each protocol version added |
+| [protocol.md](protocol.md) | Transport encryption, what each protocol version added, and the end-to-end encryption primitives in `common/e2ee.odin` (not yet used on the wire) |
 | [server-networking.md](server-networking.md) | The server's threads, IPC queues, and network loop |
 | [testing-harness.md](testing-harness.md) | The headless client (`client --headless`), voice test commands, and GUI automation (`client --ui-script`) |
 | [voice-manual-test.md](voice-manual-test.md) | Measuring voice on real audio devices with PipeWire, and the Windows voice checklist |
