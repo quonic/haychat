@@ -552,6 +552,9 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 			name = "type-voice",
 			description = "talk",
 			roomType = .Voice,
+			access = .Public,
+			historyVisibility = .Full,
+			creatorJoins = true,
 		},
 	)
 	defer IPC__database_query_response_deinit(created)
@@ -647,6 +650,7 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 				name = "type-text",
 				description = "",
 				roomType = .Chat,
+				access = .Public,
 			},
 		)
 		defer IPC__database_query_response_deinit(edited)
@@ -707,7 +711,7 @@ testAdminMigrationUpgradesVersion2AgainstPostgreSQL :: proc(t: ^testing.T) {
 	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	markersBefore := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
 
-	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:3])
 	assert(
 		outcome == DatabaseMigrationOutcome{previousVersion = 2, version = 3},
 		fmt.tprintf("expected only migration 3 to run, got %v", outcome),
@@ -716,7 +720,17 @@ testAdminMigrationUpgradesVersion2AgainstPostgreSQL :: proc(t: ^testing.T) {
 		databaseMigrationTestRecorded(conn) == "1:baseline,2:read markers,3:admin",
 		"expected version 3 recorded",
 	)
-	databaseMigrationTestValidationPasses(conn)
+	// Version 3 validates as version 3; migration 4 is tested in database_room_access_test.odin.
+	{
+		query := databaseSchemaValidationQuery(DATABASE_MIGRATIONS[:3])
+		defer delete(query)
+		validationErr := databaseSchemaValidationError(conn, query)
+		defer delete(validationErr)
+		assert(
+			len(validationErr) == 0,
+			fmt.tprintf("expected version 3 to validate, got %q", validationErr),
+		)
+	}
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	assert(
 		after == before,

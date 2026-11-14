@@ -71,9 +71,36 @@ The selected server's sidebar lists its **Channels**, then **Direct Messages** (
 conversations, newest first) and **Members** (every other account, online first, then
 alphabetical). A green dot marks an account that is online.
 
-- **Rooms.** Every account is in every room. Clicking a channel opens it, with **Load older
-  messages** at the top while older history exists. A voice-only room shows "This room is voice
-  only" where the composer would be.
+- **Rooms.** The channel list shows the rooms you are in: every **Public** room, and the invite
+  rooms someone added you to. Clicking a channel opens it, with **Load older messages** at the
+  top while older history exists. A voice-only room shows "This room is voice only" where the
+  composer would be. In a room whose history is **From join** you see only what was sent after
+  you were added. See [Room access](#room-access).
+
+### Room Access
+
+Each room has an access mode, chosen when it is created:
+
+| Mode | Who is in it | Who adds people | Who removes people |
+| --- | --- | --- | --- |
+| **Public** | Every account, new ones too | Nobody needs to | Admins |
+| **Member invite** | Whoever was added | Its members and admins | Admins |
+| **Admin invite** | Whoever was added | Admins | Admins |
+
+- **Members…** in a channel's right-click menu (invite rooms, and every room for admins) opens
+  the room's **Members** page: who is in it, **Add** next to everyone else when you may add
+  people, **Remove** for admins, and **Leave room**.
+- **Invite to room…** in an account's right-click menu lists the rooms you may add people to;
+  pick one and the answer ("Added bob to #team.") shows under the composer.
+- **Leave room…** in a channel's menu leaves an invite room (it takes a second click, "Click
+  again to leave"). Public rooms cannot be left. In an Admin invite room only an admin can add
+  you back.
+- **History for new members** is set when the room is created and never changes: **From join**
+  (new members read only what is sent after they were added; someone removed and added again
+  starts over) or **Full history** (they read everything). Public rooms always show the whole
+  history.
+- Rooms are not end-to-end encrypted; access modes decide who the server lets read a room, and
+  the server and its operator can still read every room.
 - **Direct messages.** Clicking a conversation or a member opens the conversation in the main
   pane, with the person's name and online state in the header, the transcript (your own messages
   are labelled "You"), **Load older messages**, and a composer like the room one. A message that
@@ -92,9 +119,9 @@ Enter picks, and Esc or a click outside closes it (that click does nothing else)
 
 | Where | Entries |
 | --- | --- |
-| Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name; admins also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
-| Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name |
-| Voice participant in the channel list | Send message and Copy name, and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings) |
+| Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name, Members… (invite rooms; every room for admins), Leave room… (invite rooms; "Click again to leave", then you leave); admins also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
+| Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name, Invite to room… (for someone else, when you may add people to a room: it lists those rooms) |
+| Voice participant in the channel list | Send message and Copy name, Invite to room… (as above), and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings) |
 | Message | Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer), and in rooms Send message to sender for other people's messages |
 | Server button in the rail | Server settings, Retry now (while not connected), Copy address, Remove server… (the entry turns into "Click again to remove"; the second click removes it) |
 | Text fields (the composer and the Settings fields) | Cut, Copy, Paste, Select all |
@@ -184,13 +211,21 @@ server enforces are in [rooms-and-accounts.md](rooms-and-accounts.md#admin-actio
 
 In the selected server's sidebar, the **Channels** header shows **+ New room**, which opens a
 form in the main pane: a name of 1 to 64 bytes (a leading `#` is dropped), an optional
-description of up to 256 bytes, and a **Type** selector (**Text**, **Voice**, **Text and
-voice**), with **Create** or **Cancel**. Every connected client refreshes its room list, and the
-admin's client selects the new room.
+description of up to 256 bytes, a **Type** selector (**Text**, **Voice**, **Text and voice**),
+**Who can join** (**Public**, **Member invite**, **Admin invite**; see
+[Room access](#room-access)), **History for new members** (**From join** or **Full history**;
+fixed for Public rooms, which show everything), and **Join this room** (on by default; Public
+rooms always include you), with **Create** or **Cancel**. The room's members refresh their room
+list (every account for a Public room, only you for an invite room), and the admin's client
+selects the new room. With **Join this room** off, you are not a member: the room is not in your
+channel list and you do not see its messages, but its **Members** page opens at once so you can
+add people, and it stays manageable from Server settings → Admin.
 
 A room's header shows **Edit room**, which opens the same form filled in, with **Save**,
-**Cancel**, and **Delete room**; delete asks for a second click (**Confirm delete**) and removes
-the room with its history. The form warns before a save that would remove people from a room's
+**Cancel**, **Members…**, and **Delete room**; delete asks for a second click (**Confirm
+delete**) and removes the room with its history. **Who can join** can change between any two
+modes: making a room Public adds every account (the form says so), and making a Public room
+invite-only keeps everyone in it. Its history setting is shown but cannot change. The form warns before a save that would remove people from a room's
 voice, and before deleting `#general` (the server recreates it only on a start with no rooms
 left). It closes when another admin renames or deletes its room, and shows the server's answer
 when it refuses (for example a duplicate name, or "Admin permission required" when the role was
@@ -212,8 +247,9 @@ the server, you included, with an online dot, **Admin** and **Banned** badges, a
 - **Make admin**, **Remove admin** and **Unban** act at once.
 - The server's answer, or its refusal, is shown under the account it concerns.
 
-Below the accounts, every room is listed with its type, **Edit…**, **Delete…** and **Create
-room…**.
+Below the accounts, every room on the server is listed, also those you are not in (greyed, "not
+joined"), with its type, access mode and member count, **Members…**, **Edit…**, **Delete…** and
+**Create room…**.
 
 A kicked or banned client says so in its banner, with the admin's reason, and neither reconnects
 nor rejoins voice by itself.

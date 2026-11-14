@@ -14,10 +14,13 @@ import "core:strings"
 // list itself: the server's answers do (ServerCreateRoom, ServerEditRoom, ServerDeleteRoom,
 // and the ServerRoomMembershipChanged that makes every client fetch the list again).
 
+// Members (protocol 15, room_members.odin) is the room's member list, which members of a
+// non-public room open too, not only admins.
 RoomEditorMode :: enum u8 {
 	Closed,
 	Create,
 	Edit,
+	Members,
 }
 
 // The request the editor sent and is waiting on. Protocol errors do not say which request
@@ -28,6 +31,8 @@ RoomEditorPending :: enum u8 {
 	Create,
 	Save,
 	Delete,
+	// Members: an add, a removal or a leave.
+	Member,
 }
 
 RoomEditor :: struct {
@@ -38,6 +43,19 @@ RoomEditor :: struct {
 	description:   [dynamic]u8,
 	// Text, voice, or both (protocol 14). Create starts at ChatAndVoice; Edit at the room's.
 	roomType:      common.RoomType,
+	// Protocol 15. Create starts Public, From join, joining; Edit at the room's access (its
+	// history is fixed and only shown).
+	access:        common.RoomAccess,
+	history:       common.RoomHistoryVisibility,
+	creatorJoins:  bool,
+	// Members: the room's members from the last ServerRoomMembers, and the answer to the last
+	// add or removal (owned), shown above the list.
+	members:       [dynamic]int,
+	membersLoaded: bool,
+	membersLoading: bool,
+	notice:        string,
+	// The drawn column's height, for the scroll area.
+	contentH:      f32,
 	pending:       RoomEditorPending,
 	// Delete takes two clicks: the first turns the button into "Confirm delete".
 	confirmDelete: bool,
@@ -48,10 +66,11 @@ RoomEditor_deinit :: proc(editor: ^RoomEditor) {
 	delete(editor.name)
 	delete(editor.description)
 	delete(editor.error)
+	delete(editor.members)
+	delete(editor.notice)
 	editor^ = {}
 }
 
-@(private = "file")
 RoomEditor_setError :: proc(editor: ^RoomEditor, message: string) {
 	delete(editor.error)
 	editor.error = strings.clone(message)
@@ -71,6 +90,10 @@ RoomAdminRequest :: struct {
 	description: string,
 	// Create and Edit (protocol 14): Chat, Voice or ChatAndVoice.
 	roomType:    common.RoomType,
+	// Create and Edit (protocol 15); history and creatorJoins only for Create.
+	access:      common.RoomAccess,
+	history:     common.RoomHistoryVisibility,
+	creatorJoins: bool,
 }
 
 RoomAdminSendBridge :: #type proc(
@@ -92,6 +115,9 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.name,
 			request.description,
 			request.roomType,
+			request.access,
+			request.history,
+			request.creatorJoins,
 		)
 	case .Edit:
 		return ClientServerTransport_editRoom(
@@ -100,6 +126,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.name,
 			request.description,
 			request.roomType,
+			request.access,
 		)
 	case .Delete:
 		return ClientServerTransport_deleteRoom(transport, request.roomID)
@@ -162,6 +189,12 @@ State_roomNameTaken :: proc(
 			return true
 		}
 	}
+	// An admin's list also has the rooms they are not in.
+	for entry in state.server_room_caches[index].adminRooms {
+		if entry.room.id != exceptRoomID && entry.room.name == name {
+			return true
+		}
+	}
 	return false
 }
 
@@ -187,6 +220,12 @@ State_sendRoomAdminRequest :: proc(
 		}
 		if !common.roomTypeIsSupported(request.roomType) {
 			return "Choose text, voice, or both for the room."
+		}
+		if !common.roomAccessIsSupported(request.access) {
+			return "Choose who can join the room."
+		}
+		if request.kind == .Create && !common.roomHistoryVisibilityIsSupported(request.history) {
+			return "Choose what new members can read."
 		}
 		request.name = name
 		request.description = description
@@ -217,13 +256,18 @@ State_sendRoomAdminRequest :: proc(
 }
 
 // Asks the server for a new room of roomType (protocol 14; text and voice unless told
-// otherwise). The answer arrives as RoomCreated (to this session only) and as
-// RoomMembershipChanged (to everyone). Returns the reason when nothing was sent.
+// otherwise) with an access mode and history setting (protocol 15; Public, From join, and the
+// creator joining unless told otherwise). The answer arrives as RoomCreated (to this session
+// only) and as RoomMembershipChanged (to the room's members). Returns the reason when nothing
+// was sent.
 State_sendCreateRoom :: proc(
 	state: ^State,
 	serverID: int,
 	name, description: string,
 	roomType: common.RoomType = .ChatAndVoice,
+	access: common.RoomAccess = .Public,
+	history: common.RoomHistoryVisibility = .FromJoin,
+	creatorJoins := true,
 ) -> string {
 	return State_sendRoomAdminRequest(
 		state,
@@ -233,18 +277,23 @@ State_sendCreateRoom :: proc(
 			name = name,
 			description = description,
 			roomType = roomType,
+			access = access,
+			history = history,
+			creatorJoins = creatorJoins,
 		},
 	)
 }
 
-// Renames a room and replaces its description and type; the answer arrives as RoomEdited. The
-// type has no default, so an edit never changes it by accident: pass the room's own to keep it.
-// Making a room text-only ends its voice session on the server.
+// Renames a room and replaces its description, type and access mode; the answer arrives as
+// RoomEdited. Neither has a default, so an edit never changes them by accident: pass the room's
+// own to keep them. Making a room text-only ends its voice session on the server; making it
+// Public adds every account.
 State_sendEditRoom :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	name, description: string,
 	roomType: common.RoomType,
+	access: common.RoomAccess,
 ) -> string {
 	if roomID <= 0 {
 		return "No room to edit."
@@ -258,22 +307,38 @@ State_sendEditRoom :: proc(
 			name = name,
 			description = description,
 			roomType = roomType,
+			access = access,
 		},
 	)
 }
 
 // The type of a cached room, or ChatAndVoice when it is not cached.
 State_roomType :: proc(state: ^State, serverID, roomID: int) -> common.RoomType {
-	index := State_serverRoomCacheIndex(state^, serverID)
-	if index < 0 {
-		return .ChatAndVoice
-	}
-	for room in state.server_room_caches[index].rooms {
-		if room.id == roomID {
-			return room.roomType
-		}
+	if room := State_knownRoom(state, serverID, roomID); room != nil {
+		return room.roomType
 	}
 	return .ChatAndVoice
+}
+
+// A room this client knows: one it is in (the room list) or, for an admin, one from the Admin
+// section's list of every room. nil when neither has it. Borrowed from State.
+State_knownRoom :: proc(state: ^State, serverID, roomID: int) -> ^common.RoomSummary {
+	index := State_serverRoomCacheIndex(state^, serverID)
+	if index < 0 {
+		return nil
+	}
+	cache := &state.server_room_caches[index]
+	for &room in cache.rooms {
+		if room.id == roomID {
+			return &room
+		}
+	}
+	for &entry in cache.adminRooms {
+		if entry.room.id == roomID {
+			return &entry.room
+		}
+	}
+	return nil
 }
 
 // Deletes a room with its history; the answer arrives as RoomDeleted.
@@ -293,7 +358,6 @@ State_roomEditorVisible :: proc(state: ^State) -> bool {
 	)
 }
 
-@(private = "file")
 State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roomID: int) {
 	editor := &state.roomEditor
 	editor.mode = mode
@@ -302,10 +366,19 @@ State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roo
 	clear(&editor.name)
 	clear(&editor.description)
 	editor.roomType = .ChatAndVoice
+	editor.access = .Public
+	editor.history = .FromJoin
+	editor.creatorJoins = true
 	editor.pending = .None
 	editor.confirmDelete = false
 	delete(editor.error)
 	editor.error = ""
+	clear(&editor.members)
+	editor.membersLoaded = false
+	editor.membersLoading = false
+	delete(editor.notice)
+	editor.notice = ""
+	editor.contentH = 0
 }
 
 // Opens the empty "New room" form for the selected server. Only admins get it.
@@ -319,28 +392,26 @@ State_openRoomCreator :: proc(state: ^State) {
 	State_resetRoomEditor(state, .Create, serverID, 0)
 }
 
-// Opens the edit form for one of the selected server's rooms, filled with its current name
-// and description. Only admins get it.
+// Opens the edit form for one of the selected server's rooms, filled with its current name,
+// description, type and access. Only admins get it, also for a room they are not in (from the
+// Admin section's list).
 State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	serverID := state.selected_server_id
 	if !State_isServerAdmin(state, serverID) {
 		return
 	}
-	index := State_serverRoomCacheIndex(state^, serverID)
-	if index < 0 {
+	room := State_knownRoom(state, serverID, roomID)
+	if room == nil {
 		return
 	}
-	for room in state.server_room_caches[index].rooms {
-		if room.id == roomID {
-			state.selected_dm_peer_id = 0
-			State_closeServerSettings(state)
-			State_resetRoomEditor(state, .Edit, serverID, roomID)
-			append(&state.roomEditor.name, room.name)
-			append(&state.roomEditor.description, room.description)
-			state.roomEditor.roomType = room.roomType
-			return
-		}
-	}
+	state.selected_dm_peer_id = 0
+	State_closeServerSettings(state)
+	State_resetRoomEditor(state, .Edit, serverID, roomID)
+	append(&state.roomEditor.name, room.name)
+	append(&state.roomEditor.description, room.description)
+	state.roomEditor.roomType = room.roomType
+	state.roomEditor.access = roomAccessShown(room.access)
+	state.roomEditor.history = room.historyVisibility
 }
 
 // Opens the edit form with its delete armed: the next click on "Confirm delete" sends. The
@@ -378,11 +449,45 @@ State_setRoomEditorType :: proc(state: ^State, roomType: common.RoomType) {
 	editor.confirmDelete = false
 }
 
+// The access selector: Public, Member invite, or Admin invite. Nothing is sent until Create or
+// Save.
+State_setRoomEditorAccess :: proc(state: ^State, access: common.RoomAccess) {
+	editor := &state.roomEditor
+	if (editor.mode != .Create && editor.mode != .Edit) ||
+	   editor.pending != .None ||
+	   !common.roomAccessIsSupported(access) {
+		return
+	}
+	editor.access = access
+	editor.confirmDelete = false
+}
+
+// The history selector (Create only; it is fixed afterwards).
+State_setRoomEditorHistory :: proc(state: ^State, history: common.RoomHistoryVisibility) {
+	editor := &state.roomEditor
+	if editor.mode != .Create ||
+	   editor.pending != .None ||
+	   !common.roomHistoryVisibilityIsSupported(history) {
+		return
+	}
+	editor.history = history
+}
+
+// Join this room (Create only). A Public room always includes its creator, so the toggle only
+// matters for invite rooms.
+State_toggleRoomEditorCreatorJoins :: proc(state: ^State) {
+	editor := &state.roomEditor
+	if editor.mode != .Create || editor.pending != .None {
+		return
+	}
+	editor.creatorJoins = !editor.creatorJoins
+}
+
 // Create or Save. The form stays open until the server answers: RoomCreated or RoomEdited
 // closes it, a protocol error shows in it.
 State_submitRoomEditor :: proc(state: ^State) {
 	editor := &state.roomEditor
-	if editor.mode == .Closed || editor.pending != .None {
+	if (editor.mode != .Create && editor.mode != .Edit) || editor.pending != .None {
 		return
 	}
 	editor.confirmDelete = false
@@ -397,6 +502,9 @@ State_submitRoomEditor :: proc(state: ^State) {
 			name,
 			description,
 			editor.roomType,
+			editor.access,
+			editor.history,
+			editor.creatorJoins || editor.access == .Public,
 		)
 		pending = .Create
 	} else {
@@ -407,6 +515,7 @@ State_submitRoomEditor :: proc(state: ^State) {
 			name,
 			description,
 			editor.roomType,
+			editor.access,
 		)
 		pending = .Save
 	}
@@ -442,10 +551,28 @@ State_deleteRoomFromEditor :: proc(state: ^State) {
 }
 
 // The editor's view of a room that changed or went away on the server: the form closes when
-// its room was edited (by this admin or another one) or deleted.
+// its room was edited (by this admin or another one) or deleted. A Members page stays open
+// while this account may still see the room's members (an admin who left it still may).
 State_roomEditorRoomChanged :: proc(state: ^State, serverID, roomID: int) {
 	editor := &state.roomEditor
-	if editor.mode == .Edit && editor.serverID == serverID && editor.roomID == roomID {
+	if editor.serverID != serverID || editor.roomID != roomID {
+		return
+	}
+	switch editor.mode {
+	case .Edit:
+		State_closeRoomEditor(state)
+	case .Members:
+		if !roomMemberRights(state, serverID, roomID).canView {
+			State_closeRoomEditor(state)
+		}
+	case .Closed, .Create:
+	}
+}
+
+// A deleted room closes whatever the editor showed of it, its Members page included.
+State_roomEditorRoomDeleted :: proc(state: ^State, serverID, roomID: int) {
+	editor := &state.roomEditor
+	if editor.mode != .Closed && editor.serverID == serverID && editor.roomID == roomID {
 		State_closeRoomEditor(state)
 	}
 }
@@ -474,13 +601,33 @@ State_roomEditorConnectionReset :: proc(state: ^State, serverID: int) {
 // Takes ownership of room and clears the caller's copy. ServerCreateRoom goes only to the
 // session that asked, so the new room is this admin's: it joins the room list right away
 // (the refresh that RoomMembershipChanged starts replaces the list moments later) and, on the
-// selected server, becomes the selected room.
-State_roomCreated :: proc(state: ^State, serverID: int, room: ^common.RoomSummary) {
+// selected server, becomes the selected room. A room the admin created without joining it
+// (isMember false, protocol 15) goes into the Admin section's list instead, and its Members
+// page opens, so the admin can add people at once.
+State_roomCreated :: proc(
+	state: ^State,
+	serverID: int,
+	room: ^common.RoomSummary,
+	isMember := true,
+) {
 	if room.id <= 0 {
 		return
 	}
 	roomID := room.id
 	cache := State_serverRoomCache(state, serverID)
+	closeForm := state.roomEditor.mode == .Create && state.roomEditor.serverID == serverID
+	// A Public room always includes its creator.
+	if !isMember && roomAccessShown(room.access) != .Public {
+		State_noteAdminRoom(state, serverID, room)
+		if closeForm {
+			State_closeRoomEditor(state)
+		}
+		if serverID == state.selected_server_id {
+			State_openRoomMembers(state, serverID, roomID)
+		}
+		State_requestAdminRooms(state, serverID)
+		return
+	}
 	if ServerRoomCache_roomIsJoined(cache, roomID) {
 		delete(room.name)
 		delete(room.description)
@@ -488,10 +635,13 @@ State_roomCreated :: proc(state: ^State, serverID: int, room: ^common.RoomSummar
 		append(&cache.rooms, room^)
 	}
 	room^ = {}
-	if state.roomEditor.mode == .Create && state.roomEditor.serverID == serverID {
+	if closeForm {
 		State_closeRoomEditor(state)
 	}
 	if serverID == state.selected_server_id {
 		State_switchToChannel(state, serverID, roomID)
+	}
+	if cache.adminRoomsLoaded {
+		State_requestAdminRooms(state, serverID)
 	}
 }

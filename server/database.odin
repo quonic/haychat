@@ -26,8 +26,9 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 //   accounts (such as the seeded admin) can only be claimed by HAYCHAT_ADMIN_PUBLIC_KEY ($3).
 //   A nickname bound to another key is refused.
 //
-// Rooms are open: an account created by this statement joins every existing room in the same
-// statement, so it can chat as soon as it authenticates. `existing` reads the snapshot from
+// An account created by this statement joins every Public room (protocol 15) in the same
+// statement, so it can chat as soon as it authenticates; invite rooms take only whom a member
+// or an admin adds. `existing` reads the snapshot from
 // before the write, so only a brand-new nickname joins; a rename, a returning account, or a
 // claimed account keeps whatever membership it had. The membership insert reads from
 // `inserted`, which is empty when the key already owns an account or the identity is not
@@ -68,7 +69,7 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"joined AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT r.id, inserted.id FROM rooms r CROSS JOIN inserted " +
-	"WHERE NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING), " +
+	"WHERE r.access = 1 AND NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING), " +
 	"resolved AS (" +
 	"SELECT id, false AS is_rename, ''::text AS previous_nickname, nickname::text " +
 	"FROM by_key WHERE nickname = $1 OR nickname_locked OR banned " +
@@ -190,6 +191,61 @@ databaseGetBool :: proc(result: pg.Result, row: i32, column: i32) -> bool {
 	return text == "t" || text == "true"
 }
 
+// Reads a rooms.access column. Its check allows only the three modes; anything else means a
+// broken row, which reads as Admin invite, the mode that lets the fewest people in.
+databaseGetRoomAccess :: proc(result: pg.Result, row: i32, column: i32) -> common.RoomAccess {
+	value, ok := databaseGetInt(result, row, column)
+	access := common.RoomAccess(value)
+	if !ok || !common.roomAccessIsSupported(access) {
+		return .AdminInvite
+	}
+	return access
+}
+
+// Reads a rooms.history_visibility column next to its access column, as the history new
+// members read: Full for a Public room (common.roomEffectiveHistoryVisibility). A broken value
+// reads as From join, the one that shows the least.
+databaseGetRoomHistoryVisibility :: proc(
+	result: pg.Result,
+	row: i32,
+	column: i32,
+	access: common.RoomAccess,
+) -> common.RoomHistoryVisibility {
+	value, ok := databaseGetInt(result, row, column)
+	visibility := common.RoomHistoryVisibility(value)
+	if !ok || !common.roomHistoryVisibilityIsSupported(visibility) {
+		visibility = .FromJoin
+	}
+	return common.roomEffectiveHistoryVisibility(access, visibility)
+}
+
+// Reads a room's columns in the order id, name, description, room_type, access,
+// history_visibility starting at first. The strings are owned by the caller.
+databaseGetRoomSummary :: proc(
+	result: pg.Result,
+	row: i32,
+	first: i32,
+) -> (
+	room: common.RoomSummary,
+	ok: bool,
+) {
+	room.id, ok = databaseGetInt(result, row, first)
+	if !ok {
+		return {}, false
+	}
+	room.name = databaseGetText(result, row, first + 1)
+	room.description = databaseGetText(result, row, first + 2)
+	room.roomType = databaseGetRoomType(result, row, first + 3)
+	room.access = databaseGetRoomAccess(result, row, first + 4)
+	room.historyVisibility = databaseGetRoomHistoryVisibility(
+		result,
+		row,
+		first + 5,
+		room.access,
+	)
+	return room, true
+}
+
 // Reads a rooms.room_type column. The column's check allows only the supported types, so
 // anything else means a broken row; it reads as ChatAndVoice, what rooms were before types.
 databaseGetRoomType :: proc(result: pg.Result, row: i32, column: i32) -> common.RoomType {
@@ -272,7 +328,8 @@ databaseExecuteUserIdentityResolution :: proc(
 // filter on the marker.
 DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"SELECT r.id::text, r.name, r.description, " +
-	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text, r.room_type::text FROM rooms r " +
+	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text, r.room_type::text, " +
+	"r.access::text, r.history_visibility::text FROM rooms r " +
 	"JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
@@ -310,6 +367,7 @@ databaseExecuteListRoomsForUser :: proc(
 		}
 		lastRead, _ := databaseGetInt(result, row, 3)
 		unread, _ := databaseGetInt(result, row, 4)
+		access := databaseGetRoomAccess(result, row, 6)
 		append(
 			&rooms,
 			common.RoomSummary {
@@ -319,6 +377,8 @@ databaseExecuteListRoomsForUser :: proc(
 				lastReadMessageId = lastRead,
 				unreadCount = unread,
 				roomType = databaseGetRoomType(result, row, 5),
+				access = access,
+				historyVisibility = databaseGetRoomHistoryVisibility(result, row, 7, access),
 			},
 		)
 	}
@@ -434,14 +494,28 @@ databaseExecutePostRoomChatMessage :: proc(
 // Returns the membership flag on every row, with message columns NULL when the requester is
 // not a member or the page is empty. Fetches one extra row to detect older messages. The
 // sender's current nickname is joined in so clients can label history without a user lookup.
+//
+// From join history (protocol 15): in a non-public room whose history_visibility is From join,
+// a member reads only messages created after their room_members.joined_at (`since`), the same
+// cut the unread count uses, so someone removed and added again starts over from the second
+// addition. `first_visible` is the first such message's ID, found through
+// chat_messages_by_room_id_and_created_at, so a page that reaches the cut stops there instead
+// of scanning every older message; the created_at test stays as the rule itself.
 DATABASE_GET_ROOM_HISTORY_SQL ::
 	"WITH member AS (SELECT EXISTS (SELECT 1 FROM room_members " +
-	"WHERE room_id = $1 AND user_id = $2) AS ok) " +
+	"WHERE room_id = $1 AND user_id = $2) AS ok, " +
+	"(SELECT rm.joined_at FROM room_members rm JOIN rooms r ON r.id = rm.room_id " +
+	"WHERE rm.room_id = $1 AND rm.user_id = $2 AND r.access <> 1 " +
+	"AND r.history_visibility = 1) AS since), " +
+	"first_visible AS (SELECT CASE WHEN m.since IS NULL THEN 0 ELSE COALESCE((" +
+	"SELECT cm.id FROM chat_messages cm WHERE cm.room_id = $1 AND cm.created_at > m.since " +
+	"ORDER BY cm.created_at, cm.id LIMIT 1), 9223372036854775807) END AS id FROM member m) " +
 	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
-	"c.nickname FROM member m LEFT JOIN LATERAL (" +
+	"c.nickname FROM member m CROSS JOIN first_visible f LEFT JOIN LATERAL (" +
 	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname " +
 	"FROM chat_messages cm JOIN users u ON u.id = cm.sender_user_id " +
 	"WHERE m.ok AND cm.room_id = $1 AND ($3::bigint = 0 OR cm.id < $3::bigint) " +
+	"AND cm.id >= f.id AND (m.since IS NULL OR cm.created_at > m.since) " +
 	"ORDER BY cm.id DESC LIMIT $4) c ON true ORDER BY c.id DESC"
 
 databaseExecuteGetRoomHistory :: proc(
@@ -541,19 +615,25 @@ databaseExecuteCheckUserServerAdmin :: proc(
 	)
 }
 
-// Rooms are open: a new room includes every account, the creator among them, so nobody has
-// to be added by hand. The database worker runs one statement at a time on one connection,
-// so an account created concurrently either sees this room or is seen by it.
+// A new Public room ($5 = 1) includes every account, the creator among them, and stores Full
+// history whatever $6 says; an invite room includes only the creator, and only when $7
+// (creatorJoins) is true. The database worker runs one statement at a time on one connection,
+// so an account created concurrently either sees this room or is seen by it. The last column
+// says whether the creator is a member.
 DATABASE_CREATE_ROOM_SQL ::
 	"WITH created_room AS (" +
-	"INSERT INTO rooms (name, description, created_by_user_id, room_type) " +
-	"VALUES ($2, $3, $1, $4::smallint) " +
-	"RETURNING id, name, description, room_type" +
-	"), all_members AS (" +
+	"INSERT INTO rooms (name, description, created_by_user_id, room_type, access, " +
+	"history_visibility) VALUES ($2, $3, $1, $4::smallint, $5::smallint, " +
+	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END) " +
+	"RETURNING id, name, description, room_type, access, history_visibility" +
+	"), members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
-	"ON CONFLICT DO NOTHING" +
-	") SELECT id::text, name, description, room_type::text FROM created_room"
+	"WHERE created_room.access = 1 OR (users.id = $1::bigint AND $7::boolean) " +
+	"ON CONFLICT DO NOTHING RETURNING user_id" +
+	") SELECT id::text, name, description, room_type::text, access::text, " +
+	"history_visibility::text, " +
+	"EXISTS (SELECT 1 FROM members WHERE user_id = $1::bigint)::text FROM created_room"
 
 databaseExecuteCreateRoom :: proc(
 	conn: pg.Conn,
@@ -567,11 +647,20 @@ databaseExecuteCreateRoom :: proc(
 	defer delete(descriptionCString)
 	roomTypeParam := databaseIntParam(int(request.roomType))
 	defer delete(roomTypeParam)
+	accessParam := databaseIntParam(int(request.access))
+	defer delete(accessParam)
+	historyParam := databaseIntParam(int(request.historyVisibility))
+	defer delete(historyParam)
+	joinsParam := strings.clone_to_cstring(request.creatorJoins ? "true" : "false")
+	defer delete(joinsParam)
 	params := [?][^]byte {
 		transmute([^]byte)creatorUserIDParam,
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
 		transmute([^]byte)roomTypeParam,
+		transmute([^]byte)accessParam,
+		transmute([^]byte)historyParam,
+		transmute([^]byte)joinsParam,
 	}
 	result := databaseExecParams(conn, DATABASE_CREATE_ROOM_SQL, params[:])
 	if result == nil {
@@ -582,26 +671,33 @@ databaseExecuteCreateRoom :: proc(
 		return databaseResultError(&result)
 	}
 
-	roomID, roomIDOK := databaseGetInt(result, 0, 0)
-	if !roomIDOK {
+	room, roomOK := databaseGetRoomSummary(result, 0, 0)
+	if !roomOK {
 		return databaseErrorResponse(strings.clone("database returned invalid room ID"))
 	}
 	return databaseSuccess(
 		common.DatabaseRoomMutationResult {
 			changed = true,
-			room = {
-				id = roomID,
-				name = databaseGetText(result, 0, 1),
-				description = databaseGetText(result, 0, 2),
-				roomType = databaseGetRoomType(result, 0, 3),
-			},
+			room = room,
+			isMember = databaseGetBool(result, 0, 6),
 		},
 	)
 }
 
+// Switching a room to Public ($5 = 1) adds every account in the same statement; the last
+// column lists the accounts it added. Switching away from Public keeps every member. The
+// history setting never changes.
 DATABASE_EDIT_ROOM_SQL ::
-	"UPDATE rooms SET name = $2, description = $3, room_type = $4::smallint WHERE id = $1 " +
-	"RETURNING id::text, name, description, room_type::text"
+	"WITH updated AS (UPDATE rooms SET name = $2, description = $3, " +
+	"room_type = $4::smallint, access = $5::smallint WHERE id = $1 " +
+	"RETURNING id, name, description, room_type, access, history_visibility), " +
+	"added AS (INSERT INTO room_members (room_id, user_id) " +
+	"SELECT updated.id, users.id FROM updated CROSS JOIN users WHERE updated.access = 1 " +
+	"ON CONFLICT DO NOTHING RETURNING user_id) " +
+	"SELECT id::text, name, description, room_type::text, access::text, " +
+	"history_visibility::text, " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM added), '') " +
+	"FROM updated"
 
 databaseExecuteEditRoom :: proc(
 	conn: pg.Conn,
@@ -615,11 +711,14 @@ databaseExecuteEditRoom :: proc(
 	defer delete(descriptionCString)
 	roomTypeParam := databaseIntParam(int(request.roomType))
 	defer delete(roomTypeParam)
+	accessParam := databaseIntParam(int(request.access))
+	defer delete(accessParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
 		transmute([^]byte)roomTypeParam,
+		transmute([^]byte)accessParam,
 	}
 	result := databaseExecParams(conn, DATABASE_EDIT_ROOM_SQL, params[:])
 	if result == nil {
@@ -634,12 +733,11 @@ databaseExecuteEditRoom :: proc(
 		changed = pg.n_tuples(result) == 1,
 	}
 	if mutation.changed {
-		mutation.room = {
-			id          = request.roomId,
-			name        = databaseGetText(result, 0, 1),
-			description = databaseGetText(result, 0, 2),
-			roomType    = databaseGetRoomType(result, 0, 3),
-		}
+		mutation.room, _ = databaseGetRoomSummary(result, 0, 0)
+		mutation.room.id = request.roomId
+		added := databaseGetText(result, 0, 6)
+		defer delete(added)
+		mutation.addedUserIDs = databaseParseIDList(added)
 	}
 	return databaseSuccess(mutation)
 }
@@ -656,27 +754,6 @@ databaseExecuteDeleteRoom :: proc(
 		"DELETE FROM rooms WHERE id = $1 RETURNING id::text",
 		params[:],
 	)
-	if result == nil {
-		return databaseConnectionError(conn)
-	}
-	defer pg.clear(result)
-	if pg.result_status(result) != .Tuples_OK {
-		return databaseResultError(&result)
-	}
-	return databaseSuccess(common.DatabaseRoomMutationResult{changed = pg.n_tuples(result) == 1})
-}
-
-databaseExecuteRoomMemberMutation :: proc(
-	conn: pg.Conn,
-	request: common.DatabaseRoomMemberMutationRequest,
-	query: cstring,
-) -> common.DatabaseQueryResponse {
-	roomIDParam := databaseIntParam(request.roomId)
-	defer delete(roomIDParam)
-	userIDParam := databaseIntParam(request.userId)
-	defer delete(userIDParam)
-	params := [?][^]byte{transmute([^]byte)roomIDParam, transmute([^]byte)userIDParam}
-	result := databaseExecParams(conn, query, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
@@ -710,19 +787,10 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteEditRoom(conn, r)
 	case common.DatabaseDeleteRoomRequest:
 		return databaseExecuteDeleteRoom(conn, r)
-	case common.DatabaseAddRoomMemberRequest:
-		return databaseExecuteRoomMemberMutation(
-			conn,
-			common.DatabaseRoomMemberMutationRequest(r),
-			"INSERT INTO room_members (room_id, user_id) VALUES ($1, $2) " +
-			"ON CONFLICT DO NOTHING RETURNING room_id::text",
-		)
-	case common.DatabaseRemoveRoomMemberRequest:
-		return databaseExecuteRoomMemberMutation(
-			conn,
-			common.DatabaseRoomMemberMutationRequest(r),
-			"DELETE FROM room_members WHERE room_id = $1 AND user_id = $2 RETURNING room_id::text",
-		)
+	case common.DatabaseRoomMemberActionRequest:
+		return databaseExecuteRoomMemberAction(conn, r)
+	case common.DatabaseAdminRoomListRequest:
+		return databaseExecuteAdminRoomList(conn, r)
 	case common.DatabasePostDirectMessageRequest:
 		return databaseExecutePostDirectMessage(conn, r)
 	case common.DatabaseDirectHistoryRequest:

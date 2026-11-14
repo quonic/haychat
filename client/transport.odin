@@ -66,6 +66,13 @@ ClientTransportRuntimeEventKind :: enum {
 	AccountUpdated,
 	AdminActionResult,
 	SessionEnded,
+	// Room access modes (protocol 15). RoomMembersReceived carries roomID and the members in
+	// userIDs (ServerRoomMembers). AdminRoomsReceived carries every room in adminRooms
+	// (ServerAdminRooms). RoomMemberResult answers this session's add (joined true) or removal
+	// (joined false) of peerUserID in roomID, changed false when nothing moved.
+	RoomMembersReceived,
+	AdminRoomsReceived,
+	RoomMemberResult,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -120,6 +127,13 @@ ClientTransportRuntimeEvent :: struct {
 	adminAction:       common.AdminAction,
 	// SessionEnded: the admin's reason, owned (may be empty).
 	detail:            string,
+	// RoomMembersReceived: the room's members (owned). AdminRoomsReceived: every room (owned).
+	userIDs:           [dynamic]int,
+	adminRooms:        [dynamic]common.AdminRoomSummary,
+	// RoomMemberResult: whether a membership row moved. RoomCreated: isMember says whether the
+	// creator is a member of the new room (protocol 15).
+	changed:           bool,
+	isMember:          bool,
 }
 
 ClientServerTransport :: struct {
@@ -289,6 +303,8 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	}
 	delete(event.voiceParticipants)
 	delete(event.detail)
+	delete(event.userIDs)
+	AdminRoomSummaries_deinit(&event.adminRooms)
 	event^ = {}
 }
 
@@ -306,6 +322,15 @@ StoredDirectMessages_deinit :: proc(messages: ^[dynamic]common.StoredDirectMessa
 	}
 	delete(messages^)
 	messages^ = nil
+}
+
+AdminRoomSummaries_deinit :: proc(rooms: ^[dynamic]common.AdminRoomSummary) {
+	for entry in rooms {
+		delete(entry.room.name)
+		delete(entry.room.description)
+	}
+	delete(rooms^)
+	rooms^ = nil
 }
 
 UserSummaries_deinit :: proc(users: ^[dynamic]common.UserSummary) {
@@ -899,6 +924,9 @@ ClientServerTransport_createRoom :: proc(
 	name: string,
 	description: string,
 	roomType: common.RoomType,
+	access: common.RoomAccess,
+	historyVisibility: common.RoomHistoryVisibility,
+	creatorJoins: bool,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
@@ -907,6 +935,9 @@ ClientServerTransport_createRoom :: proc(
 			name = name,
 			description = description,
 			roomType = roomType,
+			access = access,
+			historyVisibility = historyVisibility,
+			creatorJoins = creatorJoins,
 		},
 	)
 }
@@ -917,6 +948,7 @@ ClientServerTransport_editRoom :: proc(
 	name: string,
 	description: string,
 	roomType: common.RoomType,
+	access: common.RoomAccess,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
@@ -926,7 +958,59 @@ ClientServerTransport_editRoom :: proc(
 			name = name,
 			description = description,
 			roomType = roomType,
+			access = access,
 		},
+	)
+}
+
+// Room members (protocol 15). The server checks who may add, remove, leave and list against
+// the room's access mode and answers a refusal with ServerProtocolError.
+ClientServerTransport_addRoomMember :: proc(
+	transport: ^ClientServerTransport,
+	roomID, userID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAddRoomMember,
+		common.ClientRoomMembershipPayload{roomId = roomID, userId = userID},
+	)
+}
+
+ClientServerTransport_removeRoomMember :: proc(
+	transport: ^ClientServerTransport,
+	roomID, userID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientRemoveRoomMember,
+		common.ClientRoomMembershipPayload{roomId = roomID, userId = userID},
+	)
+}
+
+ClientServerTransport_leaveRoom :: proc(transport: ^ClientServerTransport, roomID: int) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientLeaveRoom,
+		common.ClientLeaveRoomPayload{roomId = roomID},
+	)
+}
+
+ClientServerTransport_fetchRoomMembers :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientFetchRoomMembers,
+		common.ClientFetchRoomMembersPayload{roomId = roomID},
+	)
+}
+
+ClientServerTransport_adminListRooms :: proc(transport: ^ClientServerTransport) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminListRooms,
+		common.ClientAdminListRoomsPayload{},
 	)
 }
 
@@ -1088,6 +1172,65 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				serverID = transport.serverID,
 				roomID = payload.roomId,
 				joined = payload.joined,
+				peerUserID = payload.userId,
+			},
+			true
+
+	case .ServerRoomMemberAdded, .ServerRoomMemberRemoved:
+		payload: common.ServerRoomMutationPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			delete(payload.room.name)
+			delete(payload.room.description)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room member payload",
+				),
+				true
+		}
+		delete(payload.room.name)
+		delete(payload.room.description)
+		return ClientTransportRuntimeEvent {
+				kind = .RoomMemberResult,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				peerUserID = payload.userId,
+				joined = innerPacket.messageType == .ServerRoomMemberAdded,
+				changed = payload.changed,
+			},
+			true
+
+	case .ServerRoomMembers:
+		payload: common.ServerRoomMembersPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.roomId <= 0 {
+			common.ServerRoomMembersPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room members payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoomMembersReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				userIDs = payload.userIds,
+			},
+			true
+
+	case .ServerAdminRooms:
+		payload: common.ServerAdminRoomsPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerAdminRoomsPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid admin room list payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .AdminRoomsReceived,
+				serverID = transport.serverID,
+				adminRooms = payload.rooms,
 			},
 			true
 
@@ -1127,6 +1270,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				serverID = transport.serverID,
 				roomID = payload.room.id,
 				room = payload.room,
+				isMember = payload.isMember,
 			},
 			true
 

@@ -85,6 +85,10 @@ ContextMenuState :: struct {
 	selectionText:   string,
 	// "Remove server…" was clicked once: the entry now reads "Click again to remove".
 	confirmRemove:   bool,
+	// "Leave room…" was clicked once: the entry now reads "Click again to leave".
+	confirmLeave:    bool,
+	// "Invite to room…" was clicked: the user menu lists the rooms to invite to instead.
+	inviteOpen:      bool,
 	// Each menu opened gets a new number, so the toolkit treats it as a new menu (no carried
 	// highlight, and the press that opened it never counts as a press outside it).
 	serial:          int,
@@ -134,6 +138,8 @@ State_closeContextMenu :: proc(state: ^State) {
 	menu.selectionText = ""
 	menu.target = nil
 	menu.confirmRemove = false
+	menu.confirmLeave = false
+	menu.inviteOpen = false
 }
 
 // What a menu entry does. The values name the entries' widget IDs (idOf("menu-item", value)),
@@ -169,7 +175,16 @@ ContextMenuAction :: enum u8 {
 	MuteForMe,
 	UnmuteForMe,
 	Volume,
+	// Room access modes (protocol 15).
+	RoomMembers,
+	LeaveRoom,
+	ConfirmLeaveRoom,
+	InviteToRoom,
+	InviteToRoomPick, // One per room: ContextMenuEntry.roomID names it
 }
+
+// Item keys of the Invite to room… list: this plus the room ID, above every action's value.
+CONTEXT_MENU_ROOM_KEY_BASE :: 1 << 20
 
 ContextMenuEntry :: struct {
 	action:          ContextMenuAction,
@@ -180,6 +195,8 @@ ContextMenuEntry :: struct {
 	// A slider row instead of an item (Volume): value is the current linear volume.
 	slider:          bool,
 	value:           f32,
+	// InviteToRoomPick: the room.
+	roomID:          int,
 }
 
 // What the view knows that State does not: a right-clicked text input's facts (from the ui
@@ -196,6 +213,7 @@ ContextMenuView :: struct {
 }
 
 CONTEXT_MENU_CONFIRM_REMOVE_TEXT :: "Click again to remove"
+CONTEXT_MENU_CONFIRM_LEAVE_TEXT :: "Click again to leave"
 
 // Marking a conversation read whose newest messages are not loaded sends this as the message
 // ID: the server clamps a mark-read to the conversation's newest message.
@@ -250,6 +268,31 @@ buildContextMenu :: proc(
 			&entries,
 			ContextMenuEntry{action = .CopyRoomName, label = "Copy room name", enabled = true},
 		)
+		// Protocol 15: the Members page for members of a non-public room and admins, and
+		// Leave room for members of a non-public room (it takes a second click).
+		rights := roomMemberRights(state, target.serverID, target.roomID)
+		if rights.canView {
+			append(
+				&entries,
+				ContextMenuEntry {
+					action = .RoomMembers,
+					label = "Members…",
+					enabled = connected,
+				},
+			)
+		}
+		if rights.canLeave {
+			append(
+				&entries,
+				ContextMenuEntry {
+					action = menu.confirmLeave ? .ConfirmLeaveRoom : .LeaveRoom,
+					label = menu.confirmLeave ? CONTEXT_MENU_CONFIRM_LEAVE_TEXT : "Leave room…",
+					enabled = connected,
+					danger = true,
+					separatorBefore = true,
+				},
+			)
+		}
 		// The server checks the role on every request; this only decides what is offered.
 		if State_isServerAdmin(state, target.serverID) &&
 		   target.serverID == state.selected_server_id {
@@ -273,17 +316,29 @@ buildContextMenu :: proc(
 		if !contextMenuUserKnown(state, target.serverID, target.peerUserID) {
 			return
 		}
+		if menu.inviteOpen {
+			contextMenuAppendInviteEntries(state, &entries, target.serverID, allocator)
+			break
+		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, target.peerUserID)
 		contextMenuAppendAdminEntries(state, &entries, target.serverID, target.peerUserID)
 	case MemberMenuTarget:
 		if !contextMenuUserKnown(state, target.serverID, target.userID) {
 			return
 		}
+		if menu.inviteOpen {
+			contextMenuAppendInviteEntries(state, &entries, target.serverID, allocator)
+			break
+		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, target.userID)
 		contextMenuAppendAdminEntries(state, &entries, target.serverID, target.userID)
 	case VoiceParticipantMenuTarget:
 		if _, found := contextMenuVoiceParticipant(state, target); !found {
 			return
+		}
+		if menu.inviteOpen {
+			contextMenuAppendInviteEntries(state, &entries, target.serverID, allocator)
+			break
 		}
 		selfUserID := State_selfUserID(state, target.serverID)
 		append(
@@ -295,6 +350,7 @@ buildContextMenu :: proc(
 			},
 			ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true},
 		)
+		contextMenuAppendInviteEntry(state, &entries, target.serverID, target.userID)
 		// Volume and Mute for me (issue 47) are local: only this client plays them differently.
 		if target.userID != selfUserID {
 			volume, muted := State_userVoice(state, target.serverID, target.userID)
@@ -373,6 +429,10 @@ buildContextMenu :: proc(
 		)
 		if !found {
 			return
+		}
+		if menu.inviteOpen {
+			contextMenuAppendInviteEntries(state, &entries, target.serverID, allocator)
+			break
 		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, message.senderID)
 		contextMenuAppendAdminEntries(state, &entries, target.serverID, message.senderID)
@@ -464,6 +524,51 @@ contextMenuAppendUserEntries :: proc(
 		)
 	}
 	append(entries, ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true})
+	contextMenuAppendInviteEntry(state, entries, serverID, userID)
+}
+
+// Invite to room… (protocol 15) for someone else, when this account may add people to a room.
+@(private = "file")
+contextMenuAppendInviteEntry :: proc(
+	state: ^State,
+	entries: ^[dynamic]ContextMenuEntry,
+	serverID, userID: int,
+) {
+	if userID == State_selfUserID(state, serverID) {
+		return
+	}
+	if len(State_invitableRooms(state, serverID)) == 0 {
+		return
+	}
+	append(
+		entries,
+		ContextMenuEntry {
+			action = .InviteToRoom,
+			label = "Invite to room…",
+			enabled = State_isServerConnected(state, serverID),
+		},
+	)
+}
+
+// The Invite to room… list: one entry per room this account may add people to.
+@(private = "file")
+contextMenuAppendInviteEntries :: proc(
+	state: ^State,
+	entries: ^[dynamic]ContextMenuEntry,
+	serverID: int,
+	allocator := context.temp_allocator,
+) {
+	for room in State_invitableRooms(state, serverID, allocator) {
+		append(
+			entries,
+			ContextMenuEntry {
+				action = .InviteToRoomPick,
+				label = fmt.aprintf("Invite to #%s", room.name, allocator = allocator),
+				enabled = true,
+				roomID = room.id,
+			},
+		)
+	}
 }
 
 // Rename…, Make admin / Remove admin, Kick… and Ban… / Unban for an admin of serverID, for an
@@ -619,6 +724,7 @@ State_runContextMenuAction :: proc(
 	state: ^State,
 	action: ContextMenuAction,
 	now: time.Tick,
+	roomID := 0,
 ) -> (
 	effect: ContextMenuEffect,
 ) {
@@ -646,11 +752,37 @@ State_runContextMenuAction :: proc(
 			if target.serverID == state.selected_server_id {
 				State_openRoomEditorForDelete(state, target.roomID)
 			}
+		case .RoomMembers:
+			State_openRoomMembers(state, target.serverID, target.roomID)
+		case .LeaveRoom:
+			menu.confirmLeave = true
+			effect.keepOpen = true
+		case .ConfirmLeaveRoom:
+			if errorMessage := State_leaveRoom(state, target.serverID, target.roomID);
+			   len(errorMessage) > 0 {
+				State_setChatStatus(state, errorMessage)
+			}
 		}
 	case ConversationMenuTarget:
-		effect = State_runUserMenuAction(state, action, target.serverID, target.peerUserID, "", now)
+		effect = State_runUserMenuAction(
+			state,
+			action,
+			target.serverID,
+			target.peerUserID,
+			"",
+			now,
+			roomID,
+		)
 	case MemberMenuTarget:
-		effect = State_runUserMenuAction(state, action, target.serverID, target.userID, "", now)
+		effect = State_runUserMenuAction(
+			state,
+			action,
+			target.serverID,
+			target.userID,
+			"",
+			now,
+			roomID,
+		)
 	case VoiceParticipantMenuTarget:
 		participant, _ := contextMenuVoiceParticipant(state, target)
 		effect = State_runUserMenuAction(
@@ -660,6 +792,7 @@ State_runContextMenuAction :: proc(
 			target.userID,
 			participant.nickname,
 			now,
+			roomID,
 		)
 	case SenderMenuTarget:
 		message, found := contextMenuMessage(
@@ -677,6 +810,7 @@ State_runContextMenuAction :: proc(
 				message.senderID,
 				message.senderNickname,
 				now,
+				roomID,
 			)
 		}
 	case MessageMenuTarget:
@@ -755,10 +889,19 @@ State_runUserMenuAction :: proc(
 	serverID, userID: int,
 	fallbackName: string,
 	now: time.Tick,
+	roomID := 0,
 ) -> (
 	effect: ContextMenuEffect,
 ) {
 	#partial switch action {
+	case .InviteToRoom:
+		state.contextMenu.inviteOpen = true
+		effect.keepOpen = true
+	case .InviteToRoomPick:
+		if errorMessage := State_addRoomMember(state, serverID, roomID, userID);
+		   len(errorMessage) > 0 {
+			State_setChatStatus(state, errorMessage)
+		}
 	case .SendMessage:
 		State_openDirectConversation(state, serverID, userID)
 	case .MarkRead:

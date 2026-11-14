@@ -10,17 +10,22 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --admin | --voice | --ui | --sql | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --voice | --ui | --sql |
+#                          test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
-#                   harness smoke test, the admin proof, the two-process voice proof, the GUI
-#                   automation smoke test, the server SQL proofs, and the startup failure exit
-#                   check (what CI and `./dev.sh ci` run)
+#                   harness smoke test, the admin proof, the room access proof, the two-process
+#                   voice proof, the GUI automation smoke test, the server SQL proofs, and the
+#                   startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
 #   --admin         only the admin proof between two headless clients (dev/admin-proof.sh):
 #                   a role change pushed live, a locked rename that survives a reconnect, a
 #                   kick, a ban that refuses the next sign-in and its unban, and a room made
 #                   text-only that ends its voice and refuses joins
+#   --access        only the room access proof between three headless clients
+#                   (dev/room-access-proof.sh): Admin invite, Member invite with From join and
+#                   Full history, leaving, removing, and a room the admin creates without
+#                   joining it and still manages
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -62,10 +67,14 @@ SQL_TESTS+=,server.testAdminIdentityLockAndBanAgainstPostgreSQL
 SQL_TESTS+=,server.testAdminActionStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomTypeStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testAdminMigrationUpgradesVersion2AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomAccessModeRulesAgainstPostgreSQL
+SQL_TESTS+=,server.testRoomAccessFromJoinHistoryAgainstPostgreSQL
+SQL_TESTS+=,server.testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
 run_admin=false
+run_access=false
 run_voice=false
 run_ui=false
 run_sql=false
@@ -76,6 +85,7 @@ if [[ $# -gt 0 ]]; then
 			tests=("$STARTUP_AUTH_TEST" "$ROOM_CHAT_TEST" "$DIRECT_MESSAGE_TEST" "$VOICE_TEST")
 			run_harness=true
 			run_admin=true
+			run_access=true
 			run_voice=true
 			run_ui=true
 			run_sql=true
@@ -88,6 +98,10 @@ if [[ $# -gt 0 ]]; then
 		--admin)
 			tests=()
 			run_admin=true
+			;;
+		--access)
+			tests=()
+			run_access=true
 			;;
 		--voice)
 			tests=()
@@ -229,6 +243,13 @@ fi
 if [[ "$run_ui" == true ]]; then
 	echo "==> [live] running dev/ui-smoke.sh"
 	dev/ui-smoke.sh 127.0.0.1:12345
+fi
+
+# After the GUI proof, so the Admin section it scrolls through lists only the rooms the earlier
+# proofs made.
+if [[ "$run_access" == true ]]; then
+	echo "==> [live] running dev/room-access-proof.sh"
+	dev/room-access-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

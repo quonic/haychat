@@ -38,14 +38,48 @@ way to move an account to another device or key.
 
 ## Rooms
 
-Rooms are open: every account is a member of every room. A nickname that connects for the first
-time joins every existing room, and a new room includes every account, so testers can chat as
-soon as they connect. Membership is still stored per account in `room_members`, which the server
-checks for every send and history request; that is where private rooms will plug in. Accounts
-that already existed keep the memberships they had, so a `ClientRemoveRoomMember` lasts across
-reconnects. The client has no member management: `ClientAddRoomMember` and
-`ClientRemoveRoomMember` stay in the protocol for private rooms later, and the client never sends
-them.
+Membership is stored per account in `room_members`, which the server checks for every send,
+history request, member list and voice join. Who may join a room is its **access mode**
+(`rooms.access`, protocol 15, schema migration 4), chosen by the admin who creates it:
+
+| Mode | Who is a member | Who can add members | Who can remove members |
+| --- | --- | --- | --- |
+| **Public** | Every account: new accounts join it, and a new Public room includes everyone | Nobody needs to (adds are refused: "Public rooms include every account") | Admins |
+| **Member invite** | Whoever has been added | Any member, and admins | Admins |
+| **Admin invite** | Whoever has been added | Admins only | Admins |
+
+- In every mode, any member can leave a non-public room (`ClientLeaveRoom`); a Public room
+  cannot be left ("You cannot leave a public room"). Admins can rename, edit and delete every
+  room, also one they are not in.
+- Members cannot remove each other, also in a Member invite room: the server would have to
+  remember who invited whom.
+- A non-public room is listed only for its members; anyone else is refused its history and its
+  member list ("Not a room member"), whether or not it exists. Members and admins can fetch a
+  room's members (`ClientFetchRoomMembers`).
+- **Creating a room without joining it.** An admin who clears **Join this room** creates an
+  invite room they are not a member of: they do not see its messages, but they still add and
+  remove its members, edit and delete it, through the Admin section's list of every room
+  (`ClientAdminListRooms`). A Public room always includes its creator.
+- **Changing the mode.** An admin may switch a room between any two modes. Switching to Public
+  adds every account in the same statement (each is told it joined); switching away from Public
+  keeps every member.
+- Every rule is checked in the database, in the same statement as the change, so a role or
+  membership change between a check and the write cannot slip through.
+- Existing rooms became Public with full history when the server migrated to schema 4, so
+  nothing changed for them. An account removed from a Public room stays removed across
+  reconnects; only accounts created later join it automatically.
+
+**History for new members** (`rooms.history_visibility`) is chosen at creation and fixed
+afterwards:
+
+- **From join** (the form's default for invite rooms): a member reads only messages sent after
+  they were added (`room_members.joined_at`); the server serves no older history to them, and
+  their unread count starts at the same point. Someone who is removed and later added again
+  counts as new from the second addition: a removal or leave also drops their read marker for
+  the room.
+- **Full history:** a new member reads everything the room has.
+- **Public rooms always have full history**, whatever was chosen. A room created Public stores
+  Full; a From join room that is made Public shows everyone everything while it stays Public.
 
 **The default room.** On startup, a server whose `rooms` table is empty creates `#general`
 ("General discussion", room ID `1` on a new database), makes every existing account a member, and
@@ -115,7 +149,10 @@ newest message.
 
 ## Known Limitations
 
-- Private rooms are not implemented: every account joins every room.
+- Rooms are not end-to-end encrypted: access modes decide whom the server lets read a room,
+  not who can technically read it (the server and its operator can read every room).
+- The Admin section's room list does not refresh by itself when another admin changes a room
+  the admin is not in; reopening Server settings fetches it again.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
 - Account registration (`ClientRegister`) is not implemented.

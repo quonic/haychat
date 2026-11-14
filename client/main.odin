@@ -29,11 +29,16 @@ RoomCache :: struct {
 }
 
 ServerRoomCache :: struct {
-	serverID:     int,
-	rooms:        [dynamic]common.RoomSummary,
-	roomCaches:   [dynamic]RoomCache,
-	roomsLoaded:  bool,
-	roomsLoading: bool,
+	serverID:          int,
+	rooms:             [dynamic]common.RoomSummary,
+	roomCaches:        [dynamic]RoomCache,
+	roomsLoaded:       bool,
+	roomsLoading:      bool,
+	// Every room on the server, joined or not, for an admin (ServerAdminRooms, protocol 15;
+	// room_members.odin). Only the Admin section and room management read it.
+	adminRooms:        [dynamic]common.AdminRoomSummary,
+	adminRoomsLoaded:  bool,
+	adminRoomsLoading: bool,
 }
 
 State :: struct {

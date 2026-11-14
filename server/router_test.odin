@@ -1759,8 +1759,13 @@ testOpenRoomSQLJoinsEveryAccount :: proc(t: ^testing.T) {
 		"expected only accounts created by the statement to be auto-joined",
 	)
 	assert(
-		strings.contains(DATABASE_CREATE_ROOM_SQL, "CROSS JOIN users"),
-		"expected room creation to add every account as a member",
+		strings.contains(DATABASE_RESOLVE_USER_IDENTITY_SQL, "WHERE r.access = 1 AND"),
+		"expected new accounts to join only Public rooms (protocol 15)",
+	)
+	assert(
+		strings.contains(DATABASE_CREATE_ROOM_SQL, "CROSS JOIN users") &&
+		strings.contains(DATABASE_CREATE_ROOM_SQL, "WHERE created_room.access = 1 OR"),
+		"expected a Public room to include every account and an invite room only its creator",
 	)
 	assert(
 		strings.contains(DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, "nickname FROM users") &&
@@ -1804,6 +1809,9 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 			name = "lobby",
 			description = "hang out",
 			roomType = .ChatAndVoice,
+			access = .Public,
+			historyVisibility = .FromJoin,
+			creatorJoins = true,
 		},
 	)
 	assert(sealOK, "expected encrypted create room packet sealing to succeed")
@@ -1837,8 +1845,11 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 	assert(
 		createRequest.creatorUserId == 42 &&
 		createRequest.name == "lobby" &&
-		createRequest.roomType == .ChatAndVoice,
-		"expected the create request to carry the creator, room name and type",
+		createRequest.roomType == .ChatAndVoice &&
+		createRequest.access == .Public &&
+		createRequest.historyVisibility == .FromJoin &&
+		createRequest.creatorJoins,
+		"expected the create request to carry the creator, room name, type and access",
 	)
 	MainRouterState_handleDatabaseResult(
 		&h.pm,
@@ -1848,10 +1859,13 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 			success = true,
 			result = common.DatabaseRoomMutationResult {
 				changed = true,
+				isMember = true,
 				room = {
 					id = 9,
 					name = strings.clone("lobby"),
 					description = strings.clone("hang out"),
+					access = .Public,
+					historyVisibility = .Full,
 				},
 			},
 		},
@@ -1887,9 +1901,14 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 				cbor.unmarshal(innerPacket.payload, &payload) == nil,
 				"expected membership payload decode to succeed",
 			)
+			expectedUserID := send.peerId == adminPeerID ? 42 : 43
 			assert(
-				payload.roomId == 9 && payload.joined,
-				"expected the membership notice to announce the new room as joined",
+				payload.roomId == 9 && payload.joined && payload.userId == expectedUserID,
+				fmt.tprintf(
+					"expected the membership notice to say %d joined room 9, got %v",
+					expectedUserID,
+					payload,
+				),
 			)
 			if send.peerId == adminPeerID {
 				adminSawMembership = true

@@ -617,17 +617,25 @@ testVoiceRouterEvictsOnMemberRemovalAndRoomDeletion :: proc(t: ^testing.T) {
 	h.state.pendingDatabaseRequests[removeID] = PendingDBRequest {
 		requestID    = removeID,
 		peerID       = 1,
-		requestType  = .RemoveRoomMember,
-		roomID       = 7,
-		targetUserID = 43,
+		requestType      = .RoomMemberAction,
+		roomID           = 7,
+		targetUserID     = 43,
+		roomMemberAction = .Remove,
 	}
+	remainingMembers := make([dynamic]int)
+	append(&remainingMembers, 42)
 	MainRouterState_handleDatabaseResult(
 		&h.pm,
 		&h.state,
 		removeID,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabaseRoomMutationResult{changed = true},
+			result = common.DatabaseRoomMemberActionResult {
+				outcome = .Applied,
+				changed = true,
+				access = .AdminInvite,
+				memberUserIDs = remainingMembers,
+			},
 		},
 	)
 	drain = routerVoiceTestDrain(&h, clients[:])

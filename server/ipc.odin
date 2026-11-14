@@ -307,8 +307,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseRoomHistoryRequest,
 	     common.DatabaseUserServerAdminRequest,
 	     common.DatabaseDeleteRoomRequest,
-	     common.DatabaseAddRoomMemberRequest,
-	     common.DatabaseRemoveRoomMemberRequest,
+	     common.DatabaseRoomMemberActionRequest,
+	     common.DatabaseAdminRoomListRequest,
 	     common.DatabaseDirectHistoryRequest,
 	     common.DatabaseDirectConversationListRequest,
 	     common.DatabaseUserDirectoryRequest,
@@ -353,6 +353,15 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseRoomMutationResult:
 		delete(r.room.name)
 		delete(r.room.description)
+		delete(r.addedUserIDs)
+	case common.DatabaseRoomMemberActionResult:
+		delete(r.memberUserIDs)
+	case common.DatabaseAdminRoomListResult:
+		for entry in r.rooms {
+			delete(entry.room.name)
+			delete(entry.room.description)
+		}
+		delete(r.rooms)
 	case common.DatabasePostDirectMessageResult:
 		IPC__stored_direct_message_deinit(r.storedMessage)
 	case common.DatabaseDirectHistoryResult:

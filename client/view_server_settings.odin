@@ -452,6 +452,9 @@ viewServerSettings :: proc(
 	case .CreateRoom:
 		State_openRoomCreator(state)
 		return
+	case .RoomMembers:
+		State_openRoomMembers(state, serverID, adminAction.roomID)
+		return
 	}
 	switch {
 	case closeClicked:
@@ -481,6 +484,7 @@ AdminSectionActionKind :: enum u8 {
 	EditRoom,
 	DeleteRoom,
 	CreateRoom,
+	RoomMembers,
 }
 
 @(private = "file")
@@ -678,13 +682,19 @@ viewAdminSection :: proc(
 	}
 	for room in view.rooms {
 		line := ui.cutTop(column, rowH)
+		membersControl := AdminControl{label = "Members…", enabled = true}
 		editControl := AdminControl{label = "Edit…", enabled = true}
 		deleteControl := AdminControl{label = "Delete…", enabled = true}
 		buttonsW :=
+			ui.textSize(ui.textGet(ctx, 0, .Regular, membersControl.label)).x +
 			ui.textSize(ui.textGet(ctx, 0, .Regular, editControl.label)).x +
 			ui.textSize(ui.textGet(ctx, 0, .Regular, deleteControl.label)).x +
-			ui.dp(ctx, ctx.theme.padding * 6 + PANEL_PADDING)
+			ui.dp(ctx, ctx.theme.padding * 9 + PANEL_PADDING * 2)
 		buttons := ui.cutRight(&line, buttonsW)
+		membersID := ui.idOf("admin-room-members", serverID, room.roomID)
+		if adminButton(ctx, &buttons, membersID, membersControl) {
+			action = {kind = .RoomMembers, roomID = room.roomID}
+		}
 		editID := ui.idOf("admin-room-edit", serverID, room.roomID)
 		if adminButton(ctx, &buttons, editID, editControl) {
 			action = {kind = .EditRoom, roomID = room.roomID}
@@ -706,7 +716,12 @@ viewAdminSection :: proc(
 		{
 			ui.pushClip(ctx, line)
 			defer ui.popClip(ctx)
-			ui.label(ctx, line, room.label, ctx.theme.fg)
+			ui.label(ctx, line, room.label, room.isMember ? ctx.theme.fg : ctx.theme.fgMuted)
+		}
+		if len(room.accessLabel) > 0 {
+			accessLine := ui.cutTop(column, ui.lineHeight(ctx))
+			_ = ui.cutLeft(&accessLine, ui.dp(ctx, 12))
+			ui.label(ctx, accessLine, room.accessLabel, ctx.theme.fgMuted)
 		}
 		_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING * 2))
 	}

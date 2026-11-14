@@ -82,21 +82,26 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | --- | --- |
 | `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `isAdmin` (the server's admin flag for this session, see `connected`; `account_updated` changes it), `nicknameLocked` (an admin set and locked the name), `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
 | `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
-| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount","roomType"}]`, see [Read State](#read-state); `roomType` is 1 text, 2 voice, 3 both). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
+| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount","roomType","access","historyVisibility"}]`, see [Read State](#read-state); `roomType` is 1 text, 2 voice, 3 both; `access` 1 Public, 2 Member invite, 3 Admin invite; `historyVisibility` 1 From join, 2 Full, always 2 for a Public room). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
 | `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
-| `room-create text\|voice\|both NAME [DESCRIPTION...]` | Admins: asks the server for a new room of that type (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. The result echoes `serverID`, `roomID` (0), `name`, `description`, and `roomType` (1 text, 2 voice, 3 both) once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room), and every connected client, yours included, gets `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
-| `room-edit ROOM_ID text\|voice\|both NAME [DESCRIPTION...]` | Admins: sets the room's type, renames it, and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. Making a room `text` first removes everyone from its voice (`voice_left` "voice is disabled in this room"). A voice-only room refuses `send` (`protocol_error "Chat is disabled in this room"`), a text-only room refuses `voice-join` (`voice_join_rejected` "voice is disabled in this room"). |
+| `room-create TYPE[,OPTION...] NAME [DESCRIPTION...]` | Admins: asks the server for a new room of type TYPE (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. Comma-separated options after the type (protocol 15): the access mode `public` (the default), `member-invite` or `admin-invite`; the history `from-join` (the default) or `full` (ignored for a Public room, which always has full history); and `no-join` to create an invite room you are not a member of. For example `room-create both,admin-invite,full,no-join ops`. The result echoes `serverID`, `roomID` (0), `name`, `description`, `roomType` (1 text, 2 voice, 3 both), `access`, `historyVisibility` and `creatorJoins` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room unless you did not join it), and its members (every connected client for a Public room, only you for an invite room you joined) get `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
+| `room-edit ROOM_ID TYPE[,ACCESS] NAME [DESCRIPTION...]` | Admins: sets the room's type and, with `public`, `member-invite` or `admin-invite` after it, its access mode (without one it keeps the mode the client knows; the history cannot change), renames it, and replaces its description (an empty one without DESCRIPTION). Making a room Public adds every account, and each gets `room_membership` with `joined` true. Every member, you included, gets `room_edited`. Making a room `text` first removes everyone from its voice (`voice_left` "voice is disabled in this room"). A voice-only room refuses `send` (`protocol_error "Chat is disabled in this room"`), a text-only room refuses `voice-join` (`voice_join_rejected` "voice is disabled in this room"). |
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
 | `admin-role USER_ID on\|off` | Admins: grants or revokes the server's admin role (protocol 14). `ok` (`serverID`, `userID`) means the request went out. The answer is `admin_result`; every connected client gets `user_updated`, and the target's sessions get `account_updated` with the new `isAdmin`, without reconnecting. Refusals are `protocol_error`: `Admin permission required`, `Unknown user`, `You cannot remove your own admin role`, `The server must keep at least one admin`, `Unban the account before making it an admin`. |
 | `admin-rename USER_ID lock\|unlock [NAME...]` | Admins: renames the account to NAME (3 to 32 bytes; without NAME only the lock changes) and locks or unlocks its name. While locked, the account signs in under that name whatever its client asks for, so the target's next `connected` carries it with `"nicknameLocked":true`. The answer is `admin_result`, then `user_updated` everywhere, `account_updated` on the target's sessions, and `presence` with the new name while it is online. A name another account holds is `protocol_error "That name is already in use on this server"`. Renaming yourself is allowed. |
 | `admin-kick USER_ID [REASON...]` | Admins: ends every session of the account. The target's sessions print `session_ended` (`kind` `kicked`) and do not reconnect by themselves; `reconnect` signs in again. Refused for yourself (`You cannot kick yourself`) and for another admin (`Remove the admin role before kicking an admin`). Reasons are at most 256 bytes; a longer one is an `ok:false` result. |
 | `admin-ban USER_ID [REASON...]` | Admins: bans the account and ends its sessions (`session_ended` `kind` `banned`); its next sign-in is refused with `connect_failed` `failure` `Banned` (`detail` "This account is banned from this server", plus ": REASON" when there is one). Everyone gets `user_updated` with `"isBanned":true`. Refused for yourself (`You cannot ban yourself`) and for another admin (`Remove the admin role before banning an admin`), like a kick. Sign-up is open, so a banned person can still connect with a new identity key as a new account. |
 | `admin-unban USER_ID` | Admins: lifts a ban; everyone gets `user_updated` with `"isBanned":false`, and the account can sign in again. |
+| `room-members ROOM_ID` | Members of the room, and admins (members or not), get its members as a `room_members` event (protocol 15); anyone else gets `protocol_error "Not a room member"`, whether or not the room exists. `ok` (`serverID`, `roomID`) means the request went out. |
+| `room-add ROOM_ID USER_ID` | Adds the account to the room as its mode allows: admins in Member invite and Admin invite rooms, members in Member invite rooms. The answer is `room_member_result` (`changed` false when the account already was a member); the account, the room's members and you get `room_membership` with that `userID`. Refusals are `protocol_error`: `Public rooms include every account`, `Admin permission required` (an Admin invite room), `Not a room member`, `Room not found` (admins only; others get `Not a room member`), `Unknown user`. The harness checks none of this itself, so the server's refusal shows. |
+| `room-remove ROOM_ID USER_ID` | Admins: removes the account from the room, in every mode. The answer is `room_member_result` with `added` false; the account (whose client drops the room), the remaining members and you get `room_membership` with `joined` false. Removing someone who is not a member changes nothing. Anyone else gets `protocol_error "Admin permission required"`. |
+| `room-leave ROOM_ID` | Leaves a non-public room you are a member of; the answer is `room_membership` with `joined` false and your `userID` (also to the room's other members), and the room leaves your `rooms`. Refusals: `You cannot leave a public room`, `Not a room member`. |
+| `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. |
 | `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
 | `voice-join ROOM_ID` | Joins the room's voice on the selected server (leaving any other first). `ok` (`serverID`, `roomID`, `status` `joining`) means the request went out; the join completes with `voice_participants` carrying `"recipientJoined":true`, then `voice_status` `joined` once the engine runs. A refusal arrives as `voice_join_rejected`. See [Voice](#voice). |
 | `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice, and the `status` after it). A file sink is closed, complete, at this point. |
@@ -134,10 +139,13 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0,"roomType":3}]}` (`roomType`: 1 text, 2 voice, 3 both) |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
 | `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
-| `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true}` |
-| `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"...","roomType":3}` |
+| `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true,"userID":4}` (`userID` joined or left the room: your own account, or another member of a room you are in, or the target of your own add or removal) |
+| `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":false}` (`isMember` is only set on `room_created`) |
+| `room_members` | `{"event":"room_members","serverID":1,"roomID":2,"userIDs":[3,4]}` (the answer to `room-members`) |
+| `room_member_result` | `{"event":"room_member_result","serverID":1,"roomID":2,"userID":4,"added":true,"changed":true}` (the answer to your own `room-add`, or with `added` false to `room-remove`) |
+| `admin_rooms` | `{"event":"admin_rooms","serverID":1,"rooms":[{"room":{"id":2,"name":"ops",...,"access":3,"historyVisibility":1},"isMember":false,"memberCount":2}]}` (the answer to `admin-rooms`, by name) |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
-| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3}` (the answer to your own `room-create`) |
+| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":true}` (the answer to your own `room-create`; `isMember` false for an invite room created with `no-join`) |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
@@ -509,8 +517,18 @@ B's `reconnect` gets `connect_failed` `Banned`) and unbans it; A creates a room 
 voice, B joins its voice, A makes it text-only, and B must print `voice_left` and have its next
 `voice-join` refused, both with "voice is disabled in this room".
 
-`./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
-account joins every existing room, and the server creates `#general` (room 1) on an empty
+`./dev.sh live --access` runs `dev/room-access-proof.sh` (also part of `--all`, after the GUI
+proof) with three headless clients: admin A creates an Admin invite room and adds B, and C (not
+a member) does not list it and is refused its history and its members, while B's add of C is
+refused; in a Member invite room with From join history B invites C, who reads B's later message
+but not A's earlier one, and B cannot remove C; in a Full history room C reads A's earlier
+message; B leaves the Admin invite room and C cannot leave `#general`; A removes C, who is then
+refused the history; and A creates an Admin invite room with `no-join`, finds it only in
+`admin-rooms`, adds B, lists its members, is refused its history, makes it Public (C is added
+and reads the whole history) and deletes it.
+
+`./dev.sh live --all` runs it after the live client tests. Step 2 relies on Public rooms: a new
+account joins every Public room, and the server creates `#general` (room 1) on an empty
 database before it reports readiness, which `dev/live-proof.sh` checks before any client
 connects. If the sender is not a member of room 1 the server answers with
 `protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
@@ -630,13 +648,19 @@ admins, below Voice. Its widget IDs take the server ID and then the user or room
 | --- | --- |
 | `admin-member-rename`, `admin-member-role`, `admin-member-kick`, `admin-member-ban` | A member's Rename…, Make admin / Remove admin, Kick… and Ban… / Unban. A disabled one draws no widget (its tooltip says why), so `click-id` on it fails. |
 | `admin-confirm-text`, `admin-confirm-lock`, `admin-confirm`, `admin-confirm-cancel` | The open confirmation under that member: its field (the new name, or the reason), Lock name (rename only, on by default), and the Rename / Kick / Ban and Cancel buttons. |
-| `admin-room-edit`, `admin-room-delete` | A room's Edit… (the room form) and Delete… (the room form with **Confirm delete** armed). |
+| `admin-room-members`, `admin-room-edit`, `admin-room-delete` | A room's Members… (its Members page), Edit… (the room form) and Delete… (the room form with **Confirm delete** armed). The list holds every room on the server (`ClientAdminListRooms`, protocol 15), also those the admin is not in. |
 | `admin-room-create` | Create room… (server ID only). |
 
 The server's answer to the last request ("Waiting for the server…", its sentence, or its
 refusal) is drawn under the row of the account it concerns (for example "Banned bob"), or
 under the section's note when that account is not listed. The room form's type selector is
-`click-id room-type N`, N the protocol's type number (1 text, 2 voice, 3 text and voice); a
+`click-id room-type N`, N the protocol's type number (1 text, 2 voice, 3 text and voice); its
+access selector `click-id room-access N` (1 Public, 2 Member invite, 3 Admin invite), its
+history selector `click-id room-history N` (1 From join, 2 Full; Create only), **Join this
+room** `click-id room-editor-join`, and in an edit **Members…** `click-id room-editor-members`.
+A room's Members page (from **Members…**) has `room-members-add` and `room-members-remove`
+(server, room and user ID), `room-members-leave`, `room-members-edit` and `room-members-close`
+(server and room ID). A
 voice-only room shows "This room is voice only" where the composer would be, and a text-only
 room has no **Join voice**. When an admin locked your name, Server settings shows it under
 "Name on this server" with "Set by an admin of this server." instead of the field.
@@ -719,9 +743,13 @@ which holds the volume slider, and mutes him for herself. Last, she edits her ro
 only in the room form ("This room is voice only" replaces the composer) and then to text only:
 **Join voice** disappears from its header and its menu, and bob's `rooms` must list it with
 `"roomType":1`. She opens Server settings from the rail button's menu and scrolls to the
-Admin section's rooms list. alice takes twenty-eight screenshots on the way (`01-…` to `27-…`
-and `06b-server-settings.bmp`); the script prints the paths of the 27 numbered `NN-*.bmp`
-ones and checks that all 27 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+Admin section's rooms list. Then the access modes (protocol 15): she creates an Admin invite
+room from the form (`room-access 3`), invites bob from his member menu (**Invite to room…** →
+**Invite to #room**, "Added bob to #room." under the composer), and opens the room's Members
+page from its channel menu, which offers **Leave room**; bob must get `room_membership` for it
+and list it with `"access":3`. alice takes thirty screenshots on the way (`01-…` to `29-…` and
+`06b-server-settings.bmp`); the script prints the paths of the 29 numbered `NN-*.bmp` ones and
+checks that all 29 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
 otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

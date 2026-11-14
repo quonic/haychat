@@ -187,6 +187,9 @@ testRoomUnreadRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 			creatorUserId = alice,
 			name = "read-new",
 			roomType = .ChatAndVoice,
+			access = .Public,
+			historyVisibility = .Full,
+			creatorJoins = true,
 		},
 	)
 	defer IPC__database_query_response_deinit(created)
@@ -274,6 +277,9 @@ testMarkRoomReadMovesForwardClampsAndChecksMembershipAgainstPostgreSQL :: proc(t
 			creatorUserId = alice,
 			name = "mark-other",
 			roomType = .ChatAndVoice,
+			access = .Public,
+			historyVisibility = .Full,
+			creatorJoins = true,
 		},
 	)
 	defer IPC__database_query_response_deinit(other)

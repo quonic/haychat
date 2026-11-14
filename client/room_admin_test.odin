@@ -15,6 +15,9 @@ roomAdminSendBridgeTestRoomID: int
 roomAdminSendBridgeTestName: string
 roomAdminSendBridgeTestDescription: string
 roomAdminSendBridgeTestRoomType: common.RoomType
+roomAdminSendBridgeTestAccess: common.RoomAccess
+roomAdminSendBridgeTestHistory: common.RoomHistoryVisibility
+roomAdminSendBridgeTestCreatorJoins: bool
 roomAdminSendBridgeTestReturnValue: bool
 
 roomAdminSendBridgeTestStub :: proc(
@@ -25,6 +28,9 @@ roomAdminSendBridgeTestStub :: proc(
 	roomAdminSendBridgeTestKind = request.kind
 	roomAdminSendBridgeTestRoomID = request.roomID
 	roomAdminSendBridgeTestRoomType = request.roomType
+	roomAdminSendBridgeTestAccess = request.access
+	roomAdminSendBridgeTestHistory = request.history
+	roomAdminSendBridgeTestCreatorJoins = request.creatorJoins
 	delete(roomAdminSendBridgeTestName)
 	delete(roomAdminSendBridgeTestDescription)
 	roomAdminSendBridgeTestName = strings.clone(request.name)
@@ -73,7 +79,8 @@ testApplyConnectedAs :: proc(state: ^State, serverID, userID: int, isAdmin: bool
 }
 
 // Applies a room list of (id, name) pairs: general is room 1, the others are named. A room
-// without a supported type is listed for text and voice, as the server lists rooms.
+// without a supported type is listed for text and voice, and one without an access mode as
+// Public, as the server lists rooms.
 testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSummary) {
 	event := ClientTransportRuntimeEvent {
 		kind     = .RoomListReceived,
@@ -84,6 +91,11 @@ testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSu
 		if !common.roomTypeIsSupported(roomType) {
 			roomType = .ChatAndVoice
 		}
+		// Rooms without an access mode are Public, as every room was before protocol 15.
+		access := room.access
+		if !common.roomAccessIsSupported(access) {
+			access = .Public
+		}
 		append(
 			&event.rooms,
 			common.RoomSummary {
@@ -91,6 +103,11 @@ testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSu
 				name = strings.clone(room.name),
 				description = strings.clone(room.description),
 				roomType = roomType,
+				access = access,
+				historyVisibility = common.roomEffectiveHistoryVisibility(
+					access,
+					room.historyVisibility,
+				),
 			},
 		)
 	}
@@ -603,7 +620,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-create","serverID":908,"roomID":0,"name":"random",` +
-		`"description":"Off topic, mostly","roomType":2}` +
+		`"description":"Off topic, mostly","roomType":2,"access":1,"historyVisibility":1,` +
+		`"creatorJoins":true}` +
 		"\n",
 		"the room-create result",
 	)
@@ -620,8 +638,9 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"ok":false,"cmd":"room-create","error":"usage: room-create text|voice|both NAME ` +
-		`[DESCRIPTION...]"}` +
+		`{"ok":false,"cmd":"room-create","error":"usage: room-create ` +
+		`TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join] ` +
+		`NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-create type error",
 	)
@@ -640,7 +659,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-edit","serverID":908,"roomID":1,"name":"lobby",` +
-		`"description":"","roomType":1}` +
+		`"description":"","roomType":1,"access":1,"historyVisibility":0,"creatorJoins":false}` +
 		"\n",
 		"the room-edit result",
 	)
@@ -656,8 +675,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"ok":false,"cmd":"room-edit","error":"usage: room-edit ROOM_ID text|voice|both ` +
-		`NAME [DESCRIPTION...]"}` +
+		`{"ok":false,"cmd":"room-edit","error":"usage: room-edit ROOM_ID ` +
+		`TYPE[,public|member-invite|admin-invite] NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-edit usage error",
 	)
@@ -667,7 +686,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-delete","serverID":908,"roomID":1,"name":"",` +
-		`"description":"","roomType":0}` +
+		`"description":"","roomType":0,"access":0,"historyVisibility":0,"creatorJoins":false}` +
 		"\n",
 		"the room-delete result",
 	)
@@ -702,7 +721,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_created","serverID":908,"roomID":9,"name":"random",` +
-		`"description":"Off","roomType":2}` +
+		`"description":"Off","roomType":2,"access":0,"historyVisibility":0,"isMember":false}` +
 		"\n",
 		"the room_created event",
 	)
@@ -718,7 +737,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		strings.contains(
 			output,
-			`{"usage":"room-create text|voice|both NAME [DESCRIPTION...]",`,
+			`{"usage":"room-create TYPE[,public|member-invite|admin-invite]` +
+			`[,from-join|full][,no-join] NAME [DESCRIPTION...]",`,
 		) &&
 		strings.contains(output, `"room_created"`),
 		fmt.tprintf("expected help to list the room commands and events, got %s", output),

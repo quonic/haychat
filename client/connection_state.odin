@@ -150,6 +150,7 @@ State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: 
 	State_resetDirectRequests(state, serverID, reloadHistory)
 	State_resetReadMarkerSends(state, serverID)
 	State_roomEditorConnectionReset(state, serverID)
+	State_roomMembersConnectionReset(state, serverID)
 	State_adminConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
