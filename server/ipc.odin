@@ -22,13 +22,6 @@ Message :: union {
 	NetworkVoiceSessionOpen,
 	NetworkVoiceRoute,
 	NetworkVoiceReset,
-	// Web admin messages
-	AdminQueryStatus,
-	AdminQueryStatusResponse,
-	AdminGetPeers,
-	AdminGetPeersResponse,
-	AdminGetLogs,
-	AdminGetLogsResponse,
 	// Database messages
 	DatabaseQuery,
 	DatabaseQueryResult,
@@ -123,43 +116,6 @@ NetworkVoiceRoute :: struct {
 // attach old keys or routes to peers of the new service, whose peer IDs start over.
 NetworkVoiceReset :: struct {}
 
-AdminQueryStatus :: struct {}
-
-AdminQueryStatusResponse :: struct {
-	uptime:                 i64,
-	connectedPeers:         int,
-	networkRunning:         bool,
-	webAdminRunning:        bool,
-	databaseRunning:        bool,
-	networkRestartPending:  bool,
-	webAdminRestartPending: bool,
-	databaseRestartPending: bool,
-	shutdownRequested:      bool,
-	// Voice (Q9): rooms and participants from the router, which owns the control plane, and the
-	// counters the network thread's relay last published (voiceRelayPublishedStats).
-	voiceRooms:             int,
-	voiceParticipants:      int,
-	voiceRelay:             VoiceRelayStats,
-}
-
-AdminPeerInfo :: struct {
-	peerId:          u32,
-	isAuthenticated: bool,
-	authenticatedId: int,
-}
-
-AdminGetPeers :: struct {}
-
-AdminGetPeersResponse :: struct {
-	peers: []AdminPeerInfo,
-}
-
-AdminGetLogs :: struct {}
-
-AdminGetLogsResponse :: struct {
-	logs: []string,
-}
-
 DatabaseQuery :: struct {
 	request_id: u64,
 	request:    common.DatabaseQueryRequest,
@@ -195,7 +151,6 @@ IPC_Endpoint_Kind :: enum {
 	Unknown,
 	Main,
 	Network,
-	WebAdmin,
 	Database,
 }
 
@@ -308,7 +263,6 @@ IPC_State :: struct {
 	endpoints:      [dynamic]IPC_Endpoint,
 	main_queue:     IPC_Message_Queue,
 	network_queue:  IPC_Message_Queue,
-	webadmin_queue: IPC_Message_Queue,
 	database_queue: IPC_Message_Queue,
 	// One condition per queue, signalled on every push, so a consumer can sleep in
 	// IPC_Client_wait instead of polling. All of them pair with state_mutex.
@@ -327,7 +281,6 @@ IPC__state_init :: proc() {
 	ipcState.endpoints = make([dynamic]IPC_Endpoint)
 	IPC_Ring_init(&ipcState.main_queue)
 	IPC_Ring_init(&ipcState.network_queue)
-	IPC_Ring_init(&ipcState.webadmin_queue)
 	IPC_Ring_init(&ipcState.database_queue)
 }
 
@@ -437,13 +390,6 @@ IPC__message_deinit :: proc(msg: ^Message) {
 		common.VoiceReceiveState_wipe(&m.receive)
 	case NetworkVoiceRoute:
 		delete(m.members)
-	case AdminGetPeersResponse:
-		delete(m.peers)
-	case AdminGetLogsResponse:
-		for i in 0 ..< len(m.logs) {
-			delete(m.logs[i])
-		}
-		delete(m.logs)
 	case DatabaseQuery:
 		IPC__database_query_request_deinit(m.request)
 	case DatabaseQueryResult:
@@ -478,7 +424,6 @@ IPC__state_deinit :: proc() {
 	delete(ipcState.endpoints)
 	IPC__queue_deinit(&ipcState.main_queue)
 	IPC__queue_deinit(&ipcState.network_queue)
-	IPC__queue_deinit(&ipcState.webadmin_queue)
 	IPC__queue_deinit(&ipcState.database_queue)
 	ipcState.initialized = false
 }
@@ -486,9 +431,6 @@ IPC__state_deinit :: proc() {
 IPC__endpoint_kind_from_socket :: proc(socket_name: string) -> IPC_Endpoint_Kind {
 	if strings.contains(socket_name, "network") {
 		return .Network
-	}
-	if strings.contains(socket_name, "webadmin") {
-		return .WebAdmin
 	}
 	if strings.contains(socket_name, "database") {
 		return .Database
@@ -514,8 +456,6 @@ IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^IPC_Message_Queue {
 		return &ipcState.main_queue
 	case .Network:
 		return &ipcState.network_queue
-	case .WebAdmin:
-		return &ipcState.webadmin_queue
 	case .Database:
 		return &ipcState.database_queue
 	case .Unknown:
@@ -538,8 +478,6 @@ IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_K
 		     NetworkVoiceRoute,
 		     NetworkVoiceReset:
 			return .Network
-		case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
-			return .WebAdmin
 		case DatabaseQuery:
 			return .Database
 		case:
@@ -547,8 +485,6 @@ IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_K
 			return .Unknown
 		}
 	case .Network:
-		return .Main
-	case .WebAdmin:
 		return .Main
 	case .Database:
 		return .Main

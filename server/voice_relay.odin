@@ -390,8 +390,8 @@ VoiceRelay_handleDatagram :: proc(relay: ^VoiceRelay, peerId: u32, datagram: []u
 	}
 }
 
-// The relay counters the network thread last published, read by the main thread for web admin
-// /status (Q9). Each field is written and read with atomics: the counters are independent, so a
+// The relay counters the network thread last published, read by the main thread for its
+// periodic [Status] log line (Q9, status.odin). Each field is written and read with atomics: the counters are independent, so a
 // reader may see one pass's datagramsIn with the previous pass's drops, which is fine for
 // counters and costs no lock or IPC message on the voice path.
 voiceRelayPublishedStats: VoiceRelayStats

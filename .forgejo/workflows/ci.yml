@@ -14,10 +14,6 @@ jobs:
   linux:
     name: Checks, tests, and live proofs
     runs-on: ubuntu-latest
-    # The live proof needs io_uring in the job container, which the default seccomp profile
-    # and SELinux container_t both block. forgejo-runner ignores --security-opt in workflow
-    # container options, so the runner's config.yml must set them; see README "Continuous
-    # Integration". dev/live-proof.sh prints the sandbox it got before starting the server.
     container:
       image: registry.fedoraproject.org/fedora:44
     services:

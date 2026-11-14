@@ -133,15 +133,6 @@ networkDrainIPC :: proc(
 			fmt.eprintfln("[Network] Received unexpected message type from main process")
 			IPC__message_deinit(&ipcMsg)
 
-		case AdminQueryStatus,
-		     AdminQueryStatusResponse,
-		     AdminGetPeers,
-		     AdminGetPeersResponse,
-		     AdminGetLogs,
-		     AdminGetLogsResponse:
-			fmt.eprintfln("[Network] Received admin message, ignoring")
-			IPC__message_deinit(&ipcMsg)
-
 		case DatabaseQuery,
 		     DatabaseQueryResult,
 		     DatabaseError,

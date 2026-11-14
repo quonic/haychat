@@ -33,16 +33,11 @@ testIPCClientSendFromMainRoutesEachMessageToItsService :: proc(t: ^testing.T) {
 
 	mainFd := IPC_Main_init()
 	networkFd := ipcRouteTestEndpoint("ipc_route_test_network")
-	webAdminFd := ipcRouteTestEndpoint("ipc_route_test_webadmin")
 	databaseFd := ipcRouteTestEndpoint("ipc_route_test_database")
 
 	assert(
 		IPC_Client_send(mainFd, NetworkDisconnectPeer{peerId = 7}) == nil,
 		"expected Main to route NetworkDisconnectPeer, got an error",
-	)
-	assert(
-		IPC_Client_send(mainFd, AdminQueryStatusResponse{connectedPeers = 3}) == nil,
-		"expected Main to route AdminQueryStatusResponse, got an error",
 	)
 	assert(
 		IPC_Client_send(
@@ -65,15 +60,6 @@ testIPCClientSendFromMainRoutesEachMessageToItsService :: proc(t: ^testing.T) {
 	)
 	IPC__message_deinit(&networkMsg)
 
-	webAdminMsg, webAdminErr := IPC_Client_poll(webAdminFd)
-	assert(webAdminErr == nil, "expected the web admin queue to hold the status response")
-	status, isStatus := webAdminMsg.(AdminQueryStatusResponse)
-	assert(
-		isStatus && status.connectedPeers == 3,
-		"expected AdminQueryStatusResponse{connectedPeers = 3} on the web admin queue",
-	)
-	IPC__message_deinit(&webAdminMsg)
-
 	databaseMsg, databaseErr := IPC_Client_poll(databaseFd)
 	assert(databaseErr == nil, "expected the database queue to hold the query")
 	query, isQuery := databaseMsg.(DatabaseQuery)
@@ -82,7 +68,6 @@ testIPCClientSendFromMainRoutesEachMessageToItsService :: proc(t: ^testing.T) {
 
 	// Every message went to exactly one queue.
 	assert(ipcRouteTestQueueIsEmpty(networkFd), "expected the network queue to be empty")
-	assert(ipcRouteTestQueueIsEmpty(webAdminFd), "expected the web admin queue to be empty")
 	assert(ipcRouteTestQueueIsEmpty(databaseFd), "expected the database queue to be empty")
 	assert(ipcRouteTestQueueIsEmpty(mainFd), "expected the main queue to be empty")
 }

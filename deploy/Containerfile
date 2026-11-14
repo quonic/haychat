@@ -43,8 +43,6 @@ FROM registry.fedoraproject.org/fedora-minimal:44
 
 # The server's direct dependencies (objdump NEEDED above) are libpq.so.5 and libenet.so.7
 # beside glibc; the packages pull in libpq's own dependencies (OpenSSL, Kerberos, LDAP).
-# fedora-minimal already has curl, which health checks and `podman exec ... curl` calls to
-# the web admin use (it listens on 127.0.0.1 inside the container only).
 RUN microdnf install -y --setopt=install_weak_deps=0 libpq enet \
 	&& microdnf clean all \
 	&& rm -rf /var/cache/libdnf5 /var/lib/dnf
@@ -66,7 +64,6 @@ RUN ! /lib64/ld-linux-x86-64.so.2 --list /usr/local/bin/haychat-server | grep -F
 
 ENV HAYCHAT_LISTEN_ADDR=0.0.0.0 \
 	HAYCHAT_LISTEN_PORT=12345 \
-	HAYCHAT_WEB_ADMIN_PORT=8080 \
 	HAYCHAT_LOG_DIR=/var/lib/haychat/logs \
 	HAYCHAT_FILE_STORAGE_PATH=/var/lib/haychat/storage \
 	HAYCHAT_SERVER_IDENTITY_FILE=/var/lib/haychat/storage/server_identity.json

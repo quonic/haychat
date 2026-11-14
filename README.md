@@ -105,9 +105,8 @@ Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a
 | --- | --- |
 | `./dev.sh up` | Build the server and start the pod |
 | `./dev.sh restart` | Rebuild the server from the working tree and restart it. A compile error leaves the running server up |
-| `./dev.sh status` | Containers, ports, and the web admin token |
+| `./dev.sh status` | Containers and ports |
 | `./dev.sh logs [-f]` | Server output |
-| `./dev.sh admin [-X METHOD] PATH` | Call a web admin route with the token filled in, e.g. `./dev.sh admin /peers` |
 | `./dev.sh seed` | Load the `server/sql/auth_bootstrap.sql` fixture (see Seeded test identities) |
 | `./dev.sh psql [ARGS...]` | psql on the dev database |
 | `./dev.sh client [PROFILE]` | Build the client and open its window on your Wayland or X11 display. Each profile has its own config and identity key. A new profile's display name is the profile name and its server is the dev server, so two profiles are two users. Profiles created before the first-run screen existed have no server: enter `localhost` once on that screen |
@@ -117,16 +116,15 @@ Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a
 | `./dev.sh shell` | Interactive shell in the dev image with the repository mounted read-write at `/src`, for ad-hoc `odin` commands; `./dev.sh shell CMD [ARGS...]` runs one command there without a terminal |
 | `./dev.sh image [--pull]` | Rebuild the dev image; `--pull` also refreshes the Fedora base image |
 
-The server keeps its logs, storage, identity key, and web admin token in the `haychat-dev-state` volume, and PostgreSQL keeps its data in `haychat-dev-pgdata`. Client profiles live in `haychat-dev-client-<profile>` volumes. A client running on the host (`odin run client`) also reaches the dev server, at its default `localhost:12345`.
+The server keeps its logs, storage, and identity key in the `haychat-dev-state` volume, and PostgreSQL keeps its data in `haychat-dev-pgdata`. Client profiles live in `haychat-dev-client-<profile>` volumes. A client running on the host (`odin run client`) also reaches the dev server, at its default `localhost:12345`.
 
-The server's web admin uses `core:nbio`, which needs io_uring on Linux. Podman's default seccomp profile blocks io_uring, and so does the SELinux `container_t` policy on SELinux hosts. Containers that run the server therefore use podman's default seccomp profile plus the three io_uring syscalls (generated under `$XDG_RUNTIME_DIR/haychat-dev/`), and run without SELinux confinement. They remain rootless.
+Containers that run the server or the tests use podman's default seccomp profile and SELinux label. Only `./dev.sh client` (for the host display socket) and `./dev.sh shell` (for the read-write repository mount) run without SELinux confinement. All of them are rootless.
 
 `./dev.sh` reads these environment variables:
 
 - `HAYCHAT_DEV_PORT`: host UDP port published for client connections (default `12345`)
 - `HAYCHAT_DEV_ENV_FILE`: server overrides file (default `.env`, see below)
 - `HAYCHAT_DEV_POSTGRES_IMAGE`: PostgreSQL image (default `docker.io/library/postgres:17`)
-- `HAYCHAT_DEV_SECCOMP`: seccomp profile for containers that run the server, replacing the generated one (for example `unconfined`)
 - `HAYCHAT_SERVER_READY_TIMEOUT_SECS`: how long to wait for the server to report readiness. `./dev.sh up` and `restart` default to `120`; `dev/live-proof.sh` defaults to `60`, and `./dev.sh live` and `ci` pass the variable through to it when it is set
 
 #### Without Containers
@@ -159,7 +157,6 @@ Network and paths (set by `./dev.sh` in the pod):
 
 - `HAYCHAT_LISTEN_ADDR` (default `0.0.0.0`)
 - `HAYCHAT_LISTEN_PORT` (default `12345`)
-- `HAYCHAT_WEB_ADMIN_PORT` (default `8080`)
 - `HAYCHAT_LOG_DIR` (default `./logs`)
 - `HAYCHAT_FILE_STORAGE_PATH` (default `./storage`)
 - `HAYCHAT_SERVER_IDENTITY_FILE` (default `$HAYCHAT_FILE_STORAGE_PATH/server_identity.json`)
@@ -177,7 +174,6 @@ Runtime (configurable in `.env`):
 - `HAYCHAT_MAX_STORAGE_CAPACITY` (bytes, default `1073741824`)
 - `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`: fixed server identity. When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE`.
 - `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key.
-- `HAYCHAT_WEB_ADMIN_TOKEN`: bearer token (at least 32 characters) for the protected web admin routes. When unset, the server generates one and stores it at `$HAYCHAT_FILE_STORAGE_PATH/web_admin_token` with `0600` permissions.
 
 Voice (configurable in `.env`). Voice rides the same UDP port as chat (`HAYCHAT_LISTEN_PORT`, ENet channel 2), so it needs no extra port or firewall rule. Every room can carry voice. The server relays each voice frame to the room's other participants on its network thread and never stores or logs audio. Out-of-range values are clamped to the range; a value that does not parse uses the default.
 
@@ -188,20 +184,15 @@ Voice (configurable in `.env`). Voice rides the same UDP port as chat (`HAYCHAT_
 
 The server owns its schema and migrates it at startup, before it reports readiness. The migrations (`server/database_migrations.odin`) are numbered, applied in order inside one transaction under an advisory lock (so two servers never migrate one database at once), and recorded in the `schema_migrations` table. An empty database gets every migration; a database created before migrations existed (v0.1.0-rc1 and earlier dev databases) is adopted as version 1 with every row kept; an older version gets the missing migrations. Migration 1 is the v0.1.0-rc1 schema; migration 2 adds the read markers behind unread counts (see "Unread counts" under Rooms). The server never drops data: a database whose recorded version is newer than the server knows (a downgrade), or whose tables it does not recognise, stops startup with a `[Startup]` error and exit status 1 and is left exactly as it was (see deploy/README.md "Upgrades" for restoring a backup or resetting a throwaway database). The configured role must be able to create and alter objects in its schema (`public`). When the `rooms` table is empty, startup then creates `#general` (see Rooms). `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
 
-### Web Admin
+### Server Status Log
 
-The web admin listens on `127.0.0.1` only, so in the dev pod it is reachable from inside the pod but not from the host. `GET /status` is an unauthenticated health probe. Besides the service states it reports voice counters, one `key=value` per line: `voice_rooms` and `voice_participants` (rooms with an active voice session and the sessions in them), `voice_frames_in` (datagrams received on the voice channel), `voice_frames_relayed` (frames that passed every check), `voice_frames_out` (datagrams sent to recipients), `voice_send_failures`, and one `voice_drops_<reason>` line per drop reason (`unknown_peer`, `not_in_room`, `rate_limited`, `malformed`, `replayed`, `too_old`, `bad_tag`, `inactive`, `malformed_frame`, `wrong_room`, `muted`, `oversize`, `bad_duration`). The frame counters start over when the network service restarts. A dropped datagram never disconnects anyone. `GET /peers`, `GET /logs`, `POST /shutdown`, and `POST /restart` require the bearer token. `./dev.sh admin` calls a route from inside the pod with the token filled in:
+The server has no admin port or HTTP endpoint. Every five minutes (`SERVER_STATUS_LOG_INTERVAL` in `server/status.odin`), and once when it shuts down, the main thread logs one line of space-separated `key=value` pairs, for example:
 
-```sh
-./dev.sh admin /peers
-./dev.sh admin -X POST /restart
+```text
+[Status] uptime=300 connected_peers=2 network_running=true database_running=true network_restart_pending=false database_restart_pending=false shutdown_requested=false voice_rooms=1 voice_participants=2 voice_frames_in=15000 voice_frames_relayed=14990 voice_frames_out=14990 voice_send_failures=0 voice_drops_unknown_peer=0 ...
 ```
 
-For a server running directly on the host:
-
-```sh
-curl -H "Authorization: Bearer $(cat storage/web_admin_token)" http://localhost:8080/peers
-```
+`uptime` is in seconds. The `*_running` and `*_restart_pending` pairs are the supervisor's view of the network and database service threads. The voice pairs are `voice_rooms` and `voice_participants` (rooms with an active voice session and the sessions in them), `voice_frames_in` (datagrams received on the voice channel), `voice_frames_relayed` (frames that passed every check), `voice_frames_out` (datagrams sent to recipients), `voice_send_failures`, and one `voice_drops_<reason>` pair per drop reason (`unknown_peer`, `not_in_room`, `rate_limited`, `malformed`, `replayed`, `too_old`, `bad_tag`, `inactive`, `malformed_frame`, `wrong_room`, `muted`, `oversize`, `bad_duration`). The frame counters start over when the network service restarts. A dropped datagram never disconnects anyone. In the dev pod, read the latest line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`.
 
 ### Typical Workflow
 
@@ -253,7 +244,7 @@ An upgraded server starts with nothing unread: migration 2 gives every existing 
 
 ### Deployment
 
-[deploy/README.md](deploy/README.md) covers running HayChat for real users: the production server image (`deploy/Containerfile`, a multi-stage build that uses the same package script and Odin pins as the dev image), systemd quadlet units that run it next to PostgreSQL (`deploy/quadlet/`), the io_uring container settings, first-time setup (`deploy/sql/make-admin.sql` gives your account the admin role), the firewall, backups, and upgrades.
+[deploy/README.md](deploy/README.md) covers running HayChat for real users: the production server image (`deploy/Containerfile`, a multi-stage build that uses the same package script and Odin pins as the dev image), systemd quadlet units that run it next to PostgreSQL (`deploy/quadlet/`), first-time setup (`deploy/sql/make-admin.sql` gives your account the admin role), the firewall, backups, and upgrades.
 
 | Command | Purpose |
 | --- | --- |
@@ -267,30 +258,7 @@ An upgraded server starts with nothing unread: migration 2 gives every existing 
 
 HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
 
-The live proof needs io_uring in the job container (see Dev Environment), which takes two changes on a podman-backed runner host. Both apply to every container that runner starts.
-
-1. Seccomp: make the io_uring profile podman's default. forgejo-runner sends `--security-opt seccomp=FILE` as inline JSON, Docker style, which podman's Docker-compatible API rejects ("opening seccomp profile failed ... file name too long"). Instead, generate the profile from the host's own podman default and point `containers.conf` at it. Use `/etc/containers/containers.conf.d/` when the runner talks to rootful podman, or `~/.config/containers/containers.conf.d/` of the runner's user for rootless podman:
-
-   ```sh
-   ./dev.sh seccomp-profile /etc/forgejo-runner/seccomp-io-uring.json
-   ```
-
-   ```toml
-   # containers.conf.d/50-io-uring.conf
-   [containers]
-   seccomp_profile = "/etc/forgejo-runner/seccomp-io-uring.json"
-   ```
-
-   Restart the podman API service (`podman.socket` / `podman.service`) afterwards.
-
-2. SELinux (only on SELinux hosts): forgejo-runner ignores `--security-opt` in a workflow's `container.options`, so set it in the runner's `config.yml` and restart the runner:
-
-   ```yaml
-   container:
-     options: --security-opt label=disable
-   ```
-
-`dev/live-proof.sh` prints the sandbox it got before starting the server. A working runner shows `seccomp=filtered selinux=...spc_t... io_uring_disabled=0`. `container_t` means step 2 is missing; seccomp with io_uring still blocked shows up as the web admin's `acquire_err == nil` assertion.
+The job container needs no special seccomp or SELinux settings. A runner host set up for the old web admin (an io_uring seccomp profile in `containers.conf.d/` and `--security-opt label=disable` in the runner's `config.yml`) can drop both.
 
 ### Known Limitations
 
@@ -312,7 +280,7 @@ If a user wants to use HayChat in a commercial product, they would need to compl
 ### Licences and Credits
 
 Release builds contain third-party code, libraries and fonts: the Odin core library, the
-`odin-http` and `pg` packages in the server, ENet, SDL3 (with HIDAPI, yuv2rgb and fdlibm
+`pg` package in the server, ENet, SDL3 (with HIDAPI, yuv2rgb and fdlibm
 code), SDL3_ttf (with FreeType, HarfBuzz, PlutoSVG and PlutoVG) and libopus in the Windows
 client, and the Inter and Twemoji fonts in both clients.
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each release artifact contains,
