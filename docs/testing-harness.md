@@ -100,6 +100,8 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `voice-gate vad [THRESHOLD_DB]\|ptt\|open` | Voice activity (threshold in dBFS, -100 to below 0, default -45), push-to-talk, or `open`: push-to-talk with the key held, so every frame is sent. Applies at once and to the next join. |
 | `voice-mute on\|off`, `voice-deafen on\|off` | Mute closes the gate at once and deafen stops playback at once; both are then sent to the server (which shows them in `voice_participants`) and carried by the next join. |
 | `voice-ptt down\|up` | Presses or releases push-to-talk (local only). |
+| `voice-volume USER_ID PERCENT` | How loud this client plays that user on the selected server, 0 to 200 (percent), through the same action as the Server settings slider: stored in the server's config entry for this run (the harness does not write `config.json` back) and applied at once to a running engine, otherwise from the next join. Local only: the server and the user are not told. The result is the user's setting: `serverID`, `userID`, `volumePercent`, `muted`, and what the engine applies (`engineRunning`, `engineVolumePercent`, `engineMuted`; 100 and false without an engine on that server). 100 with mute off removes the entry. |
+| `voice-mute-user USER_ID on\|off` | Mute for me: this client stops playing that user's voice (frames are dropped before decoding and counted in `engine.inboundLocallyMuted`) and keeps its volume. Same result as `voice-volume`. |
 | `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
 | `voice-flush` | With a file sink: replies once every frame played so far is in the file (`path`, `bytes`, `seconds`, `running`), so a script can analyse it without leaving. Without a running engine it reports the file as the engine closed it. |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
@@ -243,10 +245,10 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
  "depth":3,"maxGapRun":0,"playoutDelayMS":60.4,"playoutDelayMaxMS":66.1,"injectedLoss":0,
  "inputLevelDB":-100.0,"transmitting":false,"frameSequence":233,
  "engine":{"framesCaptured":233,"framesSent":0,...},"jitter":{"received":211,...},
- "speakers":[{"userID":3,"speaking":true,"levelDB":-9.0,"bufferedFrames":3,"targetDepth":3,
- "jitterMS":1.18}],
+ "speakers":[{"userID":3,"volumePercent":100,"speaking":true,"levelDB":-9.0,"bufferedFrames":3,
+ "targetDepth":3,"jitterMS":1.18}],
  "network":{"datagramsReceived":211,"framesDelivered":211,"receiveDropped":{"Malformed":0,...},
- "framesSent":0,"sendDropped":{"NotJoined":0,...}}}
+ "framesSent":0,"sendDropped":{"NotJoined":0,...}},"userVoice":[]}
 ```
 
 (Wrapped here; the harness prints one line.)
@@ -267,8 +269,9 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
 | `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level, whether the gate sent it, and the capture sequence |
 | `engine` | `VoiceEngineStats` (`client/voice_engine.odin`): capture, gate, encode, inbound, decode and sink counters |
 | `jitter` | `JitterStats` (`client/voice_jitter.odin`) summed over every speaker |
-| `speakers` | Each current remote speaker: `userID`, `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
+| `speakers` | Each current remote speaker: `userID`, `volumePercent` (the per-user volume the engine applies), `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
 | `network` | The transport's `ClientVoiceNetworkStats` for the voice server, read under the network worker's lock: datagrams received and delivered, frames sent, and every drop by reason |
+| `userVoice` | Every per-user volume and mute stored for that server (`voice-volume`, `voice-mute-user`, Server settings), each as in the `voice-volume` result: `userID`, `volumePercent`, `muted`, `engineRunning`, `engineVolumePercent`, `engineMuted` |
 
 A speaker's frames stop without an end-of-spurt flag when it leaves, so the listener conceals
 a few (`plc`, then `silent`) before its spurt times out. Take stats while the speaker still
@@ -587,10 +590,12 @@ and the composer, sends a message that headless bob must receive, waits for bob'
 message under Direct Messages, opens it, asserts its text, and replies from the DM composer;
 bob must receive the reply as a `direct_message`. alice is an admin (her profile connects
 once headlessly before the window opens, so `make_admin` has an account to grant the role to):
-she clicks **+ New room**, types a name, clicks **Create**, and waits until the room is drawn;
+she opens the server's settings from the sidebar header (`click-id server-settings 1`), mutes
+bob for herself in the Voice section and unmutes him again, and closes them; she clicks
+**+ New room**, types a name, clicks **Create**, and waits until the room is drawn;
 bob must receive `room_membership` and list the room. Then, on SDL's dummy audio driver, she
 clicks **Join voice**, waits for "Voice connected", mutes, opens Settings → Voice, and leaves
-again, while bob must see her join, mute and leave in `voice_participants`. alice takes twelve
+again, while bob must see her join, mute and leave in `voice_participants`. alice takes thirteen
 screenshots on the way and the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.

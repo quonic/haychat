@@ -3,6 +3,7 @@ package client
 import "../common"
 import "core:encoding/json"
 import "core:fmt"
+import "core:math"
 import "core:os"
 import "core:strings"
 
@@ -46,6 +47,22 @@ Server :: struct {
 	port:                      i32,
 	pinned_server_public_key:  string,
 	pinned_server_fingerprint: string,
+	// Per-server user settings (server_settings.odin). Kept only in this profile's config, so
+	// they are not synced between devices. display_name is the name used on this server only;
+	// empty means the global display_name (Server_displayName).
+	display_name:              string `json:"display_name,omitempty"`,
+	// Voice volume and local mute per user of this server. Only entries that differ from the
+	// default (volume 1, not muted) are kept; Config_validateServers drops the rest.
+	user_voice:                [dynamic]ServerUserVoice `json:"user_voice,omitempty"`,
+}
+
+// One user's voice playback on one server, as only this client hears it. user_id is the
+// server's account ID. volume is a linear gain from 0 to SERVER_USER_VOICE_VOLUME_MAX (2,
+// i.e. 200 %); unset means 1. muted drops the user's voice before it is decoded.
+ServerUserVoice :: struct {
+	user_id: int,
+	volume:  Maybe(f32) `json:"volume,omitempty"`,
+	muted:   bool `json:"muted,omitempty"`,
 }
 
 loadConfig :: proc() -> (config: Config) {
@@ -104,6 +121,7 @@ loadConfig :: proc() -> (config: Config) {
 		json.unmarshal(data, &config)
 	}
 
+	Config_validateServers(&config)
 	if ensureIdentityKeys(&config) {
 		shouldPersist = true
 	}
@@ -295,7 +313,7 @@ Server_setPins :: proc(server: ^Server, publicKey, fingerprint: string) {
 // Config values are owned: every string and array is heap allocated. Clone before storing a
 // config somewhere that frees it, and free it with Config_deinit.
 Server_clone :: proc(server: Server) -> Server {
-	return Server {
+	clone := Server {
 		id = server.id,
 		name = strings.clone(server.name),
 		short_name = strings.clone(server.short_name),
@@ -303,7 +321,13 @@ Server_clone :: proc(server: Server) -> Server {
 		port = server.port,
 		pinned_server_public_key = strings.clone(server.pinned_server_public_key),
 		pinned_server_fingerprint = strings.clone(server.pinned_server_fingerprint),
+		display_name = strings.clone(server.display_name),
 	}
+	if len(server.user_voice) > 0 {
+		clone.user_voice = make([dynamic]ServerUserVoice, 0, len(server.user_voice))
+		append(&clone.user_voice, ..server.user_voice[:])
+	}
+	return clone
 }
 
 Server_deinit :: proc(server: ^Server) {
@@ -312,7 +336,131 @@ Server_deinit :: proc(server: ^Server) {
 	delete(server.host)
 	delete(server.pinned_server_public_key)
 	delete(server.pinned_server_fingerprint)
+	delete(server.display_name)
+	delete(server.user_voice)
 	server^ = {}
+}
+
+// The name this client signs in with on server: its own display_name when set, otherwise the
+// profile's global one. Borrowed from server or config.
+Server_displayName :: proc(server: Server, config: Config) -> string {
+	if len(server.display_name) > 0 {
+		return server.display_name
+	}
+	return config.display_name
+}
+
+SERVER_USER_VOICE_VOLUME_MAX :: f32(2)
+// At most this many users per server keep a volume or mute. It matches the voice engine's
+// table (VOICE_SPEAKER_CONTROL_CAPACITY), which holds one server's entries.
+SERVER_USER_VOICE_MAX_ENTRIES :: 256
+
+// A user's voice entry made valid: the volume clamped to 0..SERVER_USER_VOICE_VOLUME_MAX
+// (unset or NaN is 1).
+serverUserVoiceVolume :: proc(entry: ServerUserVoice) -> f32 {
+	volume, hasVolume := entry.volume.?
+	if !hasVolume || math.is_nan(volume) {
+		return 1
+	}
+	return clamp(volume, 0, SERVER_USER_VOICE_VOLUME_MAX)
+}
+
+// Whether the entry changes anything; default entries are not stored.
+serverUserVoiceIsDefault :: proc(volume: f32, muted: bool) -> bool {
+	return volume == 1 && !muted
+}
+
+// Makes the per-server settings of a loaded or hand-edited config usable: trims the per-server
+// display name (blank means "use the global one"), and for user_voice drops entries without a
+// valid user ID, clamps volumes, stores a volume of 1 as unset, drops default entries and
+// repeats of a user (the last one wins), and keeps at most SERVER_USER_VOICE_MAX_ENTRIES. A
+// per-server name of the wrong length is kept: the transport refuses it with the same
+// "invalid name" failure as a bad global name, and the banner points to Server settings.
+Config_validateServers :: proc(config: ^Config) {
+	for &server in config.servers {
+		trimmed := strings.trim_space(server.display_name)
+		if trimmed != server.display_name {
+			clean := strings.clone(trimmed)
+			delete(server.display_name)
+			server.display_name = clean
+		}
+		if len(server.display_name) == 0 {
+			delete(server.display_name)
+			server.display_name = ""
+		}
+		kept := 0
+		for index in 0 ..< len(server.user_voice) {
+			entry := server.user_voice[index]
+			if entry.user_id <= 0 {
+				continue
+			}
+			repeated := false
+			for later in server.user_voice[index + 1:] {
+				repeated ||= later.user_id == entry.user_id
+			}
+			volume := serverUserVoiceVolume(entry)
+			if repeated || serverUserVoiceIsDefault(volume, entry.muted) {
+				continue
+			}
+			if kept == SERVER_USER_VOICE_MAX_ENTRIES {
+				break
+			}
+			entry.volume = nil
+			if volume != 1 {
+				entry.volume = volume
+			}
+			server.user_voice[kept] = entry
+			kept += 1
+		}
+		resize(&server.user_voice, kept)
+		if kept == 0 {
+			delete(server.user_voice)
+			server.user_voice = nil
+		}
+	}
+}
+
+// The volume and local mute this client applies to userID's voice on server.
+Server_userVoice :: proc(server: Server, userID: int) -> (volume: f32, muted: bool) {
+	for entry in server.user_voice {
+		if entry.user_id == userID {
+			return serverUserVoiceVolume(entry), entry.muted
+		}
+	}
+	return 1, false
+}
+
+// Stores userID's volume and mute on server, dropping the entry when both are the default.
+// Returns false when the user is new and the server already has SERVER_USER_VOICE_MAX_ENTRIES.
+Server_setUserVoice :: proc(server: ^Server, userID: int, volume: f32, muted: bool) -> bool {
+	if userID <= 0 {
+		return false
+	}
+	clean := serverUserVoiceVolume({volume = volume})
+	stored: Maybe(f32)
+	if clean != 1 {
+		stored = clean
+	}
+	for index in 0 ..< len(server.user_voice) {
+		if server.user_voice[index].user_id != userID {
+			continue
+		}
+		if serverUserVoiceIsDefault(clean, muted) {
+			ordered_remove(&server.user_voice, index)
+		} else {
+			server.user_voice[index].volume = stored
+			server.user_voice[index].muted = muted
+		}
+		return true
+	}
+	if serverUserVoiceIsDefault(clean, muted) {
+		return true
+	}
+	if len(server.user_voice) >= SERVER_USER_VOICE_MAX_ENTRIES {
+		return false
+	}
+	append(&server.user_voice, ServerUserVoice{user_id = userID, volume = stored, muted = muted})
+	return true
 }
 
 Config_clone :: proc(config: Config) -> Config {

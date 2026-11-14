@@ -71,6 +71,9 @@ State :: struct {
 	// The admin's room create/edit form (room_admin.odin); shown in the main pane while open
 	// on the selected server.
 	roomEditor:                     RoomEditor,
+	// One server's settings screen (server_settings.odin); shown in the main pane while open
+	// on the selected server.
+	serverSettings:                 ServerSettingsForm,
 	// Whether the window has input focus. Only the GUI sets it; a conversation counts as
 	// viewed (marked read, no new badge) only while it is set (read_state.odin).
 	windowFocused:                  bool,
@@ -113,6 +116,7 @@ State_serverForTransport :: proc(
 // on localhost) can call Config_fillLocalDefaults first.
 State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	init_state.config = Config_clone(config)
+	Config_validateServers(&init_state.config)
 	// loadConfig gives every profile a device ID; a config built in code (tests, tools) gets one
 	// for this run only, so every voice join can carry a valid one.
 	ensureDeviceID(&init_state.config)
@@ -201,6 +205,7 @@ State_deinit :: proc(state: ^State) {
 	delete(state.serverConnections)
 	SettingsForm_deinit(&state.settings)
 	RoomEditor_deinit(&state.roomEditor)
+	ServerSettingsForm_deinit(&state.serverSettings)
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)
 	state^ = {}
@@ -241,8 +246,8 @@ init :: proc(
 
 // Builds a short server label from the first letter of each word, or the first two characters
 // of a single-word name. The result is always heap allocated.
-getShortServerName :: proc(serverName: string) -> string {
-	builder := strings.builder_make()
+getShortServerName :: proc(serverName: string, allocator := context.allocator) -> string {
+	builder := strings.builder_make(allocator)
 	wordCount := 0
 	remaining := serverName
 	for word in strings.fields_iterator(&remaining) {

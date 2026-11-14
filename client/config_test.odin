@@ -610,3 +610,152 @@ testConfigVoicePushToTalkGlobalDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
 	assert(config.voice_ptt_global == nil, "expected the default (on) stored as unset")
 	_ = t
 }
+
+// Per-server settings (server_settings.odin, user_voice.odin): display_name and user_voice
+// survive a JSON round trip and a clone, are left out of config.json while unset, and a
+// default volume is stored as unset.
+@(test)
+testServerSettingsConfigKeysRoundTrip :: proc(t: ^testing.T) {
+	config := Config {
+		display_name = strings.clone("alice"),
+	}
+	defer Config_deinit(&config)
+	append(
+		&config.servers,
+		Server{id = 1, name = strings.clone("Plain"), host = strings.clone("a"), port = 1},
+	)
+	plainJSON, plainErr := json.marshal(config)
+	defer delete(plainJSON)
+	assert(plainErr == nil, "expected the config to marshal")
+	assert(
+		!strings.contains(string(plainJSON), "user_voice") &&
+		!strings.contains(string(plainJSON), `"display_name":""`),
+		fmt.tprintf("expected no per-server keys while unset, got %s", plainJSON),
+	)
+
+	server := &config.servers[0]
+	server.display_name = strings.clone("alice-at-work")
+	assert(Server_setUserVoice(server, 7, 0.5, false), "expected a volume for user 7")
+	assert(Server_setUserVoice(server, 9, 1, true), "expected a mute for user 9")
+	assert(Server_setUserVoice(server, 11, 1.5, false), "expected a volume for user 11")
+	// Back to the default drops the entry.
+	assert(Server_setUserVoice(server, 11, 1, false), "expected user 11 reset")
+	assert(
+		len(server.user_voice) == 2 && server.user_voice[1].volume == nil,
+		fmt.tprintf("expected two entries, the mute without a volume, got %v", server.user_voice),
+	)
+	assert(
+		Server_displayName(server^, config) == "alice-at-work",
+		"expected the server's own name to win over the global one",
+	)
+
+	data, marshalErr := json.marshal(config)
+	defer delete(data)
+	assert(marshalErr == nil, "expected the config to marshal")
+	// A volume of 1 is not written; the mute-only entry has no volume key.
+	assert(
+		strings.contains(string(data), `"display_name":"alice-at-work","user_voice":[`) &&
+		strings.contains(string(data), `{"user_id":7,"volume":0.5`) &&
+		strings.contains(string(data), `{"user_id":9,"muted":true}`),
+		fmt.tprintf("unexpected per-server keys in %s", data),
+	)
+	loaded: Config
+	defer Config_deinit(&loaded)
+	unmarshalErr := json.unmarshal(data, &loaded)
+	assert(unmarshalErr == nil, fmt.tprintf("expected %s to load, got %v", data, unmarshalErr))
+	Config_validateServers(&loaded)
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	for copyOf in ([2]^Config{&loaded, &clone}) {
+		back := copyOf.servers[0]
+		volume7, muted7 := Server_userVoice(back, 7)
+		volume9, muted9 := Server_userVoice(back, 9)
+		volume11, muted11 := Server_userVoice(back, 11)
+		assert(
+			back.display_name == "alice-at-work" &&
+			volume7 == 0.5 &&
+			!muted7 &&
+			volume9 == 1 &&
+			muted9 &&
+			volume11 == 1 &&
+			!muted11,
+			fmt.tprintf("expected the per-server keys back, got %v", back),
+		)
+	}
+	// The clone owns its own array.
+	assert(
+		raw_data(clone.servers[0].user_voice) != raw_data(loaded.servers[0].user_voice),
+		"expected Config_clone to copy user_voice",
+	)
+	_ = t
+}
+
+// A hand-edited config is made usable: a blank per-server name means the global one, invalid
+// user IDs and default entries go, volumes are clamped, a repeated user keeps its last entry,
+// and a name of the wrong length is kept for the transport to refuse visibly.
+@(test)
+testServerSettingsConfigKeysAreValidated :: proc(t: ^testing.T) {
+	text := `{"display_name":"alice","servers":[` +
+		`{"id":1,"name":"One","host":"a","port":1,"display_name":"  work  ","user_voice":[` +
+		`{"user_id":0,"volume":0.5},{"user_id":-3,"muted":true},{"user_id":4,"volume":9},` +
+		`{"user_id":5,"volume":-1},{"user_id":6},{"user_id":7,"volume":1},` +
+		`{"user_id":8,"volume":0.25},{"user_id":8,"volume":1.75,"muted":true}]},` +
+		`{"id":2,"name":"Two","host":"b","port":1,"display_name":"   "},` +
+		`{"id":3,"name":"Three","host":"c","port":1,"display_name":"ab"}]}`
+	config: Config
+	defer Config_deinit(&config)
+	unmarshalErr := json.unmarshal(transmute([]u8)text, &config)
+	assert(unmarshalErr == nil, fmt.tprintf("expected the config to parse, got %v", unmarshalErr))
+	Config_validateServers(&config)
+
+	one := config.servers[0]
+	assert(
+		one.display_name == "work",
+		fmt.tprintf("expected a trimmed name, got %q", one.display_name),
+	)
+	assert(
+		len(one.user_voice) == 3,
+		fmt.tprintf("expected users 4, 5 and 8 kept, got %v", one.user_voice),
+	)
+	volume4, _ := Server_userVoice(one, 4)
+	volume5, _ := Server_userVoice(one, 5)
+	volume8, muted8 := Server_userVoice(one, 8)
+	assert(
+		volume4 == SERVER_USER_VOICE_VOLUME_MAX && volume5 == 0,
+		fmt.tprintf("expected volumes clamped to 0..2, got %v and %v", volume4, volume5),
+	)
+	assert(
+		volume8 == 1.75 && muted8,
+		fmt.tprintf("expected the last entry of user 8, got %v %v", volume8, muted8),
+	)
+	assert(config.servers[1].display_name == "", "expected a blank name to mean the global one")
+	assert(
+		Server_displayName(config.servers[1], config) == "alice",
+		"expected the global name for a server without its own",
+	)
+	assert(config.servers[2].display_name == "ab", "expected a too short name kept as written")
+	transport := ClientServerTransport_initForServer(config.servers[2], config)
+	defer ClientServerTransport_deinit(&transport)
+	assert(
+		transport.configInvalid && transport.lastError == CLIENT_INVALID_NICKNAME_MESSAGE,
+		fmt.tprintf("expected the transport to refuse the name, got %q", transport.lastError),
+	)
+
+	// The table is bounded; a new user beyond it is refused, an existing one still changes.
+	full: Server
+	defer Server_deinit(&full)
+	for userID in 1 ..= SERVER_USER_VOICE_MAX_ENTRIES {
+		assert(Server_setUserVoice(&full, userID, 0.5, false), "expected room in the table")
+	}
+	assert(
+		!Server_setUserVoice(&full, SERVER_USER_VOICE_MAX_ENTRIES + 1, 0.5, false),
+		"expected a full table to refuse a new user",
+	)
+	assert(Server_setUserVoice(&full, 1, 1, true), "expected an existing user to change")
+	assert(
+		Server_setUserVoice(&full, SERVER_USER_VOICE_MAX_ENTRIES + 1, 1, false),
+		"expected a default for an unknown user to need no slot",
+	)
+	assert(!Server_setUserVoice(&full, 0, 0.5, false), "expected user ID 0 refused")
+	_ = t
+}

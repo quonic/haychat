@@ -1066,6 +1066,12 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		headlessCommandVoiceDeafen},
 	{"voice-ptt", 1, 0, .None, "voice-ptt down|up", "presses or releases push-to-talk",
 		headlessCommandVoicePushToTalk},
+	{"voice-volume", 2, 0, .None, "voice-volume USER_ID PERCENT",
+		"plays that user at 0 to 200 % on this server, for this client only",
+		headlessCommandVoiceVolume},
+	{"voice-mute-user", 2, 0, .None, "voice-mute-user USER_ID on|off",
+		"stops or resumes playing that user's voice, for this client only",
+		headlessCommandVoiceMuteUser},
 	{"voice-stats", 0, 0, .None, "voice-stats",
 		"engine, jitter, speaker and network voice counters", headlessCommandVoiceStats},
 	{"voice-flush", 0, 0, .None, "voice-flush",
@@ -1219,6 +1225,10 @@ headlessRecordEvent :: proc(harness: ^HeadlessHarness, kind: HeadlessEventKind) 
 headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTransportRuntimeEvent) {
 	info := HeadlessRenderInfo {
 		displayName = harness.state.config.display_name,
+	}
+	// A server with a display name of its own signs in with that one.
+	if server, ok := State_serverConfig(&harness.state, event.serverID); ok {
+		info.displayName = Server_displayName(server^, harness.state.config)
 	}
 	#partial switch event.kind {
 	case .Connecting:

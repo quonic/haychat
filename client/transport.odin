@@ -353,8 +353,9 @@ ClientServerTransport_init :: proc(
 	string,
 	bool,
 ) {
-	if len(config.display_name) < DISPLAY_NAME_MIN_BYTES ||
-	   len(config.display_name) > DISPLAY_NAME_MAX_BYTES {
+	// A per-server display name replaces the global one on that server only.
+	nickname := Server_displayName(server, config)
+	if len(nickname) < DISPLAY_NAME_MIN_BYTES || len(nickname) > DISPLAY_NAME_MAX_BYTES {
 		return {}, CLIENT_INVALID_NICKNAME_MESSAGE, false
 	}
 
@@ -375,7 +376,7 @@ ClientServerTransport_init :: proc(
 			serverName                = strings.clone(server.name),
 			serverHost                = strings.clone(server.host),
 			serverPort                = server.port,
-			nickname                  = strings.clone(config.display_name),
+			nickname                  = strings.clone(nickname),
 			clientIdentityPrivateKey  = clientPrivateKey,
 			clientIdentityPublicKey   = clientPublicKey,
 			clientEphemeralPrivateKey = clientEphemeralPrivateKey,

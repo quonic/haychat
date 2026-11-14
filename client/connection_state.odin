@@ -324,7 +324,8 @@ describeConnectFailure :: proc(
 	case .NameUnavailable:
 		return fmt.aprintf(
 			"The name %s is already in use on this server (or bound to another device's " +
-			"key). Choose another name in Settings.",
+			"key). Choose another name in Settings, or one for this server only in its " +
+			"Server settings.",
 			nickname,
 			allocator = allocator,
 		)
@@ -390,6 +391,8 @@ buildConnectionBanner :: proc(
 	connection := &state.serverConnections[connectionIndex]
 	banner.hasServer = true
 	serverName := server.name
+	// The name this client signs in with here: the server's own, or the global one.
+	nickname := Server_displayName(server^, state.config)
 
 	switch connection.status {
 	case .Established:
@@ -403,7 +406,7 @@ buildConnectionBanner :: proc(
 			reason := describeConnectFailure(
 				connection.failureKind,
 				connection.detail,
-				state.config.display_name,
+				nickname,
 				"",
 			)
 			banner.text = fmt.aprintf(
@@ -432,7 +435,7 @@ buildConnectionBanner :: proc(
 			reason := describeConnectFailure(
 				connection.failureKind,
 				connection.detail,
-				state.config.display_name,
+				nickname,
 				"",
 			)
 			banner.text = fmt.aprintf(
@@ -456,7 +459,7 @@ buildConnectionBanner :: proc(
 		reason := describeConnectFailure(
 			connection.failureKind,
 			connection.detail,
-			state.config.display_name,
+			nickname,
 			connection.offeredServerFingerprint,
 		)
 		banner.text = fmt.aprintf(

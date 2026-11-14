@@ -267,6 +267,7 @@ State_openRoomCreator :: proc(state: ^State) {
 		return
 	}
 	state.selected_dm_peer_id = 0
+	State_closeServerSettings(state)
 	State_resetRoomEditor(state, .Create, serverID, 0)
 }
 
@@ -284,6 +285,7 @@ State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	for room in state.server_room_caches[index].rooms {
 		if room.id == roomID {
 			state.selected_dm_peer_id = 0
+			State_closeServerSettings(state)
 			State_resetRoomEditor(state, .Edit, serverID, roomID)
 			append(&state.roomEditor.name, room.name)
 			append(&state.roomEditor.description, room.description)

@@ -399,6 +399,9 @@ State_voiceStartEngine :: proc(
 	VoiceEngine_setMuted(engine, state.voice.muted)
 	VoiceEngine_setDeafened(engine, state.voice.deafened)
 	VoiceEngine_setPushToTalk(engine, state.voice.pushToTalkHeld)
+	// Per-user volumes and local mutes for this server (user_voice.odin), before the first
+	// frame plays.
+	State_voiceApplyUserVoice(state, engine, serverID)
 	if !VoiceEngine_start(engine) {
 		ClientVoiceState_setError(&state.voice, VoiceEngine_lastError(engine))
 		VoiceEngine_destroy(engine)
