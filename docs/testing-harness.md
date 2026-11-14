@@ -533,14 +533,39 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `click "TEXT"` | Clicks the centre of the most recently drawn TEXT that lies on a widget (button, sidebar row, rail button, input placeholder), or else the most recent TEXT anywhere. A sidebar row therefore wins over a header repeating its label. |
 | `click-id NAME [INT...]` | Clicks the widget whose ID is `ui.idOf(NAME, INT...)`, the same name and values the view passes (up to 4 integers), e.g. `click-id dm-input 1 7` for the DM composer with user 7 on server 1, or `click-id room-input 1 1`. |
 | `click X Y` | Clicks at window coordinates. |
+| `right-click "TEXT"`, `right-click-id NAME [INT...]`, `right-click X Y` | The same lookups as `click`, `click-id` and `click X Y`, with the right mouse button: this opens a context menu (see [Context Menus](#context-menus)). |
 | `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
 | `key NAME` | Presses and releases a key. Names (any case): `Return`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `A`, `C`, `V`, `X`, with optional `Shift+`, `Ctrl+`, `Alt+`, `Gui+`/`Cmd+` prefixes, e.g. `Shift+Return`, `Ctrl+A`. |
 | `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
 | `quit` | Ends the script and closes the window. Reaching the end of the file does the same. |
 
-After `click`, `type` and `key` the next command waits until two more frames are drawn, so
-the input has been handled and its effects are on screen. Waits re-check every frame and at
-least every 10 ms.
+After `click`, `right-click`, `type` and `key` the next command waits until two more frames
+are drawn, so the input has been handled and its effects are on screen. Waits re-check every
+frame and at least every 10 ms.
+
+### Context Menus
+
+A right-click on a channel, a Direct Messages or Members row, a voice participant, a message or
+a sender name in a transcript, a server's rail button, or any text field opens its context menu
+at the pointer (`client/context_menu.odin` lists the entries). The menu's labels are drawn
+through the automation hook, so `click "Copy message"` picks an entry, and every entry also has
+a stable widget ID, `ui.idOf("menu-item", ACTION)`, with ACTION the entry's
+`ContextMenuAction` value. A transcript reports the right-clicked unit only when the press is
+on a unit's text line, so `right-click "TEXT"` with a message's full text (or a sender name)
+is the reliable way to reach it. While a menu is open, the pointer and the wheel do not reach
+what is under it, keys go to the menu (`key Down`, `key Up`, `key Return`, `key Escape`), and a
+left click outside it only closes it. Text field entries (Cut, Copy, Paste, Select all) apply
+on the field's next frame, and the clipboard is SDL's, which works on the `offscreen` driver
+within the process.
+
+```text
+right-click "hello from bob"
+wait-text "Copy message"
+click "Copy message"
+right-click "Message #general (Enter to send, Shift+Enter for newline)"
+click "Paste"
+key Return
+```
 
 ### Output and Exit Codes
 
@@ -590,8 +615,13 @@ once headlessly before the window opens, so `make_admin` has an account to grant
 she clicks **+ New room**, types a name, clicks **Create**, and waits until the room is drawn;
 bob must receive `room_membership` and list the room. Then, on SDL's dummy audio driver, she
 clicks **Join voice**, waits for "Voice connected", mutes, opens Settings → Voice, and leaves
-again, while bob must see her join, mute and leave in `voice_participants`. alice takes twelve
-screenshots on the way and the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
+again, while bob must see her join, mute and leave in `voice_participants`. Last come the
+context menus: she right-clicks her `#general` message, clicks **Copy message**, right-clicks
+the empty composer, clicks **Paste** and sends it again (bob must receive it a second time);
+then bob posts in her new room, which she is not viewing, and once its unread badge is drawn
+she right-clicks the channel and clicks **Mark as read**: a second headless session of her
+account (same profile) must get the room's `read_marker` with `unreadCount` 0. alice takes
+sixteen screenshots on the way and the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

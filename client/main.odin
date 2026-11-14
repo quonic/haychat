@@ -80,6 +80,8 @@ State :: struct {
 	// The Settings → Voice section (voice_settings.odin): device lists and the microphone
 	// test, held only while the section is shown.
 	voicePanel:                     VoiceSettingsPanel,
+	// The open right-click menu's target (context_menu.odin), drawn by viewContextMenu.
+	contextMenu:                    ContextMenuState,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -203,6 +205,7 @@ State_deinit :: proc(state: ^State) {
 	RoomEditor_deinit(&state.roomEditor)
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)
+	ContextMenuState_deinit(&state.contextMenu)
 	state^ = {}
 }
 

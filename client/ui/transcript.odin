@@ -14,12 +14,25 @@ UnitLayout :: struct {
 
 TRANSCRIPT_DRAG_SCROLL_STEP :: 12 // Logical points per frame while drag-selecting past an edge
 
+// What happened in the transcript this frame. A right press on a unit is reported with that
+// unit's key, so the caller can open a context menu for it; a press between units or below
+// the last one is not reported.
+TranscriptResult :: struct {
+	contextMenu:   bool,
+	unitKey:       u64,
+	// The transcript's selected text when the right press came, in the temp allocator, or ""
+	// when nothing in this transcript is selected.
+	selectionText: string,
+}
+
 transcript :: proc(
 	ctx: ^Context,
 	id: ID,
 	r: Rect,
 	units: []TranscriptUnit,
 	emptyText: string = "",
+) -> (
+	result: TranscriptResult,
 ) {
 	padding := dp(ctx, ctx.theme.padding)
 	paddingX := padding * 2
@@ -96,6 +109,20 @@ transcript :: proc(
 		requestFrame(ctx)
 	}
 
+	if contextMenuRequested(ctx, id, inputRect) {
+		localY := ctx.input.mousePos.y - origin.y
+		for layout, index in layouts {
+			if localY >= layout.y && localY < layout.y + layout.h {
+				result.contextMenu = true
+				result.unitKey = units[index].key
+				break
+			}
+		}
+		if result.contextMenu && ctx.selection.ownerID == id {
+			result.selectionText = transcriptSelectionText(units, ctx.selection)
+		}
+	}
+
 	if focused {
 		for event in ctx.input.events {
 			key, isKey := event.(KeyPress)
@@ -144,6 +171,7 @@ transcript :: proc(
 	}
 
 	scrollEnd(ctx, id, r)
+	return
 }
 
 @(private = "file")

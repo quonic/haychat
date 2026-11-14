@@ -19,6 +19,8 @@ COMPOSER_PADDING :: 12
 PANEL_PADDING :: 8
 
 viewApp :: proc(state: ^State, ctx: ^ui.Context) {
+	// Last, on top of whichever screen is drawn, after it recorded its right-clicks.
+	defer viewContextMenu(state, ctx)
 	// The Voice settings section holds the device lists and the microphone test only while
 	// it is on screen.
 	voicePanelVisible :=
@@ -177,6 +179,7 @@ viewRail :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 		}
 		viewServerStatusDot(state, ctx, buttonRect, server.id)
 		ui.tooltip(ctx, id, buttonRect, server.name)
+		viewServerContextMenu(state, ctx, id, server.id, buttonRect)
 		y += size + spacing
 	}
 	ui.scrollEnd(ctx, scrollID, area)
@@ -418,6 +421,7 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 			clickedID = row.id
 			clickedAction = row.action
 		}
+		viewSidebarRowContextMenu(state, ctx, serverID, row, rowRect)
 	}
 	ui.scrollEnd(ctx, scrollID, list)
 
@@ -701,13 +705,14 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	} else if view.isLoadingHistory {
 		emptyText = "Loading messages…"
 	}
-	ui.transcript(
+	transcript := ui.transcript(
 		ctx,
 		ui.idOf("room-transcript", serverID, roomID),
 		area,
 		transcriptUnits(ctx, view.lines),
 		emptyText,
 	)
+	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Room, roomID)
 
 	// Last, so the form replaces the room only from the next frame on.
 	switch {

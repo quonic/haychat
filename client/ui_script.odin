@@ -144,20 +144,26 @@ UIScriptCommandKind :: enum u8 {
 	Key,
 	Screenshot,
 	Quit,
+	RightClick,
+	RightClickAt,
+	RightClickID,
 }
 
 UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
-	.Wait       = "wait",
-	.WaitText   = "wait-text",
-	.WaitCount  = "wait-count",
-	.AssertText = "assert-text",
-	.Click      = "click",
-	.ClickAt    = "click",
-	.ClickID    = "click-id",
-	.Type       = "type",
-	.Key        = "key",
-	.Screenshot = "screenshot",
-	.Quit       = "quit",
+	.Wait         = "wait",
+	.WaitText     = "wait-text",
+	.WaitCount    = "wait-count",
+	.AssertText   = "assert-text",
+	.Click        = "click",
+	.ClickAt      = "click",
+	.ClickID      = "click-id",
+	.Type         = "type",
+	.Key          = "key",
+	.Screenshot   = "screenshot",
+	.Quit         = "quit",
+	.RightClick   = "right-click",
+	.RightClickAt = "right-click",
+	.RightClickID = "right-click-id",
 }
 
 UIScriptKey :: struct {
@@ -172,8 +178,8 @@ UIScriptCommand :: struct {
 	text:      string, // Owned: the TEXT, NAME, or FILE argument, or the key's name
 	count:     int, // wait-count: how many times the text must be drawn
 	timeoutMS: int, // wait: the duration; wait-text, wait-count: the timeout
-	x, y:      f32, // click X Y, in window coordinates
-	ids:       [UI_SCRIPT_MAX_IDS]int, // click-id: the integers after the name
+	x, y:      f32, // click X Y and right-click X Y, in window coordinates
+	ids:       [UI_SCRIPT_MAX_IDS]int, // click-id, right-click-id: the integers after the name
 	idCount:   int,
 	key:       UIScriptKey,
 }
@@ -342,14 +348,15 @@ uiScriptParseLine :: proc(
 			return {}, false, "usage: wait-count N \"TEXT\" [TIMEOUT_MS] (N from 1 to 1000)"
 		}
 		text = args[1].text
-	case "click":
+	case "click", "right-click":
+		right := tokens[0].text == "right-click"
 		switch len(args) {
 		case 1:
-			command.kind = .Click
+			command.kind = right ? .RightClick : .Click
 			ok = len(args[0].text) > 0
 			text = args[0].text
 		case 2:
-			command.kind = .ClickAt
+			command.kind = right ? .RightClickAt : .ClickAt
 			xOK, yOK: bool
 			command.x, xOK = uiScriptParseCoordinate(args[0])
 			command.y, yOK = uiScriptParseCoordinate(args[1])
@@ -358,10 +365,14 @@ uiScriptParseLine :: proc(
 			ok = false
 		}
 		if !ok {
+			if right {
+				return {}, false, "usage: right-click \"TEXT\" or right-click X Y"
+			}
 			return {}, false, "usage: click \"TEXT\" or click X Y"
 		}
-	case "click-id":
-		command.kind = .ClickID
+	case "click-id", "right-click-id":
+		right := tokens[0].text == "right-click-id"
+		command.kind = right ? .RightClickID : .ClickID
 		ok = len(args) >= 1 && len(args) <= 1 + UI_SCRIPT_MAX_IDS && len(args[0].text) > 0
 		for index := 1; ok && index < len(args); index += 1 {
 			value, valueOK := strconv.parse_int(args[index].text, 10)
@@ -370,6 +381,9 @@ uiScriptParseLine :: proc(
 			command.idCount += 1
 		}
 		if !ok {
+			if right {
+				return {}, false, "usage: right-click-id NAME [INTEGER...] (at most 4 integers)"
+			}
 			return {}, false, "usage: click-id NAME [INTEGER...] (at most 4 integers)"
 		}
 		text = args[0].text
@@ -586,9 +600,9 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		line = command.line,
 	}
 	switch command.kind {
-	case .WaitText, .WaitCount, .AssertText, .Click, .Type:
+	case .WaitText, .WaitCount, .AssertText, .Click, .RightClick, .Type:
 		result.text = command.text
-	case .ClickID:
+	case .ClickID, .RightClickID:
 		result.name = command.text
 	case .Key:
 		result.key = command.text
@@ -596,7 +610,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		result.file = command.text
 	case .Wait:
 		result.ms = command.timeoutMS
-	case .ClickAt, .Quit:
+	case .ClickAt, .RightClickAt, .Quit:
 	}
 	return result
 }
@@ -659,9 +673,10 @@ uiScriptPushEvent :: proc(event: ^SDL.Event) -> bool {
 	return true
 }
 
-// Moves the pointer to p (window coordinates) and clicks the left button there.
+// Moves the pointer to p (window coordinates) and clicks a button there (the left one unless
+// button says otherwise).
 @(private = "file")
-uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2) -> bool {
+uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2, button: u8 = SDL.BUTTON_LEFT) -> bool {
 	windowID := SDL.GetWindowID(window)
 	motion: SDL.Event
 	motion.motion = SDL.MouseMotionEvent {
@@ -674,7 +689,7 @@ uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2) -> bool {
 	press.button = SDL.MouseButtonEvent {
 		type     = .MOUSE_BUTTON_DOWN,
 		windowID = windowID,
-		button   = SDL.BUTTON_LEFT,
+		button   = button,
 		down     = true,
 		clicks   = 1,
 		x        = p.x,
@@ -684,6 +699,16 @@ uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2) -> bool {
 	release.button.type = .MOUSE_BUTTON_UP
 	release.button.down = false
 	return uiScriptPushEvent(&motion) && uiScriptPushEvent(&press) && uiScriptPushEvent(&release)
+}
+
+// The mouse button a click command presses.
+@(private = "file")
+uiScriptButton :: proc(kind: UIScriptCommandKind) -> u8 {
+	#partial switch kind {
+	case .RightClick, .RightClickAt, .RightClickID:
+		return SDL.BUTTON_RIGHT
+	}
+	return SDL.BUTTON_LEFT
 }
 
 @(private = "file")
@@ -782,7 +807,7 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		} else {
 			uiScriptFail(runner, result, "the text is not drawn in the current frame")
 		}
-	case .Click:
+	case .Click, .RightClick:
 		rect, found := ui.Automation_findText(automation, command.text)
 		if !found {
 			uiScriptFail(runner, result, "no drawn text equals TEXT in the current frame")
@@ -790,9 +815,9 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		}
 		point := uiScriptWindowPoint(ctx, rect)
 		result.x, result.y = point.x, point.y
-		pushOK = uiScriptPushClick(window, point)
+		pushOK = uiScriptPushClick(window, point, uiScriptButton(command.kind))
 		pushed = true
-	case .ClickID:
+	case .ClickID, .RightClickID:
 		id := ui.idOf(command.text, ..command.ids[:command.idCount])
 		rect, found := ui.Automation_findWidget(automation, id)
 		if !found {
@@ -801,11 +826,12 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		}
 		point := uiScriptWindowPoint(ctx, rect)
 		result.x, result.y = point.x, point.y
-		pushOK = uiScriptPushClick(window, point)
+		pushOK = uiScriptPushClick(window, point, uiScriptButton(command.kind))
 		pushed = true
-	case .ClickAt:
+	case .ClickAt, .RightClickAt:
 		result.x, result.y = command.x, command.y
-		pushOK = uiScriptPushClick(window, ui.Vec2{command.x, command.y})
+		point := ui.Vec2{command.x, command.y}
+		pushOK = uiScriptPushClick(window, point, uiScriptButton(command.kind))
 		pushed = true
 	case .Type:
 		pushOK = uiScriptPushText(runner, window, command.text)

@@ -51,11 +51,12 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	if view.isLoadingHistory {
 		emptyText = "Loading messages…"
 	}
-	ui.transcript(
+	transcript := ui.transcript(
 		ctx,
 		ui.idOf("dm-transcript", serverID, peerUserID),
 		area,
 		transcriptUnits(ctx, view.lines),
 		emptyText,
 	)
+	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Direct, peerUserID)
 }
