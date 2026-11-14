@@ -20,7 +20,9 @@ package client
 //     in VoiceEngine_open and released in VoiceEngine_close.
 //   - The voice thread owns the codec, gate, jitter buffers, SDL streams and sink file while
 //     it runs. Other threads only set the atomic controls (mute, push-to-talk, gate mode,
-//     threshold), push inbound frames, and read VoiceEngine_snapshot / VoiceEngine_inputLevel.
+//     threshold), set per-speaker gains and mutes (a small table under its own mutex that
+//     the voice thread copies when it changed), push inbound frames, and read
+//     VoiceEngine_snapshot / VoiceEngine_inputLevel.
 //   - SDL's audio subsystem is initialised only when a device source or sink is opened, so a
 //     headless client never touches SDL unless asked to.
 
@@ -57,6 +59,12 @@ VOICE_PLAYBACK_TARGET_FRAMES :: 2
 VOICE_LOOPBACK_USER_ID :: u32(0xFFFF_FFFF)
 VOICE_DEFAULT_TONE_AMPLITUDE :: f32(0.5)
 VOICE_ERROR_BUFFER_SIZE :: 512
+// Per-speaker volume and local mute entries the engine holds (VoiceEngine_setSpeakerControl).
+// Only entries that differ from the default (gain 1, not muted) take a slot, so this bounds
+// how many users of one server can have a volume or mute, not how many can speak.
+VOICE_SPEAKER_CONTROL_CAPACITY :: 256
+// The highest per-speaker gain, 200 %. Linear, like the output volume.
+VOICE_SPEAKER_GAIN_MAX :: f32(2)
 
 VoiceSourceKind :: enum u8 {
 	Silence,
@@ -116,6 +124,14 @@ VoiceOutboundFrame :: struct {
 // Called on the voice thread for every encoded frame.
 VoiceOutboundProc :: #type proc(userdata: rawptr, frame: VoiceOutboundFrame)
 
+// One speaker's volume and local mute (VoiceEngine_setSpeakerControl). gain is linear,
+// 0..VOICE_SPEAKER_GAIN_MAX; a muted speaker's frames are dropped before decoding.
+VoiceSpeakerControl :: struct {
+	userID: u32,
+	gain:   f32,
+	muted:  bool,
+}
+
 // One frame's timing, for latency measurements (voice-rooms-design.md 6.4). Encoded: this
 // engine encoded its own frame `sequence` (speakerUserID 0). Played: it decoded frame
 // `sequence` of speakerUserID for its sink (a normal decode, not FEC or concealment). at is
@@ -168,6 +184,9 @@ VoiceEngineConfig :: struct {
 
 VoiceEngineStats :: struct {
 	framesCaptured:  u64,
+	// Received frames dropped before decoding because their speaker is muted locally
+	// (VoiceEngine_setSpeakerControl), or discarded from a speaker's buffer when it was muted.
+	inboundLocallyMuted: u64,
 	framesSent:      u64, // encoded and handed to the outbound seam
 	framesGated:     u64, // captured while the gate was closed
 	captureDropped:  u64, // dropped from a backed-up capture stream
@@ -197,6 +216,8 @@ VoiceEngineStats :: struct {
 
 VoiceSpeakerSnapshot :: struct {
 	userID:         u32,
+	// The per-speaker gain the voice thread applies (VoiceEngine_setSpeakerControl).
+	gain:           f32,
 	speaking:       bool,
 	levelDB:        f32,
 	bufferedFrames: int,
@@ -227,6 +248,8 @@ VoiceInboundFrame :: struct {
 VoiceSpeaker :: struct {
 	active:        bool,
 	userID:        u32,
+	// This speaker's gain, applied as its SDL stream's gain or in the file and null mix.
+	gain:          f32,
 	jitter:        JitterBuffer,
 	decoder:       ^opus.Decoder,
 	stream:        ^SDL.AudioStream,
@@ -308,6 +331,19 @@ VoiceEngine :: struct {
 	sinkFlushCompleted:  u64,
 	// Empty unless built with HAYCHAT_TEST_FAULTS.
 	faults:              VoiceReceiveFaults,
+	// Per-speaker volume and local mute. Any thread writes the table under
+	// speakerControlMutex and then bumps speakerControlVersion (atomic); the voice thread
+	// copies it into appliedControls when the version moved, at the start of a step, so it
+	// reads its own copy without a lock and nothing is allocated. Only non-default entries
+	// are stored, packed at the front.
+	speakerControlMutex:   sync.Mutex,
+	speakerControls:       [VOICE_SPEAKER_CONTROL_CAPACITY]VoiceSpeakerControl,
+	speakerControlCount:   int,
+	speakerControlVersion: u64,
+	// Voice-thread copy.
+	appliedControls:       [VOICE_SPEAKER_CONTROL_CAPACITY]VoiceSpeakerControl,
+	appliedControlCount:   int,
+	appliedControlVersion: u64,
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────
@@ -698,6 +734,93 @@ VoiceEngine_setOutputVolume :: proc(engine: ^VoiceEngine, volume: f32) {
 	sync.atomic_store(&engine.outputVolumeBits, transmute(u32)max(volume, 0))
 }
 
+// VoiceEngine_setSpeakerControl sets how this engine plays userID: a linear gain (clamped to
+// 0..VOICE_SPEAKER_GAIN_MAX; NaN is 1) and a local mute, which only this client hears and the
+// server never learns. From any thread. The voice thread applies it on its next step: the
+// gain as the speaker's SDL stream gain (device sink) or in the file and null mix, and a mute
+// by releasing the speaker, so nothing already buffered plays, and by dropping the user's
+// frames before decoding (stats.inboundLocallyMuted). Gain 1 and not muted removes the entry.
+// Returns false when the table is full (VOICE_SPEAKER_CONTROL_CAPACITY) and userID is new.
+VoiceEngine_setSpeakerControl :: proc(
+	engine: ^VoiceEngine,
+	userID: u32,
+	gain: f32,
+	muted: bool,
+) -> bool {
+	if userID == 0 {
+		return false
+	}
+	clean := math.is_nan(gain) ? 1 : clamp(gain, 0, VOICE_SPEAKER_GAIN_MAX)
+	isDefault := clean == 1 && !muted
+	sync.mutex_lock(&engine.speakerControlMutex)
+	defer sync.mutex_unlock(&engine.speakerControlMutex)
+	index := -1
+	for control, at in engine.speakerControls[:engine.speakerControlCount] {
+		if control.userID == userID {
+			index = at
+			break
+		}
+	}
+	switch {
+	case index >= 0 && isDefault:
+		// Keep the table packed: the last entry takes the removed one's place.
+		engine.speakerControlCount -= 1
+		engine.speakerControls[index] = engine.speakerControls[engine.speakerControlCount]
+		engine.speakerControls[engine.speakerControlCount] = {}
+	case index >= 0:
+		engine.speakerControls[index] = {userID = userID, gain = clean, muted = muted}
+	case isDefault:
+		return true
+	case engine.speakerControlCount == VOICE_SPEAKER_CONTROL_CAPACITY:
+		return false
+	case:
+		engine.speakerControls[engine.speakerControlCount] = {
+			userID = userID,
+			gain   = clean,
+			muted  = muted,
+		}
+		engine.speakerControlCount += 1
+	}
+	sync.atomic_add(&engine.speakerControlVersion, 1)
+	return true
+}
+
+// VoiceEngine_setSpeakerGain changes userID's gain and keeps its mute.
+VoiceEngine_setSpeakerGain :: proc(engine: ^VoiceEngine, userID: u32, gain: f32) -> bool {
+	_, muted := VoiceEngine_speakerControl(engine, userID)
+	return VoiceEngine_setSpeakerControl(engine, userID, gain, muted)
+}
+
+// VoiceEngine_setSpeakerMuted mutes or unmutes userID locally and keeps its gain.
+VoiceEngine_setSpeakerMuted :: proc(engine: ^VoiceEngine, userID: u32, muted: bool) -> bool {
+	gain, _ := VoiceEngine_speakerControl(engine, userID)
+	return VoiceEngine_setSpeakerControl(engine, userID, gain, muted)
+}
+
+// VoiceEngine_speakerControl is the gain and mute set for userID (1 and false when none is),
+// as the voice thread will apply them from its next step. From any thread.
+VoiceEngine_speakerControl :: proc(engine: ^VoiceEngine, userID: u32) -> (gain: f32, muted: bool) {
+	sync.mutex_lock(&engine.speakerControlMutex)
+	defer sync.mutex_unlock(&engine.speakerControlMutex)
+	for control in engine.speakerControls[:engine.speakerControlCount] {
+		if control.userID == userID {
+			return control.gain, control.muted
+		}
+	}
+	return 1, false
+}
+
+// The voice thread's copy of userID's control.
+@(private = "file")
+VoiceEngine_appliedControl :: proc(engine: ^VoiceEngine, userID: u32) -> (gain: f32, muted: bool) {
+	for control in engine.appliedControls[:engine.appliedControlCount] {
+		if control.userID == userID {
+			return control.gain, control.muted
+		}
+	}
+	return 1, false
+}
+
 // VoiceEngine_setBitrate asks for a new Opus bitrate in bit/s. The voice thread owns the
 // encoder, so it applies the change (OPUS_SET_BITRATE) on its next step; the stream goes on
 // without a restart.
@@ -822,6 +945,41 @@ VoiceEngine_applyControls :: proc(engine: ^VoiceEngine) {
 		engine.appliedOutputVolume = volume
 		if engine.playbackDevice != 0 {
 			_ = SDL.SetAudioDeviceGain(engine.playbackDevice, volume)
+		}
+	}
+	VoiceEngine_applySpeakerControls(engine)
+}
+
+// Copies the per-speaker table when it changed and applies it to the active speakers: a new
+// gain to the speaker (and its SDL stream), a mute by releasing the speaker so its buffered
+// frames never play. A copy of at most VOICE_SPEAKER_CONTROL_CAPACITY small entries, only on
+// a change.
+@(private = "file")
+VoiceEngine_applySpeakerControls :: proc(engine: ^VoiceEngine) {
+	version := sync.atomic_load(&engine.speakerControlVersion)
+	if version == engine.appliedControlVersion {
+		return
+	}
+	sync.mutex_lock(&engine.speakerControlMutex)
+	engine.appliedControlCount = engine.speakerControlCount
+	copy(engine.appliedControls[:], engine.speakerControls[:engine.speakerControlCount])
+	engine.appliedControlVersion = sync.atomic_load(&engine.speakerControlVersion)
+	sync.mutex_unlock(&engine.speakerControlMutex)
+	for &speaker in engine.speakers {
+		if !speaker.active {
+			continue
+		}
+		gain, muted := VoiceEngine_appliedControl(engine, speaker.userID)
+		if muted {
+			engine.stats.inboundLocallyMuted += u64(JitterBuffer_buffered(&speaker.jitter))
+			VoiceEngine_releaseSpeaker(engine, &speaker)
+			continue
+		}
+		if gain != speaker.gain {
+			speaker.gain = gain
+			if speaker.stream != nil {
+				_ = SDL.SetAudioStreamGain(speaker.stream, gain)
+			}
 		}
 	}
 }
@@ -1072,9 +1230,14 @@ VoiceEngine_findSpeaker :: proc(engine: ^VoiceEngine, userID: u32, now: f64) -> 
 			return nil
 		}
 	}
+	gain, _ := VoiceEngine_appliedControl(engine, userID)
+	if stream != nil && gain != 1 {
+		_ = SDL.SetAudioStreamGain(stream, gain)
+	}
 	freeSlot^ = {}
 	freeSlot.active = true
 	freeSlot.userID = userID
+	freeSlot.gain = gain
 	freeSlot.decoder = decoder
 	freeSlot.stream = stream
 	freeSlot.lastArrivalMS = now
@@ -1179,7 +1342,8 @@ VoiceEngine_drainInbound :: proc(engine: ^VoiceEngine, now: f64) {
 	sync.mutex_unlock(&engine.inboundMutex)
 }
 
-// Pushes one frame into its speaker's jitter buffer. Returns false when there is no free
+// Pushes one frame into its speaker's jitter buffer. A frame from a locally muted speaker is
+// dropped here, before a decoder or stream exists for it. Returns false when there is no free
 // speaker slot.
 @(private = "file")
 VoiceEngine_deliverInbound :: proc(
@@ -1187,6 +1351,10 @@ VoiceEngine_deliverInbound :: proc(
 	frame: ^VoiceInboundFrame,
 	now: f64,
 ) -> bool {
+	if _, muted := VoiceEngine_appliedControl(engine, frame.senderUserID); muted {
+		engine.stats.inboundLocallyMuted += 1
+		return true
+	}
 	speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
 	if speaker == nil {
 		return false
@@ -1324,8 +1492,9 @@ VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine, now: f64) {
 			continue
 		}
 		pcm := VoiceEngine_decode(engine, &speaker, output, now)
+		gain := speaker.gain
 		for sample, index in pcm {
-			mix[index] += sample
+			mix[index] += sample * gain
 		}
 	}
 	volume := engine.appliedOutputVolume
@@ -1370,6 +1539,7 @@ VoiceEngine_publish :: proc(engine: ^VoiceEngine) {
 		jitterStatsAdd(&snapshot.jitter, speaker.jitter.stats)
 		snapshot.speakers[snapshot.speakerCount] = {
 			userID         = speaker.userID,
+			gain           = speaker.gain,
 			speaking       = speaker.jitter.inSpurt,
 			levelDB        = speaker.levelDB,
 			bufferedFrames = JitterBuffer_buffered(&speaker.jitter),

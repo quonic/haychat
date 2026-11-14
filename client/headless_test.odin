@@ -422,7 +422,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"connect_failed","serverID":1,"message":"The name alice is already in use on ` +
-		`this server (or bound to another device's key). Choose another name in Settings.",` +
+		`this server (or bound to another device's key). Choose another name in Settings, ` +
+		`or one for this server only in its Server settings.",` +
 		`"detail":"user identity is unavailable","failure":"NameUnavailable",` +
 		`"retryable":false,"retryInMS":0}`,
 		"the permanent connect_failed JSON",

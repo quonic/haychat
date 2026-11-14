@@ -220,6 +220,7 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 // the room editor.
 State_switchToServer :: proc(state: ^State, serverID: int) {
 	State_closeRoomEditor(state)
+	State_closeServerSettings(state)
 	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
@@ -231,6 +232,7 @@ State_switchToServer :: proc(state: ^State, serverID: int) {
 // Showing a room replaces whatever the main pane showed, the room editor included.
 State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
 	State_closeRoomEditor(state)
+	State_closeServerSettings(state)
 	state.selected_dm_peer_id = 0
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)

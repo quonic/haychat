@@ -4,8 +4,9 @@ import "core:fmt"
 import "ui"
 
 // The first-run and settings screen. On first run it fills the window and asks only for a
-// display name and one server; later it opens from the rail's gear button and also lists the
-// configured servers so each can be edited or removed.
+// display name and one server; later it opens from the rail's gear button, lists the
+// configured servers (each opens its own Server settings, view_server_settings.odin, where
+// its address, label and key are changed or it is removed) and adds new ones.
 
 SETTINGS_COLUMN_WIDTH :: 480
 SETTINGS_PORT_WIDTH :: 104
@@ -88,7 +89,9 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 			return
 		}
 	}
-	intro := "Changing your name or a server's address reconnects to that server."
+	intro :=
+		"Changing your name reconnects to every server that has no name of its own. A " +
+		"server's address, label and name for that server alone are in its own settings."
 	if firstRun {
 		intro = "Choose the name other people will see, then the server to connect to."
 	}
@@ -114,35 +117,24 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	)
 	_ = ui.cutTop(&column, sectionGap)
 
-	// The server list, so an existing server can be picked for editing or a new one added.
-	editServerID := -1
+	// The server list: each row opens that server's own settings.
+	openServerID := 0
 	if !firstRun {
 		settingsLabel(ctx, &column, "Servers")
 		for server in state.config.servers {
 			row := ui.cutTop(&column, rowH)
-			text := fmt.tprintf("%s   %s:%d", server.name, server.host, server.port)
-			selected := form.editingServerID == server.id
+			text := fmt.tprintf("%s   %s:%d  ›", server.name, server.host, server.port)
 			serverButtonID := ui.idOf("settings-server", server.id)
-			if ui.button(ctx, serverButtonID, row, text, {selected = selected}) {
-				editServerID = server.id
+			if ui.button(ctx, serverButtonID, row, text) {
+				openServerID = server.id
 			}
+			ui.tooltip(ctx, serverButtonID, row, "Server settings")
 			_ = ui.cutTop(&column, ui.dp(ctx, ROW_SPACING))
-		}
-		addRow := ui.cutTop(&column, rowH)
-		addOptions := ui.ButtonOptions {
-			selected = form.editingServerID == 0,
-			color    = ctx.theme.primary,
-		}
-		if ui.button(ctx, ui.idOf("settings-add-server"), addRow, "+ Add server", addOptions) {
-			editServerID = 0
 		}
 		_ = ui.cutTop(&column, sectionGap)
 	}
 
-	addressTitle := "Server"
-	if !firstRun {
-		addressTitle = form.editingServerID == 0 ? "New server" : "Server address"
-	}
+	addressTitle := firstRun ? "Server" : "Add a server"
 	settingsLabel(ctx, &column, addressTitle)
 	hostID := ui.idOf("settings-host", form.editingServerID)
 	portID := ui.idOf("settings-port", form.editingServerID)
@@ -185,7 +177,7 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	if ui.button(ctx, ui.idOf("settings-apply"), applyRect, applyText, applyOptions) {
 		submitted = true
 	}
-	closeClicked, removeClicked := false, false
+	closeClicked := false
 	if !firstRun {
 		_ = ui.cutLeft(&buttons, gap)
 		cancelOptions := ui.ButtonOptions {
@@ -199,19 +191,6 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 			"Cancel",
 			cancelOptions,
 		)
-		if form.editingServerID != 0 {
-			removeOptions := ui.ButtonOptions {
-				align = .Center,
-				color = ctx.theme.danger,
-			}
-			removeClicked = ui.button(
-				ctx,
-				ui.idOf("settings-remove"),
-				ui.cutRight(&buttons, ui.dp(ctx, 140)),
-				"Remove server",
-				removeOptions,
-			)
-		}
 	}
 
 	// Actions run last: they can reallocate the server list drawn above.
@@ -220,9 +199,7 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 		State_applySettings(state)
 	case closeClicked:
 		State_closeSettings(state)
-	case removeClicked:
-		State_settingsRemoveServer(state, form.editingServerID)
-	case editServerID >= 0:
-		State_settingsEditServer(state, editServerID)
+	case openServerID != 0:
+		State_openServerSettings(state, openServerID)
 	}
 }

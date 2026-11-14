@@ -1,6 +1,7 @@
 package ui
 
 import "core:testing"
+import SDL "vendor:sdl3"
 
 @(test)
 testCutsSplitRectsWithoutOverflow :: proc(t: ^testing.T) {
@@ -247,4 +248,108 @@ testSliderValueAtMapsSnapsAndClamps :: proc(t: ^testing.T) {
 	testing.expectf(t, value == 64000, "expected right of the track to clamp, got %v", value)
 	value = sliderValueAt(Rect{0, 0, 0, 10}, 5, 1, 2, 0)
 	testing.expectf(t, value == 1, "expected an empty track to give low, got %v", value)
+}
+
+@(test)
+testMenuPlaceKeepsTheMenuInsideTheWindow :: proc(t: ^testing.T) {
+	window := Rect{0, 0, 800, 600}
+	size := Vec2{200, 120}
+
+	placed := menuPlace(Vec2{100, 50}, size, window)
+	assert(placed == Rect{100, 50, 200, 120}, "expected the top-left corner at the anchor")
+
+	placed = menuPlace(Vec2{700, 50}, size, window)
+	testing.expectf(t, placed.x == 500, "expected a flip to the left of the anchor, got %v", placed)
+
+	placed = menuPlace(Vec2{100, 550}, size, window)
+	testing.expectf(t, placed.y == 430, "expected a flip above the anchor, got %v", placed)
+
+	placed = menuPlace(Vec2{790, 590}, size, window)
+	testing.expectf(t, placed == Rect{590, 470, 200, 120}, "expected both flips, got %v", placed)
+
+	// Flipping would cross the other edge: the menu is clamped inside instead.
+	placed = menuPlace(Vec2{150, 550}, Vec2{200, 580}, window)
+	testing.expectf(t, placed.y == 0 && placed.x == 150, "expected clamped at the top: %v", placed)
+
+	// Larger than the window: pinned to its top-left corner.
+	placed = menuPlace(Vec2{400, 300}, Vec2{900, 700}, window)
+	testing.expectf(t, placed.x == 0 && placed.y == 0, "expected pinned at the corner: %v", placed)
+
+	offset := Rect{64, 0, 400, 300}
+	placed = menuPlace(Vec2{70, 10}, Vec2{500, 50}, offset)
+	testing.expectf(t, placed.x == 64, "expected clamped to the bounds' left edge, got %v", placed)
+}
+
+@(test)
+testOverlayBlocksOnlyWidgetsUnderIt :: proc(t: ^testing.T) {
+	block := Rect{100, 100, 200, 150}
+	assert(overlayBlocks(block, true, false, Vec2{150, 150}), "expected the pointer on it blocked")
+	assert(!overlayBlocks(block, true, false, Vec2{50, 150}), "expected outside it not blocked")
+	assert(!overlayBlocks(block, true, true, Vec2{150, 150}), "expected its own widgets free")
+	assert(!overlayBlocks(block, false, false, Vec2{150, 150}), "expected no block without one")
+}
+
+// The frame start with an overlay open: the pointer over it is kept from the widgets under it,
+// a left press outside it is consumed and reported, and the keyboard goes to the overlay.
+@(test)
+testOverlayFrameStartTakesInputFromTheWidgetsUnderIt :: proc(t: ^testing.T) {
+	ctx: Context
+	defer delete(ctx.input.events)
+	defer delete(ctx.overlay.events)
+	overlayID := idOf("menu", 1)
+	ctx.overlay.nextID = overlayID
+	ctx.overlay.next = Rect{100, 100, 200, 150}
+	ctx.input.mouseInWindow = true
+	ctx.input.mousePos = Vec2{150, 150}
+	ctx.input.wheel = Vec2{0, 1}
+	append(&ctx.input.events, KeyPress{key = SDL.K_RETURN})
+	overlayBeginFrame(&ctx)
+
+	assert(overlayWasOpen(&ctx, overlayID), "expected last frame's overlay open")
+	assert(!overlayWasOpen(&ctx, idOf("menu", 2)), "expected a new overlay not counted as open")
+	assert(!mouseOver(&ctx, Rect{0, 0, 800, 600}), "expected the row under the menu blocked")
+	assert(!contextMenuRequested(&ctx, idOf("row"), Rect{0, 0, 800, 600}), "expected no menu")
+	assert(len(ctx.input.events) == 0, "expected the keyboard taken from the widgets")
+	assert(len(overlayEvents(&ctx, overlayID)) == 1, "expected the overlay to get the key")
+	assert(!ctx.pressConsumed && !overlayPressedOutside(&ctx, overlayID), "expected no press")
+
+	// The overlay closed (nothing drew it this frame): the next frame blocks nothing.
+	ctx.input.mousePressed[.Left] = true
+	overlayBeginFrame(&ctx)
+	assert(mouseOver(&ctx, Rect{0, 0, 800, 600}), "expected nothing blocked once it closed")
+	assert(!ctx.pressConsumed, "expected a press with no overlay left to the widgets")
+
+	// Open again, then a left press outside it.
+	ctx.overlay.nextID = overlayID
+	ctx.overlay.next = Rect{100, 100, 200, 150}
+	ctx.input.mousePos = Vec2{20, 20}
+	overlayBeginFrame(&ctx)
+	assert(ctx.pressConsumed, "expected the press outside consumed")
+	assert(overlayPressedOutside(&ctx, overlayID), "expected the press outside reported")
+
+	// A right press outside is reported but left to the widget under it, so a menu can reopen
+	// there; only the first widget asking gets it.
+	ctx.pressConsumed = false
+	ctx.rightPressTaken = false
+	ctx.input.mousePressed = {}
+	ctx.input.mousePressed[.Right] = true
+	ctx.overlay.nextID = overlayID
+	ctx.overlay.next = Rect{100, 100, 200, 150}
+	overlayBeginFrame(&ctx)
+	assert(!ctx.pressConsumed && overlayPressedOutside(&ctx, overlayID), "expected reported")
+	assert(contextMenuRequested(&ctx, idOf("row"), Rect{0, 0, 50, 50}), "expected the row's menu")
+	assert(!contextMenuRequested(&ctx, idOf("list"), Rect{0, 0, 800, 600}), "expected one taker")
+}
+
+@(test)
+testMenuHighlightSkipsDisabledItemsAndWraps :: proc(t: ^testing.T) {
+	enabled := []bool{true, false, true, true}
+	testing.expect(t, menuMoveHot(enabled, -1, 1) == 0, "expected Down to start at the first")
+	testing.expect(t, menuMoveHot(enabled, -1, -1) == 3, "expected Up to start at the last")
+	testing.expect(t, menuMoveHot(enabled, 0, 1) == 2, "expected the disabled item skipped")
+	testing.expect(t, menuMoveHot(enabled, 3, 1) == 0, "expected Down to wrap to the top")
+	testing.expect(t, menuMoveHot(enabled, 0, -1) == 3, "expected Up to wrap to the bottom")
+	testing.expect(t, menuMoveHot(enabled, 0, 2) == 3, "expected two moves in one frame")
+	testing.expect(t, menuMoveHot([]bool{false, false}, -1, 1) == -1, "expected none to land on")
+	testing.expect(t, menuMoveHot(nil, -1, 1) == -1, "expected an empty menu to stay empty")
 }

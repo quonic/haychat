@@ -1,0 +1,138 @@
+package client
+
+import "../common"
+import "core:time"
+import "ui"
+
+// Draws the open context menu (context_menu.odin) on top of the frame. viewApp defers it, so it
+// runs after every screen has drawn and recorded its right-clicks. The chosen action runs after
+// the menu is drawn, because it can change what the menu was built from.
+viewContextMenu :: proc(state: ^State, ctx: ^ui.Context) {
+	menu := &state.contextMenu
+	// Every text input reports its own right-clicks; no screen has to wire them.
+	if inputID, ok := ui.textInputContextMenuRequested(ctx); ok {
+		State_requestContextMenu(state, TextFieldMenuTarget{inputID}, ctx.input.mousePos)
+	}
+	if menu.pending != nil {
+		// A right press outside an open menu replaces it with the new one at once.
+		State_openContextMenu(state, menu.pending, menu.pendingPosition, menu.pendingSelection)
+		menu.pending = nil
+		menu.pendingSelection = ""
+	}
+	if menu.target == nil {
+		return
+	}
+
+	facts := ContextMenuFacts {
+		clipboardHasText = ui.clipboardHasText(),
+	}
+	if target, isText := menu.target.(TextFieldMenuTarget); isText {
+		facts.textField, facts.textFieldDrawn = ui.textInputFacts(ctx, target.inputID)
+	}
+	view := buildContextMenu(state, facts)
+	if !view.visible {
+		// What the menu was about is gone.
+		State_closeContextMenu(state)
+		return
+	}
+	items := make([dynamic]ui.MenuItem, 0, len(view.entries) + 4, context.temp_allocator)
+	for entry in view.entries {
+		if entry.separatorBefore && len(items) > 0 {
+			append(&items, ui.MenuItem{separator = true})
+		}
+		append(
+			&items,
+			ui.MenuItem {
+				key = int(entry.action),
+				label = entry.label,
+				enabled = entry.enabled,
+				danger = entry.danger,
+			},
+		)
+	}
+	result := ui.menu(ctx, ui.idOf("context-menu", menu.serial), menu.position, items[:])
+	if result.clicked >= 0 {
+		action := ContextMenuAction(items[result.clicked].key)
+		effect := State_runContextMenuAction(state, action, time.tick_now())
+		if len(effect.copyText) > 0 {
+			ui.setClipboardText(effect.copyText)
+		}
+		if effect.textCommand != .None {
+			ui.textInputCommand(ctx, effect.textInputID, effect.textCommand)
+		}
+		if effect.focusInput != 0 {
+			ui.focusTextInput(ctx, effect.focusInput)
+		}
+		ui.requestFrame(ctx)
+	} else if result.dismissed {
+		State_closeContextMenu(state)
+		ui.requestFrame(ctx)
+	}
+}
+
+// Records a right-click on a sidebar row (view.odin's viewSidebar), with the row's widget ID.
+viewSidebarRowContextMenu :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	serverID: int,
+	row: SidebarRow,
+	rect: ui.Rect,
+) {
+	target: ContextMenuTarget
+	id: ui.ID
+	switch row.kind {
+	case .Channel:
+		id = ui.idOf("channel", serverID, row.id)
+		target = ChannelMenuTarget{serverID, row.id}
+	case .Conversation:
+		id = ui.idOf("dm-conversation", serverID, row.id)
+		target = ConversationMenuTarget{serverID, row.id}
+	case .Member:
+		id = ui.idOf("dm-member", serverID, row.id)
+		target = MemberMenuTarget{serverID, row.id}
+	case .VoiceParticipant:
+		id = ui.idOf("voice-participant", serverID, row.roomID, row.id)
+		target = VoiceParticipantMenuTarget{serverID, row.roomID, row.id}
+	case .SectionHeader, .Placeholder:
+		return
+	}
+	if ui.contextMenuRequested(ctx, id, rect) {
+		State_requestContextMenu(state, target, ctx.input.mousePos)
+	}
+}
+
+// Records a right-click on a server's rail button (view.odin's viewRail).
+viewServerContextMenu :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	id: ui.ID,
+	serverID: int,
+	rect: ui.Rect,
+) {
+	if ui.contextMenuRequested(ctx, id, rect) {
+		State_requestContextMenu(state, ServerMenuTarget{serverID}, ctx.input.mousePos)
+	}
+}
+
+// Records a right-click on a transcript built by transcriptUnits: an even unit key is the
+// sender header of message key / 2, an odd one the message itself.
+viewTranscriptContextMenu :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	result: ui.TranscriptResult,
+	serverID: int,
+	kind: common.ReadMarkerKind,
+	conversationID: int,
+) {
+	if !result.contextMenu {
+		return
+	}
+	messageID := int(result.unitKey / 2)
+	target: ContextMenuTarget
+	if result.unitKey % 2 == 0 {
+		target = SenderMenuTarget{serverID, kind, conversationID, messageID}
+	} else {
+		target = MessageMenuTarget{serverID, kind, conversationID, messageID}
+	}
+	State_requestContextMenu(state, target, ctx.input.mousePos, result.selectionText)
+}
