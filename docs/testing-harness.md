@@ -621,7 +621,8 @@ user or room ID:
 | `admin-room-create` | Create room… (server ID only). |
 
 The server's answer to the last request ("Waiting for the server…", its sentence, or its
-refusal) is drawn under the section's note. The room form's type selector is
+refusal) is drawn under the row of the account it concerns (for example "Banned bob"), or
+under the section's note when that account is not listed. The room form's type selector is
 `click-id room-type N`, N the protocol's type number (1 text, 2 voice, 3 text and voice); a
 voice-only room shows "This room is voice only" where the composer would be, and a text-only
 room has no **Join voice**. When an admin locked your name, Server settings shows it under
@@ -634,9 +635,9 @@ wait-text "Ban bob"
 click-id admin-confirm-text 1 7
 type "spam"
 click-id admin-confirm 1 7
-wait-text "Banned"
+wait-text "Banned bob"
 click-id admin-member-ban 1 7
-wait-gone "Banned"
+wait-text "Unbanned bob"
 ```
 
 ### Output and Exit Codes

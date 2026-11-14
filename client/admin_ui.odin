@@ -355,13 +355,27 @@ AdminConfirmView :: struct {
 AdminSectionView :: struct {
 	visible:    bool,
 	note:       string,
-	// Every account of the server's directory, you included, in the Members order.
+	// Every account of the server's directory, you included, by name (adminMemberLess), so a
+	// row stays where it is when its account goes offline or is banned.
 	members:    []AdminMemberRow,
 	rooms:      []AdminRoomRow,
 	confirm:    AdminConfirmView,
 	// The last admin request on this server: waiting, the server's sentence, or the refusal.
-	status:     string,
-	statusTone: AdminStatusTone,
+	// The view draws it under statusUserID's row, where the admin is looking, or above the
+	// table when that account is not listed.
+	status:       string,
+	statusTone:   AdminStatusTone,
+	statusUserID: int,
+}
+
+// By name (as memberLess orders equal online states), then by ID: unlike the sidebar, the
+// Admin table does not put online accounts first, so its rows do not move under the pointer.
+@(private = "file")
+adminMemberLess :: proc(a, b: common.UserSummary) -> bool {
+	a, b := a, b
+	a.isOnline = false
+	b.isOnline = false
+	return memberLess(a, b)
 }
 
 // The Admin section for serverID; visible only to an admin of it. Strings borrow from State
@@ -384,7 +398,7 @@ buildAdminSectionView :: proc(
 	members := make([dynamic]AdminMemberRow, 0, allocator)
 	if index := State_serverDirectCacheIndex(state^, serverID); index >= 0 {
 		users := slice.clone(state.serverDirectCaches[index].users[:], allocator)
-		slice.sort_by(users, memberLess)
+		slice.sort_by(users, adminMemberLess)
 		for user in users {
 			controls := adminUserControls(user, user.id == selfUserID)
 			label := userLabel(user.nickname, user.id, allocator)
@@ -417,6 +431,7 @@ buildAdminSectionView :: proc(
 
 	request := &state.adminRequest
 	if request.serverID == serverID {
+		view.statusUserID = request.userID
 		switch {
 		case request.pending:
 			view.status = "Waiting for the server…"

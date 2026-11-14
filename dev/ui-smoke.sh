@@ -228,10 +228,13 @@ click-id admin-confirm-text 1 $user_bob
 type "$ban_reason"
 screenshot $screenshot_dir/19-ban-confirm.bmp
 click-id admin-confirm 1 $user_bob
-wait-text "Banned" 10000
+# The server's answer is shown above the table; his row keeps its place (sorted by name).
+wait-text "Banned $nickname_bob" 10000
+wait 300
 screenshot $screenshot_dir/20-bob-banned.bmp
 click-id admin-member-ban 1 $user_bob
-wait-gone "Banned" 10000
+wait-text "Unbanned $nickname_bob" 10000
+wait 300
 screenshot $screenshot_dir/21-bob-unbanned.bmp
 click-id server-settings-close 1
 # bob signs in again and joins #general's voice: his name is then drawn a third time (after his

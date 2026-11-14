@@ -137,7 +137,7 @@ testAdminSectionIsShownOnlyToAdmins :: proc(t: ^testing.T) {
 		t,
 		strings.join(labels[:], ",", context.temp_allocator),
 		"alice (you)+admin,bob,carol+admin,dave+banned",
-		"the member table, online first",
+		"the member table, by name",
 	)
 	rooms := make([dynamic]string, context.temp_allocator)
 	for room in view.admin.rooms {
@@ -206,12 +206,9 @@ testAdminConfirmationsSendTheRightRequest :: proc(t: ^testing.T) {
 		fmt.tprintf("expected a locked rename to robert, got %v", adminSendBridgeTestLast),
 	)
 	testing.expect(t, confirm.kind == .None, "expected the confirmation closed once sent")
-	testExpectString(
-		t,
-		buildServerSettingsView(&state).admin.status,
-		"Waiting for the server…",
-		"the status while waiting",
-	)
+	view = buildServerSettingsView(&state)
+	testExpectString(t, view.admin.status, "Waiting for the server…", "the waiting status")
+	testing.expect(t, view.admin.statusUserID == ADMIN_UI_TEST_BOB, "expected it on bob's row")
 
 	// Lock off with an empty name unlocks the current name.
 	State_openAdminConfirm(&state, 1103, .Rename, ADMIN_UI_TEST_BOB)

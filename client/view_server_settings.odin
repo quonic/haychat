@@ -553,16 +553,12 @@ viewAdminSection :: proc(
 	rowH := ui.dp(ctx, ROW_HEIGHT)
 	serverSettingsHeading(ctx, column, "Admin")
 	serverSettingsWrapped(ctx, column, view.note, ctx.theme.fgMuted)
-	if len(view.status) > 0 {
-		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
-		color := ctx.theme.fgMuted
-		#partial switch view.statusTone {
-		case .Success:
-			color = ctx.theme.success
-		case .Error:
-			color = ctx.theme.danger
-		}
-		serverSettingsWrapped(ctx, column, view.status, color)
+	statusOnRow := false
+	for member in view.members {
+		statusOnRow ||= member.userID == view.statusUserID
+	}
+	if !statusOnRow {
+		viewAdminStatus(ctx, column, view)
 	}
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
 
@@ -640,6 +636,10 @@ viewAdminSection :: proc(
 				}
 			}
 		}
+		if statusOnRow && member.userID == view.statusUserID {
+			_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING))
+			viewAdminStatus(ctx, column, view, ui.dp(ctx, 8) + gap)
+		}
 		if view.confirm.kind != .None && view.confirm.userID == member.userID {
 			_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
 			if confirmAction := viewAdminConfirm(state, ctx, column, view.confirm, serverID);
@@ -714,6 +714,32 @@ viewAdminSection :: proc(
 		serverSettingsWrapped(ctx, column, "No rooms yet.", ctx.theme.fgMuted)
 	}
 	return
+}
+
+// The answer to the last admin request, inset by indent (under a member's controls).
+@(private = "file")
+viewAdminStatus :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: AdminSectionView,
+	indent: f32 = 0,
+) {
+	if len(view.status) == 0 {
+		return
+	}
+	color := ctx.theme.fgMuted
+	#partial switch view.statusTone {
+	case .Success:
+		color = ctx.theme.success
+	case .Error:
+		color = ctx.theme.danger
+	}
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	area := column^
+	_ = ui.cutLeft(&area, indent)
+	height := ui.wrappedTextHeight(ctx, view.status, area.w)
+	ui.wrappedLabel(ctx, ui.Rect{area.x, area.y, area.w, height}, view.status, color)
+	_ = ui.cutTop(column, height)
 }
 
 // Scrolls the screen so the member row starting at rowTop (screen y) and its confirmation,
