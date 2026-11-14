@@ -42,3 +42,4 @@ describe the current state.
 | [plan/voice-rooms-design.md](plan/voice-rooms-design.md) | Voice rooms design (audio, codec, wire format, relay) |
 | [plan/2026-11-05-after-first-testers.md](plan/2026-11-05-after-first-testers.md) | Work after the first tester round: migrations, read state, voice |
 | [plan/2026-11-14-admin-settings-menus.md](plan/2026-11-14-admin-settings-menus.md) | Admin interface, per-server settings, and context menus |
+| [plan/e2ee-design.md](plan/e2ee-design.md) | End-to-end encryption design (direct messages, room access modes, encrypted rooms, voice) |
