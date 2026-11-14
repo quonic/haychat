@@ -276,11 +276,15 @@ assert-text "Mark as read"
 wait-gone "Join voice" 1000
 screenshot $screenshot_dir/26-text-only-menu.bmp
 key Escape
-# Server settings from the rail button's menu, scrolled down to the Admin section's rooms.
+# Server settings from the rail button's menu, scrolled to the end (the offset clamps there),
+# where the Admin section's rooms list sits above the server key. Under --all the server has
+# every earlier proof's accounts, so the page is long.
 right-click-id rail-server 1
 click "Server settings"
 wait-text "Display name on this server" 5000
-scroll 760 400 40
+scroll 760 400 100
+scroll 760 400 100
+scroll 760 400 100
 wait-text "Create room…" 5000
 screenshot $screenshot_dir/27-admin-rooms.bmp
 click-id server-settings-close 1
