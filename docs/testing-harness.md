@@ -557,11 +557,13 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `wait MS` | Lets the UI run and draw for MS milliseconds. |
 | `wait-text "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn in the current frame. |
 | `wait-count N "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn at least N times (e.g. a user under both Direct Messages and Members). |
+| `wait-gone "TEXT" [TIMEOUT_MS]` | Waits until TEXT is no longer drawn (e.g. `wait-gone "Join voice"` after a room became text-only). |
 | `assert-text "TEXT"` | Fails unless TEXT is drawn in the current frame. |
 | `click "TEXT"` | Clicks the centre of the most recently drawn TEXT that lies on a widget (button, sidebar row, rail button, input placeholder), or else the most recent TEXT anywhere. A sidebar row therefore wins over a header repeating its label. |
 | `click-id NAME [INT...]` | Clicks the widget whose ID is `ui.idOf(NAME, INT...)`, the same name and values the view passes (up to 4 integers), e.g. `click-id dm-input 1 7` for the DM composer with user 7 on server 1, or `click-id room-input 1 1`. |
 | `click X Y` | Clicks at window coordinates. |
 | `right-click "TEXT"`, `right-click-id NAME [INT...]`, `right-click X Y` | The same lookups as `click`, `click-id` and `click X Y`, with the right mouse button: this opens a context menu (see [Context Menus](#context-menus)). |
+| `scroll X Y N` | Moves the pointer to window coordinates X Y and turns the wheel N notches (-100 to 100; positive scrolls the content down), for widgets below the fold of a scrolling screen. |
 | `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
 | `key NAME` | Presses and releases a key. Names (any case): `Return`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `A`, `C`, `V`, `X`, with optional `Shift+`, `Ctrl+`, `Alt+`, `Gui+`/`Cmd+` prefixes, e.g. `Shift+Return`, `Ctrl+A`. |
 | `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
@@ -586,6 +588,16 @@ left click outside it only closes it. Text field entries (Cut, Copy, Paste, Sele
 on the field's next frame, and the clipboard is SDL's, which works on the `offscreen` driver
 within the process.
 
+A voice participant's menu (not your own) holds **Mute for me** / **Unmute for me** and a
+volume slider labelled "Volume: N %" (0 to 200 %), whose widget ID is
+`ui.idOf("menu-slider", ACTION)` with the `Volume` action's value; moving it keeps the menu
+open. For an admin, the Direct Messages, Members, voice participant and sender name menus end
+with **Rename…**, **Make admin** / **Remove admin**, **Kick…** and **Ban…** / **Unban**,
+disabled where the server would refuse them (yourself, another admin, a banned account).
+**Rename…**, **Kick…** and **Ban…** open Server settings → Admin with that account's
+confirmation already open and scrolled into view (see [Admin Screens](#admin-screens)); the
+others send at once. A server's rail button menu starts with **Server settings**.
+
 ```text
 right-click "hello from bob"
 wait-text "Copy message"
@@ -593,6 +605,38 @@ click "Copy message"
 right-click "Message #general (Enter to send, Shift+Enter for newline)"
 click "Paste"
 key Return
+```
+
+### Admin Screens
+
+Server settings (`click-id server-settings SERVER` or the rail menu's **Server settings**)
+shows an Admin section to admins, below Voice. Its widget IDs take the server ID and then the
+user or room ID:
+
+| Widget | Meaning |
+| --- | --- |
+| `admin-member-rename`, `admin-member-role`, `admin-member-kick`, `admin-member-ban` | A member's Rename…, Make admin / Remove admin, Kick… and Ban… / Unban. A disabled one draws no widget (its tooltip says why), so `click-id` on it fails. |
+| `admin-confirm-text`, `admin-confirm-lock`, `admin-confirm`, `admin-confirm-cancel` | The open confirmation under that member: its field (the new name, or the reason), Lock name (rename only, on by default), and the Rename / Kick / Ban and Cancel buttons. |
+| `admin-room-edit`, `admin-room-delete` | A room's Edit… (the room form) and Delete… (the room form with **Confirm delete** armed). |
+| `admin-room-create` | Create room… (server ID only). |
+
+The server's answer to the last request ("Waiting for the server…", its sentence, or its
+refusal) is drawn under the section's note. The room form's type selector is
+`click-id room-type N`, N the protocol's type number (1 text, 2 voice, 3 text and voice); a
+voice-only room shows "This room is voice only" where the composer would be, and a text-only
+room has no **Join voice**. When an admin locked your name, Server settings shows it under
+"Name on this server" with "Set by an admin of this server." instead of the field.
+
+```text
+right-click-id dm-member 1 7
+click "Ban…"
+wait-text "Ban bob"
+click-id admin-confirm-text 1 7
+type "spam"
+click-id admin-confirm 1 7
+wait-text "Banned"
+click-id admin-member-ban 1 7
+wait-gone "Banned"
 ```
 
 ### Output and Exit Codes
@@ -650,8 +694,19 @@ context menus: she right-clicks her `#general` message, clicks **Copy message**,
 the empty composer, clicks **Paste** and sends it again (bob must receive it a second time);
 then bob posts in her new room, which she is not viewing, and once its unread badge is drawn
 she right-clicks the channel and clicks **Mark as read**: a second headless session of her
-account (same profile) must get the room's `read_marker` with `unreadCount` 0. alice takes
-seventeen screenshots on the way and the script prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
+account (same profile) must get the room's `read_marker` with `unreadCount` 0. Then the admin
+steps (plan P4): alice right-clicks bob in Members and clicks **Make admin**, and bob's harness
+must print `account_updated` with `"isAdmin":true` without reconnecting; she removes the role
+again (another admin cannot be banned), clicks **Ban…** in his menu, types a reason into the
+confirmation that opens in Server settings → Admin and confirms, and bob must get
+`session_ended` `banned` with that reason. She unbans him with the section's **Unban**, bob's
+`reconnect` signs in again, and he joins `#general`'s voice; alice right-clicks his voice row,
+which holds the volume slider, and mutes him for herself. Last, she edits her room to voice
+only in the room form ("This room is voice only" replaces the composer) and then to text only:
+**Join voice** disappears from its header and its menu, and bob's `rooms` must list it with
+`"roomType":1`. She opens Server settings from the rail button's menu and scrolls to the
+Admin section's rooms list. alice takes twenty-eight screenshots on the way and the script
+prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
 in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.
