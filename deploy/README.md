@@ -162,7 +162,7 @@ and waits for the graceful shutdown. Leave out `--env-file` when you have no ove
 
 ## Environment Variables
 
-Every server setting is a `HAYCHAT_*` environment variable; [README.md "Server Configuration"](https://git.spyingwind.com/quonic/haychat/src/branch/main/README.md#server-configuration)
+Every server setting is a `HAYCHAT_*` environment variable; [docs/server-configuration.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/server-configuration.md)
 lists them all with defaults, and [`.env.example`](https://git.spyingwind.com/quonic/haychat/src/branch/main/.env.example) documents the optional ones. In this
 deployment:
 
@@ -180,7 +180,8 @@ side of `PublishPort=` is simpler.
 Voice is on by default in every room. `HAYCHAT_VOICE_ENABLED=false` turns it off;
 `HAYCHAT_VOICE_MAX_PARTICIPANTS` (default 25) caps each room, and
 `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` (60) and `HAYCHAT_VOICE_MAX_FRAME_BYTES` (512) bound
-what one connection may send. README.md "Server Configuration" describes each one.
+what one connection may send. [docs/server-configuration.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/server-configuration.md#voice)
+describes each one.
 
 ## Network
 
@@ -206,7 +207,7 @@ creates `#general` as room 1, and every account joins every room. The log shows
 Optionally, give your own account the admin role, which lets it create, rename, and delete
 rooms from the client (**+ New room** next to the room list, **Edit room** in a room's
 header), and grant the role to others, rename, kick, ban and unban accounts, and choose a
-room's type (protocol 14, see README "Admin actions and room types"):
+room's type (see [docs/rooms-and-accounts.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/rooms-and-accounts.md#admin-actions)):
 
 1. Connect once with the client, using the display name that should own the server (for
    example `quonic`). The server creates the account and binds the name to your client's key.
@@ -267,8 +268,8 @@ already bound to your key, so you do not need it.
 The server has no admin port. Every five minutes, and once when it shuts down, it logs one
 `[Status]` line of `key=value` pairs: uptime, connected peers, whether the network and
 database services are running or waiting to restart, and the voice counters (rooms,
-participants, frames in and out, drops by reason; see README.md "Server Status Log"). Read it
-with:
+participants, frames in and out, drops by reason; see [docs/server-configuration.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/server-configuration.md#status-log)).
+Read it with:
 
 ```sh
 sudo journalctl -u haychat-server.service | grep -F '[Status]' | tail -n 1

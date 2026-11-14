@@ -228,7 +228,7 @@ click-id admin-confirm-text 1 $user_bob
 type "$ban_reason"
 screenshot $screenshot_dir/19-ban-confirm.bmp
 click-id admin-confirm 1 $user_bob
-# The server's answer is shown above the table; his row keeps its place (sorted by name).
+# The server's answer is shown under his row, which keeps its place (sorted by name).
 wait-text "Banned $nickname_bob" 10000
 wait 300
 screenshot $screenshot_dir/20-bob-banned.bmp

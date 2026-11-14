@@ -2,7 +2,8 @@
 
 Thank you for testing HayChat. This guide explains what HayChat is, how to install and start
 it, what the messages on screen mean, what to try, and how to tell us about problems. You do
-not need to be a developer.
+not need to be a developer. Every screen and button is described in detail in the
+[user guide](user-guide.md).
 
 ## What HayChat Is
 
@@ -19,7 +20,9 @@ What works today:
 | Room history                         | Works. Messages are stored on the server; **Load older messages** at the top of a room fetches earlier ones, also after a restart                                                                         |
 | Direct messages                      | Works. Below the rooms, the sidebar lists **Direct Messages** (recent conversations) and **Members** (everyone on the server, online first, with a green dot when online). Click a person to message them |
 | Several servers                      | Works. The client can connect to more than one server at once                                                                                                                                             |
-| Voice rooms                          | Works. Every room has voice: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation)                                                           |
+| Voice rooms                          | Works. Rooms have voice unless an admin made them text-only: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation)                           |
+| Server settings                      | Works. The gear in a server's sidebar header: a display name for that server only, its label, and a volume slider and **Mute for me** for each person                                                     |
+| Right-click menus                    | Works. Rooms, people, messages, server buttons and text fields have a menu: mark as read, copy, quote, send a message, join voice, and more                                                               |
 | Creating rooms                       | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room                                                                 |
 | Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity))                                                                                                                       |
 
@@ -148,8 +151,9 @@ anything.
 
 ## Voice
 
-Every room has voice as well as text. You can be in one room's voice at a time, on one
-server, and keep chatting anywhere while you are.
+Rooms have voice as well as text, unless an admin made a room text-only (it has no **Join
+voice**) or voice-only (it has no message box). You can be in one room's voice at a time, on
+one server, and keep chatting anywhere while you are.
 
 - **Joining:** open a room and press **Join voice** at the top right. The **voice bar** at the
   bottom of the room list shows "Joining…", then "Voice connected: #room on Server". Under
@@ -182,6 +186,9 @@ server, and keep chatting anywhere while you are.
   "Rejoining voice…" and you are back in the same room once the client reconnects.
 - **Two devices:** joining voice on a second device moves you there; the first device leaves
   voice with "joined voice on another device".
+- **One person too loud or too quiet:** right-click them in the room's voice list, or open the
+  server's settings (the gear in its sidebar header) → **Voice**, and move their volume slider
+  or choose **Mute for me**. Only you hear the change.
 
 ### When Voice Does Not Work
 
@@ -237,6 +244,12 @@ Use HayChat as you would use any chat app, and keep an eye on these:
   (also while another window, such as a game or browser, has focus),
   a different microphone in **Settings → Voice** while you are in a room, and **Test
   microphone**. Tell us about delay, choppy sound, echo, or a level meter that does not move.
+- **Server settings:** open a server's settings with the gear in its sidebar header. Give
+  yourself a different name on that server only, change its label, and set another person's
+  voice volume or mute them for yourself while you are both in voice.
+- **Right-click menus:** right-click rooms, people, messages, the server buttons and the message
+  box. Try copy, quote, mark as read and send message, and moving through a menu with the arrow
+  keys, Enter and Esc.
 - **The window:** resizing, high-DPI screens, typing with an input method (for example
   Japanese or Chinese), copy and paste.
 

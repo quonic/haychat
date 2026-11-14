@@ -5,7 +5,7 @@ We welcome contributions to HayChat! Please follow these guidelines to ensure a 
 ## Getting Started
 
 1. Fork the repository on Forgejo and create a new branch for your changes.
-2. Install podman. `./dev.sh` builds the toolchain image and runs everything in containers (see the Development Environment section of `README.md`).
+2. Install podman. `./dev.sh` builds the toolchain image and runs everything in containers (see [docs/development.md](docs/development.md)).
 3. Follow the project's code style and conventions (see below).
 4. Write tests for your changes using the built-in Odin testing framework.
 5. Run `./dev.sh ci`. It runs the compile checks (including the Windows client), every test suite, and the live server/client proof, and a test fails on any memory leak or bad free. Forgejo CI runs the same steps on every pull request.
@@ -32,7 +32,8 @@ We welcome contributions to HayChat! Please follow these guidelines to ensure a 
 - Keep PRs focused—split large changes into separate PRs if needed.
 - For bug fixes, describe the issue and how it's resolved.
 - For UI changes, include screenshots or a demo video.
-- For new features, add documentation explaining the functionality.
+- For new features and behaviour changes, update the documentation that describes them
+  ([docs/README.md](docs/README.md) lists which document covers what).
 - Be responsive to feedback and ready to make requested changes.
 
 ## License

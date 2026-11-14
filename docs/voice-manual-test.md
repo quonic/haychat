@@ -19,15 +19,17 @@ dev/voice-manual-test.sh host:port   # another server
 ```
 
 It needs `pactl`, `pw-cat`, `pw-record` and `pw-link` (PipeWire's tools, with pipewire-pulse),
-plus `sox`. Without `espeak-ng` it skips the speech phase. Without `python3` and numpy it skips
-the speech, burst and latency analysis, but still runs voice-check on the tone. It builds the
-client with the host's `odin`; if that fails, it builds in the dev image (`./dev.sh shell`).
-The client is the same one users run: SDL's PipeWire driver, and the default voice settings
-of a fresh profile.
+plus `sox`, and stops unless `pactl info` reports a PipeWire server. Without `espeak-ng` it
+skips the speech phase. Without `python3` and numpy it skips the analysis of the tone's
+dropouts, the speech, the bursts and the clicks, but still runs voice-check on the tone. It
+builds the client and `dev/tools/voice-check` with the host's `odin`; if that fails, it builds
+them in the dev image (`./dev.sh shell`). The client is the same one users run: SDL's PipeWire
+driver, and the default voice settings of a fresh profile.
 
 A run takes about two and a half minutes. Each run makes two throwaway accounts on the server
 (`voice-mt-a-…` and `voice-mt-b-…`), which join room 1's voice. Use the dev pod, not the
-tester server.
+tester server. If either client leaves voice or loses its connection during the run (a server
+restart, for example), the run stops, because a re-join starts fresh counters.
 
 Settings, all optional, as environment variables:
 
@@ -38,7 +40,7 @@ Settings, all optional, as environment variables:
 | `HAYCHAT_VOICE_MANUAL_LEVELS` | `-6 -18 -30` | Peak levels of the speech, in dBFS |
 | `HAYCHAT_VOICE_MANUAL_NOISE_DB` | `-60` | Pink noise under the speech, RMS in dBFS |
 | `HAYCHAT_VOICE_MANUAL_THRESHOLD_DB` | the client's default | A's voice activity threshold |
-| `HAYCHAT_VOICE_MANUAL_CLICKS` | `20` | Clicks in the latency train |
+| `HAYCHAT_VOICE_MANUAL_CLICKS` | `20` | Clicks in the latency train, and taps in the `taps` phase |
 | `HAYCHAT_VOICE_MANUAL_CLIENT` | build one | Use this client binary, for example one built with a changed constant, to compare |
 | `HAYCHAT_VOICE_MANUAL_KEEP` | `0` | `1` keeps the work directory with every recording and log |
 
@@ -78,7 +80,10 @@ source.
   SDL audio open ignores SIGTERM, so EOF is what stops it, with SIGKILL after 5 s), stops
   `pw-cat` and `pw-record`, unloads every module the kit loaded, and compares the module list
   with the one from the start. The last line says whether they match:
-  `cleanup: unloaded 4 modules; module list and default devices are as before`.
+  `cleanup: unloaded 4 modules; module list and default devices are as before`. When another
+  program loaded or unloaded modules meanwhile, it says so and lists them instead; that is not
+  the kit's to undo. A module of the kit's still loaded, or an `hc_mt_*` node still present,
+  prints a `WARNING: still loaded:` line and makes the run fail.
 - If a run is killed with SIGKILL, nothing can clean up. The next run refuses to start while a
   `hc_mt_*` node exists. Remove leftovers with
   `pactl list short modules | awk '/hc_mt_/ {print $1}' | xargs -r -n1 pactl unload-module`.
@@ -117,7 +122,7 @@ its analysis. A summary at the end has one line per phase:
 | --- | --- | --- |
 | `tone` | 440 Hz at amplitude 0.5 for 6 s | voice-check on B's output: frequency, level, SNR. Also *dropouts*: runs of digital silence of 1 ms or more inside the tone, meaning B's playout queue ran dry |
 | `speech` | Six espeak-ng sentences, 1.5 s apart, at each peak level, over a pink noise floor, with A on voice activity | Speech level at A's microphone; share of speech frames that reached B; words whose start or end was clipped by more than 20 ms; background noise sent more than a hangover after any speech |
-| `taps` | 5 ms clicks 1.007 s apart (so they fall at every position within a 20 ms frame), on voice activity | How many taps opened the gate (B's talk spurts). An open gate sends at least one hangover of background |
+| `taps` | 5 ms clicks 1.007 s apart (so they fall at every position within a 20 ms frame), as many as `HAYCHAT_VOICE_MANUAL_CLICKS`, on voice activity | How many taps opened the gate (B's talk spurts). An open gate sends at least one hangover of background |
 | `bursts` | Ten 300 ms 1 kHz bursts, 1.507 s apart (every frame position again), on voice activity | Delay from a burst's start at A to its start at B. This is the delay of a talk spurt's first syllable: the gate's attack plus the jitter buffer's pre-roll |
 | `clicks` | The click train, with A's gate held open | Steady-state mouth-to-ear delay per click, p50 and p95 |
 
@@ -125,8 +130,8 @@ Counters: `A sent` and `gated` are frames A encoded and frames the gate held bac
 `capture dropped` counts frames A threw away because its capture queue backed up. `B received`
 counts frames that reached B's jitter buffer. `FEC` and `PLC` count frames B rebuilt or
 concealed. `late` counts frames that arrived after their playout time, and `spurts` counts
-talk spurts B heard. `jitter` and `depth` are B's interarrival jitter estimate and jitter
-buffer target, in frames of 20 ms.
+talk spurts B heard. `jitter` is B's interarrival jitter estimate in milliseconds, and `depth`
+its jitter buffer target in frames of 20 ms.
 
 How the speech analysis decides: a 10 ms frame is *speech* when the clean (noise-free)
 material is within 40 dB of its loudest frame and not under the noise floor. It is *heard*
