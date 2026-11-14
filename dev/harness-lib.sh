@@ -58,16 +58,20 @@ start_client() {
 # wait_for_line CLIENT FIXED_TEXT [START_LINE]: waits until a complete stdout line after
 # START_LINE contains FIXED_TEXT and prints it.
 wait_for_line() {
-	local client=$1 text=$2 start=${3:-0} line
+	local client=$1 text=$2 start=${3:-0} line alive
 	local deadline=$((SECONDS + command_timeout_secs))
 	while ((SECONDS < deadline)); do
+		# Liveness is read before the output: a client that answers and exits at once (quit)
+		# must not be reported as exited when its answer is already in the file.
+		alive=1
+		kill -0 "${client_pid[$client]}" 2>/dev/null || alive=0
 		line=$(tail -n "+$((start + 1))" "$work_dir/$client.out" | grep -F -- "$text" |
 			grep -m1 '}$' || true)
 		if [[ -n "$line" ]]; then
 			printf '%s\n' "$line"
 			return 0
 		fi
-		if ! kill -0 "${client_pid[$client]}" 2>/dev/null; then
+		if ((alive == 0)); then
 			echo "client $client exited while waiting for: $text" >&2
 			return 1
 		fi
@@ -80,16 +84,20 @@ wait_for_line() {
 
 # wait_for_match CLIENT REGEX [START_LINE]: like wait_for_line, for an extended regex.
 wait_for_match() {
-	local client=$1 pattern=$2 start=${3:-0} line
+	local client=$1 pattern=$2 start=${3:-0} line alive
 	local deadline=$((SECONDS + command_timeout_secs))
 	while ((SECONDS < deadline)); do
+		# Liveness is read before the output: a client that answers and exits at once (quit)
+		# must not be reported as exited when its answer is already in the file.
+		alive=1
+		kill -0 "${client_pid[$client]}" 2>/dev/null || alive=0
 		line=$(tail -n "+$((start + 1))" "$work_dir/$client.out" | grep -E -m1 -- "$pattern" |
 			grep '}$' || true)
 		if [[ -n "$line" ]]; then
 			printf '%s\n' "$line"
 			return 0
 		fi
-		if ! kill -0 "${client_pid[$client]}" 2>/dev/null; then
+		if ((alive == 0)); then
 			echo "client $client exited while waiting for: $pattern" >&2
 			return 1
 		fi
