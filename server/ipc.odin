@@ -299,6 +299,9 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.description)
 	case common.DatabasePostDirectMessageRequest:
 		delete(r.content)
+	case common.DatabaseAdminUserRequest:
+		delete(r.nickname)
+		delete(r.reason)
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
@@ -370,6 +373,11 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		}
 		delete(r.users)
 	case common.DatabaseUserIdentityResult:
+		delete(r.previousNickname)
+		delete(r.nickname)
+		delete(r.banReason)
+	case common.DatabaseAdminUserResult:
+		delete(r.user.nickname)
 		delete(r.previousNickname)
 	case common.DatabaseUserServerAdminResult, common.DatabaseMarkReadResult:
 	case nil:

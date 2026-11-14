@@ -214,6 +214,9 @@ routerEncodePacketBytes :: proc(packet: common.Packet) -> []u8 {
 
 // renamed makes the stubbed identity resolution report that this login renamed the account,
 // and isAdmin that the account holds the admin role; ServerAuthSuccess must carry the latter.
+// accountNickname (protocol 14) is the account's name the identity statement reports, as for
+// a name an admin locked (nicknameLocked); empty means the requested nickname. ServerAuthSuccess
+// must carry it and the session must take it.
 routerCompleteHandshake :: proc(
 	h: ^RouterTestHarness,
 	peerID: u32,
@@ -222,6 +225,8 @@ routerCompleteHandshake :: proc(
 	renamed := false,
 	isAdmin := false,
 	voiceOpen: ^NetworkVoiceSessionOpen = nil,
+	accountNickname := "",
+	nicknameLocked := false,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -327,6 +332,8 @@ routerCompleteHandshake :: proc(
 				renamed = renamed,
 				previousNickname = renamed ? strings.clone("router-previous") : "",
 				isAdmin = isAdmin,
+				nickname = strings.clone(len(accountNickname) > 0 ? accountNickname : nickname),
+				nicknameLocked = nicknameLocked,
 			},
 		},
 	)
@@ -366,10 +373,22 @@ routerCompleteHandshake :: proc(
 	authSuccess: common.ServerAuthSuccessPayload
 	authSuccessErr := cbor.unmarshal(authSuccessPacket.payload, &authSuccess)
 	assert(authSuccessErr == nil, "expected auth success payload decode to succeed")
-	defer delete(authSuccess.message)
+	defer common.ServerAuthSuccessPayload_deinit(&authSuccess)
 	assert(
 		authSuccess.userId == userID,
 		"expected authenticated user ID from database resolution",
+	)
+	expectedNickname := len(accountNickname) > 0 ? accountNickname : nickname
+	assert(
+		authSuccess.nickname == expectedNickname &&
+		authSuccess.nicknameLocked == nicknameLocked,
+		fmt.tprintf(
+			"expected ServerAuthSuccess to name the account %q (locked %v), got %q (locked %v)",
+			expectedNickname,
+			nicknameLocked,
+			authSuccess.nickname,
+			authSuccess.nicknameLocked,
+		),
 	)
 	assert(
 		authSuccess.isAdmin == isAdmin,
@@ -1781,7 +1800,11 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&adminTransport,
 		.ClientCreateRoom,
-		common.ClientCreateRoomPayload{name = "lobby", description = "hang out"},
+		common.ClientCreateRoomPayload {
+			name = "lobby",
+			description = "hang out",
+			roomType = .ChatAndVoice,
+		},
 	)
 	assert(sealOK, "expected encrypted create room packet sealing to succeed")
 	defer delete(sealedPacket.payload)
@@ -1812,8 +1835,10 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 	createRequest, createRequestOK := createQuery.request.(common.DatabaseCreateRoomRequest)
 	assert(createRequestOK, "expected an admin's room creation to reach the database")
 	assert(
-		createRequest.creatorUserId == 42 && createRequest.name == "lobby",
-		"expected the create request to carry the creator and room name",
+		createRequest.creatorUserId == 42 &&
+		createRequest.name == "lobby" &&
+		createRequest.roomType == .ChatAndVoice,
+		"expected the create request to carry the creator, room name and type",
 	)
 	MainRouterState_handleDatabaseResult(
 		&h.pm,

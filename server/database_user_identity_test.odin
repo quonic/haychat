@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "core:time"
 import "shared:pg"
@@ -18,7 +19,8 @@ databaseIdentityTestKey :: proc() -> common.IdentityPublicKeyBytes {
 	return publicKey
 }
 
-// Resolves nickname for publicKey. The caller frees the result's previousNickname.
+// Resolves nickname for publicKey. The caller frees the result's previousNickname; the
+// account's nickname and ban reason (protocol 14) are moved to the temp allocator.
 databaseIdentityTestResolve :: proc(
 	conn: pg.Conn,
 	nickname: string,
@@ -34,6 +36,12 @@ databaseIdentityTestResolve :: proc(
 		fmt.tprintf("expected the identity statement for %q to run: %s", nickname, response.message),
 	)
 	delete(response.message)
+	accountNickname := identity.nickname
+	identity.nickname = strings.clone(accountNickname, context.temp_allocator)
+	delete(accountNickname)
+	banReason := identity.banReason
+	identity.banReason = strings.clone(banReason, context.temp_allocator)
+	delete(banReason)
 	return identity
 }
 

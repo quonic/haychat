@@ -567,6 +567,37 @@ State_userPresenceChanged :: proc(state: ^State, serverID: int, user: ^common.Us
 	user^ = {}
 }
 
+// ServerUserUpdated (protocol 14): an admin changed an account's role, ban, or name. The
+// directory entry is replaced in place (added when unknown), and a new name also reaches the
+// account's conversation summary, like a rename announced as presence. Takes ownership of
+// user's nickname and clears it.
+State_userUpdated :: proc(state: ^State, serverID: int, user: ^common.UserSummary) {
+	if State_selectedTransportIndexForServerID(state^, serverID) < 0 || user.id <= 0 {
+		return
+	}
+	cache := State_serverDirectCache(state, serverID)
+	if index := ServerDirectCache_conversationIndex(cache^, user.id); index >= 0 {
+		summary := &cache.conversations[index]
+		if len(user.nickname) > 0 && summary.peerNickname != user.nickname {
+			delete(summary.peerNickname)
+			summary.peerNickname = strings.clone(user.nickname)
+		}
+	}
+	if index := ServerDirectCache_userIndex(cache^, user.id); index >= 0 {
+		known := &cache.users[index]
+		if len(user.nickname) == 0 {
+			user.nickname = known.nickname
+		} else {
+			delete(known.nickname)
+		}
+		known^ = user^
+		user^ = {}
+		return
+	}
+	append(&cache.users, user^)
+	user^ = {}
+}
+
 // A new session must fetch everything again: requests in flight died with the old one, and
 // messages may have arrived while disconnected. Merging by message ID keeps what is loaded.
 State_resetDirectRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {

@@ -183,7 +183,11 @@ testRoomUnreadRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	// A newly created room starts with nothing unread for everyone, its creator included.
 	created := databaseExecuteRequest(
 		conn,
-		common.DatabaseCreateRoomRequest{creatorUserId = alice, name = "read-new"},
+		common.DatabaseCreateRoomRequest {
+			creatorUserId = alice,
+			name = "read-new",
+			roomType = .ChatAndVoice,
+		},
 	)
 	defer IPC__database_query_response_deinit(created)
 	mutation := created.result.(common.DatabaseRoomMutationResult)
@@ -266,7 +270,11 @@ testMarkRoomReadMovesForwardClampsAndChecksMembershipAgainstPostgreSQL :: proc(t
 	// A message in another room is not this room's newest.
 	other := databaseExecuteRequest(
 		conn,
-		common.DatabaseCreateRoomRequest{creatorUserId = alice, name = "mark-other"},
+		common.DatabaseCreateRoomRequest {
+			creatorUserId = alice,
+			name = "mark-other",
+			roomType = .ChatAndVoice,
+		},
 	)
 	defer IPC__database_query_response_deinit(other)
 	otherRoom := other.result.(common.DatabaseRoomMutationResult).room.id

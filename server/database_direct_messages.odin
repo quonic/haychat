@@ -64,7 +64,11 @@ DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"ORDER BY c.id DESC"
 
 // Every account, the requester included. Online flags are not stored; the router adds them.
-DATABASE_LIST_USERS_SQL :: "SELECT id::text, nickname FROM users ORDER BY lower(nickname), id"
+DATABASE_LIST_USERS_SQL ::
+	"SELECT u.id::text, u.nickname, EXISTS (SELECT 1 FROM user_server_roles usr " +
+	"JOIN server_roles sr ON sr.id = usr.role_id WHERE usr.user_id = u.id " +
+	"AND sr.name = 'admin')::text, (u.banned_at IS NOT NULL)::text FROM users u " +
+	"ORDER BY lower(u.nickname), u.id"
 
 databaseExecutePostDirectMessage :: proc(
 	conn: pg.Conn,
@@ -255,7 +259,15 @@ databaseExecuteListUsers :: proc(conn: pg.Conn) -> common.DatabaseQueryResponse 
 		if !userIDOK {
 			continue
 		}
-		append(&users, common.UserSummary{id = userID, nickname = databaseGetText(result, row, 1)})
+		append(
+			&users,
+			common.UserSummary {
+				id = userID,
+				nickname = databaseGetText(result, row, 1),
+				isAdmin = databaseGetBool(result, row, 2),
+				isBanned = databaseGetBool(result, row, 3),
+			},
+		)
 	}
 	return databaseSuccess(common.DatabaseUserDirectoryResult{users = users})
 }

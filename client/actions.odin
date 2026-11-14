@@ -457,6 +457,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	}
 	State_directProtocolError(state, serverID)
 	State_roomEditorProtocolError(state, serverID, message)
+	State_adminProtocolError(state, serverID, message)
 	State_setChatStatus(state, message)
 }
 
@@ -533,6 +534,21 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_voiceJoinRejected(state, event.serverID, event.roomID, &event.message)
 	case .VoiceLeft:
 		State_voiceLeft(state, event.serverID, event.roomID, &event.message)
+	case .UserUpdated:
+		State_userUpdated(state, event.serverID, &event.user)
+	case .AccountUpdated:
+		State_accountUpdated(state, event)
+	case .AdminActionResult:
+		State_adminActionResult(
+			state,
+			event.serverID,
+			event.adminAction,
+			event.peerUserID,
+			event.message,
+		)
+	case .SessionEnded:
+		// The transport already ended the session as a failure that is not retried.
+		State_connectionFailed(state, event)
 	case .None:
 	}
 }

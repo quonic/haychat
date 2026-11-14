@@ -153,11 +153,13 @@ routerVoiceTestSendJoin :: proc(
 	)
 }
 
-// Answers the pending membership check for roomID with memberUserIDs.
+// Answers the pending membership check for roomID with memberUserIDs, for a room of roomType
+// (protocol 14; text and voice unless a test says otherwise).
 routerVoiceTestAnswerMemberCheck :: proc(
 	h: ^RouterTestHarness,
 	roomID: int,
 	memberUserIDs: []int,
+	roomType: common.RoomType = .ChatAndVoice,
 ) {
 	query := routerPollDatabaseQuery(h)
 	defer IPC__database_query_request_deinit(query.request)
@@ -174,7 +176,11 @@ routerVoiceTestAnswerMemberCheck :: proc(
 		query.request_id,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabaseRoomMemberListResult{userIDs = userIDs},
+			result = common.DatabaseRoomMemberListResult {
+				userIDs = userIDs,
+				roomFound = true,
+				roomType = roomType,
+			},
 		},
 	)
 }

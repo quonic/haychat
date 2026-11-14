@@ -36,6 +36,8 @@ RoomEditor :: struct {
 	roomID:        int, // The room being edited; 0 while creating
 	name:          [dynamic]u8, // Edited in place by the text inputs
 	description:   [dynamic]u8,
+	// Text, voice, or both (protocol 14). Create starts at ChatAndVoice; Edit at the room's.
+	roomType:      common.RoomType,
 	pending:       RoomEditorPending,
 	// Delete takes two clicks: the first turns the button into "Confirm delete".
 	confirmDelete: bool,
@@ -67,6 +69,8 @@ RoomAdminRequest :: struct {
 	roomID:      int,
 	name:        string,
 	description: string,
+	// Create and Edit (protocol 14): Chat, Voice or ChatAndVoice.
+	roomType:    common.RoomType,
 }
 
 RoomAdminSendBridge :: #type proc(
@@ -83,13 +87,19 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 ) -> bool {
 	switch request.kind {
 	case .Create:
-		return ClientServerTransport_createRoom(transport, request.name, request.description)
+		return ClientServerTransport_createRoom(
+			transport,
+			request.name,
+			request.description,
+			request.roomType,
+		)
 	case .Edit:
 		return ClientServerTransport_editRoom(
 			transport,
 			request.roomID,
 			request.name,
 			request.description,
+			request.roomType,
 		)
 	case .Delete:
 		return ClientServerTransport_deleteRoom(transport, request.roomID)
@@ -175,6 +185,9 @@ State_sendRoomAdminRequest :: proc(
 		if State_roomNameTaken(state, serverID, name, request.roomID) {
 			return fmt.tprintf("A room named #%s already exists.", name)
 		}
+		if !common.roomTypeIsSupported(request.roomType) {
+			return "Choose text, voice, or both for the room."
+		}
 		request.name = name
 		request.description = description
 	} else if request.roomID <= 0 {
@@ -203,21 +216,35 @@ State_sendRoomAdminRequest :: proc(
 	return "Failed to send the room request"
 }
 
-// Asks the server for a new room. The answer arrives as RoomCreated (to this session only)
-// and as RoomMembershipChanged (to everyone). Returns the reason when nothing was sent.
-State_sendCreateRoom :: proc(state: ^State, serverID: int, name, description: string) -> string {
+// Asks the server for a new room of roomType (protocol 14; text and voice unless told
+// otherwise). The answer arrives as RoomCreated (to this session only) and as
+// RoomMembershipChanged (to everyone). Returns the reason when nothing was sent.
+State_sendCreateRoom :: proc(
+	state: ^State,
+	serverID: int,
+	name, description: string,
+	roomType: common.RoomType = .ChatAndVoice,
+) -> string {
 	return State_sendRoomAdminRequest(
 		state,
 		serverID,
-		RoomAdminRequest{kind = .Create, name = name, description = description},
+		RoomAdminRequest {
+			kind = .Create,
+			name = name,
+			description = description,
+			roomType = roomType,
+		},
 	)
 }
 
-// Renames a room and replaces its description; the answer arrives as RoomEdited.
+// Renames a room and replaces its description and type; the answer arrives as RoomEdited. The
+// type has no default, so an edit never changes it by accident: pass the room's own to keep it.
+// Making a room text-only ends its voice session on the server.
 State_sendEditRoom :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	name, description: string,
+	roomType: common.RoomType,
 ) -> string {
 	if roomID <= 0 {
 		return "No room to edit."
@@ -225,8 +252,28 @@ State_sendEditRoom :: proc(
 	return State_sendRoomAdminRequest(
 		state,
 		serverID,
-		RoomAdminRequest{kind = .Edit, roomID = roomID, name = name, description = description},
+		RoomAdminRequest {
+			kind = .Edit,
+			roomID = roomID,
+			name = name,
+			description = description,
+			roomType = roomType,
+		},
 	)
+}
+
+// The type of a cached room, or ChatAndVoice when it is not cached.
+State_roomType :: proc(state: ^State, serverID, roomID: int) -> common.RoomType {
+	index := State_serverRoomCacheIndex(state^, serverID)
+	if index < 0 {
+		return .ChatAndVoice
+	}
+	for room in state.server_room_caches[index].rooms {
+		if room.id == roomID {
+			return room.roomType
+		}
+	}
+	return .ChatAndVoice
 }
 
 // Deletes a room with its history; the answer arrives as RoomDeleted.
@@ -254,6 +301,7 @@ State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roo
 	editor.roomID = roomID
 	clear(&editor.name)
 	clear(&editor.description)
+	editor.roomType = .ChatAndVoice
 	editor.pending = .None
 	editor.confirmDelete = false
 	delete(editor.error)
@@ -287,6 +335,7 @@ State_openRoomEditor :: proc(state: ^State, roomID: int) {
 			State_resetRoomEditor(state, .Edit, serverID, roomID)
 			append(&state.roomEditor.name, room.name)
 			append(&state.roomEditor.description, room.description)
+			state.roomEditor.roomType = room.roomType
 			return
 		}
 	}
@@ -317,7 +366,13 @@ State_submitRoomEditor :: proc(state: ^State) {
 	errorMessage: string
 	pending: RoomEditorPending
 	if editor.mode == .Create {
-		errorMessage = State_sendCreateRoom(state, editor.serverID, name, description)
+		errorMessage = State_sendCreateRoom(
+			state,
+			editor.serverID,
+			name,
+			description,
+			editor.roomType,
+		)
 		pending = .Create
 	} else {
 		errorMessage = State_sendEditRoom(
@@ -326,6 +381,7 @@ State_submitRoomEditor :: proc(state: ^State) {
 			editor.roomID,
 			name,
 			description,
+			editor.roomType,
 		)
 		pending = .Save
 	}

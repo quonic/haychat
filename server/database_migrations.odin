@@ -216,6 +216,44 @@ DATABASE_READ_MARKERS_CHECKS ::
 	"('chat messages created_at index', " +
 	"to_regclass('chat_messages_by_room_id_and_created_at') IS NOT NULL)"
 
+// Migration 3 (protocol 14): admin actions and room types.
+//
+// - users.nickname_locked: an admin renamed the account and locked the name, so a sign-in keeps
+//   it whatever the client asks for.
+// - users.banned_at, users.ban_reason: a banned account cannot sign in; banned_at is NULL for
+//   every account that is not banned.
+// - rooms.room_type: common.RoomType as a number, only Chat (1), Voice (2), and ChatAndVoice
+//   (3). Every existing room becomes ChatAndVoice, which is what rooms did before.
+//
+// Columns are added with defaults, so every existing row keeps its data and gets the default.
+// Never edit it; append a migration instead.
+DATABASE_MIGRATION_3_ADMIN_SQL ::
+	"ALTER TABLE users ADD COLUMN nickname_locked BOOLEAN NOT NULL DEFAULT false; " +
+	"ALTER TABLE users ADD COLUMN banned_at TIMESTAMPTZ NULL; " +
+	"ALTER TABLE users ADD COLUMN ban_reason VARCHAR(256) NOT NULL DEFAULT ''; " +
+	"ALTER TABLE rooms ADD COLUMN room_type SMALLINT NOT NULL DEFAULT 3 " +
+	"CONSTRAINT rooms_room_type_check CHECK (room_type IN (1, 2, 3));"
+
+// What migration 3 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ADMIN_CHECKS ::
+	"('users nickname_locked', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'users' " +
+	"AND column_name = 'nickname_locked' AND data_type = 'boolean' AND is_nullable = 'NO')), " +
+	"('users banned_at', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'users' " +
+	"AND column_name = 'banned_at' AND data_type = 'timestamp with time zone' " +
+	"AND is_nullable = 'YES')), " +
+	"('users ban_reason', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'users' " +
+	"AND column_name = 'ban_reason' AND data_type = 'character varying' " +
+	"AND character_maximum_length = 256 AND is_nullable = 'NO')), " +
+	"('rooms room_type', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'room_type' AND data_type = 'smallint' AND is_nullable = 'NO')), " +
+	"('rooms room type check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_room_type_check'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -224,6 +262,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "read markers",
 		sql = DATABASE_MIGRATION_2_READ_MARKERS_SQL,
 		checks = DATABASE_READ_MARKERS_CHECKS,
+	},
+	{
+		version = 3,
+		name = "admin",
+		sql = DATABASE_MIGRATION_3_ADMIN_SQL,
+		checks = DATABASE_ADMIN_CHECKS,
 	},
 }
 
@@ -327,6 +371,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_SCHEMA_MIGRATIONS_CHECKS +
 	", " +
 	DATABASE_READ_MARKERS_CHECKS +
+	", " +
+	DATABASE_ADMIN_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

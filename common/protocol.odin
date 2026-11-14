@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 13
+protocolVersion: ProtocolVersion = 14
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -22,6 +22,12 @@ ROOM_DESCRIPTION_MAX_BYTES :: 256
 // Unread counts are capped: a room or conversation with this many unread messages or more may
 // report exactly this many, and clients show it as "99+". It keeps the list queries cheap.
 UNREAD_COUNT_CAP :: 100
+// Display names (ClientHello.nickname, ClientAdminRenameUser.nickname) are 3..32 bytes.
+NICKNAME_MIN_BYTES :: 3
+NICKNAME_MAX_BYTES :: 32
+// Kick and ban reasons (protocol 14) are at most this many bytes; users.ban_reason is
+// VARCHAR(256).
+ADMIN_REASON_MAX_BYTES :: 256
 
 // Packet is the logical application packet format.
 // Handshake packets are encoded directly as Packet values.
@@ -97,12 +103,20 @@ ClientAuthRequestPayload :: struct {
 
 // isAdmin (protocol 8) tells the client whether the account holds the server's admin role at
 // the moment it signed in, so it can offer room management. It is a hint for the UI only: the
-// server checks the role again on every admin request, and a role granted or revoked while
-// connected shows up on the next connection.
+// server checks the role again on every admin request. A role an admin changes from a client
+// while the account is connected arrives as ServerAccountUpdated (protocol 14); one changed
+// directly in the database shows up on the next connection.
+//
+// nickname and nicknameLocked (protocol 14): the account's name on this server, and whether an
+// admin set it. While it is locked, a sign-in keeps the account's name whatever ClientHello
+// asked for, so nickname can differ from the one the client sent. message and nickname are
+// owned once decoded.
 ServerAuthSuccessPayload :: struct {
-	userId:  int,
-	message: string,
-	isAdmin: bool,
+	userId:         int,
+	message:        string,
+	isAdmin:        bool,
+	nickname:       string,
+	nicknameLocked: bool,
 }
 
 ServerAuthFailurePayload :: struct {
@@ -320,14 +334,49 @@ MessageType :: enum {
 	// Read state (protocol 11), appended so no existing wire value moves.
 	ClientMarkRead, // ClientMarkReadPayload: mark a room or conversation read up to a message
 	ServerReadMarker, // ServerReadMarkerPayload: a read marker moved, to every session of the user
+
+	// Admin actions on accounts (protocol 14), appended so no existing wire value moves. The
+	// older ClientKickUser, ClientBanUser and ClientUnbanUser placeholders above were never
+	// sent and stay unused.
+	ClientAdminSetRole, // ClientAdminSetRolePayload: grant or revoke the admin role
+	ClientAdminRenameUser, // ClientAdminRenameUserPayload: rename an account, lock its name
+	ClientAdminKickUser, // ClientAdminKickUserPayload: end every session of an account
+	ClientAdminBanUser, // ClientAdminBanUserPayload: ban or unban an account
+	ServerAdminActionResult, // ServerAdminActionResultPayload: an admin action succeeded
+	ServerUserUpdated, // ServerUserUpdatedPayload: an account's directory entry changed
+	ServerAccountUpdated, // ServerAccountUpdatedPayload: this account's role or name changed
+	ServerSessionEnded, // ServerSessionEndedPayload: the server is about to end this session
 }
 
+// Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
+// ClientEditRoom, and rooms.room_type in the database). Only Chat, Voice and ChatAndVoice are
+// accepted (roomTypeIsSupported); Container and Forum are refused. The values are pinned in
+// protocol_test.odin.
 RoomType :: enum {
 	Container, // A room that can contain other rooms but cannot have participants or messages itself, used for organizational purposes (e.g. "Games" category that contains "Chess", "Poker", etc.)
 	Chat,
 	Voice,
 	ChatAndVoice,
 	Forum,
+}
+
+// Whether a room may have this type today: Chat, Voice or ChatAndVoice.
+roomTypeIsSupported :: proc(roomType: RoomType) -> bool {
+	#partial switch roomType {
+	case .Chat, .Voice, .ChatAndVoice:
+		return true
+	}
+	return false
+}
+
+// Whether a room of this type takes chat messages (a voice-only room does not).
+roomTypeAllowsChat :: proc(roomType: RoomType) -> bool {
+	return roomType == .Chat || roomType == .ChatAndVoice
+}
+
+// Whether a room of this type has a voice session (a text-only room does not).
+roomTypeAllowsVoice :: proc(roomType: RoomType) -> bool {
+	return roomType == .Voice || roomType == .ChatAndVoice
 }
 
 Rooms :: struct {
@@ -402,6 +451,8 @@ RoomSummary :: struct {
 	// Messages from other users after the marker (without a marker: created after the
 	// requester joined the room), capped at UNREAD_COUNT_CAP.
 	unreadCount:       int,
+	// Text, voice, or both (protocol 14). Every payload that embeds a RoomSummary carries it.
+	roomType:          RoomType,
 }
 
 ClientListRoomsPayload :: struct {}
@@ -436,15 +487,22 @@ ServerRoomHistoryPayload :: struct {
 // the new room, and every authenticated session gets ServerRoomMembershipChanged{joined} (rooms
 // are open, so every account is a member). ServerEditRoom and ServerDeleteRoom go to the
 // room's members and to the admin who asked.
+//
+// roomType (protocol 14) must be Chat, Voice or ChatAndVoice; anything else is refused like
+// bad metadata. A voice-only room refuses chat messages ("Chat is disabled in this room"), and
+// a text-only room refuses voice joins ("voice is disabled in this room"); editing a room to
+// text-only removes its voice participants with ServerVoiceLeft.
 ClientCreateRoomPayload :: struct {
 	name:        string,
 	description: string,
+	roomType:    RoomType,
 }
 
 ClientEditRoomPayload :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
+	roomType:    RoomType,
 }
 
 ClientDeleteRoomPayload :: struct {
@@ -529,6 +587,10 @@ UserSummary :: struct {
 	id:       int,
 	nickname: string,
 	isOnline: bool, // At least one authenticated session for this account is connected
+	// Protocol 14: whether the account holds the admin role, and whether it is banned. Every
+	// account sees them; banned accounts stay listed because history names them.
+	isAdmin:  bool,
+	isBanned: bool,
 }
 
 // ServerUserList: every account on the server, the requester included, ordered by nickname.
@@ -703,6 +765,144 @@ ServerReadMarkerPayload :: struct {
 	unreadCount:       int,
 }
 
+// Admin actions on accounts (protocol 14). Every request needs the admin role, which the
+// server checks in the database in the same statement as the change. Refusals are
+// ServerProtocolError with a sentence for people, and the session stays up:
+//
+// - "Admin permission required": the requester is not an admin.
+// - "Unknown user": no account has userId.
+// - The requester as the target of a kick, a ban, or a role revoke (renaming yourself is
+//   allowed), another admin as the target of a kick or a ban (revoke the role first), a
+//   revoke that would leave the server without an admin, making a banned account an admin,
+//   and a rename to a name another account holds.
+//
+// A success answers the requester with ServerAdminActionResult. A role change, a ban or unban,
+// and a rename that changed something send ServerUserUpdated (the account's full UserSummary)
+// to every authenticated session, and a role change or rename sends ServerAccountUpdated to
+// every session of the target account.
+
+// Which admin action a ServerAdminActionResult answers. An unban is a Ban with banned false.
+AdminAction :: enum u8 {
+	SetRole = 0,
+	Rename  = 1,
+	Kick    = 2,
+	Ban     = 3,
+}
+
+// ClientAdminSetRole: grant (isAdmin true) or revoke the admin role.
+ClientAdminSetRolePayload :: struct {
+	userId:  int,
+	isAdmin: bool,
+}
+
+// ClientAdminRenameUser: renames the account and sets its nickname lock. nickname is
+// NICKNAME_MIN_BYTES..NICKNAME_MAX_BYTES bytes, or empty to keep the name and change only the
+// lock. While locked, a sign-in keeps the account's name whatever the client asks for, so the
+// next connection does not undo the rename; locked false gives the name back to the client.
+// nickname is owned once decoded.
+ClientAdminRenameUserPayload :: struct {
+	userId:   int,
+	nickname: string,
+	locked:   bool,
+}
+
+// ClientAdminKickUser: ends every session of the account with ServerSessionEnded{Kicked}. It
+// can sign in again at once; its client waits until the user asks. reason is at most
+// ADMIN_REASON_MAX_BYTES and owned once decoded.
+ClientAdminKickUserPayload :: struct {
+	userId: int,
+	reason: string,
+}
+
+// ClientAdminBanUser: banned true bans the account (users.banned_at, users.ban_reason), ends
+// every session of it with ServerSessionEnded{Banned}, and refuses its sign-in with
+// ServerAuthFailure "This account is banned from this server" (plus ": reason" when set).
+// banned false lifts the ban. Sign-up is open, so a banned person can still connect with a new
+// key as a new account. reason is owned once decoded.
+ClientAdminBanUserPayload :: struct {
+	userId: int,
+	banned: bool,
+	reason: string,
+}
+
+// ServerAdminActionResult: the requester's action succeeded. message is a sentence for people
+// and owned once decoded.
+ServerAdminActionResultPayload :: struct {
+	action:  AdminAction,
+	userId:  int,
+	message: string,
+}
+
+// ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
+// every authenticated session. user.nickname is owned once decoded.
+ServerUserUpdatedPayload :: struct {
+	user: UserSummary,
+}
+
+// ServerAccountUpdated: the receiving session's own account changed role or name (#41), to
+// every session of that account. nickname is owned once decoded.
+ServerAccountUpdatedPayload :: struct {
+	isAdmin:        bool,
+	nickname:       string,
+	nicknameLocked: bool,
+}
+
+// Why the server ended a session.
+SessionEndedKind :: enum u8 {
+	Kicked = 0,
+	Banned = 1,
+}
+
+// ServerSessionEnded: sent right before the server disconnects the session. A client treats it
+// as a failure that retrying cannot fix until the user asks to connect again. reason is the
+// admin's reason (may be empty) and owned once decoded.
+ServerSessionEndedPayload :: struct {
+	kind:   SessionEndedKind,
+	reason: string,
+}
+
+ServerAuthSuccessPayload_deinit :: proc(payload: ^ServerAuthSuccessPayload) {
+	delete(payload.message)
+	delete(payload.nickname)
+	payload.message = ""
+	payload.nickname = ""
+}
+
+ClientAdminRenameUserPayload_deinit :: proc(payload: ^ClientAdminRenameUserPayload) {
+	delete(payload.nickname)
+	payload.nickname = ""
+}
+
+ClientAdminKickUserPayload_deinit :: proc(payload: ^ClientAdminKickUserPayload) {
+	delete(payload.reason)
+	payload.reason = ""
+}
+
+ClientAdminBanUserPayload_deinit :: proc(payload: ^ClientAdminBanUserPayload) {
+	delete(payload.reason)
+	payload.reason = ""
+}
+
+ServerAdminActionResultPayload_deinit :: proc(payload: ^ServerAdminActionResultPayload) {
+	delete(payload.message)
+	payload.message = ""
+}
+
+ServerUserUpdatedPayload_deinit :: proc(payload: ^ServerUserUpdatedPayload) {
+	delete(payload.user.nickname)
+	payload.user.nickname = ""
+}
+
+ServerAccountUpdatedPayload_deinit :: proc(payload: ^ServerAccountUpdatedPayload) {
+	delete(payload.nickname)
+	payload.nickname = ""
+}
+
+ServerSessionEndedPayload_deinit :: proc(payload: ^ServerSessionEndedPayload) {
+	delete(payload.reason)
+	payload.reason = ""
+}
+
 VideoData :: struct {
 	senderId:  int,
 	roomId:    int,
@@ -741,6 +941,7 @@ DatabaseQueryRequest :: union {
 	DatabaseDirectConversationListRequest,
 	DatabaseUserDirectoryRequest,
 	DatabaseMarkReadRequest,
+	DatabaseAdminUserRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -783,12 +984,14 @@ DatabaseCreateRoomRequest :: struct {
 	creatorUserId: int,
 	name:          string,
 	description:   string,
+	roomType:      RoomType,
 }
 
 DatabaseEditRoomRequest :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
+	roomType:    RoomType,
 }
 
 DatabaseDeleteRoomRequest :: struct {
@@ -835,6 +1038,22 @@ DatabaseMarkReadRequest :: struct {
 	messageId:      int,
 }
 
+// One admin action on an account (protocol 14). The statement checks that actorUserId holds
+// the admin role and applies the guards of the action in the same statement as the change, so
+// a role change between a check and the action cannot slip through. isAdmin is for SetRole,
+// nickname (owned; empty keeps the name) and locked for Rename, banned for Ban, and reason
+// (owned) for Ban.
+DatabaseAdminUserRequest :: struct {
+	action:       AdminAction,
+	actorUserId:  int,
+	targetUserId: int,
+	isAdmin:      bool,
+	nickname:     string,
+	locked:       bool,
+	banned:       bool,
+	reason:       string,
+}
+
 // message holds the error text when success is false. All strings and arrays are owned.
 DatabaseQueryResponse :: struct {
 	success: bool,
@@ -855,6 +1074,7 @@ DatabaseQueryResult :: union {
 	DatabaseDirectConversationListResult,
 	DatabaseUserDirectoryResult,
 	DatabaseMarkReadResult,
+	DatabaseAdminUserResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -862,24 +1082,38 @@ DatabaseQueryResult :: union {
 // login; previousNickname (owned, empty otherwise) is the nickname it had before.
 // isAdmin is whether the resolved account holds the admin server role, read in the same
 // statement so ServerAuthSuccess needs no second query.
+//
+// Protocol 14: nickname (owned) is the account's name after this login, which differs from the
+// requested one when an admin locked it (nicknameLocked). banned is true for a banned account,
+// with banReason (owned, may be empty); the router refuses its sign-in.
 DatabaseUserIdentityResult :: struct {
 	userId:           int,
 	renamed:          bool,
 	previousNickname: string,
 	isAdmin:          bool,
+	nickname:         string,
+	nicknameLocked:   bool,
+	banned:           bool,
+	banReason:        string,
 }
 
 DatabaseRoomListResult :: struct {
 	rooms: [dynamic]RoomSummary,
 }
 
+// roomFound is false when no room has the requested ID; roomType is the room's type
+// (protocol 14), which the voice join check reads.
 DatabaseRoomMemberListResult :: struct {
-	userIDs: [dynamic]int,
+	userIDs:   [dynamic]int,
+	roomFound: bool,
+	roomType:  RoomType,
 }
 
-// When isMember is false nothing was stored and the other fields are empty.
+// When isMember is false, or chatDisabled is true (a voice-only room, protocol 14), nothing was
+// stored and the other fields are empty.
 DatabasePostRoomChatMessageResult :: struct {
 	isMember:         bool,
+	chatDisabled:     bool,
 	storedMessage:    StoredChatMessage,
 	recipientUserIDs: [dynamic]int,
 }
@@ -930,6 +1164,30 @@ DatabaseMarkReadResult :: struct {
 	changed:           bool,
 	lastReadMessageId: int,
 	unreadCount:       int,
+}
+
+// How the admin statement ended. Applied means the guards passed (changed says whether a row
+// moved); every other value is a refusal and nothing changed.
+DatabaseAdminOutcome :: enum u8 {
+	Applied,
+	NotAdmin, // The requester does not hold the admin role
+	UnknownUser, // No account has the target ID
+	SelfTarget, // Kick, ban, or role revoke aimed at the requester
+	AdminTarget, // Kick or ban aimed at an admin
+	LastAdmin, // The revoke would leave the server without an admin
+	NicknameTaken, // Another account holds the new nickname
+	BannedTarget, // Granting the admin role to a banned account
+}
+
+// user (nickname owned) is the target's directory entry after the action, isOnline false (the
+// router fills it in); previousNickname (owned) is its name before a rename. Both are set only
+// when outcome is Applied.
+DatabaseAdminUserResult :: struct {
+	outcome:          DatabaseAdminOutcome,
+	changed:          bool,
+	user:             UserSummary,
+	nicknameLocked:   bool,
+	previousNickname: string,
 }
 
 ProtocolErrorResponse :: struct {

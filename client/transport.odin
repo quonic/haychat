@@ -55,6 +55,17 @@ ClientTransportRuntimeEventKind :: enum {
 	VoiceParticipants,
 	VoiceJoinRejected,
 	VoiceLeft,
+	// Admin actions (protocol 14). UserUpdated carries an account's full directory entry in
+	// user (ServerUserUpdated). AccountUpdated carries this account's isAdmin, nickname and
+	// nicknameLocked (ServerAccountUpdated, #41). AdminActionResult answers this session's admin
+	// request: adminAction, peerUserID (the target) and the server's sentence in message.
+	// SessionEnded is ServerSessionEnded: the transport has already ended the session as a
+	// failure that is not retried (failureKind Kicked or Banned, message for people, detail the
+	// admin's reason), and State handles it exactly like ConnectFailed.
+	UserUpdated,
+	AccountUpdated,
+	AdminActionResult,
+	SessionEnded,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -71,11 +82,14 @@ ClientTransportRuntimeEvent :: struct {
 	hasOlder:          bool,
 	joined:            bool,
 	room:              common.RoomSummary,
-	// Connection lifecycle fields. userID, nickname, and isAdmin are set on Connected. retryAt
-	// is when the worker tries again after Disconnected or a retryable ConnectFailed.
+	// Connection lifecycle fields. userID, nickname, isAdmin and nicknameLocked are set on
+	// Connected (nickname is the account's name from ServerAuthSuccess, which an admin may have
+	// locked); AccountUpdated uses isAdmin, nickname and nicknameLocked too. retryAt is when the
+	// worker tries again after Disconnected or a retryable ConnectFailed.
 	userID:            int,
 	nickname:          string,
 	isAdmin:           bool,
+	nicknameLocked:    bool,
 	failureKind:       ClientConnectFailureKind,
 	retryable:         bool,
 	retryAt:           time.Tick,
@@ -102,6 +116,10 @@ ClientTransportRuntimeEvent :: struct {
 	// On Connected: the transport's session counter, which voice bindings are checked against
 	// (see ClientTransportVoiceBinding).
 	sessionGeneration: u64,
+	// AdminActionResult: which action the server answered.
+	adminAction:       common.AdminAction,
+	// SessionEnded: the admin's reason, owned (may be empty).
+	detail:            string,
 }
 
 ClientServerTransport :: struct {
@@ -122,8 +140,13 @@ ClientServerTransport :: struct {
 	pendingKeysReady:          bool,
 	transport:                 common.TransportState,
 	authenticatedUserID:       int,
-	// Whether ServerAuthSuccess said the account is an admin; fixed for the session.
+	// Whether ServerAuthSuccess said the account is an admin; ServerAccountUpdated changes the
+	// copy in State, not this one.
 	authenticatedIsAdmin:      bool,
+	// The account's name and lock from ServerAuthSuccess (protocol 14); owned, empty when the
+	// server sent none.
+	authenticatedNickname:     string,
+	authenticatedNicknameLocked: bool,
 	lastError:                 string,
 	enetHost:                  ^ENet.Host,
 	enetPeer:                  ^ENet.Peer,
@@ -187,6 +210,9 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.pendingKeysReady = false
 	transport.authenticatedUserID = 0
 	transport.authenticatedIsAdmin = false
+	delete(transport.authenticatedNickname)
+	transport.authenticatedNickname = ""
+	transport.authenticatedNicknameLocked = false
 }
 
 // Releases the ENet session and every string the transport owns.
@@ -195,6 +221,7 @@ ClientServerTransport_deinit :: proc(transport: ^ClientServerTransport) {
 	delete(transport.serverName)
 	delete(transport.serverHost)
 	delete(transport.nickname)
+	delete(transport.authenticatedNickname)
 	delete(transport.lastError)
 	delete(transport.pinnedServerPublicKey)
 	delete(transport.pinnedServerFingerprint)
@@ -261,6 +288,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 		common.VoiceParticipant_deinit(&participant)
 	}
 	delete(event.voiceParticipants)
+	delete(event.detail)
 	event^ = {}
 }
 
@@ -595,10 +623,11 @@ ClientServerTransport_handleIncomingPacket :: proc(
 
 		authSuccess: common.ServerAuthSuccessPayload
 		if cbor.unmarshal(outerPacket.payload, &authSuccess) != nil {
+			common.ServerAuthSuccessPayload_deinit(&authSuccess)
 			ClientServerTransport_fail(transport, "invalid auth success payload")
 			return result, false
 		}
-		defer delete(authSuccess.message)
+		defer common.ServerAuthSuccessPayload_deinit(&authSuccess)
 
 		common.TransportState_activate(
 			&transport.transport,
@@ -610,6 +639,10 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		transport.pendingKeysReady = false
 		transport.authenticatedUserID = authSuccess.userId
 		transport.authenticatedIsAdmin = authSuccess.isAdmin
+		delete(transport.authenticatedNickname)
+		transport.authenticatedNickname = authSuccess.nickname
+		authSuccess.nickname = ""
+		transport.authenticatedNicknameLocked = authSuccess.nicknameLocked
 		return result, true
 
 	case .ServerAuthFailure:
@@ -864,11 +897,16 @@ ClientServerTransport_createRoom :: proc(
 	transport: ^ClientServerTransport,
 	name: string,
 	description: string,
+	roomType: common.RoomType,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
 		.ClientCreateRoom,
-		common.ClientCreateRoomPayload{name = name, description = description},
+		common.ClientCreateRoomPayload {
+			name = name,
+			description = description,
+			roomType = roomType,
+		},
 	)
 }
 
@@ -877,11 +915,69 @@ ClientServerTransport_editRoom :: proc(
 	roomID: int,
 	name: string,
 	description: string,
+	roomType: common.RoomType,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
 		.ClientEditRoom,
-		common.ClientEditRoomPayload{roomId = roomID, name = name, description = description},
+		common.ClientEditRoomPayload {
+			roomId = roomID,
+			name = name,
+			description = description,
+			roomType = roomType,
+		},
+	)
+}
+
+// Admin actions on accounts (protocol 14). The server checks the admin role and the guards in
+// the database and answers with ServerAdminActionResult or a ServerProtocolError.
+ClientServerTransport_adminSetRole :: proc(
+	transport: ^ClientServerTransport,
+	userID: int,
+	isAdmin: bool,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminSetRole,
+		common.ClientAdminSetRolePayload{userId = userID, isAdmin = isAdmin},
+	)
+}
+
+ClientServerTransport_adminRenameUser :: proc(
+	transport: ^ClientServerTransport,
+	userID: int,
+	nickname: string,
+	locked: bool,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminRenameUser,
+		common.ClientAdminRenameUserPayload{userId = userID, nickname = nickname, locked = locked},
+	)
+}
+
+ClientServerTransport_adminKickUser :: proc(
+	transport: ^ClientServerTransport,
+	userID: int,
+	reason: string,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminKickUser,
+		common.ClientAdminKickUserPayload{userId = userID, reason = reason},
+	)
+}
+
+ClientServerTransport_adminBanUser :: proc(
+	transport: ^ClientServerTransport,
+	userID: int,
+	banned: bool,
+	reason: string,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminBanUser,
+		common.ClientAdminBanUserPayload{userId = userID, banned = banned, reason = reason},
 	)
 }
 
@@ -1228,6 +1324,75 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				message = payload.reason,
 			},
 			true
+
+	case .ServerUserUpdated:
+		payload: common.ServerUserUpdatedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.user.id <= 0 {
+			common.ServerUserUpdatedPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid user update payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .UserUpdated,
+				serverID = transport.serverID,
+				user = payload.user,
+			},
+			true
+
+	case .ServerAccountUpdated:
+		payload: common.ServerAccountUpdatedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerAccountUpdatedPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid account update payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .AccountUpdated,
+				serverID = transport.serverID,
+				userID = transport.authenticatedUserID,
+				isAdmin = payload.isAdmin,
+				nickname = payload.nickname,
+				nicknameLocked = payload.nicknameLocked,
+			},
+			true
+
+	case .ServerAdminActionResult:
+		payload: common.ServerAdminActionResultPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   int(payload.action) > int(max(common.AdminAction)) {
+			common.ServerAdminActionResultPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid admin result payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .AdminActionResult,
+				serverID = transport.serverID,
+				adminAction = payload.action,
+				peerUserID = payload.userId,
+				message = payload.message,
+			},
+			true
+
+	case .ServerSessionEnded:
+		payload: common.ServerSessionEndedPayload
+		decodeOK := cbor.unmarshal(innerPacket.payload, &payload) == nil
+		defer common.ServerSessionEndedPayload_deinit(&payload)
+		// Even a payload that does not decode means the server is about to drop the session;
+		// it is treated as a kick, so the client still waits for the user.
+		kind := decodeOK ? payload.kind : .Kicked
+		if kind != .Kicked && kind != .Banned {
+			kind = .Kicked
+		}
+		return ClientServerTransport_sessionEnded(transport, time.tick_now(), kind, payload.reason)
 
 	case .ServerProtocolError:
 		protocolError: common.ProtocolErrorResponse

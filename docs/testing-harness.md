@@ -80,18 +80,23 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 
 | Command | Result |
 | --- | --- |
-| `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `isAdmin` (the server's admin flag for this session, see `connected`), `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
+| `status` | `connection` (`connecting`, `connected`, `retrying`, `failed`, or `none` without a server), `connected` (true when signed in), `retryInMS` (time until the next attempt while `retrying`), `serverID`, `server` (`host:port`), `userID`, `nickname`, `isAdmin` (the server's admin flag for this session, see `connected`; `account_updated` changes it), `nicknameLocked` (an admin set and locked the name), `selectedRoomID`, `lastError` (the last raw failure or disconnect reason) |
 | `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
-| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount"}]`, see [Read State](#read-state)). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
+| `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount","roomType"}]`, see [Read State](#read-state); `roomType` is 1 text, 2 voice, 3 both). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
-| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount"}]`, ordered by nickname; the last two are the read state of your conversation with that account, 0 without one). The list is fetched when the client connects and kept current by `presence` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
+| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
-| `room-create NAME [DESCRIPTION...]` | Admins: asks the server for a new room named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. The result echoes `serverID`, `roomID` (0), `name`, and `description` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room), and every connected client, yours included, gets `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
-| `room-edit ROOM_ID NAME [DESCRIPTION...]` | Admins: renames the room and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. |
+| `room-create text\|voice\|both NAME [DESCRIPTION...]` | Admins: asks the server for a new room of that type (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. The result echoes `serverID`, `roomID` (0), `name`, `description`, and `roomType` (1 text, 2 voice, 3 both) once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room), and every connected client, yours included, gets `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
+| `room-edit ROOM_ID text\|voice\|both NAME [DESCRIPTION...]` | Admins: sets the room's type, renames it, and replaces its description (an empty one without DESCRIPTION). Every member, you included, gets `room_edited`. Making a room `text` first removes everyone from its voice (`voice_left` "voice is disabled in this room"). A voice-only room refuses `send` (`protocol_error "Chat is disabled in this room"`), a text-only room refuses `voice-join` (`voice_join_rejected` "voice is disabled in this room"). |
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
+| `admin-role USER_ID on\|off` | Admins: grants or revokes the server's admin role (protocol 14). `ok` (`serverID`, `userID`) means the request went out. The answer is `admin_result`; every connected client gets `user_updated`, and the target's sessions get `account_updated` with the new `isAdmin`, without reconnecting. Refusals are `protocol_error`: `Admin permission required`, `Unknown user`, `You cannot remove your own admin role`, `The server must keep at least one admin`, `Unban the account before making it an admin`. |
+| `admin-rename USER_ID lock\|unlock [NAME...]` | Admins: renames the account to NAME (3 to 32 bytes; without NAME only the lock changes) and locks or unlocks its name. While locked, the account signs in under that name whatever its client asks for, so the target's next `connected` carries it with `"nicknameLocked":true`. The answer is `admin_result`, then `user_updated` everywhere, `account_updated` on the target's sessions, and `presence` with the new name while it is online. A name another account holds is `protocol_error "That name is already in use on this server"`. Renaming yourself is allowed. |
+| `admin-kick USER_ID [REASON...]` | Admins: ends every session of the account. The target's sessions print `session_ended` (`kind` `kicked`) and do not reconnect by themselves; `reconnect` signs in again. Refused for yourself (`You cannot kick yourself`) and for another admin (`Remove the admin role before kicking an admin`). Reasons are at most 256 bytes. |
+| `admin-ban USER_ID [REASON...]` | Admins: bans the account and ends its sessions (`session_ended` `kind` `banned`); its next sign-in is refused with `connect_failed` `failure` `Banned` (`detail` "This account is banned from this server", plus ": REASON" when there is one). Everyone gets `user_updated` with `"isBanned":true`. Refused for yourself and for another admin, like a kick. Sign-up is open, so a banned person can still connect with a new identity key as a new account. |
+| `admin-unban USER_ID` | Admins: lifts a ban; everyone gets `user_updated` with `"isBanned":false`, and the account can sign in again. |
 | `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
 | `voice-join ROOM_ID` | Joins the room's voice on the selected server (leaving any other first). `ok` (`serverID`, `roomID`, `status` `joining`) means the request went out; the join completes with `voice_participants` carrying `"recipientJoined":true`, then `voice_status` `joined` once the engine runs. A refusal arrives as `voice_join_rejected`. See [Voice](#voice). |
 | `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice). A file sink is closed, complete, at this point. |
@@ -122,20 +127,24 @@ Every runtime event the client applies is printed first. Keys always come in the
 | Event | Example |
 | --- | --- |
 | `connecting` | `{"event":"connecting","serverID":1,"attempt":1}` (`attempt` counts from 1 since the last `connected` or `disconnected`) |
-| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}` (`isAdmin`: the account holds the server's `admin` role) |
+| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false}` (`isAdmin`: the account holds the server's `admin` role; `nickname` is the account's name on the server, which an admin may have set and locked, `nicknameLocked`) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
-| `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0}]}` |
+| `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0,"roomType":3}]}` (`roomType`: 1 text, 2 voice, 3 both) |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
 | `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true}` |
-| `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"..."}` |
+| `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"...","roomType":3}` |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
-| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"..."}` (the answer to your own `room-create`) |
+| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3}` (the answer to your own `room-create`) |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
 | `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}]}` |
-| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true}]}` |
+| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"isAdmin":false,"isBanned":false}]}` |
+| `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"isAdmin":true,"isBanned":false}}` (an admin changed an account's role, ban, or name; the full directory entry) |
+| `account_updated` | `{"event":"account_updated","serverID":1,"isAdmin":true,"nickname":"bob","nicknameLocked":false}` (an admin changed this account's role or name while it is connected) |
+| `admin_result` | `{"event":"admin_result","serverID":1,"action":"role","userID":4,"message":"bob is an admin"}` (your admin request succeeded; `action` is `role`, `rename`, `kick`, or `ban`, an unban included) |
+| `session_ended` | `{"event":"session_ended","serverID":1,"kind":"kicked","message":"An admin removed you from this server (reason: calm down). Press Retry to connect again.","reason":"calm down","retryable":false}` (an admin kicked or banned this account; the connection stays stopped until `reconnect`) |
 | `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` |
 | `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
 | `read_marker` | `{"event":"read_marker","serverID":1,"kind":"room","conversationID":1,"lastReadMessageId":12,"unreadCount":0}` (`kind` is `room` or `dm`; for `dm`, `conversationID` is the peer's user ID) |
@@ -147,8 +156,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
-`NameUnavailable`, `ServerKeyChanged`, `ProtocolMismatch`, `InvalidName`, `InvalidIdentity`, or
-the harness's own `NoServer` and `Timeout`. `retryable` is true when the worker will try again
+`NameUnavailable`, `ServerKeyChanged`, `ProtocolMismatch`, `InvalidName`, `InvalidIdentity`,
+`Kicked`, `Banned` (protocol 14: a banned account's sign-in), or the harness's own `NoServer`
+and `Timeout`. `retryable` is true when the worker will try again
 in `retryInMS`; when it is false nothing retries until `reconnect` (or, at startup, the harness
 exits with code 2).
 
@@ -165,10 +175,16 @@ account was already online; the client updates the name in `users` and `conversa
 Direct messages belong to one server: user IDs from different servers are unrelated.
 
 `isAdmin` in `connected` and `status` is what the server said when this session signed in
-(protocol 8). An account made admin while connected (for example with
-`deploy/sql/make-admin.sql`) learns it on its next connection: send `reconnect` and wait for
-`connected`. The server checks the role again for every room request, so a stale `true` only
-earns a `protocol_error "Admin permission required"`.
+(protocol 8). A role an admin changes from a client (`admin-role`) reaches the account's
+sessions at once as `account_updated` (protocol 14). A role changed directly in the database
+(for example with `deploy/sql/make-admin.sql`) shows only on the next connection: send
+`reconnect` and wait for `connected`. The server checks the role again for every admin
+request, so a stale `true` only earns a `protocol_error "Admin permission required"`.
+
+`session_ended` means the server is about to drop this session because an admin kicked or
+banned the account. The client does not reconnect by itself afterwards (`status` reports
+`failed`); `reconnect` tries again, which a kick allows and a ban refuses with `connect_failed`
+`failure` `Banned`.
 
 ## Voice
 
@@ -471,6 +487,15 @@ grep -F '"cmd":"send"' alice.out
    connected when D loads both conversations and sends `read room 1` and `read dm C`; the
    second session must print both `read_marker` events with `unreadCount` 0 and then list 0,
    and a third session started afterwards must list 0 straight from the server.
+
+`./dev.sh live --admin` runs `dev/admin-proof.sh` (also part of `--all`) with two headless
+clients: A becomes an admin with `make-admin.sql` and makes B an admin, and B must print
+`account_updated` `"isAdmin":true` and report it in `status` without reconnecting; A renames B
+with a lock and B's `reconnect` must sign in under the new name; A kicks B (`session_ended`
+`kicked`, no reconnect by itself, then `reconnect` works); A bans B (`session_ended` `banned`,
+B's `reconnect` gets `connect_failed` `Banned`) and unbans it; A creates a room for text and
+voice, B joins its voice, A makes it text-only, and B must print `voice_left` and have its next
+`voice-join` refused, both with "voice is disabled in this room".
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
 account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
