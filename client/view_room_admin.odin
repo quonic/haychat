@@ -7,6 +7,10 @@ import "ui"
 // It is laid out like the settings screen: a centred column of labelled fields and a row of
 // buttons. "+ New room" in the sidebar opens it empty; "Edit room" in the room header opens it
 // filled, with a Delete button that needs a second click.
+//
+// Widget IDs for GUI automation: room-editor-name and room-editor-description (server and room
+// ID, 0 while creating), room-type N (N the protocol's type number: 1 text, 2 voice, 3 both),
+// room-editor-submit, room-editor-cancel, room-editor-delete.
 
 ROOM_EDITOR_COLUMN_WIDTH :: 480
 ROOM_EDITOR_SECTION_GAP :: 20
@@ -102,6 +106,39 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		submitted = true
 	}
 
+	_ = ui.cutTop(&column, sectionGap)
+	roomEditorLabel(ctx, &column, "Type")
+	typeClicked := -1
+	{
+		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+		gap := ui.dp(ctx, PANEL_PADDING)
+		optionW := (row.w - gap * f32(len(ROOM_EDITOR_TYPES) - 1)) / f32(len(ROOM_EDITOR_TYPES))
+		for roomType, index in ROOM_EDITOR_TYPES {
+			rect := ui.cutLeft(&row, optionW)
+			_ = ui.cutLeft(&row, gap)
+			selected := view.roomType == roomType
+			options := ui.ButtonOptions {
+				align      = .Center,
+				selected   = selected,
+				color      = selected ? ctx.theme.onPrimary : ctx.theme.fg,
+				background = selected ? ctx.theme.primary : ctx.theme.hover,
+			}
+			if selected {
+				options.font = .Bold
+			}
+			id := ui.idOf("room-type", int(roomType))
+			if ui.button(ctx, id, rect, roomTypeLabel(roomType), options) {
+				typeClicked = index
+			}
+		}
+	}
+	_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+	roomEditorWrapped(ctx, &column, view.typeNote, ctx.theme.fgMuted)
+	if len(view.typeWarning) > 0 {
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		roomEditorWrapped(ctx, &column, view.typeWarning, ctx.theme.warning)
+	}
+
 	if len(view.generalNotice) > 0 {
 		_ = ui.cutTop(&column, sectionGap)
 		roomEditorWrapped(ctx, &column, view.generalNotice, ctx.theme.warning)
@@ -160,6 +197,8 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 
 	// Actions run last: a send can change the room list drawn in the sidebar.
 	switch {
+	case typeClicked >= 0:
+		State_setRoomEditorType(state, ROOM_EDITOR_TYPES[typeClicked])
 	case cancelClicked:
 		State_closeRoomEditor(state)
 	case deleteClicked:

@@ -236,3 +236,32 @@ State_adminConnectionReset :: proc(state: ^State, serverID: int) {
 		"The connection dropped before the server answered. Try again.",
 	)
 }
+
+// A request that never went out (a local check or the transport refused it): recorded like a
+// refusal, so the Admin section shows why.
+State_adminRequestFailed :: proc(
+	state: ^State,
+	serverID: int,
+	action: common.AdminAction,
+	userID: int,
+	message: string,
+) {
+	tracked := &state.adminRequest
+	tracked.serverID = serverID
+	tracked.action = action
+	tracked.userID = userID
+	tracked.pending = false
+	AdminRequestState_setText(&tracked.result, "")
+	AdminRequestState_setText(&tracked.error, message)
+}
+
+// Forgets the last answer (not a pending request), so a screen opened later does not show an
+// old one.
+State_clearAdminRequestStatus :: proc(state: ^State) {
+	tracked := &state.adminRequest
+	if tracked.pending {
+		return
+	}
+	AdminRequestState_setText(&tracked.result, "")
+	AdminRequestState_setText(&tracked.error, "")
+}

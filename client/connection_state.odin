@@ -227,6 +227,10 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	}
 	State_resetPendingRequests(state, event.serverID, false)
 	State_voiceConnectionLost(state, event.serverID)
+	// A kick or ban is not undone by Retry's reconnect, and neither is the voice it ended.
+	if event.failureKind == .Kicked || event.failureKind == .Banned {
+		State_voiceEndedByAdmin(state, event.serverID)
+	}
 }
 
 // Takes ownership of the event's message.
