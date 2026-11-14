@@ -7,26 +7,25 @@ queues (`server/ipc.odin`).
 clients ◄─ENet/UDP─► network thread ◄─IPC─► main thread ◄─IPC─► database thread
                      networkServerLoop        mainLoop           databaseServerLoop
                      PeerManager              router, crypto
-                     ENet host                supervisor ◄─IPC─► web admin thread
+                     ENet host                supervisor, [Status] log
 ```
 
 - network → main: `NetworkPeerConnected`, `NetworkDataReceived`, `NetworkPeerDisconnected`.
 - main → network: `NetworkSendData`, `NetworkBroadcast`, `NetworkDisconnectPeer`, the voice
   commands `NetworkVoiceSessionOpen`, `NetworkVoiceRoute` and `NetworkVoiceReset`, and the
   `ProcessShutdown` / `ProcessRestart` signals.
-- main ↔ database: `DatabaseQuery` / `DatabaseQueryResult`; main ↔ web admin: `Admin*`.
+- main ↔ database: `DatabaseQuery` / `DatabaseQueryResult`.
 
 The listen port is `HAYCHAT_LISTEN_PORT` (default `12345`, `common.DEFAULT_SERVER_PORT`).
 
 ## IPC queues
 
-- Each endpoint (main, network, database, web admin) has one FIFO queue, an `IPC_Ring`: a
+- Each endpoint (main, network, database) has one FIFO queue, an `IPC_Ring`: a
   growable ring buffer behind the global `ipcState.state_mutex`. Push and pop are O(1). The
   ring never drops messages; it doubles when full.
 - `IPC_Client_poll` pops one message without blocking. `IPC_Client_wait(fd, timeout)` sleeps
   on the queue's condition variable until a push or the timeout, so idle consumers do not
-  spin. The main loop waits up to 5 ms, the database thread up to 100 ms, and web admin
-  handlers until their request timeout.
+  spin. The main loop waits up to 5 ms and the database thread up to 100 ms.
 - Payloads (`data`, strings, arrays) are owned allocations that move with the message. The
   consumer frees them; `IPC__message_deinit` frees any message type, and `IPC__state_deinit`
   frees whatever is still queued.
@@ -88,8 +87,8 @@ The relay uses fixed scratch buffers, so a frame costs no allocation of its own 
 packet). It logs nothing per packet. A disconnect (`handlePeerDisconnect`, or a router-commanded
 `NetworkDisconnectPeer`) removes the peer from the relay at once and wipes its keys, before the
 router hears about it. A `NetworkVoiceSessionOpen` for a peer that already disconnected is
-dropped and wiped. The counters are published for web admin `/status` with atomic stores
-(`voiceRelayPublishedStats`).
+dropped and wiped. The counters are published with atomic stores (`voiceRelayPublishedStats`)
+for the main thread's periodic `[Status]` log line (`server/status.odin`).
 
 ## Logging
 

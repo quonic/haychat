@@ -63,7 +63,6 @@ SERVER_LICENCES=(
 	repo:THIRD_PARTY_NOTICES.md:THIRD_PARTY_NOTICES.txt
 	odin:LICENSE:licenses/Odin-LICENSE.txt
 	odin:base/runtime/LICENSE-compiler-rt.txt:licenses/compiler-rt-LICENSE.txt
-	odin:shared/odin-http/LICENSE:licenses/odin-http-LICENSE.txt
 	odin:shared/pg/LICENSE:licenses/pg-LICENSE.txt
 )
 LINUX_CLIENT_LICENCES=(

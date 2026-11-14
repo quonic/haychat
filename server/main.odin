@@ -630,7 +630,6 @@ MainRouterState_prepareForProcessStop :: proc(
 		MainRouterState_voiceReset(pm, state)
 	case .Database:
 		MainRouterState_failPendingDatabaseRequests(pm, state, message)
-	case .WebAdmin:
 	case:
 	}
 }
@@ -1851,7 +1850,6 @@ main :: proc() {
 		mainExitStartupFailure()
 	}
 	fmt.println("Configuration loaded:")
-	fmt.printfln("  Web Admin: %s:%d", config.webAdminHost, config.webAdminPort)
 	fmt.printfln(
 		"  Database: %s@%s:%d/%s",
 		config.databaseUser,
@@ -1867,7 +1865,6 @@ main :: proc() {
 	)
 
 	config.networkSocketName = fmt.aprintf("%s_network", SERVER_SOCKET)
-	config.webAdminSocketName = fmt.aprintf("%s_webadmin", SERVER_SOCKET)
 	config.databaseSocketName = fmt.aprintf("%s_database", SERVER_SOCKET)
 
 	pm := initProcessManager(&config)
@@ -1896,15 +1893,9 @@ main :: proc() {
 		shutdownAllProcesses(&pm)
 		mainExitStartupFailure()
 	}
-	if !spawnProcess(&pm, .WebAdmin) {
-		fmt.eprintln("[Startup] failed to start the web admin service thread")
-		pm.shouldShutdown = true
-		shutdownAllProcesses(&pm)
-		mainExitStartupFailure()
-	}
 
 	fmt.println("=== Server Running ===")
-	fmt.println("Main thread is supervising network, web admin, and database threads")
+	fmt.println("Main thread is supervising network and database threads")
 
 	mainLoop(&pm)
 
@@ -1979,6 +1970,7 @@ mainLoop :: proc(pm: ^ProcessManager) {
 	routerState := MainRouterState_init(pm)
 	defer MainRouterState_deinit(&routerState)
 
+	lastStatusLog := time.now()
 	for running {
 		if mainInterruptRequested {
 			queueMainInterruptShutdown(pm)
@@ -2006,9 +1998,6 @@ mainLoop :: proc(pm: ^ProcessManager) {
 				)
 				restartProcess(pm, .Network)
 			}
-			if ProcessManager_shouldScheduleRestart(pm, .WebAdmin) {
-				restartProcess(pm, .WebAdmin)
-			}
 			if ProcessManager_shouldScheduleRestart(pm, .Database) {
 				MainRouterState_prepareForProcessStop(
 					pm,
@@ -2021,12 +2010,18 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			ProcessManager_pumpRestarts(pm)
 		}
 
+		if time.since(lastStatusLog) >= SERVER_STATUS_LOG_INTERVAL {
+			mainLogStatus(pm, &routerState)
+			lastStatusLog = time.now()
+		}
+
 		// Sleep on the queue instead of spinning; a push wakes the wait at once.
 		if running && processed == 0 {
 			IPC_Client_wait(pm.config.mainFd, MAIN_IDLE_WAIT)
 		}
 	}
 
+	mainLogStatus(pm, &routerState)
 	shutdownAllProcesses(pm)
 }
 
@@ -2056,84 +2051,6 @@ mainLoopHandleMessage :: proc(
 	case NetworkDataReceived:
 		MainRouterState_handleNetworkDataReceived(pm, routerState, m)
 		delete(m.data)
-	case AdminQueryStatus:
-		uptime := i64(time.duration_seconds(time.since(pm.startTime)))
-		voiceRooms, voiceParticipants := MainRouterState_voiceCounts(routerState)
-		sync.mutex_lock(&pm.processMutex)
-		response := AdminQueryStatusResponse {
-			voiceRooms             = voiceRooms,
-			voiceParticipants      = voiceParticipants,
-			voiceRelay             = VoiceRelayStats_load(&voiceRelayPublishedStats),
-			uptime                 = uptime,
-			connectedPeers         = len(routerState.connectedPeers),
-			networkRunning         = pm.networkProcess.isRunning,
-			webAdminRunning        = pm.webAdminProcess.isRunning,
-			databaseRunning        = pm.databaseProcess.isRunning,
-			networkRestartPending  = pm.networkProcess.restartPending,
-			webAdminRestartPending = pm.webAdminProcess.restartPending,
-			databaseRestartPending = pm.databaseProcess.restartPending,
-			shutdownRequested      = pm.shouldShutdown,
-		}
-		sync.mutex_unlock(&pm.processMutex)
-		IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, response)
-	case AdminQueryStatusResponse, AdminGetPeersResponse, AdminGetLogsResponse:
-	// Responses are consumed by web admin.
-	case AdminGetPeers:
-		peerSnapshots := make([dynamic]AdminPeerInfo, 0, len(routerState.connectedPeers))
-		for peerID in routerState.connectedPeers {
-			session, ok := MainRouterState_getPeerSession(routerState, peerID)
-			if !ok {
-				append(&peerSnapshots, AdminPeerInfo{peerId = peerID})
-				continue
-			}
-			append(
-				&peerSnapshots,
-				AdminPeerInfo {
-					peerId = peerID,
-					isAuthenticated = session.isAuthenticated,
-					authenticatedId = session.authenticatedUserID,
-				},
-			)
-		}
-		IPC_Server_send(
-			&pm.config.webAdminSocket,
-			pm.config.webAdminFd,
-			AdminGetPeersResponse{peers = peerSnapshots[:]},
-		)
-	case AdminGetLogs:
-		sync.mutex_lock(&pm.processMutex)
-		logs := make([dynamic]string, 0, 4)
-		append(
-			&logs,
-			fmt.aprintf(
-				"network running=%v restart_pending=%v",
-				pm.networkProcess.isRunning,
-				pm.networkProcess.restartPending,
-			),
-		)
-		append(
-			&logs,
-			fmt.aprintf(
-				"web_admin running=%v restart_pending=%v",
-				pm.webAdminProcess.isRunning,
-				pm.webAdminProcess.restartPending,
-			),
-		)
-		append(
-			&logs,
-			fmt.aprintf(
-				"database running=%v restart_pending=%v",
-				pm.databaseProcess.isRunning,
-				pm.databaseProcess.restartPending,
-			),
-		)
-		append(&logs, fmt.aprintf("shutdown_requested=%v", pm.shouldShutdown))
-		sync.mutex_unlock(&pm.processMutex)
-		IPC_Server_send(
-			&pm.config.webAdminSocket,
-			pm.config.webAdminFd,
-			AdminGetLogsResponse{logs = logs[:]},
-		)
 	case DatabaseQuery:
 		IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, m)
 	case DatabaseQueryResult:
@@ -2157,24 +2074,9 @@ mainLoopHandleMessage :: proc(
 			"server shutting down",
 		)
 		return false
-	case ProcessRestart:
-		MainRouterState_prepareForProcessStop(
-			pm,
-			routerState,
-			.Database,
-			"database restarting",
-		)
-		MainRouterState_prepareForProcessStop(
-			pm,
-			routerState,
-			.Network,
-			"server restarting",
-		)
-		restartProcess(pm, .Network)
-		restartProcess(pm, .WebAdmin)
-		restartProcess(pm, .Database)
-	case Wake:
-		IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, Wake{})
+	case ProcessRestart, Wake:
+	// Main sends ProcessRestart to the services (restartProcess) and never receives one; a Wake
+	// only ends IPC_Client_wait early.
 	case ProcessError:
 		fmt.printfln("[Main] Process error: %s\n", m.error)
 	case:

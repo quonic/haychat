@@ -8,7 +8,6 @@ import "core:time"
 
 ProcessType :: enum {
 	Network,
-	WebAdmin,
 	Database,
 }
 
@@ -26,7 +25,6 @@ ProcessInfo :: struct {
 
 ProcessManager :: struct {
 	networkProcess:  ProcessInfo,
-	webAdminProcess: ProcessInfo,
 	databaseProcess: ProcessInfo,
 	config:          ^ServerConfig,
 	shouldShutdown:  bool,
@@ -49,11 +47,9 @@ initProcessManager :: proc(config: ^ServerConfig) -> ProcessManager {
 	}
 
 	pm.networkProcess.type = .Network
-	pm.webAdminProcess.type = .WebAdmin
 	pm.databaseProcess.type = .Database
 
 	IPC_Server_init(&pm.config.networkSocket, pm.config.networkSocketName)
-	IPC_Server_init(&pm.config.webAdminSocket, pm.config.webAdminSocketName)
 	IPC_Server_init(&pm.config.databaseSocket, pm.config.databaseSocketName)
 	pm.config.mainFd = IPC_Main_init()
 
@@ -64,8 +60,6 @@ ProcessManager_getProcessInfo :: proc(pm: ^ProcessManager, procType: ProcessType
 	switch procType {
 	case .Network:
 		return &pm.networkProcess
-	case .WebAdmin:
-		return &pm.webAdminProcess
 	case .Database:
 		return &pm.databaseProcess
 	case:
@@ -89,8 +83,6 @@ ProcessManager__serviceThreadEntry :: proc(startDataRaw: rawptr) {
 	switch procType {
 	case .Network:
 		networkServerLoop(pm)
-	case .WebAdmin:
-		webAdminServerLoop(pm)
 	case .Database:
 		databaseServerLoop(pm)
 	}
@@ -124,8 +116,6 @@ ProcessManager_signalProcess :: proc(pm: ^ProcessManager, procType: ProcessType,
 	switch procType {
 	case .Network:
 		IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, msg)
-	case .WebAdmin:
-		IPC_Server_send(&pm.config.webAdminSocket, pm.config.webAdminFd, msg)
 	case .Database:
 		IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, msg)
 	case:
@@ -280,7 +270,6 @@ ProcessManager_restartDue :: proc(pm: ^ProcessManager, procType: ProcessType, no
 ProcessManager_pumpRestarts :: proc(pm: ^ProcessManager) {
 	now := time.now()
 	ProcessManager_restartDue(pm, .Network, now)
-	ProcessManager_restartDue(pm, .WebAdmin, now)
 	ProcessManager_restartDue(pm, .Database, now)
 }
 
@@ -288,29 +277,21 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 	sync.mutex_lock(&pm.processMutex)
 	pm.shouldShutdown = true
 	pm.networkProcess.stopRequested = true
-	pm.webAdminProcess.stopRequested = true
 	pm.databaseProcess.stopRequested = true
 	pm.networkProcess.restartPending = false
-	pm.webAdminProcess.restartPending = false
 	pm.databaseProcess.restartPending = false
 	sync.mutex_unlock(&pm.processMutex)
 
 	fmt.println("[Shutdown] Signaling service threads to stop...")
 	ProcessManager_signalProcess(pm, .Network, ProcessShutdown{})
-	ProcessManager_signalProcess(pm, .WebAdmin, ProcessShutdown{})
 	ProcessManager_signalProcess(pm, .Database, ProcessShutdown{})
-	shutdownWebAdminHTTPServer()
 
 	shutdownStart := time.now()
 	for time.since(shutdownStart) < 10 * time.Second {
 		sync.mutex_lock(&pm.processMutex)
-		allStopped :=
-			!pm.networkProcess.isRunning &&
-			!pm.webAdminProcess.isRunning &&
-			!pm.databaseProcess.isRunning
+		allStopped := !pm.networkProcess.isRunning && !pm.databaseProcess.isRunning
 		if allStopped {
 			pm.networkProcess.threadHandle = nil
-			pm.webAdminProcess.threadHandle = nil
 			pm.databaseProcess.threadHandle = nil
 			sync.mutex_unlock(&pm.processMutex)
 			fmt.println("[Shutdown] All service threads exited")

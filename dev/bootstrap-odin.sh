@@ -11,7 +11,6 @@ set -euo pipefail
 
 ODIN_COMMIT=b76605be90bb7dceb0a17d93d2e1bfd430a25d92
 PG_COMMIT=9d82bb88e99fd2d47aac57c00e9e6f9aabf48238
-ODIN_HTTP_COMMIT=fac113fbd828aad3d71479a534b5de4358b6a07b
 
 odin_root=${1:-$HOME/Odin}
 
@@ -38,7 +37,5 @@ fi
 
 mkdir -p "$odin_root/shared"
 checkout_pinned https://github.com/laytan/odin-postgresql.git "$odin_root/shared/pg" "$PG_COMMIT"
-checkout_pinned https://github.com/laytan/odin-http.git "$odin_root/shared/odin-http" \
-	"$ODIN_HTTP_COMMIT"
 
 "$odin_root/odin" version

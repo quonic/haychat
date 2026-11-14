@@ -64,7 +64,6 @@ Making breaking changes to the project is currently allowed, but it is recommend
 ## Architecture
 
 - Client GUI: a small immediate-mode UI toolkit in `client/ui`, drawn with `vendor:sdl3` (SDL_Renderer) and `vendor:sdl3/ttf` (text). Screens in `client/view.odin` call `State_*` action procedures directly.
-- Server Web Service Frontend: `shared:odin-http`, repository: <https://github.com/laytan/odin-http>
 - Database: `shared:pg` bindings for libpq version 17, repository: <https://github.com/laytan/odin-postgresql>
 - Client-Server Communication: `vendor:ENet` bindings for enet
 

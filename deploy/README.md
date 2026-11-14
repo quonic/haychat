@@ -49,54 +49,33 @@ the dev image and CI use.
 | Property | Value |
 | --- | --- |
 | Base | `registry.fedoraproject.org/fedora-minimal:44`, about 150 MB in total |
-| Runtime packages | `libpq` and `enet` (the binary links `libpq.so.5`, `libenet.so.7`, and glibc); `curl` comes with the base image |
+| Runtime packages | `libpq` and `enet` (the binary links `libpq.so.5`, `libenet.so.7`, and glibc) |
 | Entrypoint | `/usr/local/bin/haychat-server` |
 | User | `haychat`, UID/GID `10001`, not root |
 | Working directory | `/var/lib/haychat` |
-| Volumes | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key, web admin token) |
+| Volumes | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) |
 | Port | `12345/udp` (clients) |
 | Stop signal | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0 |
-| Also included | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt, odin-http and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Also included | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
-The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`,
-`HAYCHAT_WEB_ADMIN_PORT=8080`, and the three path variables (`HAYCHAT_LOG_DIR`,
-`HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE`) to match the volumes.
+The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the three
+path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
+`HAYCHAT_SERVER_IDENTITY_FILE`) to match the volumes.
 
 The server writes its log to stdout (read it with `journalctl` or `podman logs`).
-`HAYCHAT_LOG_DIR` is created at startup and reserved for log files.
-
-## io_uring: Required Container Settings
-
-The server's web admin runs on `core:nbio`, which uses io_uring on Linux. Two default
-container restrictions block io_uring, and the server fails to start with either in place:
-
-1. **Podman's default seccomp profile** blocks the `io_uring_setup`, `io_uring_enter`, and
-   `io_uring_register` syscalls. Write podman's own default profile plus those three syscalls
-   with:
-
-   ```sh
-   ./dev.sh seccomp-profile /etc/haychat-server/seccomp-io-uring.json
-   ```
-
-   and run the server with `--security-opt seccomp=/etc/haychat-server/seccomp-io-uring.json`.
-   The rest of the default filter stays in place. (`seccomp=unconfined` also works but drops
-   the whole filter.)
-2. **SELinux** (Fedora, RHEL, and other SELinux hosts): the `container_t` policy denies
-   io_uring too. Run the server with `--security-opt label=disable`.
-
-The container stays rootless-compatible and unprivileged. Hosts that set the sysctl
-`kernel.io_uring_disabled=2` cannot run the server at all.
+`HAYCHAT_LOG_DIR` is created at startup and reserved for log files. The server needs no
+special container settings: it runs under podman's default seccomp profile and, on SELinux
+hosts, the default `container_t` label.
 
 ## Running With Quadlet (Recommended)
 
 The units in `deploy/quadlet/` run PostgreSQL 17 and the server as systemd services in one
 pod. The two containers share the pod's network and reach each other on `127.0.0.1`; the pod
-publishes only UDP `12345`, so neither PostgreSQL nor the web admin is reachable from outside.
+publishes only UDP `12345`, so PostgreSQL is not reachable from outside.
 
 Quadlet rather than a `podman kube play` YAML: systemd restarts the services on failure and
-starts them at boot, logs go to the journal, and the settings the server needs
-(`SeccompProfile=`, `SecurityLabelDisable=`, `Secret=`, `RunInit=`) are plain quadlet keys
-instead of Kubernetes annotations. The `.pod` unit needs **podman 5.0 or newer** (Fedora 40+,
+starts them at boot, logs go to the journal, and the settings the server needs (`Secret=`,
+`RunInit=`) are plain quadlet keys instead of Kubernetes annotations. The `.pod` unit needs **podman 5.0 or newer** (Fedora 40+,
 RHEL 10, Debian 13, Ubuntu 25.04). On an older podman, use the commands in
 [Running With Plain Podman](#running-with-plain-podman).
 
@@ -113,12 +92,11 @@ find their config through `%E`, which systemd expands to `/etc` for system servi
    openssl rand -base64 32 | tr -d '\n' | sudo podman secret create haychat-db-password -
    ```
 
-2. Create the config directory, the io_uring seccomp profile, and the server's environment
-   file (it must exist, even if empty):
+2. Create the config directory and the server's environment file (it must exist, even if
+   empty):
 
    ```sh
    sudo mkdir -p /etc/haychat-server
-   sudo ./dev.sh seccomp-profile /etc/haychat-server/seccomp-io-uring.json
    sudo install -m 0600 /dev/null /etc/haychat-server/server.env
    ```
 
@@ -142,8 +120,10 @@ find their config through `%E`, which systemd expands to `/etc` for system servi
    ```sh
    sudo systemctl status haychat-server.service
    sudo journalctl -u haychat-server.service -f      # wait for "=== Server Running ==="
-   sudo podman exec haychat-server curl -fsS http://127.0.0.1:8080/status
    ```
+
+   After that the server logs a `[Status]` line every five minutes (see
+   [Server Status](#server-status)).
 
 5. Open the firewall (see [Network](#network)) and continue with
    [First-Time Setup](#first-time-setup).
@@ -154,7 +134,6 @@ The same setup by hand, useful for a first try or on podman 4:
 
 ```sh
 openssl rand -base64 32 | tr -d '\n' | podman secret create haychat-db-password -
-./dev.sh seccomp-profile "$HOME/.config/haychat-server/seccomp-io-uring.json"
 
 podman pod create --name haychat -p 12345:12345/udp
 
@@ -165,8 +144,6 @@ podman run -d --pod haychat --name haychat-db \
 	docker.io/library/postgres:17
 
 podman run -d --pod haychat --name haychat-server --init \
-	--security-opt label=disable \
-	--security-opt seccomp="$HOME/.config/haychat-server/seccomp-io-uring.json" \
 	-e HAYCHAT_DATABASE_URL=127.0.0.1 \
 	--secret haychat-db-password,type=env,target=HAYCHAT_DATABASE_PASS \
 	--env-file "$HOME/.config/haychat-server/server.env" \
@@ -191,11 +168,11 @@ deployment:
 
 | Set by | Variables |
 | --- | --- |
-| The image | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_WEB_ADMIN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE` |
+| The image | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE` |
 | The quadlet unit (or your `podman run`) | `HAYCHAT_DATABASE_URL=127.0.0.1`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_NAME`, and `HAYCHAT_DATABASE_PASS` from the `haychat-db-password` secret |
-| You, in `server.env` (all optional) | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_WEB_ADMIN_TOKEN`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES` |
+| You, in `server.env` (all optional) | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES` |
 
-`server.env` holds secrets when you set the web admin token or a fixed server key, so keep it
+`server.env` holds a secret when you set a fixed server key, so keep it
 at mode `0600`. To keep the server listening on another port inside the pod, set
 `HAYCHAT_LISTEN_PORT` and change the pod's `PublishPort=` to match; changing only the left
 side of `PublishPort=` is simpler.
@@ -280,22 +257,20 @@ volume, set `HAYCHAT_SERVER_PRIVATE_KEY` and `HAYCHAT_SERVER_PUBLIC_KEY` (hex) i
 no key yet, such as the fixture's `admin`. With `make-admin.sql` your account is
 already bound to your key, so you do not need it.
 
-## Web Admin
+## Server Status
 
-The web admin listens on `127.0.0.1:8080` inside the pod only; it is never published. `GET
-/status` is an unauthenticated health check (the quadlet unit uses it as `HealthCmd`); it also
-lists voice counters (rooms, participants, frames in and out, drops by reason; see README.md
-"Web Admin"). The
-other routes (`/peers`, `/logs`, `POST /shutdown`, `POST /restart`) need the bearer token, which
-the server generates in its storage volume unless `HAYCHAT_WEB_ADMIN_TOKEN` is set. Call them
-from inside the container:
+The server has no admin port. Every five minutes, and once when it shuts down, it logs one
+`[Status]` line of `key=value` pairs: uptime, connected peers, whether the network and
+database services are running or waiting to restart, and the voice counters (rooms,
+participants, frames in and out, drops by reason; see README.md "Server Status Log"). Read it
+with:
 
 ```sh
-podman exec haychat-server sh -c \
-	'curl -sS -H "Authorization: Bearer $(cat storage/web_admin_token)" http://127.0.0.1:8080/peers'
+sudo journalctl -u haychat-server.service | grep -F '[Status]' | tail -n 1
+podman logs haychat-server 2>&1 | grep -F '[Status]' | tail -n 1     # plain podman
 ```
 
-From another machine, SSH to the host and run the same command. Do not publish port 8080.
+The quadlet unit has no `HealthCmd`; systemd restarts the server whenever it exits.
 
 ## Backups
 
@@ -306,7 +281,7 @@ podman exec haychat-db pg_dump -U haychat -d haychat -Fc >"haychat-$(date +%F).d
 podman volume export haychat-storage >"haychat-storage-$(date +%F).tar"
 ```
 
-The storage archive holds the server's private key and the web admin token: store it as
+The storage archive holds the server's private key: store it as
 privately as the database dump. To restore into a fresh deployment, import the volume before
 the first start (`podman volume create haychat-storage && podman volume import
 haychat-storage FILE.tar`), start the pod, stop the server, empty the database, and load the
@@ -357,6 +332,20 @@ exits with status 1, leaving the database exactly as it was, when:
 4. Watch the log for the migration lines and `=== Server Running ===`. Keep the
    `haychat-storage` volume: it holds the identity key that every client has pinned.
 
+### Upgrading From a Server With the Web Admin
+
+Servers before this change ran an HTTP web admin on `127.0.0.1:8080`, which needed io_uring
+and therefore a custom seccomp profile and SELinux turned off. It is gone; the `[Status]` log
+line replaces `/status`. When you upgrade from such a server:
+
+- Install the new `haychat-server.container`, or remove `SeccompProfile=`,
+  `SecurityLabelDisable=`, and the `HealthCmd=`/`HealthInterval=`/`HealthStartPeriod=` lines
+  from your copy, then `systemctl daemon-reload`. With plain podman, drop
+  `--security-opt label=disable` and `--security-opt seccomp=...`.
+- Delete `seccomp-io-uring.json` from the config directory.
+- `HAYCHAT_WEB_ADMIN_PORT` and `HAYCHAT_WEB_ADMIN_TOKEN` are ignored; remove them from
+  `server.env`. The old `storage/web_admin_token` file is no longer read and can be deleted.
+
 ### Downgrading
 
 An older server refuses a database that a newer one migrated. To go back, stop the server,
@@ -387,7 +376,7 @@ Each release also attaches `haychat-server-VERSION-linux-x86_64.tar.gz`: the ser
 newer, `libpq.so.5`, and `libenet.so.7` (Fedora `libpq enet`, Debian and
 Ubuntu `libpq5 libenet7`), plus a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`. Run it
 from a directory it can write to (relative paths resolve against the working directory) and
-stop it with SIGINT. Outside a container io_uring is available unless the host disables it.
+stop it with SIGINT.
 
 ## Release Builds
 
@@ -409,7 +398,7 @@ Release assets:
 
 | Asset | Contents |
 | --- | --- |
-| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, odin-http, pg) |
+| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, pg) |
 | `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji) |
 | `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus) |
 | `SHA256SUMS` | Checksums of the three archives |

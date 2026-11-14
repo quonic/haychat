@@ -37,7 +37,6 @@ DB_NAME=haychat
 
 STATE_DIR=/var/lib/haychat
 SERVER_PORT=12345
-ADMIN_PORT=8080
 
 # Server settings dev.sh owns because the pod wiring depends on them. The same keys in the
 # env file are ignored.
@@ -49,7 +48,6 @@ FORCED_SERVER_KEYS=(
 	HAYCHAT_DATABASE_NAME
 	HAYCHAT_LISTEN_ADDR
 	HAYCHAT_LISTEN_PORT
-	HAYCHAT_WEB_ADMIN_PORT
 	HAYCHAT_LOG_DIR
 	HAYCHAT_FILE_STORAGE_PATH
 	HAYCHAT_SERVER_IDENTITY_FILE
@@ -72,9 +70,8 @@ Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):
   restart               rebuild the server from the working tree and restart it
   down                  stop and remove the pod (data volumes are kept)
   reset                 down, then delete the dev database, server state, and client profiles
-  status                show containers, ports, and the web admin token
+  status                show containers and ports
   logs [-f]             server output
-  admin [-X METHOD] PATH  call a web admin route, e.g. admin /peers or admin -X POST /restart
   seed                  load server/sql/auth_bootstrap.sql (admin, haypeer, #general)
   psql [ARGS...]        psql shell on the dev database
   client [PROFILE]      run a client window in the pod (Wayland or X11); each profile has
@@ -84,8 +81,6 @@ Dev environment (pod "$POD": PostgreSQL + server, state kept in volumes):
 
 Toolchain:
   image [--pull]        (re)build the dev image; other commands build it when missing
-  seccomp-profile PATH  write podman's default seccomp profile plus io_uring to PATH (for a
-                        CI runner host's containers.conf; see README "Continuous Integration")
   release-image [--smoke]
                         build the production server image (deploy/Containerfile) as
                         $RELEASE_IMAGE; --smoke also runs it against a
@@ -165,52 +160,6 @@ source_snapshot() {
 			done \
 			| tar --null --no-recursion -T - -cf -
 	)
-}
-
-# ── Server sandbox ────────────────────────────────────────────────
-
-# The server's web admin runs on core:nbio, which needs io_uring on Linux. Two default
-# container restrictions block io_uring: podman's seccomp profile, and on SELinux hosts the
-# container_t policy (io_uring_setup fails with EACCES). Containers that run the server
-# therefore get podman's default seccomp profile plus the three io_uring syscalls, and run
-# without SELinux confinement. They stay rootless and keep the rest of the seccomp filter.
-SERVER_SANDBOX_ARGS=()
-
-# write_io_uring_seccomp_profile PATH
-# Writes podman's default seccomp profile with the three io_uring syscalls allowed to PATH.
-# Fails when the default profile cannot be read.
-write_io_uring_seccomp_profile() {
-	local output_profile=$1 source_profile
-	source_profile=$(podman info --format '{{.Host.Security.SECCOMPProfilePath}}' 2>/dev/null \
-		|| true)
-	[[ -r "$source_profile" ]] && grep -q '"syscalls": \[' "$source_profile" || return 1
-
-	local io_uring_rule='{"names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],'
-	io_uring_rule+=' "action": "SCMP_ACT_ALLOW"},'
-	mkdir -p "$(dirname -- "$output_profile")"
-	# Prepend the rule to the first "syscalls" array.
-	sed "0,/\"syscalls\": \\[/s//\"syscalls\": [ $io_uring_rule/" \
-		"$source_profile" >"$output_profile"
-}
-
-prepare_server_sandbox() {
-	[[ ${#SERVER_SANDBOX_ARGS[@]} -gt 0 ]] && return 0
-	SERVER_SANDBOX_ARGS=(--security-opt label=disable)
-
-	if [[ -n "${HAYCHAT_DEV_SECCOMP:-}" ]]; then
-		SERVER_SANDBOX_ARGS+=(--security-opt "seccomp=$HAYCHAT_DEV_SECCOMP")
-		return 0
-	fi
-
-	local output_profile
-	output_profile="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/haychat-dev/seccomp-io-uring.json"
-	if write_io_uring_seccomp_profile "$output_profile"; then
-		SERVER_SANDBOX_ARGS+=(--security-opt "seccomp=$output_profile")
-	else
-		echo "    (could not read podman's default seccomp profile; running the server" \
-			"container with seccomp=unconfined)" >&2
-		SERVER_SANDBOX_ARGS+=(--security-opt seccomp=unconfined)
-	fi
 }
 
 # ── Containers ────────────────────────────────────────────────────
@@ -340,19 +289,16 @@ start_server() {
 	local db_args=()
 	mapfile -d '' db_args < <(database_env_args)
 	load_server_overrides
-	prepare_server_sandbox
 
 	log_step "Starting the server"
 	podman run -d --pod "$POD" --name "$SERVER_CONTAINER" --init \
 		--stop-signal SIGINT --stop-timeout 10 \
-		"${SERVER_SANDBOX_ARGS[@]}" \
 		-v "$STATE_VOLUME:$STATE_DIR" \
 		-w "$STATE_DIR" \
 		"${server_env_args[@]}" \
 		"${db_args[@]}" \
 		-e "HAYCHAT_LISTEN_ADDR=0.0.0.0" \
 		-e "HAYCHAT_LISTEN_PORT=$SERVER_PORT" \
-		-e "HAYCHAT_WEB_ADMIN_PORT=$ADMIN_PORT" \
 		-e "HAYCHAT_LOG_DIR=$STATE_DIR/logs" \
 		-e "HAYCHAT_FILE_STORAGE_PATH=$STATE_DIR/storage" \
 		-e "HAYCHAT_SERVER_IDENTITY_FILE=$STATE_DIR/storage/server_identity.json" \
@@ -379,14 +325,13 @@ run_snapshot_in_pod() {
 	shift
 	local db_args=()
 	mapfile -d '' db_args < <(database_env_args)
-	prepare_server_sandbox
 	# dev/live-proof.sh has its own readiness default; pass the timeout only when it is set.
 	if [[ -n "${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-}" ]]; then
 		run_args+=(-e "HAYCHAT_SERVER_READY_TIMEOUT_SECS=$HAYCHAT_SERVER_READY_TIMEOUT_SECS")
 	fi
 
 	source_snapshot | podman run --rm -i --init --pod "$pod" \
-		"${SERVER_SANDBOX_ARGS[@]}" "${db_args[@]}" "${run_args[@]}" "$(image_ref)" \
+		"${db_args[@]}" "${run_args[@]}" "$(image_ref)" \
 		bash -c 'tar -xf - -C /work && exec bash -c "$0" dev.sh "$@"' "$@"
 }
 
@@ -447,8 +392,7 @@ cmd_up() {
 		fi
 		podman pod start "$POD" >/dev/null
 	else
-		# Only the client port is published. The web admin binds 127.0.0.1 inside the pod,
-		# which port forwarding cannot reach; ./dev.sh admin calls it from inside instead.
+		# Only the client port is published; PostgreSQL stays inside the pod.
 		log_step "Creating pod $POD (client port UDP $HOST_PORT)"
 		podman pod create --name "$POD" -p "$HOST_PORT:$SERVER_PORT/udp" >/dev/null
 		start_database "$POD" "$DB_CONTAINER" "$DB_VOLUME"
@@ -510,37 +454,12 @@ cmd_status() {
 	podman ps -a --filter "pod=$POD" --format 'table {{.Names}}\t{{.Status}}'
 	echo
 	echo "Client connections: localhost:$HOST_PORT (UDP)"
-	echo "Web admin:          ./dev.sh admin /status (inside the pod only)"
-	if container_running "$SERVER_CONTAINER"; then
-		local token
-		token=$(podman exec "$SERVER_CONTAINER" cat "$STATE_DIR/storage/web_admin_token" \
-			2>/dev/null || true)
-		if [[ -n "$token" ]]; then
-			echo "Web admin token:    $token"
-		fi
-	fi
+	echo "Server status:      ./dev.sh logs | grep -F '[Status]' | tail -n 1"
 }
 
 cmd_logs() {
 	require_dev_pod
 	podman logs "$@" "$SERVER_CONTAINER"
-}
-
-cmd_admin() {
-	require_dev_pod
-	container_running "$SERVER_CONTAINER" || die "the server is not running"
-	local method=GET
-	if [[ "${1:-}" == "-X" ]]; then
-		[[ $# -ge 2 ]] || die "usage: ./dev.sh admin [-X METHOD] PATH"
-		method=$2
-		shift 2
-	fi
-	local path=${1:-/status}
-	[[ "$path" == /* ]] || path="/$path"
-	# The token is read inside the container so it never appears in a host process list.
-	podman exec "$SERVER_CONTAINER" sh -c \
-		'curl -sS -X "$0" -H "Authorization: Bearer $(cat "$1")" "http://127.0.0.1:$2$3"; echo' \
-		"$method" "$STATE_DIR/storage/web_admin_token" "$ADMIN_PORT" "$path"
 }
 
 cmd_seed() {
@@ -600,10 +519,10 @@ cmd_client() {
 	# from a config holding its display name and the dev server, so it skips the client's
 	# first-run screen; the client generates the identity key. The server binds each nickname
 	# to the first key it sees, so profiles need distinct names. The container runs without
-	# SELinux confinement (see prepare_server_sandbox), which also lets it use the host
-	# display socket.
+	# SELinux confinement so it can use the host display socket.
 	# shellcheck disable=SC2016  # the snippet expands inside the container
 	run_snapshot_in_pod "$POD" \
+		--security-opt label=disable \
 		-v "$CLIENT_VOLUME_PREFIX$profile:/config" \
 		-e XDG_CONFIG_HOME=/config \
 		"${display_args[@]}" \
@@ -641,12 +560,6 @@ cmd_image() {
 	build_image "${build_args[@]}"
 }
 
-cmd_seccomp_profile() {
-	[[ $# -eq 1 ]] || die "usage: ./dev.sh seccomp-profile PATH"
-	write_io_uring_seccomp_profile "$1" || die "could not read podman's default seccomp profile"
-	echo "Wrote $1"
-}
-
 cmd_release_image() {
 	local smoke=false arg
 	for arg in "$@"; do
@@ -670,10 +583,9 @@ smoke_release_image() {
 	local server="$throwaway_pod-server" name db_args=()
 	name="smoke-$(date +%s)"
 	mapfile -d '' db_args < <(database_env_args)
-	prepare_server_sandbox
 	log_step "Starting $RELEASE_IMAGE in pod $throwaway_pod"
 	podman run -d --pod "$throwaway_pod" --name "$server" --init \
-		"${SERVER_SANDBOX_ARGS[@]}" "${db_args[@]}" "$RELEASE_IMAGE" >/dev/null
+		"${db_args[@]}" "$RELEASE_IMAGE" >/dev/null
 	wait_for_server_ready "$server"
 
 	# shellcheck disable=SC2016  # the snippet expands inside the container
@@ -723,13 +635,11 @@ main() {
 		reset) cmd_reset "$@" ;;
 		status) cmd_status "$@" ;;
 		logs) cmd_logs "$@" ;;
-		admin) cmd_admin "$@" ;;
 		seed) cmd_seed "$@" ;;
 		psql) cmd_psql "$@" ;;
 		client) cmd_client "$@" ;;
 		key) cmd_key "$@" ;;
 		image) cmd_image "$@" ;;
-		seccomp-profile) cmd_seccomp_profile "$@" ;;
 		release-image) cmd_release_image "$@" ;;
 		shell) cmd_shell "$@" ;;
 		*)

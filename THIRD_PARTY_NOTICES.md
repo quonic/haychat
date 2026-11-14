@@ -33,7 +33,6 @@ the copy installed on the machine, which comes with its own licence from the dis
 | --- | --- | --- | --- | --- | --- |
 | Odin core and base library | zlib (Odin) | compiled in | compiled in | compiled in | compiled in |
 | Third-party code in Odin core (below) | various | compiled in | compiled in | compiled in | compiled in |
-| odin-http | MIT | compiled in | compiled in | - | - |
 | odin-postgresql (`pg`) | MIT | compiled in | compiled in | - | - |
 | ENet | MIT | system | Fedora `enet` | system | compiled in |
 | libpq (PostgreSQL client) | PostgreSQL | system | Fedora `libpq` | - | - |
@@ -86,12 +85,6 @@ notices are kept for all of them.
 | `core:hash` CRC-64 (server) | Mark Adler | zlib | nothing |
 | `core:math/big` | LibTomMath; BPSW test by Thomas R. Nicely | public domain | nothing |
 | ChaCha20 SIMD, SHA-256 (Intel SHA) | Ted Krovetz; Jeffrey Walton | public domain | nothing |
-
-### odin-http (server)
-
-- Licence: MIT (`licenses/odin-http-LICENSE.txt`)
-- Copyright (c) 2023 Laytan Laats
-- Required in binaries: the copyright and permission notice.
 
 ### odin-postgresql, `pg` (server)
 

@@ -91,7 +91,6 @@ routerTestHarness_init :: proc() -> RouterTestHarness {
 
 	config := new(ServerConfig)
 	config.networkSocketName = "router_test_network"
-	config.webAdminSocketName = "router_test_webadmin"
 	config.databaseSocketName = "router_test_database"
 	config.serverPrivateKey = common.identityPrivateKeyToHex(serverPrivateKey)
 	config.serverPublicKey = common.identityPublicKeyToHex(serverPublicKey)
@@ -1499,7 +1498,6 @@ testWaitForDatabaseStartupAckReturnsFailureMessage :: proc(t: ^testing.T) {
 	routerResetIPCState()
 	config := new(ServerConfig)
 	config.networkSocketName = "startup_ack_network"
-	config.webAdminSocketName = "startup_ack_webadmin"
 	config.databaseSocketName = "startup_ack_database"
 	pm := initProcessManager(config)
 	defer free(config)
@@ -1533,7 +1531,6 @@ testWaitForDatabaseStartupAckTimesOutWhenWorkerNeverResponds :: proc(t: ^testing
 	routerResetIPCState()
 	config := new(ServerConfig)
 	config.networkSocketName = "startup_ack_timeout_network"
-	config.webAdminSocketName = "startup_ack_timeout_webadmin"
 	config.databaseSocketName = "startup_ack_timeout_database"
 	config.databaseURL = "127.0.0.1"
 	config.databasePort = 5432
@@ -1571,7 +1568,6 @@ testWaitForDatabaseStartupAckReturnsActionableExitFailure :: proc(t: ^testing.T)
 	routerResetIPCState()
 	config := new(ServerConfig)
 	config.networkSocketName = "startup_ack_exit_network"
-	config.webAdminSocketName = "startup_ack_exit_webadmin"
 	config.databaseSocketName = "startup_ack_exit_database"
 	config.databaseURL = "127.0.0.1"
 	config.databasePort = 5432
