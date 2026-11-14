@@ -26,6 +26,13 @@ build_packages=(
 	# Not opus-devel: the client never links libopus.
 	opus
 	libX11-devel
+	# Global push-to-talk tests (client/hotkey): a private D-Bus daemon for the mock
+	# GlobalShortcuts portal (libdbus-1.so.3 is loaded at runtime), and an Xvfb display with
+	# XTest for the X11 key-state poller.
+	dbus-libs
+	dbus-daemon
+	xorg-x11-server-Xvfb
+	libXtst
 	openssl-devel
 	which
 	findutils

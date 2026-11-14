@@ -8,6 +8,7 @@ package client
 import "../common"
 import "core:fmt"
 import "core:math"
+import "hotkey"
 
 // One user in a room's voice. The server keeps one voice session per user (Q2, protocol 13),
 // so each user is listed once.
@@ -338,8 +339,12 @@ VoiceSettingsView :: struct {
 	// Why devices cannot be listed; the lists then offer only the system default.
 	devicesNote:       string,
 	pttKeyLabel:       string,
-	// VOICE_PTT_FOCUS_NOTICE, plus why a key that types is ignored in text fields.
+	// Where push-to-talk works (voicePushToTalkNotice), plus what a key that types does.
 	pttNotice:         string,
+	// The "in other windows too" toggle is offered: this system has a global backend.
+	pttGlobalOffered:  bool,
+	// The desktop can show its shortcut dialog (Wayland portal version 2, session active).
+	pttCanConfigure:   bool,
 	capturingKey:      bool,
 	thresholdText:     string,
 	inputGainText:     string,
@@ -359,10 +364,107 @@ VOICE_ECHO_NOTICE ::
 	"HayChat has no echo cancellation: use headphones, or others hear themselves through " +
 	"your microphone."
 VOICE_PTT_FOCUS_NOTICE :: "Push-to-talk works only while the HayChat window has focus."
-VOICE_PTT_TYPING_NOTICE ::
-	VOICE_PTT_FOCUS_NOTICE +
+VOICE_PTT_TYPING_ADDENDUM ::
 	" This key types, so it does nothing while you are typing in a text field; a key such as " +
 	"Ctrl or an F-key works everywhere."
+VOICE_PTT_TYPING_NOTICE :: VOICE_PTT_FOCUS_NOTICE + VOICE_PTT_TYPING_ADDENDUM
+VOICE_PTT_GLOBAL_TYPING_ADDENDUM ::
+	" This key types: in a HayChat text field it types instead, but in other windows it " +
+	"opens your microphone while you type. A key such as Ctrl or an F-key avoids that."
+VOICE_PTT_GLOBAL_POLLING_NOTICE ::
+	"Push-to-talk also works while another window has focus. HayChat reads only this key, " +
+	"and only while you are in voice or testing your microphone."
+VOICE_PTT_GLOBAL_UNSUPPORTED_KEY_NOTICE ::
+	"This key cannot be followed outside HayChat, so push-to-talk works only while the " +
+	"HayChat window has focus. Modifiers, F-keys, letters, digits and the keypad work in " +
+	"every window."
+VOICE_PTT_NO_GLOBAL_NOTICE ::
+	VOICE_PTT_FOCUS_NOTICE +
+	" This system offers no global hotkey (Windows, X11 and Wayland desktops with the " +
+	"GlobalShortcuts portal do)."
+VOICE_PTT_PORTAL_IDLE_NOTICE ::
+	"In other windows, push-to-talk is a desktop shortcut. The first time you use " +
+	"push-to-talk in voice, your desktop asks you to confirm it, and may let you choose its key."
+VOICE_PTT_PORTAL_UNASSIGNED_NOTICE ::
+	"In other windows, push-to-talk is a desktop shortcut without a key yet. Assign one in " +
+	"your desktop's shortcut settings."
+
+// Where push-to-talk works, for the settings note: only in the window, or also in other
+// windows through the global monitor, and what a key that types does there. present says
+// the GUI has a monitor (tests and the harness have none).
+voicePushToTalkNotice :: proc(
+	settings: VoiceSettings,
+	report: hotkey.StatusReport,
+	present: bool,
+	allocator := context.temp_allocator,
+) -> string {
+	report := report
+	types := voiceKeyEditsText(voicePushToTalkKeyFromName(settings.pttKey))
+	typing := types ? VOICE_PTT_TYPING_ADDENDUM : ""
+	if !present || !settings.pttGlobal {
+		return types ? VOICE_PTT_TYPING_NOTICE : VOICE_PTT_FOCUS_NOTICE
+	}
+	if report.backend == .None {
+		return fmt.aprint(VOICE_PTT_NO_GLOBAL_NOTICE, typing, sep = "", allocator = allocator)
+	}
+	switch report.status {
+	case .Unavailable:
+		return fmt.aprintf(
+			"%s Not in other windows: %s.%s",
+			VOICE_PTT_FOCUS_NOTICE,
+			hotkey.StatusReport_message(&report),
+			typing,
+			allocator = allocator,
+		)
+	case .KeyUnsupported:
+		return fmt.aprint(
+			VOICE_PTT_GLOBAL_UNSUPPORTED_KEY_NOTICE,
+			typing,
+			sep = "",
+			allocator = allocator,
+		)
+	case .Idle, .Starting, .Active:
+	}
+	if report.backend != .Portal {
+		globalTyping := types ? VOICE_PTT_GLOBAL_TYPING_ADDENDUM : ""
+		return fmt.aprint(
+			VOICE_PTT_GLOBAL_POLLING_NOTICE,
+			globalTyping,
+			sep = "",
+			allocator = allocator,
+		)
+	}
+	// The portal: the desktop owns the trigger, so the configured key matters only in the
+	// window (and as the trigger proposed on the first bind).
+	switch report.status {
+	case .Starting:
+		return fmt.aprintf(
+			"Setting up the desktop shortcut for push-to-talk in other windows: %s.%s",
+			hotkey.StatusReport_message(&report),
+			typing,
+			allocator = allocator,
+		)
+	case .Active:
+		trigger := hotkey.StatusReport_trigger(&report)
+		if len(trigger) == 0 {
+			return fmt.aprint(
+				VOICE_PTT_PORTAL_UNASSIGNED_NOTICE,
+				typing,
+				sep = "",
+				allocator = allocator,
+			)
+		}
+		return fmt.aprintf(
+			"In other windows, push-to-talk is the desktop shortcut %s; change it in your " +
+			"desktop's shortcut settings. In HayChat the key above works too.%s",
+			trigger,
+			typing,
+			allocator = allocator,
+		)
+	case .Idle, .Unavailable, .KeyUnsupported:
+	}
+	return fmt.aprint(VOICE_PTT_PORTAL_IDLE_NOTICE, typing, sep = "", allocator = allocator)
+}
 VOICE_KEY_CAPTURE_TEXT :: "Press a key… (Esc cancels)"
 VOICE_TEST_START_TEXT :: "Test microphone"
 VOICE_TEST_STOP_TEXT :: "Stop test"
@@ -427,10 +529,15 @@ buildVoiceSettingsView :: proc(
 	}
 	view.capturingKey = panel.capturingKey
 	view.pttKeyLabel = panel.capturingKey ? VOICE_KEY_CAPTURE_TEXT : view.settings.pttKey
-	view.pttNotice = VOICE_PTT_FOCUS_NOTICE
-	if voiceKeyEditsText(voicePushToTalkKeyFromName(view.settings.pttKey)) {
-		view.pttNotice = VOICE_PTT_TYPING_NOTICE
-	}
+	present := state.voice.globalPushToTalk != nil
+	report := state.voice.globalReport
+	view.pttNotice = voicePushToTalkNotice(view.settings, report, present, allocator)
+	view.pttGlobalOffered = present && report.backend != .None
+	view.pttCanConfigure =
+		view.settings.pttGlobal &&
+		report.backend == .Portal &&
+		report.status == .Active &&
+		report.canConfigure
 	view.thresholdText = fmt.aprintf(
 		"%d dBFS",
 		int(view.settings.vadThresholdDB),

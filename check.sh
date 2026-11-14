@@ -47,6 +47,12 @@ odin test client "${test_flags[@]}" -define:HAYCHAT_TEST_FAULTS=true \
 echo "==> odin test client/ui"
 odin test client/ui "${test_flags[@]}"
 
+# The global push-to-talk backends against Xvfb and a mock portal on a private dbus-daemon
+# (dev/install-packages.sh installs them); without them the tests would only skip.
+echo "==> odin test client/hotkey"
+HAYCHAT_REQUIRE_HOTKEY_TESTS=${HAYCHAT_REQUIRE_HOTKEY_TESTS:-1} \
+	odin test client/hotkey "${test_flags[@]}" -vet -strict-style
+
 echo "==> odin test client/toneanalysis"
 odin test client/toneanalysis "${test_flags[@]}"
 

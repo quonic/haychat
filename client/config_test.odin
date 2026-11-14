@@ -579,3 +579,34 @@ testDeviceIDIsGeneratedOnceAndSurvivesSaveAndLoad :: proc(t: ^testing.T) {
 		reset.device_id,
 	)
 }
+
+// voice_ptt_global defaults to on, is stored only when turned off, and survives a round trip.
+@(test)
+testConfigVoicePushToTalkGlobalDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
+	assert(Config_voiceSettings(Config{}).pttGlobal, "expected global push-to-talk on by default")
+	config: Config
+	defer Config_deinit(&config)
+	settings := VOICE_DEFAULT_SETTINGS
+	settings.pttGlobal = false
+	Config_setVoiceSettings(&config, settings)
+	data, marshalErr := json.marshal(config)
+	defer delete(data)
+	assert(marshalErr == nil, "expected the config to marshal")
+	assert(
+		strings.contains(string(data), `"voice_ptt_global":false`),
+		fmt.tprintf("expected voice_ptt_global stored as false, got %s", string(data)),
+	)
+	loaded: Config
+	defer Config_deinit(&loaded)
+	unmarshalErr := json.unmarshal(data, &loaded)
+	assert(unmarshalErr == nil, fmt.tprintf("expected %s to load, got %v", data, unmarshalErr))
+	assert(!Config_voiceSettings(loaded).pttGlobal, "expected global push-to-talk off after a load")
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	assert(!Config_voiceSettings(clone).pttGlobal, "expected Config_clone to keep the setting")
+
+	settings.pttGlobal = true
+	Config_setVoiceSettings(&config, settings)
+	assert(config.voice_ptt_global == nil, "expected the default (on) stored as unset")
+	_ = t
+}

@@ -397,7 +397,8 @@ Rejected:
   SDL keyboard events while the window has focus. A global hotkey that works while the
   window is unfocused needs per-platform code (X11 has no portable answer and Wayland needs
   the global-shortcuts portal), so it is open question Q3. Release has a 200 ms tail so the
-  last syllable isn't clipped.
+  last syllable isn't clipped. (Update, issue 45: testers asked for it, and `client/hotkey`
+  now adds it: Windows and X11 poll the one key, Wayland uses the GlobalShortcuts portal.)
 - **Mute:** the gate is forced closed. Capture stays open so the level meter keeps working
   and unmuting is instant.
 - **Deafen:** implies mute. Playback streams are paused and the server stops relaying to the

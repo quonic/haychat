@@ -53,7 +53,12 @@ The window opens at once; connecting happens in the background.
   - **Channel list:** a room with anyone in its voice shows a speaker and a count, and lists the participants under it, also for rooms you are not in. Each user is listed once; a dot ringed green means they are speaking (known for the room you are in), and "muted" or "deafened" follows the name.
   - **Voice bar** (bottom of the sidebar): "Voice connected: #room on Server" with your own speaking dot, an input level meter, and **Mute**, **Deafen** and **Leave**; "Joining voice…" and "Rejoining voice…" while on the way; the error ("Voice unavailable: libopus not found", "Microphone not available: …", or the server's refusal) with **Dismiss** when voice failed.
   - **Settings → Voice:** input and output device lists ("System default" first; a chosen device that is unplugged stays listed as "(not connected)", and the default plays meanwhile), voice activity or push-to-talk, the push-to-talk key (click it, press a key; Esc cancels), the voice activity threshold over a live input level meter, input gain, output volume, and the Opus bitrate. **Test microphone** runs a loopback (microphone → Opus → your own speakers) while the section is open and you are not in voice. Every change applies at once: levels, mode and bitrate to the running voice session in place, a new device by reopening the audio devices while the session stays joined (the sender's frame sequence carries on across the reopen, so listeners do not drop what follows). Devices are listed only while the section is open, and refreshed on hotplug; a session on a named device that is unplugged reopens on the system default, and returns to the named device when it is plugged back in.
-  - **Push-to-talk** reads the key only while the HayChat window has focus, and losing focus releases it. A key that types (a letter, digit, punctuation, Space, Enter, Tab, Backspace, Delete or Esc) is ignored while a text field has keyboard focus, so it types there instead of opening the microphone; modifiers such as the default Left Ctrl and F-keys work everywhere. A global hotkey is not implemented.
+  - **Push-to-talk** reads the key from the HayChat window while it has focus, and, with **In other windows too** on (the default, `voice_ptt_global`), while another window has focus as well. A key that types (a letter, digit, punctuation, Space, Enter, Tab, Backspace, Delete or Esc) is ignored while a HayChat text field has keyboard focus, so it types there instead of opening the microphone; in other windows it does open the microphone while you type, so modifiers such as the default Left Ctrl and F-keys suit push-to-talk best.
+  - **In other windows** push-to-talk works per platform (`client/hotkey`). The key is followed only while you are in voice (or joining it) or testing the microphone, and nothing is read or set up before that.
+    - **Windows:** `GetAsyncKeyState` reads the one configured key; no keyboard hook is installed.
+    - **Linux on X11:** `XQueryKeymap` reads the one configured key (libX11 is loaded at runtime).
+    - **Linux on Wayland:** the desktop's GlobalShortcuts portal (KDE Plasma, GNOME 48 and later, Hyprland), over libdbus-1 loaded at runtime. The desktop owns the shortcut: the first time you use push-to-talk in voice it asks you to confirm the key HayChat proposes (a modifier alone, such as Left Ctrl, is not proposed, so you choose one), and Settings → Voice shows the shortcut it assigned, with **Change shortcut** where the portal supports it. Inside the window the configured key works as well.
+    - Where none of these is available (a Wayland desktop without the portal, or an unmapped key), Settings → Voice says why, and push-to-talk works while the window has focus.
 
 Client config keys (`config.json`):
 
@@ -68,6 +73,7 @@ Client config keys (`config.json`):
 | `voice_output_device` | Speakers or headphones, by SDL device name. Default `""`: the system default |
 | `voice_mode` | `"voice_activity"` (default: send while louder than the threshold) or `"push_to_talk"` (send while the push-to-talk key is held and the window has focus) |
 | `voice_ptt_key` | The push-to-talk key as an SDL key name, e.g. `"Space"`. Default `"Left Ctrl"`; an unknown name uses the default |
+| `voice_ptt_global` | `true` (default: push-to-talk also works while another window has focus, see Push-to-talk above) or `false` (only while the HayChat window has focus) |
 | `voice_vad_threshold_db` | Voice activity threshold in dBFS, −80 to 0. Default −45 |
 | `voice_input_gain` | Linear microphone gain, 0 to 4. Default 1 |
 | `voice_output_volume` | Linear output volume, 0 to 2. Default 1 |
@@ -267,7 +273,8 @@ The job container needs no special seccomp or SELinux settings. A runner host se
 - Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
-- Voice has no echo cancellation or noise suppression: use headphones. Push-to-talk works only while the window has focus.
+- Voice has no echo cancellation or noise suppression: use headphones.
+- Push-to-talk in other windows needs a Wayland desktop with the GlobalShortcuts portal; on other Wayland desktops it works only while the window has focus. Under Wayland the desktop, not HayChat, chooses the key there.
 
 ## License
 

@@ -284,19 +284,53 @@ the DLLs copied as the README says.
 5. **Mute and deafen:** mute stops sending at once, and the other side sees "muted". Deafen
    stops playback at once and also mutes. Undo both.
 6. **Push-to-talk while focused:** hold the key with the HayChat window focused, and you are
-   heard. Click another window while holding the key, and sending stops.
-7. **Switching devices while joined:** choose another microphone and then another output. The
+   heard. With **In other windows too** off, click another window while holding the key,
+   and sending stops.
+7. **Push-to-talk in another window:** with **In other windows too** on (the default),
+   Settings → Voice says push-to-talk also works in other windows. Join voice, focus another
+   application (a browser, a game in windowed and in fullscreen mode, and an elevated
+   window such as Task Manager), and hold the key: you are heard, and the speaking ring
+   shows. Release it, and sending stops. Choose a letter key: typing it in a HayChat text
+   field does not open the microphone, typing it in another window does. Note any game or
+   elevated window where the key is not seen.
+8. **Switching devices while joined:** choose another microphone and then another output. The
    session stays joined, and audio continues on the new device after a short gap.
-8. **Unplugging a headset while joined:** voice moves to the system default, and the chosen
+9. **Unplugging a headset while joined:** voice moves to the system default, and the chosen
    device stays listed in Settings → Voice as "(not connected)". Plug it back in: voice
    returns to it.
-9. **Bluetooth headset (if you have one):** opening the microphone can switch the headset to
-   its hands-free profile, which changes the sound quality. Note what Windows does, and
-   whether HayChat keeps playing.
-10. **Reconnect:** disconnect the network for a few seconds. The voice bar says "Rejoining
+10. **Bluetooth headset (if you have one):** opening the microphone can switch the headset to
+    its hands-free profile, which changes the sound quality. Note what Windows does, and
+    whether HayChat keeps playing.
+11. **Reconnect:** disconnect the network for a few seconds. The voice bar says "Rejoining
     voice…", and voice comes back without a click.
 
 Report anything that differs, with the Windows version and the device names.
+
+## Global Push-To-Talk On Linux
+
+`odin test client/hotkey` covers the X11 poller on Xvfb (with XTest pressing the key) and
+the portal client against a mock GlobalShortcuts portal. Real desktops differ in what they
+accept, so check by hand on each you can reach. Run the client from a terminal: the portal
+works for an unsandboxed app only once it has registered its app ID (`chat.haychat.client`).
+
+1. **X11 session** (`echo $XDG_SESSION_TYPE` says `x11`): choose push-to-talk, join voice,
+   focus another window and hold the key. You are heard while it is held. Settings → Voice
+   says push-to-talk also works in other windows.
+2. **Wayland, KDE Plasma:** choose push-to-talk with F13 (or any non-modifier key) and join
+   voice. A Plasma dialog asks to confirm the shortcut. Accept it: Settings → Voice names the
+   shortcut, and holding it in another window sends. **Change shortcut** opens Plasma's
+   dialog; a new key works at once. Leave and join again: no second dialog. Restart HayChat
+   and join: Plasma remembers the shortcut.
+3. **Wayland, KDE, Left Ctrl:** with the default Left Ctrl, nothing is proposed. Pick a key
+   in the dialog, or cancel it: Settings → Voice then says the desktop cancelled the
+   binding, and push-to-talk still works inside the window.
+4. **Wayland, GNOME 48 or later:** the same as 2. On GNOME 47 or older, or Sway, Settings →
+   Voice says the desktop has no GlobalShortcuts portal, and push-to-talk works inside the
+   window.
+5. **Release while switching windows:** hold the key in another window, alt-tab to HayChat
+   and back while still holding it, then release. Sending stops on release, not before.
+
+Report the desktop, its version, and what the dialog offered.
 
 ## Jitter Buffer Edges To Check By Hand
 

@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:sync"
 import "core:time"
+import "hotkey"
 import "ui"
 import SDL "vendor:sdl3"
 import ttf "vendor:sdl3/ttf"
@@ -137,6 +138,14 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 	// A UI script drives the window like a user sitting at it, so it counts as focused even
 	// where the video driver (offscreen) never reports focus.
 	state.windowFocused = script != nil || .INPUT_FOCUS in SDL.GetWindowFlags(window)
+	// Global push-to-talk (issue 45). It wakes the loop like the network worker does. A UI
+	// script gets none, so automation never reads the real keyboard.
+	globalBackend := script != nil ? hotkey.Backend.None : hotkey.defaultBackend()
+	globalWake: hotkey.ChangeProc = nil
+	if wakeProc != nil {
+		globalWake = appWakeFromWorker
+	}
+	state.voice.globalPushToTalk = hotkey.create(globalBackend, globalWake, &wake)
 	// How long until a throttled mark-read may go out (State_updateReadMarkers), or -1.
 	readMarkerWait := time.Duration(-1)
 	// Voice meters and speaking dots change with no event. While they are on screen the loop
@@ -199,6 +208,11 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		if State_drainNetworkEvents(&state) {
 			redraw = true
 		}
+		// After the events and the network: both the window's key and a voice join or leave
+		// change what push-to-talk follows.
+		if State_voiceSyncPushToTalk(&state, ui.hasTextFocus(&ctx)) {
+			redraw = true
+		}
 		if ctx.nextDeadlineMS != ui.NO_DEADLINE && u64(SDL.GetTicks()) >= ctx.nextDeadlineMS {
 			redraw = true
 		}
@@ -237,12 +251,12 @@ appTrackWindowFocus :: proc(state: ^State, event: ^SDL.Event, scripted: bool) {
 	}
 }
 
-// Push-to-talk and audio hotplug. The push-to-talk key is read from the window's own key
-// events, so it works only while the window has focus (Q3: no global hotkeys), and losing
-// focus releases it, because the key-up then goes to another window. textFocused says a
-// text field had keyboard focus in the last frame: a push-to-talk key that types is then
-// left to the text field (voicePushToTalkKeyEvent). Returns true when the event needs a new
-// frame.
+// Push-to-talk and audio hotplug. Here the push-to-talk key is read from the window's own
+// key events, and losing focus releases it, because the key-up then goes to another window;
+// the global monitor covers other windows (State_voiceSyncPushToTalk combines the two after
+// the events). textFocused says a text field had keyboard focus in the last frame: a
+// push-to-talk key that types is then left to the text field (voicePushToTalkKeyEvent).
+// Returns true when the event needs a new frame.
 @(private = "file")
 appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event, textFocused: bool) -> bool {
 	#partial switch event.type {
@@ -254,16 +268,14 @@ appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event, textFocused: bool)
 			State_voicePushToTalkKeycode(state),
 			event.key.key,
 			event.type == .KEY_DOWN,
-			state.voice.pushToTalkHeld,
+			state.voice.pushToTalkWindowHeld,
 			textFocused,
 		)
 		if change {
-			State_voicePushToTalkChanged(state, held)
+			state.voice.pushToTalkWindowHeld = held
 		}
 	case .WINDOW_FOCUS_LOST:
-		if state.voice.pushToTalkHeld {
-			State_voicePushToTalkChanged(state, false)
-		}
+		state.voice.pushToTalkWindowHeld = false
 	case .AUDIO_DEVICE_ADDED, .AUDIO_DEVICE_REMOVED:
 		State_voiceAudioDevicesChanged(state)
 		return true

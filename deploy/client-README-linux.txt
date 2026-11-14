@@ -17,6 +17,9 @@ The client needs SDL3, SDL3_ttf, ENet and libopus from your distribution:
 libopus (libopus.so.0) is the voice codec. The client loads it only when voice is used, so
 text chat works without it; voice then reports that libopus was not found.
 
+Push-to-talk in other windows loads libX11 (on X11) or libdbus-1 (on Wayland, for the
+desktop's GlobalShortcuts portal) when you first use it in voice; every desktop has them.
+
 Older distributions (Ubuntu 24.04, Debian 12) do not package SDL3; build the client from
 source instead (see the tester guide). The client also needs glibc 2.34 or newer.
 

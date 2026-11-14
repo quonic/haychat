@@ -26,6 +26,7 @@ import "../common"
 import "core:fmt"
 import "core:strings"
 import "core:time"
+import "hotkey"
 import "opus"
 
 VoiceSessionStatus :: enum u8 {
@@ -50,7 +51,15 @@ ClientVoiceState :: struct {
 	// The user's choices; they survive leaving and are sent with every join.
 	muted:            bool,
 	deafened:         bool,
+	// Push-to-talk as the engine sees it: the window's key or the global hotkey
+	// (State_voiceSyncPushToTalk). The harness and tests set it directly.
 	pushToTalkHeld:   bool,
+	// The push-to-talk key as the window's own key events last left it (app.odin).
+	pushToTalkWindowHeld: bool,
+	// Global push-to-talk (client/hotkey): owned, created by the GUI only, nil elsewhere.
+	globalPushToTalk: ^hotkey.Monitor,
+	// The monitor's report as of the last State_voiceSyncPushToTalk, for the settings view.
+	globalReport:     hotkey.StatusReport,
 	// Owned. Why voice last stopped or failed; empty after a successful join.
 	lastError:        string,
 	// Every room with anyone in voice, joined or not, on every server, for the sidebar.
