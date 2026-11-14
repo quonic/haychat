@@ -196,3 +196,30 @@ testUIScriptOptionsShareTheHeadlessParser :: proc(t: ^testing.T) {
 	assert(uiScriptRequested({"--name", "a", "--ui-script=x"}), "expected the = form detected")
 	assert(!uiScriptRequested({"--headless"}), "expected no script mode without the flag")
 }
+
+@(test)
+testUIScriptParsesRightClicks :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := `right-click "# general"` + "\nright-click 120 48.5\nright-click-id channel 1 2\n"
+	commands, errLine, err := uiScriptParse(source)
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0 && len(commands) == 3, "expected three right-clicks")
+	assert(commands[0].kind == .RightClick && commands[0].text == "# general", "expected text")
+	assert(commands[1].kind == .RightClickAt && commands[1].x == 120, "expected coordinates")
+	assert(commands[1].y == 48.5, "expected the y coordinate")
+	assert(commands[2].kind == .RightClickID && commands[2].text == "channel", "expected an ID")
+	assert(commands[2].idCount == 2 && commands[2].ids[1] == 2, "expected the ID's integers")
+	assert(UI_SCRIPT_COMMAND_NAMES[.RightClickID] == "right-click-id", "expected the JSON name")
+
+	bad := [?][2]string {
+		{"right-click", `usage: right-click "TEXT" or right-click X Y`},
+		{"right-click 1 2 3", `usage: right-click "TEXT" or right-click X Y`},
+		{"right-click-id", "usage: right-click-id NAME [INTEGER...] (at most 4 integers)"},
+		{"right-click-id a b", "usage: right-click-id NAME [INTEGER...] (at most 4 integers)"},
+	}
+	for entry in bad {
+		lines, _, lineErr := uiScriptParse(entry[0])
+		assert(lines == nil, "expected nothing parsed from a bad line")
+		testing.expectf(t, lineErr == entry[1], "%q: got %q", entry[0], lineErr)
+	}
+}

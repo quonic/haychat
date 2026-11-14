@@ -8,10 +8,11 @@ import "core:slice"
 // them free of SDL lets tests check what the UI would show without opening a window.
 
 TranscriptLine :: struct {
-	messageID:   int,
-	senderLabel: string, // Borrowed from the room cache, or allocated with the view allocator
-	isSelf:      bool,
-	content:     string, // Borrowed from the room cache
+	messageID:    int,
+	senderUserID: int,
+	senderLabel:  string, // Borrowed from the room cache, or allocated with the view allocator
+	isSelf:       bool,
+	content:      string, // Borrowed from the room cache
 }
 
 RoomView :: struct {
@@ -59,10 +60,11 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 			}
 		}
 		lines[index] = TranscriptLine {
-			messageID   = message.id,
-			senderLabel = senderLabel,
-			isSelf      = isSelf,
-			content     = message.content,
+			messageID    = message.id,
+			senderUserID = message.senderId,
+			senderLabel  = senderLabel,
+			isSelf       = isSelf,
+			content      = message.content,
 		}
 	}
 	view.lines = lines
@@ -346,10 +348,11 @@ buildDirectConversationView :: proc(
 			senderLabel = userLabel(message.senderNickname, message.senderId, allocator)
 		}
 		lines[index] = TranscriptLine {
-			messageID   = message.id,
-			senderLabel = senderLabel,
-			isSelf      = isSelf,
-			content     = message.content,
+			messageID    = message.id,
+			senderUserID = message.senderId,
+			senderLabel  = senderLabel,
+			isSelf       = isSelf,
+			content      = message.content,
 		}
 	}
 	view.lines = lines
