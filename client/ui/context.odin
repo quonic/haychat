@@ -43,6 +43,7 @@ Context :: struct {
 	focus:             ID, // Widget receiving keyboard input
 	focusDrawn:        bool,
 	pressConsumed:     bool,
+	rightPressTaken:   bool, // A widget took this frame's right press (contextMenuRequested)
 	scrolls:           map[ID]ScrollState,
 	texts:             map[u64]TextEntry,
 	emojiTextures:     map[string]EmojiTexture,
@@ -65,6 +66,9 @@ Context :: struct {
 	nextDeadlineMS:    u64, // When the next frame must be drawn without new input
 	needsFrame:        bool, // Draw another frame immediately
 	automation:        ^Automation, // Scripted-driver records; nil unless enableAutomation ran
+	overlay:           OverlayState, // The modal layer drawn on top (overlay.odin)
+	menu:              MenuState, // The open popup menu's highlight (menu.odin)
+	textMenu:          TextMenuState, // A text input's context menu requests (text_input.odin)
 }
 
 init :: proc(
@@ -111,6 +115,7 @@ destroy :: proc(ctx: ^Context) {
 	delete(ctx.scrolls)
 	delete(ctx.clipStack)
 	delete(ctx.input.events)
+	delete(ctx.overlay.events)
 	delete(ctx.preedit)
 	Automation_destroy(ctx.automation)
 	ctx^ = {}
@@ -213,6 +218,7 @@ beginFrame :: proc(ctx: ^Context) {
 	ctx.nextDeadlineMS = NO_DEADLINE
 	ctx.focusDrawn = false
 	ctx.pressConsumed = false
+	ctx.rightPressTaken = false
 	ctx.textInputWanted = false
 	ctx.hoverSeen = false
 	ctx.tooltip = {}
@@ -221,6 +227,8 @@ beginFrame :: proc(ctx: ^Context) {
 	if ctx.automation != nil {
 		Automation_clearFrame(ctx.automation)
 	}
+	// After pressConsumed is reset: a press outside an open overlay is consumed here.
+	overlayBeginFrame(ctx)
 
 	w, h: i32
 	_ = SDL.GetRenderOutputSize(ctx.renderer, &w, &h)
@@ -322,12 +330,16 @@ getClipboardText :: proc() -> string {
 	return strings.clone_from_cstring(cstring(raw), context.temp_allocator)
 }
 
-// Returns true when the mouse is over r and inside the current clip rect.
+// Returns true when the mouse is over r, inside the current clip rect, and not over an overlay
+// that r is not part of (overlay.odin).
 mouseOver :: proc(ctx: ^Context, r: Rect) -> bool {
 	if !ctx.input.mouseInWindow {
 		return false
 	}
 	p := ctx.input.mousePos
+	if overlayBlocks(ctx.overlay.block, ctx.overlay.blocking, ctx.overlay.drawing, p) {
+		return false
+	}
 	if len(ctx.clipStack) > 0 && !contains(ctx.clipStack[len(ctx.clipStack) - 1], p) {
 		return false
 	}

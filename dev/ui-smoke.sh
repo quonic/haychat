@@ -18,6 +18,11 @@ set -euo pipefail
 #      opens Settings → Voice while joined, closes it, and leaves voice (bob sees the room's
 #      voice empty). The window runs on SDL's dummy audio driver (SDL_AUDIO_DRIVER), so the
 #      device engine opens without sound hardware.
+#   6. context menus: alice right-clicks her #general message, clicks "Copy message", right-
+#      clicks the empty composer, clicks "Paste" and sends it again (bob must receive it a
+#      second time). bob then posts in alice's new room, which she is not viewing; she waits
+#      for its unread badge, right-clicks the channel and clicks "Mark as read". A second
+#      headless session of alice's account (her profile) must get the read_marker for it.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -88,6 +93,7 @@ room_message="ui smoke room $run_tag"
 dm_message="ui smoke dm from bob $run_tag"
 reply_message="ui smoke reply from alice $run_tag"
 admin_room="ui-room-$run_tag"
+unread_message="ui smoke unread from bob $run_tag"
 
 echo "==> [ui] starting headless bob"
 start_client bob "$nickname_bob"
@@ -168,6 +174,27 @@ click-id rail-settings
 click-id voice-leave
 wait-text "Join voice" 5000
 screenshot $screenshot_dir/12-voice-left.bmp
+# Context menus: copy the message from its menu, paste it with the composer's own menu (the
+# right-click focuses the composer), and send it again.
+right-click "$room_message"
+wait-text "Copy message" 5000
+screenshot $screenshot_dir/13-message-menu.bmp
+click "Copy message"
+right-click "Message #general (Enter to send, Shift+Enter for newline)"
+wait-text "Paste" 5000
+click "Paste"
+# The composer applies the paste on its next frame; its text is not findable, so just wait.
+wait 300
+key Return
+wait-count 2 "$room_message" 10000
+screenshot $screenshot_dir/14-message-pasted.bmp
+# bob posts in the new room once alice is in #general: its unread badge is the only "1" drawn.
+wait-text "1" 30000
+right-click "# $admin_room"
+wait-text "Mark as read" 5000
+screenshot $screenshot_dir/15-channel-menu.bmp
+click "Mark as read"
+screenshot $screenshot_dir/16-channel-read.bmp
 quit
 EOF
 
@@ -217,6 +244,9 @@ wait_for_match bob "^\\{\"event\":\"room_list\",.*\"name\":\"$admin_room\"" "$ad
 expect_ok bob rooms
 [[ "$last_result" == *"\"name\":\"$admin_room\""* ]] ||
 	fail "[admin] bob's rooms do not list $admin_room"
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"name\":\"$admin_room\" ]] ||
+	fail "[admin] bob's rooms give no ID for $admin_room"
+admin_room_id=${BASH_REMATCH[1]}
 
 echo "==> [ui] alice joins voice in #general from the window, bob sees her, muted, then gone"
 voice_pattern="^\\{\"event\":\"voice_participants\",.*\"roomID\":1,.*"
@@ -234,6 +264,23 @@ empty_line=$(wait_for_match bob \
 	fail "[voice] bob never saw #general's voice empty after alice left"
 echo "    bob< $empty_line"
 
+echo "==> [ui] alice copies her message from its menu and pastes it into the composer"
+first_room_line=$(grep -nE -m1 "$room_pattern" "$work_dir/bob.out" | cut -d: -f1)
+again_line=$(wait_for_match bob "$room_pattern" "$first_room_line") ||
+	fail "[menu] bob did not receive alice's pasted copy of her message"
+echo "    bob< $again_line"
+
+echo "==> [ui] bob posts in alice's new room, alice marks it read from the channel's menu"
+# A second session of alice's account sees the read marker the server sends every session.
+start_client alice-watch "$nickname_alice" alice
+expect_connected alice-watch
+expect_ok bob send "$admin_room_id" "$unread_message"
+marker_pattern="^\\{\"event\":\"read_marker\",.*\"kind\":\"room\","
+marker_pattern+="\"conversationID\":$admin_room_id,.*\"unreadCount\":0\\}$"
+marker_line=$(wait_for_match alice-watch "$marker_pattern") ||
+	fail "[menu] alice's account never got a read marker for $admin_room"
+echo "    alice-watch< $marker_line"
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -242,6 +289,7 @@ sed 's/^/    alice< /' "$work_dir/alice.out"
 grep -Fqx '{"event":"ui_script_done","failed":0,"skipped":0}' "$work_dir/alice.out" ||
 	fail "the GUI script did not report every command as done"
 
+stop_client alice-watch
 stop_client bob
 
 echo "==> [ui] screenshots written:"
@@ -251,5 +299,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 12 ]] || fail "expected 12 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 16 ]] || fail "expected 16 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

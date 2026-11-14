@@ -33,6 +33,7 @@ Input :: struct {
 	wheel:         Vec2, // In notches; positive y scrolls toward the start
 	events:        [dynamic]InputEvent,
 	hadEvents:     bool,
+	focusLost:     bool, // The window lost input focus since the previous frame
 }
 
 Input_reset :: proc(input: ^Input) {
@@ -41,6 +42,7 @@ Input_reset :: proc(input: ^Input) {
 	input.wheel = {}
 	clear(&input.events)
 	input.hadEvents = false
+	input.focusLost = false
 }
 
 @(private = "file")
@@ -102,6 +104,7 @@ handleEvent :: proc(ctx: ^Context, event: ^SDL.Event) -> bool {
 	case .WINDOW_MOUSE_LEAVE:
 		input.mouseInWindow = false
 	case .WINDOW_FOCUS_LOST:
+		input.focusLost = true
 		// A release that happens outside the window is never reported, so drop held buttons.
 		for &down, button in input.mouseDown {
 			if down {

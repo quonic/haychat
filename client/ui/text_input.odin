@@ -16,6 +16,102 @@ TextInputResult :: struct {
 	submitted: bool, // Enter was pressed with non-blank content
 }
 
+// Context menus on text inputs. A right press on an input focuses it (keeping its selection)
+// and is reported by textInputContextMenuRequested, so the caller can open a menu for it
+// without every screen wiring its inputs. The menu's commands are queued with
+// textInputCommand and applied by the input itself the next time it is drawn, since only it
+// has the buffer.
+TextMenuCommand :: enum u8 {
+	None,
+	Cut,
+	Copy,
+	Paste,
+	SelectAll,
+}
+
+// What a text input's menu needs to know to enable its entries.
+TextFieldFacts :: struct {
+	hasSelection: bool,
+	hasText:      bool,
+}
+
+TextMenuState :: struct {
+	requested:    ID, // The input right-clicked this frame, 0 for none
+	requestFrame: u64,
+	watched:      ID, // The input whose facts are recorded each frame
+	facts:        TextFieldFacts,
+	factsFrame:   u64, // The frame the watched input was last drawn in
+	commandID:    ID,
+	command:      TextMenuCommand,
+}
+
+// The text input that was right-clicked this frame, if any. Call it after the inputs are drawn.
+textInputContextMenuRequested :: proc(ctx: ^Context) -> (id: ID, ok: bool) {
+	menu := &ctx.textMenu
+	if menu.requested == 0 || menu.requestFrame != ctx.frame {
+		return 0, false
+	}
+	return menu.requested, true
+}
+
+// The facts of a right-clicked input, and whether it was drawn this frame (an input that is
+// no longer on screen has nothing to act on).
+textInputFacts :: proc(ctx: ^Context, id: ID) -> (facts: TextFieldFacts, drawn: bool) {
+	menu := &ctx.textMenu
+	if menu.watched != id || menu.factsFrame != ctx.frame {
+		return {}, false
+	}
+	return menu.facts, true
+}
+
+// Queues a menu command for the input with id; it is applied when the input is next drawn.
+textInputCommand :: proc(ctx: ^Context, id: ID, command: TextMenuCommand) {
+	ctx.textMenu.commandID = id
+	ctx.textMenu.command = command
+	requestFrame(ctx)
+}
+
+// Gives the input with id keyboard focus with the caret at the end, e.g. after text was added
+// to its buffer from outside.
+focusTextInput :: proc(ctx: ^Context, id: ID) {
+	ctx.focus = id
+	ctx.editOwner = 0
+	ctx.caretBlinkStartMS = ctx.nowMS
+	requestFrame(ctx)
+}
+
+clipboardHasText :: proc() -> bool {
+	return SDL.HasClipboardText()
+}
+
+@(private = "file")
+textInputApplyCommand :: proc(
+	ctx: ^Context,
+	buf: ^[dynamic]u8,
+	command: TextMenuCommand,
+	maxBytes: int,
+) -> (
+	changed: bool,
+) {
+	st := &ctx.edit
+	switch command {
+	case .None:
+	case .Cut, .Copy:
+		if TextEdit_hasSelection(st^) {
+			setClipboardText(TextEdit_selectedText(buf[:], st^))
+			if command == .Cut {
+				changed = TextEdit_deleteSelection(st, buf)
+			}
+		}
+	case .Paste:
+		pasted := sanitizeInsertText(getClipboardText(), true)
+		changed = TextEdit_insert(st, buf, pasted, maxBytes)
+	case .SelectAll:
+		TextEdit_selectAll(st, buf[:])
+	}
+	return
+}
+
 @(private = "file")
 textInputKey :: proc(id: ID) -> u64 {
 	return hashString(u64(id), "text")
@@ -108,9 +204,46 @@ textInput :: proc(
 		ctx.caretBlinkStartMS = ctx.nowMS
 	}
 
+	if contextMenuRequested(ctx, id, r) {
+		// Focus without moving the caret, so the menu acts on the current selection.
+		takeFocus(ctx, id)
+		focused = true
+		if ctx.editOwner != id {
+			ctx.editOwner = id
+			ctx.edit = TextEditState{len(buf), len(buf)}
+		}
+		ctx.textMenu.requested = id
+		ctx.textMenu.requestFrame = ctx.frame
+		ctx.textMenu.watched = id
+	}
+	if ctx.textMenu.command != .None && ctx.textMenu.commandID == id {
+		command := ctx.textMenu.command
+		ctx.textMenu.command = .None
+		takeFocus(ctx, id)
+		focused = true
+		if ctx.editOwner != id {
+			ctx.editOwner = id
+			ctx.edit = TextEditState{len(buf), len(buf)}
+		}
+		TextEdit_clamp(&ctx.edit, buf[:])
+		if textInputApplyCommand(ctx, buf, command, maxBytes) {
+			result.changed = true
+		}
+		ctx.caretBlinkStartMS = ctx.nowMS
+	}
+
 	if focused {
 		ctx.textInputWanted = true
-		result = textInputHandleKeys(ctx, id, buf, wrapW, maxBytes)
+		keys := textInputHandleKeys(ctx, id, buf, wrapW, maxBytes)
+		result.changed ||= keys.changed
+		result.submitted = keys.submitted
+	}
+	if ctx.textMenu.watched == id {
+		ctx.textMenu.facts = TextFieldFacts {
+			hasSelection = ctx.editOwner == id && TextEdit_hasSelection(ctx.edit),
+			hasText      = len(buf) > 0,
+		}
+		ctx.textMenu.factsFrame = ctx.frame
 	}
 
 	display, preeditAt := textInputDisplay(ctx, id, buf[:])
