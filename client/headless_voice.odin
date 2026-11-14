@@ -250,6 +250,8 @@ HeadlessVoiceSettingJSON :: struct {
 
 HeadlessVoiceSpeakerJSON :: struct {
 	userID:         u32,
+	// The per-user volume the engine applies to this speaker, in percent (user_voice.odin).
+	volumePercent:  int,
 	speaking:       bool,
 	levelDB:        f32,
 	bufferedFrames: int,
@@ -293,6 +295,31 @@ HeadlessVoiceStatsJSON :: struct {
 	jitter:            JitterStats,
 	speakers:          []HeadlessVoiceSpeakerJSON,
 	network:           ClientVoiceNetworkStats,
+	// Per-user volumes and local mutes stored for serverID, and what the running engine holds
+	// for each (voice-volume, voice-mute-user).
+	userVoice:         []HeadlessUserVoiceJSON,
+}
+
+// One user's voice playback setting on a server: stored is what the config holds (and the
+// next engine starts with), engine what the running engine applies (100 and false when no
+// engine runs on that server). voice-volume and voice-mute-user print one; voice-stats lists
+// every stored one.
+HeadlessUserVoiceJSON :: struct {
+	userID:              int,
+	volumePercent:       int,
+	muted:               bool,
+	engineRunning:       bool,
+	engineVolumePercent: int,
+	engineMuted:         bool,
+}
+
+// voice-volume and voice-mute-user: the user's setting after the change.
+HeadlessUserVoiceResultJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
+	// Marshalled flat into this object (json flattens `using _` fields).
+	using _:  HeadlessUserVoiceJSON,
 }
 
 // voice-flush: the file sink's path and its size once the flush was served. running is false
@@ -351,6 +378,7 @@ headlessVoiceStatsJSON :: proc(
 	for speaker, index in snapshot.speakers[:snapshot.speakerCount] {
 		result.speakers[index] = {
 			userID         = speaker.userID,
+			volumePercent  = headlessVolumePercent(speaker.gain),
 			speaking       = speaker.speaking,
 			levelDB        = speaker.levelDB,
 			bufferedFrames = speaker.bufferedFrames,
@@ -361,6 +389,46 @@ headlessVoiceStatsJSON :: proc(
 		result.depth = max(result.depth, speaker.targetDepth)
 	}
 	return result
+}
+
+// A linear gain as a whole percentage.
+headlessVolumePercent :: proc(gain: f32) -> int {
+	return int(gain * 100 + 0.5)
+}
+
+// userID's stored setting on serverID and what the voice engine applies, when one runs there.
+headlessUserVoice :: proc(state: ^State, serverID, userID: int) -> HeadlessUserVoiceJSON {
+	volume, muted := State_userVoice(state, serverID, userID)
+	result := HeadlessUserVoiceJSON {
+		userID              = userID,
+		volumePercent       = headlessVolumePercent(volume),
+		muted               = muted,
+		engineVolumePercent = 100,
+	}
+	if engine := state.voice.engine; engine != nil && state.voice.serverID == serverID {
+		gain, engineMuted := VoiceEngine_speakerControl(engine, u32(userID))
+		result.engineRunning = true
+		result.engineVolumePercent = headlessVolumePercent(gain)
+		result.engineMuted = engineMuted
+	}
+	return result
+}
+
+// Every stored setting on serverID, allocated with allocator.
+headlessUserVoiceList :: proc(
+	state: ^State,
+	serverID: int,
+	allocator := context.allocator,
+) -> []HeadlessUserVoiceJSON {
+	server, ok := State_serverConfig(state, serverID)
+	if !ok {
+		return nil
+	}
+	list := make([]HeadlessUserVoiceJSON, len(server.user_voice), allocator)
+	for entry, index in server.user_voice {
+		list[index] = headlessUserVoice(state, serverID, entry.user_id)
+	}
+	return list
 }
 
 // ── Commands ──────────────────────────────────────────────────────
@@ -581,6 +649,8 @@ headlessCommandVoiceStats :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	}
 	result := headlessVoiceStatsJSON(&state.voice, snapshotPointer, network, joinedMS)
 	defer delete(result.speakers)
+	result.userVoice = headlessUserVoiceList(state, serverID)
+	defer delete(result.userVoice)
 	result.cmd = command.name
 	headlessWriteJSON(harness, result)
 }
@@ -629,4 +699,62 @@ headlessCommandVoiceFlush :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 			running = engine != nil,
 		},
 	)
+}
+
+@(private = "file")
+headlessWriteUserVoice :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	serverID, userID: int,
+) {
+	result := HeadlessUserVoiceResultJSON {
+		ok       = true,
+		cmd      = command.name,
+		serverID = serverID,
+	}
+	result.userID = userID
+	user := headlessUserVoice(&harness.state, serverID, userID)
+	result.volumePercent = user.volumePercent
+	result.muted = user.muted
+	result.engineRunning = user.engineRunning
+	result.engineVolumePercent = user.engineVolumePercent
+	result.engineMuted = user.engineMuted
+	headlessWriteJSON(harness, result)
+}
+
+// voice-volume USER_ID PERCENT: how loud this client plays that user on the selected server,
+// 0 to 200 %, through the same action as the Server settings slider. Stored in the server's
+// config entry and applied at once to a running engine; local only, the server is not told.
+headlessCommandVoiceVolume :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID, userOK := headlessParseNumber(command.args[0])
+	percent, percentOK := headlessParseNumber(command.args[1], 200)
+	if !userOK || userID == 0 || !percentOK {
+		headlessVoiceUsage(harness, command)
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	if !State_setUserVoiceVolume(state, serverID, userID, f32(percent) / 100) {
+		headlessWriteError(harness, command.name, "could not store the volume for that user")
+		return
+	}
+	headlessWriteUserVoice(harness, command, serverID, userID)
+}
+
+// voice-mute-user USER_ID on|off: Mute for me. This client stops playing that user's voice
+// (frames are dropped before decoding); the server and the user are not told.
+headlessCommandVoiceMuteUser :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID, userOK := headlessParseNumber(command.args[0])
+	muted, mutedOK := headlessParseSwitch(command.args[1])
+	if !userOK || userID == 0 || !mutedOK {
+		headlessVoiceUsage(harness, command)
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	if !State_setUserVoiceMuted(state, serverID, userID, muted) {
+		headlessWriteError(harness, command.name, "could not store the mute for that user")
+		return
+	}
+	headlessWriteUserVoice(harness, command, serverID, userID)
 }

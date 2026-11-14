@@ -345,6 +345,7 @@ State_openDirectConversation :: proc(state: ^State, serverID, peerUserID: int) {
 		State_requestRoomList(state, serverID)
 	}
 	State_closeRoomEditor(state)
+	State_closeServerSettings(state)
 	state.selected_dm_peer_id = peerUserID
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)

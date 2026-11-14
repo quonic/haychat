@@ -39,11 +39,15 @@ On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`,
 The window opens at once; connecting happens in the background.
 
 - **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 bytes; accented letters and emoji count as 2 to 4), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
-- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the display name or to add, edit, or remove servers. Changing the name reconnects every server, and each server renames your account (see Display names); changing a server's address reconnects only that server and pins its key afresh.
+- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the global display name, add servers, and open a server's own settings from the server list. Changing the global name reconnects every server that has no name of its own, and each server renames your account (see Display names).
+- **Server settings.** The gear in the selected server's sidebar header opens that server's own settings in the main pane (switching rooms, servers or conversations closes them again). They apply to that server only and are kept in this profile's `config.json`, so they are not synced between devices:
+  - **Profile:** a display name for this server only; empty uses the global one. Saving a new one renames your account on this server and reconnects only this server.
+  - **Server:** the label (headers and the rail tooltip) and short label (the rail button, up to 3 characters; empty fields are filled in from the address), the host and port (a new address reconnects only this server and pins its key afresh), the pinned key's fingerprint with **Forget key** (two clicks: clears the pin and reconnects, and the next connection pins whatever key the server presents; only when you know the server was reinstalled), and **Remove server** (two clicks).
+  - **Voice:** every other user of the server, those in voice first, with a volume slider (0 to 200 %) and **Mute for me**. Only you hear the change, at once, also while in voice; the user and the server are not told. A muted user's voice is dropped before it is decoded.
 - **Connection status.** The sidebar footer shows the selected server's status ("Connected as alice", "Connecting…", "Reconnecting in 4 s"), and a dot on each rail button shows every server's status (green connected, amber connecting or waiting, red stopped). While the selected server is not connected, a banner above the room explains why, with a **Retry now** button.
 - **Reconnecting.** After a lost connection or a failed attempt the client retries after 1 s, 2 s, 4 s, and so on, capped at 30 s, each shortened by up to 20% of random jitter so clients do not all return at once. Restarting the server therefore reconnects every client without user action.
 - **Failures that stop retrying.** Some causes cannot fix themselves, so the client stops and says what to do:
-  - the name belongs to another account (another person, or another device's key) on that server: choose another name in Settings;
+  - the name belongs to another account (another person, or another device's key) on that server: choose another name in Settings, or one for that server only in its Server settings (**Open settings** in the banner goes to the one the server uses);
   - the server's identity key does not match the pinned one (expected after a server reset or reinstall): **Trust the new key** replaces the pin, saves the config, and reconnects;
   - the client and server speak different protocol versions;
   - the display name is too short or too long, or the identity key in the config is corrupt.
@@ -64,10 +68,12 @@ Client config keys (`config.json`):
 
 | Key | Purpose |
 | --- | --- |
-| `display_name` | The nickname sent to every server. A server's account belongs to the identity key: a new key gets an account under this name, and a new name renames that key's account (see Display names) |
+| `display_name` | The nickname sent to every server that has no `servers[].display_name` of its own. A server's account belongs to the identity key: a new key gets an account under this name, and a new name renames that key's account (see Display names) |
 | `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
 | `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
-| `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes; replaced by **Trust the new key** |
+| `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes or by **Forget key** in Server settings; replaced by **Trust the new key** |
+| `servers[].display_name` | The display name used on this server only, set in Server settings. Default unset: the global `display_name`. Surrounding spaces are dropped when the config is read; a name of the wrong length is refused by the client like a bad global name ("Choose another name") |
+| `servers[].user_voice[]` | Voice playback per user of this server, set in Server settings → Voice: `user_id` (the server's account ID), `volume` (linear, 0 to 2, i.e. 0 to 200 %; unset is 1) and `muted` (Mute for me: this client does not play that user). Only entries that differ from the default are written, at most 256 per server. When the config is read, entries without a valid `user_id` or equal to the default are dropped, volumes are clamped, and of repeated users the last entry wins. Local only: the server never learns about them |
 | `device_id` | This profile's voice device ID: 32 lowercase hex characters, random, generated on first start and sent with every voice join. The server compares it only when the client re-joins voice by itself after a reconnect, to tell this device's stale voice session (replaced) from another device's (left alone). Not a secret, but not logged either. A missing or malformed value is replaced with a new one at start, so deleting the key resets it. A profile directory copied to another machine keeps the same ID, and the two then count as one device for re-joins: delete `device_id` in the copy |
 | `voice_input_device` | Microphone, by SDL device name. Default `""`: the system default. A name that is not connected falls back to the system default |
 | `voice_output_device` | Speakers or headphones, by SDL device name. Default `""`: the system default |
@@ -274,6 +280,7 @@ The job container needs no special seccomp or SELinux settings. A runner host se
 - A display name change renames the same account rather than making a new one, and only through the client's own key: there is no way to move an account to another device or key, and no admin rename. Messages a client has already loaded keep the name they were sent with (see Display names).
 - Messages are not end-to-end encrypted (see Features).
 - Voice has no echo cancellation or noise suppression: use headphones.
+- Server settings (a per-server name, labels, per-user volumes and mutes) live in one profile's `config.json` and are not synced between devices.
 - Push-to-talk in other windows needs a Wayland desktop with the GlobalShortcuts portal; on other Wayland desktops it works only while the window has focus. Under Wayland the desktop, not HayChat, chooses the key there.
 
 ## License

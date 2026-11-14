@@ -84,7 +84,8 @@ State_isConversationViewed :: proc(
 	   state.settingsOpen ||
 	   conversationID <= 0 ||
 	   serverID != state.selected_server_id ||
-	   State_roomEditorVisible(state) {
+	   State_roomEditorVisible(state) ||
+	   State_serverSettingsVisible(state) {
 		return false
 	}
 	switch kind {

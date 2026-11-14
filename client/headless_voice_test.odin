@@ -32,6 +32,8 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-ptt down",
 		"voice-stats",
 		"voice-flush",
+		"voice-volume 7 50",
+		"voice-mute-user 7 on",
 	}
 	for line in good {
 		_, err := headlessParseCommand(HEADLESS_COMMANDS[:], line)
@@ -52,6 +54,9 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-ptt",
 		"voice-stats all",
 		"voice-flush now",
+		"voice-volume 7",
+		"voice-volume 7 50 60",
+		"voice-mute-user 7",
 	}
 	for line in bad {
 		_, err := headlessParseCommand(HEADLESS_COMMANDS[:], line)
@@ -474,4 +479,65 @@ testHeadlessVoiceStatsSummarisesDelayAndGaps :: proc(t: ^testing.T) {
 	)
 	idle := headlessVoiceStatsJSON(&voice, nil, {}, 0, context.temp_allocator)
 	testing.expect(t, idle.playoutDelayMS == 0, "expected no delay without an engine")
+}
+
+// voice-volume and voice-mute-user store a per-user setting on the selected server through the
+// Server settings actions, refuse bad values, and voice-stats lists every stored setting.
+@(test)
+testHeadlessVoiceUserVolumeCommands :: proc(t: ^testing.T) {
+	builder := strings.builder_make()
+	harness := testHeadlessHarness(&builder, 813)
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-volume 7 50"),
+		`{"ok":true,"cmd":"voice-volume","serverID":813,"userID":7,"volumePercent":50,` +
+		`"muted":false,"engineRunning":false,"engineVolumePercent":100,"engineMuted":false}` +
+		"\n",
+		"the volume result",
+	)
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-mute-user 9 on"),
+		`{"ok":true,"cmd":"voice-mute-user","serverID":813,"userID":9,"volumePercent":100,` +
+		`"muted":true,"engineRunning":false,"engineVolumePercent":100,"engineMuted":false}` +
+		"\n",
+		"the mute result",
+	)
+	volume, muted := State_userVoice(&harness.state, 813, 7)
+	testing.expectf(t, volume == 0.5 && !muted, "expected user 7 at 0.5, got %v", volume)
+	for line in ([?]string{"voice-volume 0 50", "voice-volume 7 201", "voice-volume x 50",
+		"voice-mute-user 9 maybe", "voice-mute-user 0 on"}) {
+		output := testHeadlessVoiceRun(&harness, &builder, line)
+		testing.expectf(
+			t,
+			strings.has_prefix(output, `{"ok":false,`),
+			"expected %q refused, got %s",
+			line,
+			output,
+		)
+	}
+	output := testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	testing.expectf(
+		t,
+		strings.contains(
+			output,
+			`"userVoice":[{"userID":7,"volumePercent":50,"muted":false,"engineRunning":false,` +
+			`"engineVolumePercent":100,"engineMuted":false},{"userID":9,"volumePercent":100,` +
+			`"muted":true,`,
+		),
+		"expected the stored settings in voice-stats, got %s",
+		output,
+	)
+	// Back to the default removes the stored entry.
+	testHeadlessVoiceRun(&harness, &builder, "voice-volume 7 100")
+	testHeadlessVoiceRun(&harness, &builder, "voice-mute-user 9 off")
+	output = testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	testing.expectf(
+		t,
+		strings.contains(output, `"userVoice":[]`),
+		"expected no stored settings, got %s",
+		output,
+	)
 }

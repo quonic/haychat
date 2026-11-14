@@ -133,6 +133,16 @@ type "$reply_message"
 key Return
 wait-text "$reply_message" 10000
 screenshot $screenshot_dir/06-dm-replied.bmp
+# Server settings from the sidebar header's gear: bob is listed in the Voice section, and
+# Mute for me toggles (local only; the server is not told).
+click-id server-settings 1
+wait-text "Display name on this server" 5000
+click-id server-voice-mute 1 $user_bob
+wait-text "Muted for me" 5000
+screenshot $screenshot_dir/06b-server-settings.bmp
+click-id server-voice-mute 1 $user_bob
+wait-text "Mute for me" 5000
+click-id server-settings-close 1
 # alice signed in as an admin, so the Channels header offers "+ New room".
 click "+ New room"
 click "e.g. random"

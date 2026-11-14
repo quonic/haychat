@@ -51,7 +51,9 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	// first, so a click there shows its room or conversation in the same frame.
 	banner := buildConnectionBanner(state, time.tick_now())
 	viewSidebar(state, ctx, sidebar, &banner)
-	if State_roomEditorVisible(state) {
+	if State_serverSettingsVisible(state) {
+		viewServerSettings(state, ctx, root, &banner)
+	} else if State_roomEditorVisible(state) {
 		viewRoomEditor(state, ctx, root, &banner)
 	} else if state.selected_dm_peer_id != 0 {
 		viewDirectChat(state, ctx, root, &banner)
@@ -310,7 +312,7 @@ viewConnectionBanner :: proc(
 	case trust:
 		State_trustNewServerKey(state, serverID)
 	case settings:
-		State_openSettings(state)
+		State_openNameSettings(state, serverID)
 	case retry:
 		State_retryConnection(state, serverID)
 	}
@@ -381,7 +383,15 @@ sidebarRowHeight :: proc(ctx: ^ui.Context, row: SidebarRow, index: int) -> f32 {
 @(private = "file")
 viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^ConnectionBanner) {
 	area := r
-	viewHeader(ctx, &area, selectedServerName(state))
+	// The gear opens this server's own settings (server_settings.odin).
+	settingsID := ui.idOf("server-settings", state.selected_server_id)
+	settingsText := banner.hasServer ? "⚙" : ""
+	serverName := selectedServerName(state)
+	openSettings := viewHeader(ctx, &area, serverName, "", settingsText, settingsID)
+	// Last, after the rows are drawn, since it closes the room form.
+	defer if openSettings {
+		State_openServerSettings(state, state.selected_server_id)
+	}
 	viewConnectionFooter(state, ctx, &area, banner)
 	// Voice can be active on another server than the one shown, so the bar is always drawn.
 	viewVoiceBar(state, ctx, &area)

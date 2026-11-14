@@ -74,74 +74,158 @@ validateSettings :: proc(
 	input: SettingsInput,
 	errorMessage: string,
 ) {
-	input.displayName = strings.trim_space(displayName)
-	if strings.contains_any(input.displayName, "\r\n\t") {
-		return input, "The display name cannot contain line breaks or tabs."
+	input.displayName, errorMessage = validateDisplayName(displayName)
+	if len(errorMessage) > 0 {
+		return
 	}
-	if len(input.displayName) < DISPLAY_NAME_MIN_BYTES ||
-	   len(input.displayName) > DISPLAY_NAME_MAX_BYTES {
-		return input,
+	input.host, input.port, input.hasServer, errorMessage = validateServerAddress(
+		host,
+		port,
+		requireServer,
+	)
+	return
+}
+
+// Checks a display name the way the server will (3 to 32 bytes, one line). The result
+// borrows from name, without surrounding spaces. Returns an empty error on success.
+validateDisplayName :: proc(name: string) -> (cleanName: string, errorMessage: string) {
+	cleanName = strings.trim_space(name)
+	if strings.contains_any(cleanName, "\r\n\t") {
+		return cleanName, "The display name cannot contain line breaks or tabs."
+	}
+	if len(cleanName) < DISPLAY_NAME_MIN_BYTES || len(cleanName) > DISPLAY_NAME_MAX_BYTES {
+		return cleanName,
 			"The display name must be 3 to 32 bytes long. Most letters take 1 byte; " +
 			"accented letters and emoji take 2 to 4."
 	}
+	return cleanName, ""
+}
 
-	input.host = strings.trim_space(host)
+// Checks a server address. "host:port" in the host field is split, and an empty port is the
+// default one. An empty host is an error only when required; otherwise hasServer is false.
+// The host borrows from the input. Returns an empty error on success.
+validateServerAddress :: proc(
+	host, port: string,
+	required: bool,
+) -> (
+	cleanHost: string,
+	cleanPort: i32,
+	hasServer: bool,
+	errorMessage: string,
+) {
+	cleanHost = strings.trim_space(host)
 	portText := strings.trim_space(port)
 	// ":PORT" has no host to split off. "::1" and other IPv6 addresses also start with a colon,
 	// so only a single colon is rejected.
-	if strings.has_prefix(input.host, ":") && strings.count(input.host, ":") == 1 {
-		return input, "Enter the server's host name or IP address before the port."
+	if strings.has_prefix(cleanHost, ":") && strings.count(cleanHost, ":") == 1 {
+		errorMessage = "Enter the server's host name or IP address before the port."
+		return
 	}
 	// Accept "host:port" pasted into the host field.
-	if colon := strings.last_index_byte(input.host, ':'); colon > 0 &&
-	   strings.count(input.host, ":") == 1 {
-		portText = input.host[colon + 1:]
-		input.host = input.host[:colon]
+	if colon := strings.last_index_byte(cleanHost, ':'); colon > 0 &&
+	   strings.count(cleanHost, ":") == 1 {
+		portText = cleanHost[colon + 1:]
+		cleanHost = cleanHost[:colon]
 	}
-	if len(input.host) == 0 {
-		if requireServer {
-			return input, "Enter the server's host name or IP address."
+	if len(cleanHost) == 0 {
+		if required {
+			errorMessage = "Enter the server's host name or IP address."
 		}
-		return input, ""
+		return
 	}
-	if strings.contains_any(input.host, " \r\n\t/") {
-		return input, "The server host cannot contain spaces or slashes."
+	if strings.contains_any(cleanHost, " \r\n\t/") {
+		errorMessage = "The server host cannot contain spaces or slashes."
+		return
 	}
-	if len(input.host) > SERVER_HOST_MAX_BYTES {
-		return input, "The server host is too long."
+	if len(cleanHost) > SERVER_HOST_MAX_BYTES {
+		errorMessage = "The server host is too long."
+		return
 	}
 
-	input.port = common.DEFAULT_SERVER_PORT
+	cleanPort = common.DEFAULT_SERVER_PORT
 	if len(portText) > 0 {
 		value, ok := strconv.parse_int(portText, 10)
 		if !ok || value < 1 || value > 65535 {
-			return input, "The port must be a number from 1 to 65535."
+			errorMessage = "The port must be a number from 1 to 65535."
+			return
 		}
-		input.port = i32(value)
+		cleanPort = i32(value)
 	}
-	input.hasServer = true
-	return input, ""
+	hasServer = true
+	return
+}
+
+// Whether another configured server than exceptServerID already has this address.
+State_serverAddressTaken :: proc(
+	state: ^State,
+	host: string,
+	port: i32,
+	exceptServerID: int,
+) -> bool {
+	for server in state.config.servers {
+		if server.id != exceptServerID &&
+		   strings.equal_fold(server.host, host) &&
+		   server.port == port {
+			return true
+		}
+	}
+	return false
+}
+
+// Moves server to a new address. Its label follows only when it was the automatic one (the
+// old address), and its key is pinned afresh, since a different address is a different
+// server. Returns false when the address did not change.
+Server_setAddress :: proc(server: ^Server, host: string, port: i32) -> bool {
+	if strings.equal_fold(server.host, host) && server.port == port {
+		return false
+	}
+	oldLabel := serverLabel(server.host, server.port)
+	defer delete(oldLabel)
+	// Keep a name the user chose; only an automatic label follows the address.
+	if server.name == oldLabel {
+		oldShort := getShortServerName(server.name)
+		defer delete(oldShort)
+		shortWasAutomatic := server.short_name == oldShort
+		delete(server.name)
+		server.name = serverLabel(host, port)
+		if shortWasAutomatic {
+			delete(server.short_name)
+			server.short_name = getShortServerName(server.name)
+		}
+	}
+	delete(server.host)
+	server.host = strings.clone(host)
+	server.port = port
+	Server_setPins(server, "", "")
+	return true
 }
 
 // A server's label in the rail tooltip and headers: the host, plus the port when it is not
 // the default.
-serverLabel :: proc(host: string, port: i32) -> string {
+serverLabel :: proc(host: string, port: i32, allocator := context.allocator) -> string {
 	if port == common.DEFAULT_SERVER_PORT {
-		return strings.clone(host)
+		return strings.clone(host, allocator)
 	}
-	return fmt.aprintf("%s:%d", host, port)
+	return fmt.aprintf("%s:%d", host, port, allocator = allocator)
 }
 
 State_openSettings :: proc(state: ^State, tab := SettingsTab.General) {
+	// The settings screen takes the whole window; a server's own settings close behind it.
+	State_closeServerSettings(state)
 	state.settingsOpen = true
 	form := &state.settings
 	form.tab = tab
 	setBuffer(&form.displayName, state.config.display_name)
 	delete(form.error)
 	form.error = ""
-	editID := state.selected_server_id
-	if _, ok := State_serverConfig(state, editID); !ok {
-		editID = len(state.config.servers) > 0 ? state.config.servers[0].id : 0
+	// First run edits the one server it asks for. Later, General only adds servers: an
+	// existing server's address is changed in its own Server settings.
+	editID := 0
+	if State_needsFirstRunSetup(state.config) {
+		editID = state.selected_server_id
+		if _, ok := State_serverConfig(state, editID); !ok {
+			editID = len(state.config.servers) > 0 ? state.config.servers[0].id : 0
+		}
 	}
 	State_settingsEditServer(state, editID)
 }
@@ -191,15 +275,10 @@ State_applySettings :: proc(state: ^State) -> bool {
 		SettingsForm_setError(form, errorMessage)
 		return false
 	}
-	if input.hasServer {
-		for server in state.config.servers {
-			if server.id != form.editingServerID &&
-			   strings.equal_fold(server.host, input.host) &&
-			   server.port == input.port {
-				SettingsForm_setError(form, "That server is already in your list.")
-				return false
-			}
-		}
+	if input.hasServer &&
+	   State_serverAddressTaken(state, input.host, input.port, form.editingServerID) {
+		SettingsForm_setError(form, "That server is already in your list.")
+		return false
 	}
 
 	if input.displayName != state.config.display_name {
@@ -209,23 +288,7 @@ State_applySettings :: proc(state: ^State) -> bool {
 
 	addedServerID := 0
 	if input.hasServer && editingExisting {
-		if !strings.equal_fold(editingServer.host, input.host) ||
-		   editingServer.port != input.port {
-			oldLabel := serverLabel(editingServer.host, editingServer.port)
-			defer delete(oldLabel)
-			// Keep a name the user chose; only an automatic label follows the address.
-			if editingServer.name == oldLabel {
-				delete(editingServer.name)
-				delete(editingServer.short_name)
-				editingServer.name = serverLabel(input.host, input.port)
-				editingServer.short_name = getShortServerName(editingServer.name)
-			}
-			delete(editingServer.host)
-			editingServer.host = strings.clone(input.host)
-			editingServer.port = input.port
-			// A different address is a different server, so its key is pinned afresh.
-			Server_setPins(editingServer, "", "")
-		}
+		Server_setAddress(editingServer, input.host, input.port)
 	} else if input.hasServer {
 		addedServerID = 1
 		for server in state.config.servers {
@@ -268,7 +331,9 @@ State_settingsRemoveServer :: proc(state: ^State, serverID: int) {
 	State_saveConfig(state)
 	State_reconfigureNetwork(state)
 	if state.settingsOpen {
-		State_settingsEditServer(state, state.selected_server_id)
+		// Only first run edits an existing server's address here.
+		editID := State_needsFirstRunSetup(state.config) ? state.selected_server_id : 0
+		State_settingsEditServer(state, editID)
 	}
 }
 
@@ -284,8 +349,10 @@ State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
 }
 
 // A live transport can be kept across a settings change only if nothing it connects with
-// changed.
-@(private = "file")
+// changed: the address, the name it signs in with on this server (its own display name or the
+// global one), and the pinned key ("Forget key" clears the pin, which reconnects only that
+// server). Called only while the network worker is stopped, so the transport's fields are
+// stable and every Connected event that pinned a key has already reached the config.
 ClientServerTransport_matchesConfig :: proc(
 	transport: ^ClientServerTransport,
 	server: Server,
@@ -296,7 +363,8 @@ ClientServerTransport_matchesConfig :: proc(
 		transport.serverID == server.id &&
 		transport.serverHost == server.host &&
 		transport.serverPort == server.port &&
-		transport.nickname == config.display_name \
+		transport.nickname == Server_displayName(server, config) &&
+		transport.pinnedServerPublicKey == server.pinned_server_public_key \
 	)
 }
 
@@ -355,6 +423,7 @@ State_reconfigureNetwork :: proc(state: ^State) {
 		state^,
 		state.selected_server_id,
 	)
+	State_closeServerSettingsIfServerGone(state)
 	if State_needsFirstRunSetup(state.config) && !state.settingsOpen {
 		State_openSettings(state)
 	}
