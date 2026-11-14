@@ -178,7 +178,7 @@ testEncryptedPacketRoundTripAndReplayProtection :: proc(t: ^testing.T) {
 	payload: ServerAuthSuccessPayload
 	payloadErr := cbor.unmarshal(openedPacket.payload, &payload)
 	assert(payloadErr == nil, "expected decrypted payload CBOR decode to succeed")
-	defer delete(payload.message)
+	defer ServerAuthSuccessPayload_deinit(&payload)
 	assert(payload.userId == 42, "expected decrypted payload user ID to match original value")
 	assert(payload.message == "ok", "expected decrypted payload message to match original value")
 

@@ -814,8 +814,7 @@ testMainRouterFailedAuthSuccessAnnouncesNoPresence :: proc(t: ^testing.T) {
 		_: ^ProcessManager,
 		_: ^MainRouterState,
 		_: u32,
-		_: int,
-		_: bool,
+		_: common.ServerAuthSuccessPayload,
 	) -> bool {
 		return false
 	}

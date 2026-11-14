@@ -36,6 +36,12 @@ SERVER_UNSUPPORTED_VERSION_MESSAGE :: "Unsupported protocol version"
 SERVER_INVALID_NICKNAME_MESSAGE :: "Invalid nickname length"
 CLIENT_INVALID_NICKNAME_MESSAGE :: "client display name must be between 3 and 32 bytes"
 CLIENT_INVALID_IDENTITY_MESSAGE :: "client identity keys are missing or invalid"
+// Protocol 14. The server refuses a banned account's sign-in with this message, followed by
+// ": reason" when the ban has one (server/router_admin.odin), and the client builds the same
+// text from ServerSessionEnded{Banned}. A kick only ever arrives as ServerSessionEnded{Kicked},
+// which the client turns into CLIENT_KICKED_MESSAGE (and ": reason").
+SERVER_BANNED_MESSAGE :: "This account is banned from this server"
+CLIENT_KICKED_MESSAGE :: "You were kicked from this server"
 
 ClientConnectionStatus :: enum u8 {
 	Idle, // Never asked to connect
@@ -55,6 +61,8 @@ ClientConnectFailureKind :: enum u8 {
 	ProtocolMismatch, // Client and server speak different protocol versions
 	InvalidName, // The display name is too short or too long
 	InvalidIdentity, // The local identity keys are missing or corrupt
+	Kicked, // An admin ended the session (protocol 14); waits for the user to retry
+	Banned, // The account is banned on this server (protocol 14)
 }
 
 ClientConnection :: struct {
@@ -110,6 +118,12 @@ classifyConnectFailure :: proc(message: string) -> ClientConnectFailureKind {
 	case CLIENT_INVALID_IDENTITY_MESSAGE:
 		return .InvalidIdentity
 	}
+	if strings.has_prefix(message, SERVER_BANNED_MESSAGE) {
+		return .Banned
+	}
+	if strings.has_prefix(message, CLIENT_KICKED_MESSAGE) {
+		return .Kicked
+	}
 	if strings.has_prefix(message, "timed out") ||
 	   strings.has_prefix(message, "could not reach") ||
 	   strings.has_prefix(message, "failed to resolve") {
@@ -123,7 +137,15 @@ connectFailureIsRetryable :: proc(kind: ClientConnectFailureKind) -> bool {
 	switch kind {
 	case .None, .Unreachable, .Other:
 		return true
-	case .NameUnavailable, .ServerKeyChanged, .ProtocolMismatch, .InvalidName, .InvalidIdentity:
+	case .NameUnavailable,
+	     .ServerKeyChanged,
+	     .ProtocolMismatch,
+	     .InvalidName,
+	     .InvalidIdentity,
+	     .Kicked,
+	     .Banned:
+		// A kick is not undone by the next automatic reconnect a second later (D5): the
+		// client waits until the user asks to connect again.
 		return false
 	}
 	return true
@@ -457,12 +479,19 @@ ClientServerTransport_connected :: proc(
 		delete(transport.lastError)
 		transport.lastError = ""
 	}
+	// The account's name as the server has it: an admin may have locked it to another one
+	// than the display name the client asked for (protocol 14).
+	nickname := transport.authenticatedNickname
+	if len(nickname) == 0 {
+		nickname = transport.nickname
+	}
 	event := ClientTransportRuntimeEvent {
-		kind     = .Connected,
-		serverID = transport.serverID,
-		userID   = transport.authenticatedUserID,
-		nickname = strings.clone(transport.nickname),
-		isAdmin  = transport.authenticatedIsAdmin,
+		kind              = .Connected,
+		serverID          = transport.serverID,
+		userID            = transport.authenticatedUserID,
+		nickname          = strings.clone(nickname),
+		isAdmin           = transport.authenticatedIsAdmin,
+		nicknameLocked    = transport.authenticatedNicknameLocked,
 		sessionGeneration = transport.sessionGeneration,
 	}
 	if transport.connection.newlyPinned {
@@ -510,6 +539,29 @@ ClientServerTransport_connectFailed :: proc(
 	} else {
 		transport.connection.status = .Failed
 	}
+	return event, true
+}
+
+// ServerSessionEnded (protocol 14): an admin kicked or banned this account, and the server is
+// about to disconnect. The session ends here as a failure that is not retried, so the next
+// automatic reconnect does not undo a kick; the user's Retry (requestConnect) connects again.
+// reason is the admin's, borrowed; the event's message is the sentence classifyConnectFailure
+// recognises, with the reason after it, and detail the bare reason.
+ClientServerTransport_sessionEnded :: proc(
+	transport: ^ClientServerTransport,
+	now: time.Tick,
+	kind: common.SessionEndedKind,
+	reason: string,
+) -> (
+	ClientTransportRuntimeEvent,
+	bool,
+) {
+	prefix := kind == .Banned ? SERVER_BANNED_MESSAGE : CLIENT_KICKED_MESSAGE
+	message := len(reason) > 0 ? strings.concatenate({prefix, ": ", reason}) : strings.clone(prefix)
+	defer delete(message)
+	event, _ := ClientServerTransport_connectFailed(transport, now, message)
+	event.kind = .SessionEnded
+	event.detail = strings.clone(reason)
 	return event, true
 }
 

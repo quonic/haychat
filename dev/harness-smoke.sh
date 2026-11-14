@@ -166,7 +166,7 @@ room_name="harness-room-$run_tag"
 renamed_room="harness-renamed-$run_tag"
 admin_start_a=$(wc -l <"$work_dir/a.out")
 admin_start_b=$(wc -l <"$work_dir/b2.out")
-expect_ok a room-create "$room_name" "made by the harness"
+expect_ok a room-create both "$room_name" "made by the harness"
 created_line=$(wait_for_match a \
 	"^\\{\"event\":\"room_created\",.*\"name\":\"$room_name\"," "$admin_start_a") ||
 	fail "[admin] client a did not receive room_created for $room_name"
@@ -187,7 +187,7 @@ expect_ok b2 send "$new_room" "hello new room $run_tag"
 wait_for_line a "\"content\":\"hello new room $run_tag\"" "$admin_start_a" >/dev/null ||
 	fail "[admin] client a did not receive B's message in the new room"
 
-expect_ok a room-edit "$new_room" "$renamed_room" "renamed by the harness"
+expect_ok a room-edit "$new_room" both "$renamed_room" "renamed by the harness"
 edited_line=$(wait_for_match b2 \
 	"^\\{\"event\":\"room_edited\",.*\"roomID\":$new_room,\"name\":\"$renamed_room\"," \
 	"$admin_start_b") || fail "[admin] client b did not receive room_edited for $new_room"
@@ -241,7 +241,7 @@ dm_unread_pattern="\\{\"peerUserID\":$user_c,[^}]*\"unreadCount\":"
 expect_room_unread() {
 	local client=$1 expected=$2 why=$3
 	expect_ok "$client" rooms
-	[[ "$last_result" =~ ${room_unread_pattern}${expected}\} ]] ||
+	[[ "$last_result" =~ ${room_unread_pattern}${expected},\"roomType\":[0-9]+\} ]] ||
 		fail "[read] client $client: expected $expected unread in room $room_id $why"
 }
 expect_dm_unread() {

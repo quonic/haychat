@@ -86,7 +86,10 @@ Per datagram, in order, each failure counted by reason and none of them disconne
 The relay uses fixed scratch buffers, so a frame costs no allocation of its own (ENet copies each
 packet). It logs nothing per packet. A disconnect (`handlePeerDisconnect`, or a router-commanded
 `NetworkDisconnectPeer`) removes the peer from the relay at once and wipes its keys, before the
-router hears about it. A `NetworkVoiceSessionOpen` for a peer that already disconnected is
+router hears about it. A router-commanded disconnect uses `peer_disconnect_later`, so the
+router's last packets to the peer (a `ServerAuthFailure`, a protocol error, or
+`ServerSessionEnded` for a kick or ban) are delivered first; the peer leaves the peer manager,
+and the router gets `NetworkPeerDisconnected`, when ENet reports the disconnect. A `NetworkVoiceSessionOpen` for a peer that already disconnected is
 dropped and wiped. The counters are published with atomic stores (`voiceRelayPublishedStats`)
 for the main thread's periodic `[Status]` log line (`server/status.odin`).
 

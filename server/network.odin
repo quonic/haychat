@@ -580,6 +580,12 @@ handleNetworkBroadcast :: proc(peerManager: ^PeerManager, msg: NetworkBroadcast)
 
 // handleNetworkDisconnectPeer forcefully disconnects a specific peer.
 // peer_disconnect_now sends the disconnect notice itself, so no flush is needed here.
+// The router ends a session after its last words to the peer: a ServerAuthFailure, a protocol
+// error, or ServerSessionEnded for a kick or ban (protocol 14). Those are queued in the same
+// drain just before this, so the peer disconnects only once ENet has delivered them
+// (peer_disconnect_later); peer_disconnect_now would drop them unsent. The peer stays in the
+// manager until ENet reports the disconnect, and handlePeerDisconnect then removes it and tells
+// the router, like any other disconnect. A peer that never answers is timed out by ENet.
 handleNetworkDisconnectPeer :: proc(peerManager: ^PeerManager, msg: NetworkDisconnectPeer) {
 	peer, ok := PeerManager_getPeer(peerManager, msg.peerId)
 	if !ok {
@@ -587,10 +593,10 @@ handleNetworkDisconnectPeer :: proc(peerManager: ^PeerManager, msg: NetworkDisco
 		return
 	}
 
-	if peer.enetPeer != nil {
-		ENet.peer_disconnect_now(peer.enetPeer, 0)
+	if peer.enetPeer == nil {
+		PeerManager_removePeer(peerManager, msg.peerId)
+		return
 	}
-
-	PeerManager_removePeer(peerManager, msg.peerId)
-	fmt.printfln("[Network] Disconnected peer %d via IPC command", msg.peerId)
+	ENet.peer_disconnect_later(peer.enetPeer, 0)
+	fmt.printfln("[Network] Disconnecting peer %d via IPC command", msg.peerId)
 }

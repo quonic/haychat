@@ -89,6 +89,9 @@ testApplyRoomsWithReadState :: proc(state: ^State, serverID: int, rooms: ..commo
 		clone := room
 		clone.name = strings.clone(room.name)
 		clone.description = strings.clone(room.description)
+		if !common.roomTypeIsSupported(clone.roomType) {
+			clone.roomType = .ChatAndVoice
+		}
 		append(&event.rooms, clone)
 	}
 	State_applyRuntimeEvent(state, &event)
@@ -524,7 +527,7 @@ testHeadlessReadStateCommandsAndEvents :: proc(t: ^testing.T) {
 	output = testHeadlessTakeOutput(&builder)
 	assert(
 		strings.contains(output, `"name":"general","description":"","lastReadMessageId":2,` +
-			`"unreadCount":2}`),
+			`"unreadCount":2,"roomType":3}`),
 		fmt.tprintf("expected #general with its marker and 2 unread, got %s", output),
 	)
 	testApplyUserList(&harness.state, 906, {id = 3, nickname = "me"}, {id = 4, nickname = "bob"})
@@ -534,7 +537,7 @@ testHeadlessReadStateCommandsAndEvents :: proc(t: ^testing.T) {
 	assert(
 		strings.contains(
 			output,
-			`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":1}`,
+			`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":1,`,
 		),
 		fmt.tprintf("expected bob with 1 unread, got %s", output),
 	)

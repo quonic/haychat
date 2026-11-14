@@ -37,14 +37,24 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // for ServerAuthSuccess.isAdmin. user_server_roles is not written here, so the statement's
 // snapshot is current: a claimed seeded admin reads true, a brand-new account false.
 //
-// Columns: user ID, whether this was a rename, the nickname before the rename, and whether the
-// account is an admin.
+// Admin actions (migration 3, protocol 14): a key whose account has nickname_locked set (an
+// admin renamed it) is never renamed here; it resolves to its account under the locked name,
+// whatever the client asked for. A banned account is never renamed either, and resolves with
+// its ban, which the router turns into a refused sign-in. users is not written for either, and
+// a claimed keyless account's lock and ban come from the statement's snapshot, so they read
+// right too.
+//
+// Columns: user ID, whether this was a rename, the nickname before the rename, whether the
+// account is an admin, its nickname after this login, whether that nickname is locked, whether
+// the account is banned, and the ban reason.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
-	"WITH by_key AS (SELECT id, nickname FROM users WHERE public_key = decode($2, 'hex')), " +
+	"WITH by_key AS (SELECT id, nickname, nickname_locked, banned_at IS NOT NULL AS banned " +
+	"FROM users WHERE public_key = decode($2, 'hex')), " +
 	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
 	"renamed AS (" +
 	"UPDATE users SET nickname = $1 FROM by_key " +
 	"WHERE users.id = by_key.id AND by_key.nickname <> $1 " +
+	"AND NOT by_key.nickname_locked AND NOT by_key.banned " +
 	"AND NOT EXISTS (SELECT 1 FROM existing) " +
 	"RETURNING users.id, by_key.nickname::text AS previous_nickname), " +
 	"inserted AS (" +
@@ -60,13 +70,15 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"SELECT r.id, inserted.id FROM rooms r CROSS JOIN inserted " +
 	"WHERE NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING), " +
 	"resolved AS (" +
-	"SELECT id, false AS is_rename, ''::text AS previous_nickname FROM by_key " +
-	"WHERE nickname = $1 " +
-	"UNION ALL SELECT id, true, previous_nickname FROM renamed " +
-	"UNION ALL SELECT id, false, '' FROM inserted) " +
+	"SELECT id, false AS is_rename, ''::text AS previous_nickname, nickname::text " +
+	"FROM by_key WHERE nickname = $1 OR nickname_locked OR banned " +
+	"UNION ALL SELECT id, true, previous_nickname, $1::text FROM renamed " +
+	"UNION ALL SELECT id, false, '', $1::text FROM inserted) " +
 	"SELECT resolved.id::text, is_rename::text, previous_nickname, EXISTS (" +
 	"SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text FROM resolved"
+	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text, resolved.nickname, " +
+	"COALESCE(u.nickname_locked, false)::text, (u.banned_at IS NOT NULL)::text, " +
+	"COALESCE(u.ban_reason, '') FROM resolved LEFT JOIN users u ON u.id = resolved.id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
 // loading a fixture. Rooms are open, so every existing account joins it. On an empty table
@@ -178,6 +190,17 @@ databaseGetBool :: proc(result: pg.Result, row: i32, column: i32) -> bool {
 	return text == "t" || text == "true"
 }
 
+// Reads a rooms.room_type column. The column's check allows only the supported types, so
+// anything else means a broken row; it reads as ChatAndVoice, what rooms were before types.
+databaseGetRoomType :: proc(result: pg.Result, row: i32, column: i32) -> common.RoomType {
+	value, ok := databaseGetInt(result, row, column)
+	roomType := common.RoomType(value)
+	if !ok || !common.roomTypeIsSupported(roomType) {
+		return .ChatAndVoice
+	}
+	return roomType
+}
+
 // Parses a comma-separated list of IDs produced by string_agg.
 databaseParseIDList :: proc(text: string) -> [dynamic]int {
 	ids := make([dynamic]int)
@@ -231,6 +254,12 @@ databaseExecuteUserIdentityResolution :: proc(
 			identity.previousNickname = databaseGetText(result, 0, 2)
 		}
 		identity.isAdmin = databaseGetBool(result, 0, 3)
+		identity.nickname = databaseGetText(result, 0, 4)
+		identity.nicknameLocked = databaseGetBool(result, 0, 5)
+		identity.banned = databaseGetBool(result, 0, 6)
+		if identity.banned {
+			identity.banReason = databaseGetText(result, 0, 7)
+		}
 	}
 	return databaseSuccess(identity)
 }
@@ -243,7 +272,7 @@ databaseExecuteUserIdentityResolution :: proc(
 // filter on the marker.
 DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"SELECT r.id::text, r.name, r.description, " +
-	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text FROM rooms r " +
+	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text, r.room_type::text FROM rooms r " +
 	"JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
@@ -289,11 +318,18 @@ databaseExecuteListRoomsForUser :: proc(
 				description = databaseGetText(result, row, 2),
 				lastReadMessageId = lastRead,
 				unreadCount = unread,
+				roomType = databaseGetRoomType(result, row, 5),
 			},
 		)
 	}
 	return databaseSuccess(common.DatabaseRoomListResult{rooms = rooms})
 }
+
+// The room's type and members: one row per member, or one row with a NULL member for a room
+// without members, and no row for a room that does not exist.
+DATABASE_LIST_ROOM_MEMBERS_SQL ::
+	"SELECT r.room_type::text, rm.user_id::text FROM rooms r " +
+	"LEFT JOIN room_members rm ON rm.room_id = r.id WHERE r.id = $1"
 
 databaseExecuteListRoomMemberUserIDs :: proc(
 	conn: pg.Conn,
@@ -302,11 +338,7 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 	roomIDParam := databaseIntParam(request.roomId)
 	defer delete(roomIDParam)
 	params := [?][^]byte{transmute([^]byte)roomIDParam}
-	result := databaseExecParams(
-		conn,
-		"SELECT user_id::text FROM room_members WHERE room_id = $1",
-		params[:],
-	)
+	result := databaseExecParams(conn, DATABASE_LIST_ROOM_MEMBERS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
@@ -315,26 +347,35 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 		return databaseResultError(&result)
 	}
 
-	userIDs := make([dynamic]int)
+	members := common.DatabaseRoomMemberListResult {
+		userIDs = make([dynamic]int),
+	}
 	for row in 0 ..< pg.n_tuples(result) {
-		if userID, ok := databaseGetInt(result, row, 0); ok {
-			append(&userIDs, userID)
+		if row == 0 {
+			members.roomFound = true
+			members.roomType = databaseGetRoomType(result, row, 0)
+		}
+		if userID, ok := databaseGetInt(result, row, 1); ok {
+			append(&members.userIDs, userID)
 		}
 	}
-	return databaseSuccess(common.DatabaseRoomMemberListResult{userIDs = userIDs})
+	return databaseSuccess(members)
 }
 
-// One statement checks membership, stores the message only for members, and lists the room's
+// One statement checks membership and the room type (a voice-only room takes no chat, protocol
+// 14), stores the message only for members of a room with chat, and lists the room's
 // recipients and the sender's nickname from the same snapshot. It always returns exactly one
-// row.
+// row: membership, the message ID and time, recipients, nickname, and whether chat is allowed.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
+	"chat AS (SELECT 1 FROM rooms WHERE id = $1 AND room_type IN (1, 3)), " +
 	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content) " +
-	"SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM member) RETURNING id, created_at) " +
+	"SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
+	"RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
-	"COALESCE((SELECT nickname FROM users WHERE id = $2), '') " +
-	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
+	"COALESCE((SELECT nickname FROM users WHERE id = $2), ''), " +
+	"EXISTS (SELECT 1 FROM chat) FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
 	conn: pg.Conn,
@@ -362,6 +403,11 @@ databaseExecutePostRoomChatMessage :: proc(
 
 	if !databaseGetBool(result, 0, 0) {
 		return databaseSuccess(common.DatabasePostRoomChatMessageResult{isMember = false})
+	}
+	if !databaseGetBool(result, 0, 5) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, chatDisabled = true},
+		)
 	}
 	messageID, messageIDOK := databaseGetInt(result, 0, 1)
 	if !messageIDOK {
@@ -500,13 +546,14 @@ databaseExecuteCheckUserServerAdmin :: proc(
 // so an account created concurrently either sees this room or is seen by it.
 DATABASE_CREATE_ROOM_SQL ::
 	"WITH created_room AS (" +
-	"INSERT INTO rooms (name, description, created_by_user_id) VALUES ($2, $3, $1) " +
-	"RETURNING id, name, description" +
+	"INSERT INTO rooms (name, description, created_by_user_id, room_type) " +
+	"VALUES ($2, $3, $1, $4::smallint) " +
+	"RETURNING id, name, description, room_type" +
 	"), all_members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
 	"ON CONFLICT DO NOTHING" +
-	") SELECT id::text, name, description FROM created_room"
+	") SELECT id::text, name, description, room_type::text FROM created_room"
 
 databaseExecuteCreateRoom :: proc(
 	conn: pg.Conn,
@@ -518,10 +565,13 @@ databaseExecuteCreateRoom :: proc(
 	defer delete(nameCString)
 	descriptionCString, _ := strings.clone_to_cstring(request.description)
 	defer delete(descriptionCString)
+	roomTypeParam := databaseIntParam(int(request.roomType))
+	defer delete(roomTypeParam)
 	params := [?][^]byte {
 		transmute([^]byte)creatorUserIDParam,
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
+		transmute([^]byte)roomTypeParam,
 	}
 	result := databaseExecParams(conn, DATABASE_CREATE_ROOM_SQL, params[:])
 	if result == nil {
@@ -543,10 +593,15 @@ databaseExecuteCreateRoom :: proc(
 				id = roomID,
 				name = databaseGetText(result, 0, 1),
 				description = databaseGetText(result, 0, 2),
+				roomType = databaseGetRoomType(result, 0, 3),
 			},
 		},
 	)
 }
+
+DATABASE_EDIT_ROOM_SQL ::
+	"UPDATE rooms SET name = $2, description = $3, room_type = $4::smallint WHERE id = $1 " +
+	"RETURNING id::text, name, description, room_type::text"
 
 databaseExecuteEditRoom :: proc(
 	conn: pg.Conn,
@@ -558,17 +613,15 @@ databaseExecuteEditRoom :: proc(
 	defer delete(nameCString)
 	descriptionCString, _ := strings.clone_to_cstring(request.description)
 	defer delete(descriptionCString)
+	roomTypeParam := databaseIntParam(int(request.roomType))
+	defer delete(roomTypeParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
+		transmute([^]byte)roomTypeParam,
 	}
-	result := databaseExecParams(
-		conn,
-		"UPDATE rooms SET name = $2, description = $3 WHERE id = $1 " +
-		"RETURNING id::text, name, description",
-		params[:],
-	)
+	result := databaseExecParams(conn, DATABASE_EDIT_ROOM_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
@@ -585,6 +638,7 @@ databaseExecuteEditRoom :: proc(
 			id          = request.roomId,
 			name        = databaseGetText(result, 0, 1),
 			description = databaseGetText(result, 0, 2),
+			roomType    = databaseGetRoomType(result, 0, 3),
 		}
 	}
 	return databaseSuccess(mutation)
@@ -679,6 +733,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteListUsers(conn)
 	case common.DatabaseMarkReadRequest:
 		return databaseExecuteMarkRead(conn, r)
+	case common.DatabaseAdminUserRequest:
+		return databaseExecuteAdminUser(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

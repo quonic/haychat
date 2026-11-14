@@ -71,6 +71,8 @@ State :: struct {
 	// The admin's room create/edit form (room_admin.odin); shown in the main pane while open
 	// on the selected server.
 	roomEditor:                     RoomEditor,
+	// The last admin action on an account and its answer (admin.odin, protocol 14).
+	adminRequest:                   AdminRequestState,
 	// One server's settings screen (server_settings.odin); shown in the main pane while open
 	// on the selected server.
 	serverSettings:                 ServerSettingsForm,
@@ -207,6 +209,7 @@ State_deinit :: proc(state: ^State) {
 	delete(state.serverConnections)
 	SettingsForm_deinit(&state.settings)
 	RoomEditor_deinit(&state.roomEditor)
+	AdminRequestState_deinit(&state.adminRequest)
 	ServerSettingsForm_deinit(&state.serverSettings)
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)

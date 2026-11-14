@@ -35,6 +35,8 @@ PendingDBRequestType :: enum {
 	ListUsers,
 	JoinVoiceMemberCheck,
 	MarkRead,
+	// An admin action on an account (router_admin.odin); one statement checks the role too.
+	AdminUserAction,
 }
 
 PendingDBRequest :: struct {
@@ -55,6 +57,12 @@ PendingDBRequest :: struct {
 	voiceDeafened:    bool,
 	voiceRejoin:      bool,
 	voiceDeviceID:    common.VoiceDeviceID,
+	// Room create and edit: the room type asked for (protocol 14).
+	roomType:         common.RoomType,
+	// Admin actions (protocol 14): which one, and its flag (isAdmin, locked, or banned). name
+	// holds a rename's nickname and description a kick or ban reason.
+	adminAction:      common.AdminAction,
+	adminFlag:        bool,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -385,23 +393,21 @@ MainRouterAuthSuccessSender :: #type proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	peerID: u32,
-	userID: int,
-	isAdmin: bool,
+	payload: common.ServerAuthSuccessPayload,
 ) -> bool
 
 MainRouterState_sendAuthSuccess :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	peerID: u32,
-	userID: int,
-	isAdmin: bool,
+	payload: common.ServerAuthSuccessPayload,
 ) -> bool {
 	return MainRouterState_sendPeerMessage(
 		pm,
 		state,
 		peerID,
 		common.MessageType.ServerAuthSuccess,
-		common.ServerAuthSuccessPayload{userId = userID, message = "ok", isAdmin = isAdmin},
+		payload,
 	)
 }
 
@@ -417,6 +423,11 @@ MainRouterState_sendAuthSuccess :: proc(
 //
 // isAdmin comes from the identity statement and only tells the client to offer room
 // management; every admin request still checks the role in the database.
+//
+// nickname (borrowed) is the account's name after this login (protocol 14). It differs from
+// the session's requested nickname when an admin locked the name; the session takes the
+// account's name then, so presence, voice lists, and ServerAuthSuccess carry it. Empty keeps
+// the requested one.
 MainRouterState_completeAuthentication :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -424,13 +435,29 @@ MainRouterState_completeAuthentication :: proc(
 	userID: int,
 	renamed := false,
 	isAdmin := false,
+	nickname := "",
+	nicknameLocked := false,
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
-	if session, sessionOK := MainRouterState_getPeerSession(state, peerID);
-	   !sessionOK || session.isAuthenticated {
+	if session, sessionOK := &state.peerSessions[peerID]; !sessionOK || session.isAuthenticated {
 		return
+	} else if len(nickname) > 0 && session.clientNickname != nickname {
+		delete(session.clientNickname)
+		session.clientNickname = strings.clone(nickname)
 	}
-	if !sendAuthSuccess(pm, state, peerID, userID, isAdmin) {
+	stored, _ := MainRouterState_getPeerSession(state, peerID)
+	if !sendAuthSuccess(
+		pm,
+		state,
+		peerID,
+		common.ServerAuthSuccessPayload {
+			userId = userID,
+			message = "ok",
+			isAdmin = isAdmin,
+			nickname = stored.clientNickname,
+			nicknameLocked = nicknameLocked,
+		},
+	) {
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
 		return
 	}
@@ -601,7 +628,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .GetDirectHistory,
 		     .ListDirectConversations,
 		     .ListUsers,
-		     .MarkRead:
+		     .MarkRead,
+		     .AdminUserAction:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
@@ -882,6 +910,10 @@ MainRouterState_handleClientAuthRequest :: proc(
 	)
 }
 
+// The refusal for a chat message to a voice-only room (protocol 14). The post statement checks
+// the room type in the same statement as membership and the insert.
+CHAT_DISABLED_MESSAGE :: "Chat is disabled in this room"
+
 MainRouterState_handleClientChatMessage :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -1034,7 +1066,8 @@ MainRouterState_handleClientCreateRoom :: proc(
 ) {
 	req: common.ClientCreateRoomPayload
 	if cbor.unmarshal(payload, &req) != nil ||
-	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) {
+	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) ||
+	   !common.roomTypeIsSupported(req.roomType) {
 		delete(req.name)
 		delete(req.description)
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room metadata")
@@ -1055,6 +1088,7 @@ MainRouterState_handleClientCreateRoom :: proc(
 			requestType = .CheckAdminCreateRoom,
 			name = strings.clone(req.name),
 			description = strings.clone(req.description),
+			roomType = req.roomType,
 		},
 	)
 }
@@ -1068,7 +1102,8 @@ MainRouterState_handleClientEditRoom :: proc(
 	req: common.ClientEditRoomPayload
 	if cbor.unmarshal(payload, &req) != nil ||
 	   req.roomId <= 0 ||
-	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) {
+	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) ||
+	   !common.roomTypeIsSupported(req.roomType) {
 		delete(req.name)
 		delete(req.description)
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room edit")
@@ -1090,6 +1125,7 @@ MainRouterState_handleClientEditRoom :: proc(
 			roomID = req.roomId,
 			name = strings.clone(req.name),
 			description = strings.clone(req.description),
+			roomType = req.roomType,
 		},
 	)
 }
@@ -1221,6 +1257,14 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientVoiceState(pm, state, peerID, packet.payload)
 	case .ClientMarkRead:
 		MainRouterState_handleClientMarkRead(pm, state, peerID, packet.payload)
+	case .ClientAdminSetRole:
+		MainRouterState_handleClientAdminSetRole(pm, state, peerID, packet.payload)
+	case .ClientAdminRenameUser:
+		MainRouterState_handleClientAdminRenameUser(pm, state, peerID, packet.payload)
+	case .ClientAdminKickUser:
+		MainRouterState_handleClientAdminKickUser(pm, state, peerID, packet.payload)
+	case .ClientAdminBanUser:
+		MainRouterState_handleClientAdminBanUser(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1440,6 +1484,10 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 
+		if identity.banned {
+			MainRouterState_refuseBannedSignIn(pm, state, request.peerID, identity.banReason)
+			return
+		}
 		if identity.renamed {
 			fmt.printfln(
 				"[Main] User %d renamed from %q on peer %d",
@@ -1455,6 +1503,8 @@ MainRouterState_handleDatabaseResult :: proc(
 			identity.userId,
 			identity.renamed,
 			identity.isAdmin,
+			identity.nickname,
+			identity.nicknameLocked,
 		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
@@ -1481,6 +1531,10 @@ MainRouterState_handleDatabaseResult :: proc(
 		}
 		if !posted.isMember {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
+			return
+		}
+		if posted.chatDisabled {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, CHAT_DISABLED_MESSAGE)
 			return
 		}
 		chatPayload := common.ServerChatMessagePayload {
@@ -1544,6 +1598,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				creatorUserId = creatorSession.authenticatedUserID,
 				name = strings.clone(request.name),
 				description = strings.clone(request.description),
+				roomType = request.roomType,
 			},
 			PendingDBRequest {
 				requestType = .CreateRoom,
@@ -1596,6 +1651,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				roomId = request.roomID,
 				name = strings.clone(request.name),
 				description = strings.clone(request.description),
+				roomType = request.roomType,
 			},
 			PendingDBRequest{requestType = .EditRoom, roomID = request.roomID},
 		)
@@ -1607,6 +1663,11 @@ MainRouterState_handleDatabaseResult :: proc(
 		if !mutation.changed {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
 			return
+		}
+		// Voice first, as for a deletion, so clients leave the room's voice before they see it
+		// become text-only.
+		if !common.roomTypeAllowsVoice(mutation.room.roomType) {
+			MainRouterState_voiceDisableRoom(pm, state, request.roomID, VOICE_LEFT_TEXT_ONLY)
 		}
 		MainRouterState_sendPeerMessage(
 			pm,
@@ -1629,6 +1690,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				roomID = request.roomID,
 				name = strings.clone(mutation.room.name),
 				description = strings.clone(mutation.room.description),
+				roomType = mutation.room.roomType,
 			},
 		)
 	case .ListEditRoomRecipients:
@@ -1637,7 +1699,12 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 		editPayload := common.ServerRoomMutationPayload {
-			room = {id = request.roomID, name = request.name, description = request.description},
+			room = {
+				id = request.roomID,
+				name = request.name,
+				description = request.description,
+				roomType = request.roomType,
+			},
 			roomId = request.roomID,
 			changed = true,
 		}
@@ -1827,6 +1894,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleJoinVoiceMemberCheckResult(pm, state, request, response)
 	case .MarkRead:
 		MainRouterState_handleMarkReadResult(pm, state, request, response)
+	case .AdminUserAction:
+		MainRouterState_handleAdminUserResult(pm, state, request, response)
 	}
 }
 

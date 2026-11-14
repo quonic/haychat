@@ -1,6 +1,7 @@
 package client
 
 import "core:fmt"
+import "core:mem"
 import "core:strings"
 import "core:time"
 
@@ -18,9 +19,13 @@ ServerConnection :: struct {
 	lastAttemptFailed:        bool,
 	userID:                   int,
 	nickname:                 string,
-	// Whether the server said at sign-in that this account is an admin. A role granted or
-	// revoked while connected shows up on the next connection.
+	// Whether the server says this account is an admin: from sign-in, then from
+	// ServerAccountUpdated when an admin changes the role from a client (protocol 14, #41). A
+	// role changed directly in the database shows up on the next connection.
 	isAdmin:                  bool,
+	// Whether an admin set this account's name and locked it (protocol 14): the server keeps
+	// nickname whatever display name the client connects with.
+	nicknameLocked:           bool,
 	// The transport's session counter from Connected, so a voice engine binds to this
 	// session and no later one (ClientTransportVoiceBinding).
 	sessionGeneration:        u64,
@@ -145,6 +150,7 @@ State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: 
 	State_resetDirectRequests(state, serverID, reloadHistory)
 	State_resetReadMarkerSends(state, serverID)
 	State_roomEditorConnectionReset(state, serverID)
+	State_adminConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return
@@ -177,6 +183,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	connection.lastAttemptFailed = false
 	connection.userID = event.userID
 	connection.isAdmin = event.isAdmin
+	connection.nicknameLocked = event.nicknameLocked
 	connection.sessionGeneration = event.sessionGeneration
 	delete(connection.nickname)
 	connection.nickname = event.nickname
@@ -209,6 +216,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.lastAttemptFailed = true
 	connection.userID = 0
 	connection.isAdmin = false
+	connection.nicknameLocked = false
 	ServerConnection_setDetail(connection, &event.message)
 	ServerConnection_clearOfferedKey(connection)
 	if event.failureKind == .ServerKeyChanged {
@@ -231,9 +239,33 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.lastAttemptFailed = false
 	connection.userID = 0
 	connection.isAdmin = false
+	connection.nicknameLocked = false
 	ServerConnection_setDetail(connection, &event.message)
 	State_resetPendingRequests(state, event.serverID, false)
 	State_voiceConnectionLost(state, event.serverID)
+}
+
+// ServerAccountUpdated (protocol 14, #41): an admin changed this account's role or name while
+// it is connected. The admin flag and the name in the connection mirror change at once, so the
+// admin controls appear or go without a reconnect. Takes ownership of the event's nickname.
+State_accountUpdated :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) {
+	index := State_serverConnectionIndex(state^, event.serverID)
+	if index < 0 || state.serverConnections[index].status != .Established {
+		return
+	}
+	connection := &state.serverConnections[index]
+	connection.isAdmin = event.isAdmin
+	connection.nicknameLocked = event.nicknameLocked
+	if len(event.nickname) > 0 {
+		delete(connection.nickname)
+		connection.nickname = event.nickname
+		event.nickname = ""
+	}
+	// Admin controls on a form for a server where the role just went away would only be
+	// refused; close it.
+	if !connection.isAdmin {
+		State_closeRoomEditorForServer(state, event.serverID)
+	}
 }
 
 // "Retry now": connect immediately instead of waiting for the backoff (or after a failure
@@ -355,12 +387,45 @@ describeConnectFailure :: proc(
 			"The identity key in your config file is missing or corrupt.",
 			allocator,
 		)
+	case .Kicked:
+		return adminEndedSessionText(
+			"An admin removed you from this server",
+			detail,
+			CLIENT_KICKED_MESSAGE,
+			". Press Retry to connect again.",
+			allocator,
+		)
+	case .Banned:
+		return adminEndedSessionText(
+			"This account is banned from this server",
+			detail,
+			SERVER_BANNED_MESSAGE,
+			". An admin has to lift the ban before you can connect again.",
+			allocator,
+		)
 	case .None, .Unreachable, .Other:
 	}
 	if len(detail) == 0 {
 		return strings.clone("unknown error", allocator)
 	}
 	return strings.clone(detail, allocator)
+}
+
+// "<lead>: <reason><tail>" for a kick or ban, or "<lead><tail>" without a reason. detail is the
+// raw failure, which starts with prefix (the sentence classifyConnectFailure matched) and may
+// carry ": reason" after it.
+@(private = "file")
+adminEndedSessionText :: proc(
+	lead, detail, prefix, tail: string,
+	allocator: mem.Allocator,
+) -> string {
+	reason := strings.trim_prefix(detail, prefix)
+	reason = strings.trim_prefix(reason, ": ")
+	reason = strings.trim_space(reason)
+	if len(reason) == 0 {
+		return strings.concatenate({lead, tail}, allocator)
+	}
+	return strings.concatenate({lead, " (reason: ", reason, ")", tail}, allocator)
 }
 
 // Whole seconds left until `at`, rounded up, and how long until that number changes.
@@ -462,12 +527,29 @@ buildConnectionBanner :: proc(
 			nickname,
 			connection.offeredServerFingerprint,
 		)
-		banner.text = fmt.aprintf(
-			"Could not connect to %s: %s",
-			serverName,
-			reason,
-			allocator = allocator,
-		)
+		switch connection.failureKind {
+		case .Kicked, .Banned:
+			// Not a failure to connect: an admin ended the session (D4, D5).
+			banner.summary = strings.clone(
+				connection.failureKind == .Banned ? "Banned" : "Kicked",
+				allocator,
+			)
+			banner.text = fmt.aprintf("%s: %s", serverName, reason, allocator = allocator)
+		case .None,
+		     .Unreachable,
+		     .Other,
+		     .NameUnavailable,
+		     .ServerKeyChanged,
+		     .ProtocolMismatch,
+		     .InvalidName,
+		     .InvalidIdentity:
+			banner.text = fmt.aprintf(
+				"Could not connect to %s: %s",
+				serverName,
+				reason,
+				allocator = allocator,
+			)
+		}
 		banner.showTrustKey =
 			connection.failureKind == .ServerKeyChanged &&
 			len(connection.offeredServerPublicKey) > 0

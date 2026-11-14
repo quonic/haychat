@@ -257,7 +257,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"Room 1","description":"",` +
-		`"lastReadMessageId":0,"unreadCount":0}]}`,
+		`"lastReadMessageId":0,"unreadCount":0,"roomType":0}]}`,
 		"the room_list JSON",
 	)
 	delete(line)
@@ -372,7 +372,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}`,
+		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,` +
+		`"nicknameLocked":false}`,
 		"the connected JSON",
 	)
 	delete(line)
@@ -381,7 +382,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":true}`,
+		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":true,` +
+		`"nicknameLocked":false}`,
 		"the connected JSON for an admin",
 	)
 	delete(line)
@@ -456,8 +458,9 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_list","serverID":801,"rooms":[{"id":1,"name":"Room 1","description":"",` +
-		`"lastReadMessageId":0,"unreadCount":0},` +
-		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0}]}` +
+		`"lastReadMessageId":0,"unreadCount":0,"roomType":0},` +
+		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0,` +
+		`"roomType":0}]}` +
 		"\n",
 		"the printed room list",
 	)
@@ -478,8 +481,10 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"rooms","serverID":801,"loaded":true,"loading":false,"rooms":[` +
-		`{"id":1,"name":"Room 1","description":"","lastReadMessageId":0,"unreadCount":0},` +
-		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0}]}` +
+		`{"id":1,"name":"Room 1","description":"","lastReadMessageId":0,"unreadCount":0,` +
+		`"roomType":0},` +
+		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0,` +
+		`"roomType":0}]}` +
 		"\n",
 		"the rooms result",
 	)
@@ -654,7 +659,8 @@ testHeadlessCountsConnectAttemptsUntilConnected :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n" +
 		`{"event":"connecting","serverID":803,"attempt":2}` + "\n" +
-		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora","isAdmin":false}` +
+		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora","isAdmin":false,` +
+		`"nicknameLocked":false}` +
 		"\n" +
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n",
 		"the lifecycle lines",
@@ -825,7 +831,8 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		line,
-		`{"event":"user_list","serverID":1,"users":[{"id":4,"nickname":"bob","isOnline":false}]}`,
+		`{"event":"user_list","serverID":1,"users":[{"id":4,"nickname":"bob","isOnline":false,` +
+		`"isAdmin":false,"isBanned":false}]}`,
 		"the user_list JSON",
 	)
 	delete(line)
@@ -895,8 +902,10 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"users","serverID":803,"loaded":true,"loading":false,"users":[` +
-		`{"id":3,"nickname":"alice","isOnline":true,"lastReadMessageId":0,"unreadCount":0},` +
-		`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":0}]}` +
+		`{"id":3,"nickname":"alice","isOnline":true,"lastReadMessageId":0,"unreadCount":0,` +
+		`"isAdmin":false,"isBanned":false},` +
+		`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":0,` +
+		`"isAdmin":false,"isBanned":false}]}` +
 		"\n",
 		"the users result",
 	)

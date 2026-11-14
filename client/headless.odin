@@ -239,6 +239,11 @@ HeadlessEventKind :: enum {
 	VoiceParticipants,
 	VoiceJoinRejected,
 	VoiceLeft,
+	// Admin actions (protocol 14).
+	UserUpdated,
+	AccountUpdated,
+	AdminResult,
+	SessionEnded,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -266,6 +271,10 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.VoiceParticipants = "voice_participants",
 	.VoiceJoinRejected = "voice_join_rejected",
 	.VoiceLeft      = "voice_left",
+	.UserUpdated    = "user_updated",
+	.AccountUpdated = "account_updated",
+	.AdminResult    = "admin_result",
+	.SessionEnded   = "session_ended",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -280,13 +289,78 @@ headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
 }
 
 // isAdmin is the server's ServerAuthSuccess flag for this session: whether room management
-// is offered. A role granted while connected shows on the next connection (`reconnect`).
+// is offered. A role an admin changes from a client arrives as account_updated (protocol 14);
+// one changed in the database shows on the next connection (`reconnect`). nickname is the
+// account's name on the server, which an admin may have set and locked (nicknameLocked).
 HeadlessConnectedJSON :: struct {
+	event:          string,
+	serverID:       int,
+	userID:         int,
+	nickname:       string,
+	isAdmin:        bool,
+	nicknameLocked: bool,
+}
+
+// ServerUserUpdated: an admin changed an account's role, ban, or name (protocol 14). user is
+// the account's full directory entry {"id","nickname","isOnline","isAdmin","isBanned"}.
+HeadlessUserUpdatedJSON :: struct {
 	event:    string,
 	serverID: int,
+	user:     common.UserSummary,
+}
+
+// ServerAccountUpdated: an admin changed this account's role or name while it is connected.
+HeadlessAccountUpdatedJSON :: struct {
+	event:          string,
+	serverID:       int,
+	isAdmin:        bool,
+	nickname:       string,
+	nicknameLocked: bool,
+}
+
+// ServerAdminActionResult: this session's admin request succeeded. action is "role", "rename",
+// "kick" or "ban" (an unban is a ban); userID is the target.
+HeadlessAdminResultJSON :: struct {
+	event:    string,
+	serverID: int,
+	action:   string,
 	userID:   int,
-	nickname: string,
-	isAdmin:  bool,
+	message:  string,
+}
+
+// ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
+// kind is "kicked" or "banned", message the explanation the GUI shows, reason the admin's
+// (may be empty). The harness does not reconnect on its own (retryable is always false):
+// `reconnect` connects again, and a banned account gets connect_failed with failure "Banned".
+HeadlessSessionEndedJSON :: struct {
+	event:     string,
+	serverID:  int,
+	kind:      string,
+	message:   string,
+	reason:    string,
+	retryable: bool,
+}
+
+HEADLESS_ADMIN_ACTION_NAMES := [common.AdminAction]string {
+	.SetRole = "role",
+	.Rename  = "rename",
+	.Kick    = "kick",
+	.Ban     = "ban",
+}
+
+// The words room-create and room-edit take for a room type, and what room_created,
+// room_edited and room_list report as roomType (the protocol's number: 1 text, 2 voice, 3
+// both).
+headlessParseRoomType :: proc(word: string) -> (common.RoomType, bool) {
+	switch word {
+	case "text", "chat":
+		return .Chat, true
+	case "voice":
+		return .Voice, true
+	case "both":
+		return .ChatAndVoice, true
+	}
+	return .ChatAndVoice, false
 }
 
 HeadlessConnectingJSON :: struct {
@@ -363,12 +437,14 @@ HeadlessRoomMembershipJSON :: struct {
 	joined:   bool,
 }
 
+// roomType is the protocol's number: 1 text, 2 voice, 3 both (protocol 14).
 HeadlessRoomEditedJSON :: struct {
 	event:       string,
 	serverID:    int,
 	roomID:      int,
 	name:        string,
 	description: string,
+	roomType:    int,
 }
 
 HeadlessRoomEventJSON :: struct {
@@ -622,6 +698,7 @@ headlessRenderRuntimeEvent :: proc(
 				roomID = event.roomID,
 				name = event.room.name,
 				description = event.room.description,
+				roomType = int(event.room.roomType),
 			},
 			allocator,
 		)
@@ -634,6 +711,7 @@ headlessRenderRuntimeEvent :: proc(
 				roomID = event.room.id,
 				name = event.room.name,
 				description = event.room.description,
+				roomType = int(event.room.roomType),
 			},
 			allocator,
 		)
@@ -676,6 +754,7 @@ headlessRenderRuntimeEvent :: proc(
 				userID = event.userID,
 				nickname = event.nickname,
 				isAdmin = event.isAdmin,
+				nicknameLocked = event.nicknameLocked,
 			},
 			allocator,
 		)
@@ -827,6 +906,55 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
+	case .UserUpdated:
+		kind = .UserUpdated
+		line = headlessMarshal(
+			HeadlessUserUpdatedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				user = event.user,
+			},
+			allocator,
+		)
+	case .AccountUpdated:
+		kind = .AccountUpdated
+		line = headlessMarshal(
+			HeadlessAccountUpdatedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				isAdmin = event.isAdmin,
+				nickname = event.nickname,
+				nicknameLocked = event.nicknameLocked,
+			},
+			allocator,
+		)
+	case .AdminActionResult:
+		kind = .AdminResult
+		line = headlessMarshal(
+			HeadlessAdminResultJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				action = HEADLESS_ADMIN_ACTION_NAMES[event.adminAction],
+				userID = event.peerUserID,
+				message = event.message,
+			},
+			allocator,
+		)
+	case .SessionEnded:
+		kind = .SessionEnded
+		message := describeConnectFailure(event.failureKind, event.message, "", "", allocator)
+		defer delete(message, allocator)
+		line = headlessMarshal(
+			HeadlessSessionEndedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				kind = event.failureKind == .Banned ? "banned" : "kicked",
+				message = message,
+				reason = event.detail,
+				retryable = event.retryable,
+			},
+			allocator,
+		)
 	case .UserPresenceChanged:
 		kind = .Presence
 		line = headlessMarshal(
@@ -869,6 +997,7 @@ HeadlessStatusJSON :: struct {
 	userID:         int,
 	nickname:       string,
 	isAdmin:        bool,
+	nicknameLocked: bool,
 	selectedRoomID: int,
 	lastError:      string,
 }
@@ -904,13 +1033,15 @@ HeadlessSendJSON :: struct {
 }
 
 // One account in `users`: the directory entry plus the read state of the direct conversation
-// with it (both 0 when there is none).
+// with it (both 0 when there is none), and its admin role and ban (protocol 14).
 HeadlessUserJSON :: struct {
 	id:                int,
 	nickname:          string,
 	isOnline:          bool,
 	lastReadMessageId: int,
 	unreadCount:       int,
+	isAdmin:           bool,
+	isBanned:          bool,
 }
 
 HeadlessUsersJSON :: struct {
@@ -933,7 +1064,8 @@ HeadlessConversationsResultJSON :: struct {
 
 // The result of room-create, room-edit, and room-delete: the request went out. roomID is 0 for
 // room-create; the server's answer arrives as a room_created, room_edited, or room_deleted
-// event, or as a protocol_error (for example "Admin permission required").
+// event, or as a protocol_error (for example "Admin permission required"). roomType is the
+// protocol's number (1 text, 2 voice, 3 both; 0 for room-delete).
 HeadlessRoomRequestJSON :: struct {
 	ok:          bool,
 	cmd:         string,
@@ -941,6 +1073,17 @@ HeadlessRoomRequestJSON :: struct {
 	roomID:      int,
 	name:        string,
 	description: string,
+	roomType:    int,
+}
+
+// The result of admin-role, admin-rename, admin-kick, admin-ban, and admin-unban: the request
+// went out. The answer arrives as admin_result (with user_updated, account_updated, or the
+// target's session_ended) or as a protocol_error naming the refusal.
+HeadlessAdminRequestJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
+	userID:   int,
 }
 
 HeadlessDirectSendJSON :: struct {
@@ -1040,14 +1183,27 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"dm-history", 1, 1, .None, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
-	{"room-create", 1, 0, .Optional, "room-create NAME [DESCRIPTION...]",
-		"admins: creates a room; it arrives as room_created", headlessCommandRoomCreate},
-	{"room-edit", 2, 0, .Optional, "room-edit ROOM_ID NAME [DESCRIPTION...]",
-		"admins: renames a room and sets its description (empty without one)",
+	{"room-create", 2, 0, .Optional, "room-create text|voice|both NAME [DESCRIPTION...]",
+		"admins: creates a room of that type; it arrives as room_created",
+		headlessCommandRoomCreate},
+	{"room-edit", 3, 0, .Optional, "room-edit ROOM_ID text|voice|both NAME [DESCRIPTION...]",
+		"admins: sets a room's type, name, and description (empty without one)",
 		headlessCommandRoomEdit},
 	{"room-delete", 1, 0, .None, "room-delete ROOM_ID",
 		"admins: deletes a room and its history; it arrives as room_deleted",
 		headlessCommandRoomDelete},
+	{"admin-role", 2, 0, .None, "admin-role USER_ID on|off",
+		"admins: grants or revokes the admin role; answered by admin_result",
+		headlessCommandAdminRole},
+	{"admin-rename", 2, 0, .Optional, "admin-rename USER_ID lock|unlock [NAME...]",
+		"admins: renames an account (no NAME: only the lock); locked names survive sign-in",
+		headlessCommandAdminRename},
+	{"admin-kick", 1, 0, .Optional, "admin-kick USER_ID [REASON...]",
+		"admins: ends every session of an account", headlessCommandAdminKick},
+	{"admin-ban", 1, 0, .Optional, "admin-ban USER_ID [REASON...]",
+		"admins: bans an account and ends its sessions", headlessCommandAdminBan},
+	{"admin-unban", 1, 0, .None, "admin-unban USER_ID", "admins: lifts a ban",
+		headlessCommandAdminUnban},
 	{"read", 2, 1, .None, "read room|dm ID [MESSAGE_ID]",
 		"marks a room or conversation read (default: up to its newest loaded message)",
 		headlessCommandRead},
@@ -1415,6 +1571,7 @@ headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParse
 			result.userID = connection.userID
 			result.nickname = connection.nickname
 			result.isAdmin = connection.isAdmin
+			result.nicknameLocked = connection.nicknameLocked
 		case .Disconnected:
 			result.connection = "retrying"
 			result.retryInMS = headlessMillisecondsUntil(connection.retryAt, time.tick_now())
@@ -1567,6 +1724,8 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			id       = user.id,
 			nickname = user.nickname,
 			isOnline = user.isOnline,
+			isAdmin  = user.isAdmin,
+			isBanned = user.isBanned,
 		}
 		if summary := State_directSummary(state, serverID, user.id); summary != nil {
 			users[index].lastReadMessageId = summary.lastReadMessageId
@@ -1720,6 +1879,7 @@ headlessWriteRoomRequest :: proc(
 	errorMessage: string,
 	roomID: int,
 	name, description: string,
+	roomType: common.RoomType = {},
 ) {
 	if len(errorMessage) > 0 {
 		headlessWriteError(harness, command.name, errorMessage)
@@ -1734,31 +1894,198 @@ headlessWriteRoomRequest :: proc(
 			roomID = roomID,
 			name = name,
 			description = description,
+			roomType = int(roomType),
 		},
 	)
 }
 
 headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
-	name := command.args[0]
-	description := command.argCount > 1 ? command.args[1] : ""
-	state := &harness.state
-	errorMessage := State_sendCreateRoom(state, state.selected_server_id, name, description)
-	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
-	headlessWriteRoomRequest(harness, command, errorMessage, 0, cleanName, cleanDescription)
-}
-
-headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
-	roomID, roomOK := headlessParseNumber(command.args[0])
-	if !roomOK || roomID == 0 {
-		headlessWriteError(harness, command.name, "usage: room-edit ROOM_ID NAME [DESCRIPTION...]")
+	roomType, typeOK := headlessParseRoomType(command.args[0])
+	if !typeOK {
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: room-create text|voice|both NAME [DESCRIPTION...]",
+		)
 		return
 	}
 	name := command.args[1]
 	description := command.argCount > 2 ? command.args[2] : ""
 	state := &harness.state
-	errorMessage := State_sendEditRoom(state, state.selected_server_id, roomID, name, description)
+	errorMessage := State_sendCreateRoom(
+		state,
+		state.selected_server_id,
+		name,
+		description,
+		roomType,
+	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
-	headlessWriteRoomRequest(harness, command, errorMessage, roomID, cleanName, cleanDescription)
+	headlessWriteRoomRequest(
+		harness,
+		command,
+		errorMessage,
+		0,
+		cleanName,
+		cleanDescription,
+		roomType,
+	)
+}
+
+headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	roomType, typeOK := headlessParseRoomType(command.args[1])
+	if !roomOK || roomID == 0 || !typeOK {
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: room-edit ROOM_ID text|voice|both NAME [DESCRIPTION...]",
+		)
+		return
+	}
+	name := command.args[2]
+	description := command.argCount > 3 ? command.args[3] : ""
+	state := &harness.state
+	errorMessage := State_sendEditRoom(
+		state,
+		state.selected_server_id,
+		roomID,
+		name,
+		description,
+		roomType,
+	)
+	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
+	headlessWriteRoomRequest(
+		harness,
+		command,
+		errorMessage,
+		roomID,
+		cleanName,
+		cleanDescription,
+		roomType,
+	)
+}
+
+// Admin actions on accounts go through the same actions a GUI would use. Like room management,
+// the harness does not check the admin flag, so an agent can see the server refuse.
+@(private = "file")
+headlessWriteAdminRequest :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	errorMessage: string,
+	userID: int,
+) {
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessAdminRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = harness.state.selected_server_id,
+			userID = userID,
+		},
+	)
+}
+
+// The USER_ID argument of an admin command, or 0 after an error line.
+@(private = "file")
+headlessAdminTarget :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+) -> int {
+	userID, ok := headlessParseNumber(command.args[0])
+	if !ok || userID == 0 {
+		usage := strings.concatenate({"usage: ", command.command.usage})
+		defer delete(usage)
+		headlessWriteError(harness, command.name, usage)
+		return 0
+	}
+	return userID
+}
+
+headlessCommandAdminRole :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID := headlessAdminTarget(harness, command)
+	if userID == 0 {
+		return
+	}
+	isAdmin: bool
+	switch command.args[1] {
+	case "on":
+		isAdmin = true
+	case "off":
+		isAdmin = false
+	case:
+		headlessWriteError(harness, command.name, "usage: admin-role USER_ID on|off")
+		return
+	}
+	state := &harness.state
+	errorMessage := State_sendAdminSetRole(state, state.selected_server_id, userID, isAdmin)
+	headlessWriteAdminRequest(harness, command, errorMessage, userID)
+}
+
+headlessCommandAdminRename :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID := headlessAdminTarget(harness, command)
+	if userID == 0 {
+		return
+	}
+	locked: bool
+	switch command.args[1] {
+	case "lock":
+		locked = true
+	case "unlock":
+		locked = false
+	case:
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: admin-rename USER_ID lock|unlock [NAME...]",
+		)
+		return
+	}
+	nickname := command.argCount > 2 ? command.args[2] : ""
+	state := &harness.state
+	errorMessage := State_sendAdminRenameUser(
+		state,
+		state.selected_server_id,
+		userID,
+		nickname,
+		locked,
+	)
+	headlessWriteAdminRequest(harness, command, errorMessage, userID)
+}
+
+headlessCommandAdminKick :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID := headlessAdminTarget(harness, command)
+	if userID == 0 {
+		return
+	}
+	reason := command.argCount > 1 ? command.args[1] : ""
+	state := &harness.state
+	errorMessage := State_sendAdminKickUser(state, state.selected_server_id, userID, reason)
+	headlessWriteAdminRequest(harness, command, errorMessage, userID)
+}
+
+headlessCommandAdminBan :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID := headlessAdminTarget(harness, command)
+	if userID == 0 {
+		return
+	}
+	reason := command.argCount > 1 ? command.args[1] : ""
+	state := &harness.state
+	errorMessage := State_sendAdminBanUser(state, state.selected_server_id, userID, true, reason)
+	headlessWriteAdminRequest(harness, command, errorMessage, userID)
+}
+
+headlessCommandAdminUnban :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID := headlessAdminTarget(harness, command)
+	if userID == 0 {
+		return
+	}
+	state := &harness.state
+	errorMessage := State_sendAdminBanUser(state, state.selected_server_id, userID, false, "")
+	headlessWriteAdminRequest(harness, command, errorMessage, userID)
 }
 
 headlessCommandRoomDelete :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {

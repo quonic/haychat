@@ -752,7 +752,10 @@ testReadMarkersMigrationOnFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	defer databaseMigrationTestClose(conn, schema)
 
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
-	assert(outcome.version == 2, fmt.tprintf("expected version 2, got %v", outcome))
+	assert(
+		outcome.version == len(DATABASE_MIGRATIONS),
+		fmt.tprintf("expected the newest version, got %v", outcome),
+	)
 	databaseMigrationTestValidationPasses(conn)
 	markers := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
 	assert(
@@ -810,8 +813,13 @@ testReadMarkersMigrationBackfillsRC1AgainstPostgreSQL :: proc(t: ^testing.T) {
 
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 	assert(
-		outcome == DatabaseMigrationOutcome{previousVersion = 0, version = 2, adopted = true},
-		fmt.tprintf("expected rc1 adopted and migrated to 2, got %v", outcome),
+		outcome ==
+		DatabaseMigrationOutcome {
+			previousVersion = 0,
+			version = len(DATABASE_MIGRATIONS),
+			adopted = true,
+		},
+		fmt.tprintf("expected rc1 adopted and migrated to the newest version, got %v", outcome),
 	)
 	databaseMigrationTestValidationPasses(conn)
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
@@ -849,13 +857,15 @@ testReadMarkersMigrationUpgradesVersion1AgainstPostgreSQL :: proc(t: ^testing.T)
 
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 	assert(
-		outcome == DatabaseMigrationOutcome{previousVersion = 1, version = 2},
-		fmt.tprintf("expected only migration 2 to run, got %v", outcome),
+		outcome ==
+		DatabaseMigrationOutcome{previousVersion = 1, version = len(DATABASE_MIGRATIONS)},
+		fmt.tprintf("expected every migration after 1 to run, got %v", outcome),
 	)
 	recorded := databaseMigrationTestRecorded(conn)
+	expectedRecorded := databaseMigrationTestExpectedRecorded()
 	assert(
-		recorded == "1:baseline,2:read markers",
-		fmt.tprintf("expected both versions recorded, got %q", recorded),
+		recorded == expectedRecorded,
+		fmt.tprintf("expected %q recorded, got %q", expectedRecorded, recorded),
 	)
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	assert(after == before, "expected every version 1 row intact")
@@ -875,25 +885,29 @@ testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL :: proc(t: ^testing.T)
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	// Two later test migrations, so a database recorded at 1, 2, and 4 is not newer than the
-	// list, only inconsistent with it.
+	// Two later test migrations, so a database recorded at every production version and the
+	// second probe is not newer than the list, only inconsistent with it.
+	newest := len(DATABASE_MIGRATIONS)
 	extended := make([dynamic]DatabaseMigration, context.temp_allocator)
 	append(&extended, ..DATABASE_MIGRATIONS[:])
-	append(&extended, DatabaseMigration{3, "probe three", "SELECT 3", ""})
-	append(&extended, DatabaseMigration{4, "probe four", "SELECT 4", ""})
+	append(&extended, DatabaseMigration{newest + 1, "probe one", "SELECT 1", ""})
+	append(&extended, DatabaseMigration{newest + 2, "probe two", "SELECT 2", ""})
 	Case :: struct {
 		label:      string,
 		damage:     string,
 		migrations: []DatabaseMigration,
 	}
 	cases := [?]Case {
-		// Versions 1, 2, and 4: a gap below the newest recorded version.
+		// Every production version and the second probe: a gap below the newest recorded one.
 		{
 			"gap",
-			"INSERT INTO schema_migrations (version, name) VALUES (4, 'probe four')",
+			fmt.tprintf(
+				"INSERT INTO schema_migrations (version, name) VALUES (%d, 'probe two')",
+				newest + 2,
+			),
 			extended[:],
 		},
-		// Version 2 alone: someone deleted the baseline's row.
+		// Every version but the baseline: someone deleted the baseline's row.
 		{"no_baseline", "DELETE FROM schema_migrations WHERE version = 1", DATABASE_MIGRATIONS[:]},
 	}
 	for testCase in cases {

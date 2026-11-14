@@ -14,6 +14,7 @@ roomAdminSendBridgeTestKind: RoomAdminRequestKind
 roomAdminSendBridgeTestRoomID: int
 roomAdminSendBridgeTestName: string
 roomAdminSendBridgeTestDescription: string
+roomAdminSendBridgeTestRoomType: common.RoomType
 roomAdminSendBridgeTestReturnValue: bool
 
 roomAdminSendBridgeTestStub :: proc(
@@ -23,6 +24,7 @@ roomAdminSendBridgeTestStub :: proc(
 	roomAdminSendBridgeTestCount += 1
 	roomAdminSendBridgeTestKind = request.kind
 	roomAdminSendBridgeTestRoomID = request.roomID
+	roomAdminSendBridgeTestRoomType = request.roomType
 	delete(roomAdminSendBridgeTestName)
 	delete(roomAdminSendBridgeTestDescription)
 	roomAdminSendBridgeTestName = strings.clone(request.name)
@@ -70,19 +72,25 @@ testApplyConnectedAs :: proc(state: ^State, serverID, userID: int, isAdmin: bool
 	ClientTransportRuntimeEvent_deinit(&event)
 }
 
-// Applies a room list of (id, name) pairs: general is room 1, the others are named.
+// Applies a room list of (id, name) pairs: general is room 1, the others are named. A room
+// without a supported type is listed for text and voice, as the server lists rooms.
 testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSummary) {
 	event := ClientTransportRuntimeEvent {
 		kind     = .RoomListReceived,
 		serverID = serverID,
 	}
 	for room in rooms {
+		roomType := room.roomType
+		if !common.roomTypeIsSupported(roomType) {
+			roomType = .ChatAndVoice
+		}
 		append(
 			&event.rooms,
 			common.RoomSummary {
 				id = room.id,
 				name = strings.clone(room.name),
 				description = strings.clone(room.description),
+				roomType = roomType,
 			},
 		)
 	}
@@ -498,7 +506,11 @@ testClientServerTransportHandlesRoomManagementPackets :: proc(t: ^testing.T) {
 			&transport,
 			&serverTransport,
 			.ClientCreateRoom,
-			common.ClientCreateRoomPayload{name = "random", description = "Off topic"},
+			common.ClientCreateRoomPayload {
+				name = "random",
+				description = "Off topic",
+				roomType = .Voice,
+			},
 		)
 		defer delete(inner.payload)
 		request: common.ClientCreateRoomPayload
@@ -507,7 +519,10 @@ testClientServerTransportHandlesRoomManagementPackets :: proc(t: ^testing.T) {
 		defer delete(request.description)
 		testing.expect(
 			t,
-			inner.messageType == .ClientCreateRoom && decoded && request.name == "random",
+			inner.messageType == .ClientCreateRoom &&
+			decoded &&
+			request.name == "random" &&
+			request.roomType == .Voice,
 			"expected a ClientCreateRoom request",
 		)
 	}
@@ -516,7 +531,7 @@ testClientServerTransportHandlesRoomManagementPackets :: proc(t: ^testing.T) {
 			&transport,
 			&serverTransport,
 			.ClientEditRoom,
-			common.ClientEditRoomPayload{roomId = 9, name = "lounge"},
+			common.ClientEditRoomPayload{roomId = 9, name = "lounge", roomType = .Chat},
 		)
 		defer delete(inner.payload)
 		request: common.ClientEditRoomPayload
@@ -528,7 +543,8 @@ testClientServerTransportHandlesRoomManagementPackets :: proc(t: ^testing.T) {
 			inner.messageType == .ClientEditRoom &&
 			decoded &&
 			request.roomId == 9 &&
-			request.name == "lounge",
+			request.name == "lounge" &&
+			request.roomType == .Chat,
 			"expected a ClientEditRoom request",
 		)
 	}
@@ -582,12 +598,12 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		fmt.tprintf("expected status to report the admin flag, got %s", output),
 	)
 
-	headlessHandleLine(&harness, "room-create random Off topic, mostly")
+	headlessHandleLine(&harness, "room-create voice random Off topic, mostly")
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-create","serverID":908,"roomID":0,"name":"random",` +
-		`"description":"Off topic, mostly"}` +
+		`"description":"Off topic, mostly","roomType":2}` +
 		"\n",
 		"the room-create result",
 	)
@@ -595,11 +611,22 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		roomAdminSendBridgeTestKind == .Create &&
 		roomAdminSendBridgeTestName == "random" &&
-		roomAdminSendBridgeTestDescription == "Off topic, mostly",
-		"expected room-create to send the name and the rest of the line",
+		roomAdminSendBridgeTestDescription == "Off topic, mostly" &&
+		roomAdminSendBridgeTestRoomType == .Voice,
+		"expected room-create to send the type, the name and the rest of the line",
 	)
 
-	headlessHandleLine(&harness, "room-create general")
+	headlessHandleLine(&harness, "room-create forum random")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":false,"cmd":"room-create","error":"usage: room-create text|voice|both NAME ` +
+		`[DESCRIPTION...]"}` +
+		"\n",
+		"the room-create type error",
+	)
+
+	headlessHandleLine(&harness, "room-create both general")
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
@@ -608,27 +635,29 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		"the duplicate room-create error",
 	)
 
-	headlessHandleLine(&harness, "room-edit 1 lobby")
+	headlessHandleLine(&harness, "room-edit 1 text lobby")
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-edit","serverID":908,"roomID":1,"name":"lobby",` +
-		`"description":""}` +
+		`"description":"","roomType":1}` +
 		"\n",
 		"the room-edit result",
 	)
 	testing.expect(
 		t,
-		roomAdminSendBridgeTestKind == .Edit && roomAdminSendBridgeTestRoomID == 1,
-		"expected room-edit to send an edit of room 1",
+		roomAdminSendBridgeTestKind == .Edit &&
+		roomAdminSendBridgeTestRoomID == 1 &&
+		roomAdminSendBridgeTestRoomType == .Chat,
+		"expected room-edit to send a text-only edit of room 1",
 	)
 
-	headlessHandleLine(&harness, "room-edit x lobby")
+	headlessHandleLine(&harness, "room-edit x both lobby")
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"ok":false,"cmd":"room-edit","error":"usage: room-edit ROOM_ID NAME ` +
-		`[DESCRIPTION...]"}` +
+		`{"ok":false,"cmd":"room-edit","error":"usage: room-edit ROOM_ID text|voice|both ` +
+		`NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-edit usage error",
 	)
@@ -638,7 +667,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"room-delete","serverID":908,"roomID":1,"name":"",` +
-		`"description":""}` +
+		`"description":"","roomType":0}` +
 		"\n",
 		"the room-delete result",
 	)
@@ -660,7 +689,12 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		kind = .RoomCreated,
 		serverID = 908,
 		roomID = 9,
-		room = {id = 9, name = strings.clone("random"), description = strings.clone("Off")},
+		room = {
+			id = 9,
+			name = strings.clone("random"),
+			description = strings.clone("Off"),
+			roomType = .Voice,
+		},
 	}
 	headlessHandleRuntimeEvent(&harness, &created)
 	ClientTransportRuntimeEvent_deinit(&created)
@@ -668,7 +702,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_created","serverID":908,"roomID":9,"name":"random",` +
-		`"description":"Off"}` +
+		`"description":"Off","roomType":2}` +
 		"\n",
 		"the room_created event",
 	)
@@ -682,7 +716,10 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 	output = testHeadlessTakeOutput(&builder)
 	testing.expect(
 		t,
-		strings.contains(output, `{"usage":"room-create NAME [DESCRIPTION...]",`) &&
+		strings.contains(
+			output,
+			`{"usage":"room-create text|voice|both NAME [DESCRIPTION...]",`,
+		) &&
 		strings.contains(output, `"room_created"`),
 		fmt.tprintf("expected help to list the room commands and events, got %s", output),
 	)
@@ -691,16 +728,25 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 @(test)
 testHeadlessParsesOptionalText :: proc(t: ^testing.T) {
 	commands := HEADLESS_COMMANDS[:]
-	parsed, err := headlessParseCommand(commands, "room-create random")
-	testing.expect(t, err == .None && parsed.argCount == 1, "expected the description optional")
-	parsed, err = headlessParseCommand(commands, "room-create random  for  fun ")
-	testing.expect(t, err == .None && parsed.argCount == 2, "expected a description")
-	testExpectString(t, parsed.args[1], "for  fun", "the description text")
-	_, err = headlessParseCommand(commands, "room-create")
-	testing.expect(t, err == .BadArguments, "expected room-create without a name rejected")
-	parsed, err = headlessParseCommand(commands, "room-edit 4 lobby the front room")
-	testing.expect(t, err == .None && parsed.argCount == 3, "expected an edit with text")
-	testExpectString(t, parsed.args[2], "the front room", "the edit description")
+	parsed, err := headlessParseCommand(commands, "room-create both random")
+	testing.expect(t, err == .None && parsed.argCount == 2, "expected the description optional")
+	parsed, err = headlessParseCommand(commands, "room-create text random  for  fun ")
+	testing.expect(t, err == .None && parsed.argCount == 3, "expected a description")
+	testExpectString(t, parsed.args[2], "for  fun", "the description text")
+	_, err = headlessParseCommand(commands, "room-create random")
+	testing.expect(t, err == .BadArguments, "expected room-create without a type rejected")
+	parsed, err = headlessParseCommand(commands, "room-edit 4 voice lobby the front room")
+	testing.expect(t, err == .None && parsed.argCount == 4, "expected an edit with text")
+	testExpectString(t, parsed.args[3], "the front room", "the edit description")
+	parsed, err = headlessParseCommand(commands, "admin-rename 4 lock new name")
+	testing.expect(t, err == .None && parsed.argCount == 3, "expected a rename with a name")
+	testExpectString(t, parsed.args[2], "new name", "the new name")
+	parsed, err = headlessParseCommand(commands, "admin-rename 4 unlock")
+	testing.expect(t, err == .None && parsed.argCount == 2, "expected the name optional")
+	parsed, err = headlessParseCommand(commands, "admin-ban 4 spam and abuse")
+	testing.expect(t, err == .None && parsed.argCount == 2, "expected a ban reason")
+	_, err = headlessParseCommand(commands, "admin-role 4")
+	testing.expect(t, err == .BadArguments, "expected admin-role without on|off rejected")
 	_, err = headlessParseCommand(commands, "room-delete 4 now")
 	testing.expect(t, err == .BadArguments, "expected extra room-delete arguments rejected")
 }

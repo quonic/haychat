@@ -205,7 +205,8 @@ creates `#general` as room 1, and every account joins every room. The log shows
 
 Optionally, give your own account the admin role, which lets it create, rename, and delete
 rooms from the client (**+ New room** next to the room list, **Edit room** in a room's
-header):
+header), and grant the role to others, rename, kick, ban and unban accounts, and choose a
+room's type (protocol 14, see README "Admin actions and room types"):
 
 1. Connect once with the client, using the display name that should own the server (for
    example `quonic`). The server creates the account and binds the name to your client's key.
@@ -233,8 +234,12 @@ header):
    	ON CONFLICT DO NOTHING;
    ```
 
-3. Reconnect: the client learns that it is an admin when it signs in, so close and reopen
-   it (or wait for its next reconnect). The room controls then appear.
+3. Reconnect: a role set in the database reaches the client when it signs in, so close and
+   reopen it (or wait for its next reconnect). The room controls then appear. Admins you
+   appoint from the client afterwards get the role at once, without reconnecting.
+
+A banned account cannot sign in, but sign-up is open: a banned person can connect again with a
+new identity key as a new account.
 
 `server/sql/auth_bootstrap.sql` (also in the image) is the **test fixture** the dev
 environment uses. It creates the accounts `admin` (ID 1) and `haypeer` (ID 2) and resets `#general`,

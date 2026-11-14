@@ -31,6 +31,10 @@ VOICE_LEFT_JOINED_OTHER_ROOM :: "joined another voice room"
 VOICE_LEFT_REMOVED_FROM_ROOM :: "removed from the room"
 VOICE_LEFT_ROOM_DELETED :: "the room was deleted"
 VOICE_LEFT_JOINED_ON_OTHER_DEVICE :: "joined voice on another device"
+// Protocol 14: a join of a text-only room is refused, and editing a room to text-only removes
+// its participants, with the same sentence.
+VOICE_REJECT_TEXT_ONLY :: "voice is disabled in this room"
+VOICE_LEFT_TEXT_ONLY :: VOICE_REJECT_TEXT_ONLY
 
 VoiceParticipantState :: struct {
 	peerID:   u32,
@@ -410,8 +414,14 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_UNAVAILABLE)
 		return
 	}
-	if !MainRouterState_hasRecipientUserID(members.userIDs[:], session.authenticatedUserID) {
+	if !members.roomFound ||
+	   !MainRouterState_hasRecipientUserID(members.userIDs[:], session.authenticatedUserID) {
 		MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_NOT_MEMBER)
+		return
+	}
+	// After the membership check, so the refusal tells a non-member nothing about the room.
+	if !common.roomTypeAllowsVoice(members.roomType) {
+		MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_TEXT_ONLY)
 		return
 	}
 
@@ -606,6 +616,50 @@ MainRouterState_voiceEvictUser :: proc(
 	if evicted {
 		MainRouterState_voiceRoomChanged(pm, state, roomID)
 	}
+}
+
+// userID's name changed (an admin rename, protocol 14): the rooms it is in voice in send their
+// participant lists again, which take nicknames from the sessions.
+MainRouterState_voiceRefreshUserRooms :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	userID: int,
+) {
+	// Heap scratch: the router loop never frees the temporary allocator.
+	roomIDs := make([dynamic]int, 0, 1)
+	defer delete(roomIDs)
+	for roomID, room in state.voiceRooms {
+		for participant in room.participants {
+			if participant.userID == userID {
+				append(&roomIDs, roomID)
+				break
+			}
+		}
+	}
+	for roomID in roomIDs {
+		MainRouterState_voiceRoomChanged(pm, state, roomID)
+	}
+}
+
+// roomID became text-only (protocol 14): every session in its voice session is told why and
+// leaves, and the members get the empty participant list, which also drops the room's state
+// and route. Unlike a deletion, the room is still there, so its members must see voice end.
+MainRouterState_voiceDisableRoom :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	roomID: int,
+	reason: string,
+) {
+	room, ok := &state.voiceRooms[roomID]
+	if !ok {
+		return
+	}
+	for participant in room.participants {
+		delete_key(&state.peerVoiceRoom, participant.peerID)
+		MainRouterState_sendVoiceLeft(pm, state, participant.peerID, roomID, reason)
+	}
+	clear(&room.participants)
+	MainRouterState_voiceRoomChanged(pm, state, roomID)
 }
 
 // roomID was deleted: every session in its voice session is told why, and the room's voice

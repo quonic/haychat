@@ -59,6 +59,192 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerVoiceLeft, 146},
 	{.ClientMarkRead, 147},
 	{.ServerReadMarker, 148},
+	{.ClientAdminSetRole, 149},
+	{.ClientAdminRenameUser, 150},
+	{.ClientAdminKickUser, 151},
+	{.ClientAdminBanUser, 152},
+	{.ServerAdminActionResult, 153},
+	{.ServerUserUpdated, 154},
+	{.ServerAccountUpdated, 155},
+	{.ServerSessionEnded, 156},
+}
+
+// Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
+// the wire format: never renumber them.
+@(test)
+testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(RoomType.Container) == 0 &&
+		int(RoomType.Chat) == 1 &&
+		int(RoomType.Voice) == 2 &&
+		int(RoomType.ChatAndVoice) == 3 &&
+		int(RoomType.Forum) == 4,
+		"expected RoomType to stay Container 0, Chat 1, Voice 2, ChatAndVoice 3, Forum 4",
+	)
+	assert(
+		int(AdminAction.SetRole) == 0 &&
+		int(AdminAction.Rename) == 1 &&
+		int(AdminAction.Kick) == 2 &&
+		int(AdminAction.Ban) == 3,
+		"expected AdminAction to stay SetRole 0, Rename 1, Kick 2, Ban 3",
+	)
+	assert(
+		int(SessionEndedKind.Kicked) == 0 && int(SessionEndedKind.Banned) == 1,
+		"expected SessionEndedKind to stay Kicked 0, Banned 1",
+	)
+}
+
+@(test)
+testOnlyChatVoiceAndBothRoomTypesAreSupported :: proc(t: ^testing.T) {
+	_ = t
+	Case :: struct {
+		roomType:  RoomType,
+		supported: bool,
+		chat:      bool,
+		voice:     bool,
+	}
+	cases := [?]Case {
+		{.Container, false, false, false},
+		{.Chat, true, true, false},
+		{.Voice, true, false, true},
+		{.ChatAndVoice, true, true, true},
+		{.Forum, false, false, false},
+		{RoomType(9), false, false, false},
+	}
+	for testCase in cases {
+		assert(
+			roomTypeIsSupported(testCase.roomType) == testCase.supported &&
+			roomTypeAllowsChat(testCase.roomType) == testCase.chat &&
+			roomTypeAllowsVoice(testCase.roomType) == testCase.voice,
+			fmt.tprintf("expected %v to be %v", testCase.roomType, testCase),
+		)
+	}
+}
+
+// Every admin payload survives CBOR with its owned strings (protocol 14).
+@(test)
+testAdminPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	{
+		encoded, err := cbor.marshal(ClientAdminSetRolePayload{userId = 7, isAdmin = true})
+		assert(err == nil, "expected ClientAdminSetRolePayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientAdminSetRolePayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected set-role decoding")
+		assert(
+			decoded == ClientAdminSetRolePayload{userId = 7, isAdmin = true},
+			fmt.tprintf("expected user 7 made admin, got %v", decoded),
+		)
+	}
+	{
+		original := ClientAdminRenameUserPayload {
+			userId   = 7,
+			nickname = "renamed",
+			locked   = true,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientAdminRenameUserPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientAdminRenameUserPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected rename decoding")
+		defer ClientAdminRenameUserPayload_deinit(&decoded)
+		assert(
+			decoded.userId == 7 && decoded.nickname == "renamed" && decoded.locked,
+			fmt.tprintf("expected user 7 renamed and locked, got %v", decoded),
+		)
+	}
+	{
+		encoded, err := cbor.marshal(ClientAdminKickUserPayload{userId = 7, reason = "calm down"})
+		assert(err == nil, "expected ClientAdminKickUserPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientAdminKickUserPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected kick decoding")
+		defer ClientAdminKickUserPayload_deinit(&decoded)
+		assert(
+			decoded.userId == 7 && decoded.reason == "calm down",
+			fmt.tprintf("expected user 7 kicked, got %v", decoded),
+		)
+	}
+	{
+		encoded, err := cbor.marshal(
+			ClientAdminBanUserPayload{userId = 7, banned = true, reason = "spam"},
+		)
+		assert(err == nil, "expected ClientAdminBanUserPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientAdminBanUserPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected ban decoding")
+		defer ClientAdminBanUserPayload_deinit(&decoded)
+		assert(
+			decoded.userId == 7 && decoded.banned && decoded.reason == "spam",
+			fmt.tprintf("expected user 7 banned for spam, got %v", decoded),
+		)
+	}
+	{
+		original := ServerAdminActionResultPayload {
+			action  = .Ban,
+			userId  = 7,
+			message = "bob is banned",
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerAdminActionResultPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerAdminActionResultPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected admin result decoding")
+		defer ServerAdminActionResultPayload_deinit(&decoded)
+		assert(
+			decoded.action == .Ban && decoded.userId == 7 && decoded.message == "bob is banned",
+			fmt.tprintf("expected the ban result, got %v", decoded),
+		)
+	}
+	{
+		original := ServerUserUpdatedPayload {
+			user = {id = 7, nickname = "bob", isOnline = true, isAdmin = true, isBanned = false},
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerUserUpdatedPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerUserUpdatedPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected user update decoding")
+		defer ServerUserUpdatedPayload_deinit(&decoded)
+		assert(
+			decoded.user.id == 7 &&
+			decoded.user.nickname == "bob" &&
+			decoded.user.isOnline &&
+			decoded.user.isAdmin &&
+			!decoded.user.isBanned,
+			fmt.tprintf("expected bob online and admin, got %v", decoded),
+		)
+	}
+	{
+		original := ServerAccountUpdatedPayload {
+			isAdmin        = true,
+			nickname       = "bob",
+			nicknameLocked = true,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerAccountUpdatedPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerAccountUpdatedPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected account update decoding")
+		defer ServerAccountUpdatedPayload_deinit(&decoded)
+		assert(
+			decoded.isAdmin && decoded.nickname == "bob" && decoded.nicknameLocked,
+			fmt.tprintf("expected an admin with a locked name, got %v", decoded),
+		)
+	}
+	for kind in SessionEndedKind {
+		encoded, err := cbor.marshal(ServerSessionEndedPayload{kind = kind, reason = "bye"})
+		assert(err == nil, "expected ServerSessionEndedPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerSessionEndedPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected session end decoding")
+		defer ServerSessionEndedPayload_deinit(&decoded)
+		assert(
+			decoded.kind == kind && decoded.reason == "bye",
+			fmt.tprintf("expected %v with reason bye, got %v", kind, decoded),
+		)
+	}
 }
 
 @(test)
@@ -108,16 +294,18 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsThirteenForOneVoiceSessionPerUser :: proc(t: ^testing.T) {
+testProtocolVersionIsFourteenForAdminActionsAndRoomTypes :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
 	// ServerVoiceParticipants.recipientJoined; 13 added ClientJoinVoice.rejoin and deviceId for
-	// one voice session per user, so peers on 12 or older cannot talk to this build.
+	// one voice session per user; 14 added the admin actions, ServerAuthSuccess.nickname and
+	// nicknameLocked, UserSummary.isAdmin and isBanned, and room types, so peers on 13 or
+	// older cannot talk to this build.
 	assert(
-		protocolVersion == 13,
+		protocolVersion == 14,
 		fmt.tprintf(
-			"expected protocol version 13 for one voice session per user, got %d",
+			"expected protocol version 14 for admin actions and room types, got %d",
 			protocolVersion,
 		),
 	)
@@ -183,7 +371,13 @@ testAuthSuccessCarriesTheAdminFlagOverCBOR :: proc(t: ^testing.T) {
 	_ = t
 	for isAdmin in ([]bool{true, false}) {
 		encoded, encodeErr := cbor.marshal(
-			ServerAuthSuccessPayload{userId = 4, message = "ok", isAdmin = isAdmin},
+			ServerAuthSuccessPayload {
+				userId = 4,
+				message = "ok",
+				isAdmin = isAdmin,
+				nickname = "alice",
+				nicknameLocked = !isAdmin,
+			},
 		)
 		assert(encodeErr == nil, "expected ServerAuthSuccessPayload encoding to succeed")
 		defer delete(encoded)
@@ -192,10 +386,14 @@ testAuthSuccessCarriesTheAdminFlagOverCBOR :: proc(t: ^testing.T) {
 			cbor.unmarshal(encoded, &decoded) == nil,
 			"expected ServerAuthSuccessPayload decoding to succeed",
 		)
-		defer delete(decoded.message)
+		defer ServerAuthSuccessPayload_deinit(&decoded)
 		assert(
-			decoded.userId == 4 && decoded.message == "ok" && decoded.isAdmin == isAdmin,
-			fmt.tprintf("expected user 4, \"ok\", isAdmin %v; got %v", isAdmin, decoded),
+			decoded.userId == 4 &&
+			decoded.message == "ok" &&
+			decoded.isAdmin == isAdmin &&
+			decoded.nickname == "alice" &&
+			decoded.nicknameLocked == !isAdmin,
+			fmt.tprintf("expected user 4, \"ok\", isAdmin %v, alice; got %v", isAdmin, decoded),
 		)
 	}
 }
@@ -205,7 +403,7 @@ testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	_ = t
 	{
 		encoded, encodeErr := cbor.marshal(
-			ClientCreateRoomPayload{name = "random", description = "Off topic"},
+			ClientCreateRoomPayload{name = "random", description = "Off topic", roomType = .Voice},
 		)
 		assert(encodeErr == nil, "expected ClientCreateRoomPayload encoding to succeed")
 		defer delete(encoded)
@@ -214,13 +412,15 @@ testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		defer delete(decoded.name)
 		defer delete(decoded.description)
 		assert(
-			decoded.name == "random" && decoded.description == "Off topic",
-			fmt.tprintf("expected random/Off topic, got %v", decoded),
+			decoded.name == "random" &&
+			decoded.description == "Off topic" &&
+			decoded.roomType == .Voice,
+			fmt.tprintf("expected random/Off topic as a voice room, got %v", decoded),
 		)
 	}
 	{
 		encoded, encodeErr := cbor.marshal(
-			ClientEditRoomPayload{roomId = 3, name = "lounge", description = ""},
+			ClientEditRoomPayload{roomId = 3, name = "lounge", description = "", roomType = .Chat},
 		)
 		assert(encodeErr == nil, "expected ClientEditRoomPayload encoding to succeed")
 		defer delete(encoded)
@@ -229,7 +429,10 @@ testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		defer delete(decoded.name)
 		defer delete(decoded.description)
 		assert(
-			decoded.roomId == 3 && decoded.name == "lounge" && decoded.description == "",
+			decoded.roomId == 3 &&
+			decoded.name == "lounge" &&
+			decoded.description == "" &&
+			decoded.roomType == .Chat,
 			fmt.tprintf("expected room 3 renamed lounge, got %v", decoded),
 		)
 	}
@@ -243,7 +446,7 @@ testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	}
 	{
 		original := ServerRoomMutationPayload {
-			room = {id = 5, name = "random", description = "Off topic"},
+			room = {id = 5, name = "random", description = "Off topic", roomType = .Chat},
 			roomId = 5,
 			userId = 2,
 			changed = true,
@@ -259,6 +462,7 @@ testRoomManagementPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 			decoded.room.id == 5 &&
 			decoded.room.name == "random" &&
 			decoded.room.description == "Off topic" &&
+			decoded.room.roomType == .Chat &&
 			decoded.roomId == 5 &&
 			decoded.userId == 2 &&
 			decoded.changed,
@@ -391,8 +595,8 @@ testDirectHistoryPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 testUserDirectoryAndPresencePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	_ = t
 	users := make([dynamic]UserSummary, context.temp_allocator)
-	append(&users, UserSummary{id = 3, nickname = "alice", isOnline = true})
-	append(&users, UserSummary{id = 9, nickname = "bob", isOnline = false})
+	append(&users, UserSummary{id = 3, nickname = "alice", isOnline = true, isAdmin = true})
+	append(&users, UserSummary{id = 9, nickname = "bob", isOnline = false, isBanned = true})
 	encoded, encodeErr := cbor.marshal(ServerUserListPayload{users = users})
 	assert(encodeErr == nil, "expected ServerUserListPayload encoding to succeed")
 	defer delete(encoded)
@@ -411,9 +615,13 @@ testUserDirectoryAndPresencePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	assert(
 		decoded.users[0].nickname == "alice" &&
 		decoded.users[0].isOnline &&
+		decoded.users[0].isAdmin &&
+		!decoded.users[0].isBanned &&
 		decoded.users[1].id == 9 &&
-		!decoded.users[1].isOnline,
-		fmt.tprintf("expected alice online and bob offline, got %v", decoded.users),
+		!decoded.users[1].isOnline &&
+		!decoded.users[1].isAdmin &&
+		decoded.users[1].isBanned,
+		fmt.tprintf("expected admin alice online and banned bob offline, got %v", decoded.users),
 	)
 
 	presence := ServerUserPresencePayload {
@@ -510,6 +718,7 @@ testRoomListCarriesReadStateOverCBOR :: proc(t: ^testing.T) {
 			description = "General discussion",
 			lastReadMessageId = 41,
 			unreadCount = UNREAD_COUNT_CAP,
+			roomType = .Voice,
 		},
 	)
 	encoded, encodeErr := cbor.marshal(ServerListRoomsPayload{rooms = rooms})
@@ -533,8 +742,9 @@ testRoomListCarriesReadStateOverCBOR :: proc(t: ^testing.T) {
 		room.id == GENERAL_ROOM_ID &&
 		room.name == "general" &&
 		room.lastReadMessageId == 41 &&
-		room.unreadCount == UNREAD_COUNT_CAP,
-		fmt.tprintf("expected the room's read state to survive, got %v", room),
+		room.unreadCount == UNREAD_COUNT_CAP &&
+		room.roomType == .Voice,
+		fmt.tprintf("expected the room's read state and type to survive, got %v", room),
 	)
 }
 
