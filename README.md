@@ -69,7 +69,8 @@ The full index, including the testing harness, voice tests, and design plans, is
 
 ## Known Limitations
 
-- Private rooms are not implemented: every account joins every room.
+- Invite-only rooms limit which accounts the server lets read a room, but rooms are not
+  end-to-end encrypted.
 - Messages are encrypted in transit but not end-to-end; the server stores them in plain text.
 - Sign-up is open and bans are per account, so a banned person can return with a new identity
   key. There is no account registration or way to move an account to another device.

@@ -34,6 +34,10 @@ set -euo pipefail
 #      then to "Text", and Join voice disappears from its header and its menu; bob's room list
 #      must show the room as text-only (roomType 1). She opens Server settings from the rail
 #      button's menu and scrolls to the Admin section's rooms list.
+#   8. access modes (protocol 15): alice creates an Admin invite room from the room form (Who
+#      can join: Admin invite), invites bob from his member menu (Invite to room… → Invite to
+#      #room), and opens the room's Members page from its channel menu, which offers Leave
+#      room; bob must receive room_membership for it and list it with access 3.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -106,6 +110,7 @@ reply_message="ui smoke reply from alice $run_tag"
 admin_room="ui-room-$run_tag"
 unread_message="ui smoke unread from bob $run_tag"
 ban_reason="ui smoke ban $run_tag"
+access_room="ui-invite-$run_tag"
 
 echo "==> [ui] starting headless bob"
 start_client bob "$nickname_bob"
@@ -288,6 +293,26 @@ scroll 760 400 100
 wait-text "Create room…" 5000
 screenshot $screenshot_dir/27-admin-rooms.bmp
 click-id server-settings-close 1
+# Access modes: an Admin invite room from the form, bob invited from his member menu, and the
+# room's Members page from its channel menu.
+click "+ New room"
+click "e.g. random"
+type "$access_room"
+click-id room-access 3
+wait-text "Only admins add and remove people. Members can leave." 5000
+screenshot $screenshot_dir/28-access-room-form.bmp
+click-id room-editor-submit
+wait-text "# $access_room" 10000
+right-click-id dm-member 1 $user_bob
+click "Invite to room…"
+click "Invite to #$access_room"
+wait-text "Added $nickname_bob to #$access_room." 10000
+right-click "# $access_room"
+click "Members…"
+wait-text "Members of #$access_room" 5000
+wait-text "Leave room" 5000
+screenshot $screenshot_dir/29-room-members.bmp
+click "Close"
 quit
 EOF
 
@@ -328,7 +353,7 @@ echo "    bob< $reply_line"
 
 echo "==> [ui] alice creates a room from the window, bob sees it"
 membership_line=$(wait_for_match bob \
-	'^\{"event":"room_membership",.*"joined":true\}$' "$admin_start") ||
+	'^\{"event":"room_membership",.*"joined":true,"userID":[0-9]+\}$' "$admin_start") ||
 	fail "[admin] bob did not receive room_membership for alice's new room"
 echo "    bob< $membership_line"
 wait_for_match bob "^\\{\"event\":\"room_list\",.*\"name\":\"$admin_room\"" "$admin_start" \
@@ -418,6 +443,15 @@ expect_ok bob rooms
 	fail "[admin] bob's rooms do not list $admin_room as text-only: $last_result"
 expect_ok bob voice-leave
 
+echo "==> [ui] alice made an Admin invite room in the form and invited bob from his menu"
+invite_line=$(wait_for_match bob \
+	"^\\{\"event\":\"room_membership\",.*\"joined\":true,\"userID\":$user_bob\\}$" \
+	"$reconnect_start") || fail "[access] bob was never added to alice's invite room"
+echo "    bob< $invite_line"
+expect_ok bob rooms
+[[ "$last_result" =~ \{\"id\":[0-9]+,\"name\":\"$access_room\",[^}]*\"access\":3, ]] ||
+	fail "[access] bob's rooms do not list $access_room as Admin invite: $last_result"
+
 stop_client alice-watch
 stop_client bob
 
@@ -428,5 +462,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 27 ]] || fail "expected 27 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 29 ]] || fail "expected 29 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

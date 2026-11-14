@@ -389,6 +389,22 @@ RoomEditorView :: struct {
 	typeNote:      string,
 	// Edit to text-only of a room with people in its voice: they are removed.
 	typeWarning:   string,
+	// Access (protocol 15): the chosen mode and what it means, and what a change in an edit
+	// does (everyone added, or nobody removed).
+	access:        common.RoomAccess,
+	accessNote:    string,
+	accessWarning: string,
+	// History for new members: chosen in Create (not for Public rooms, which always show the
+	// whole history), shown in Edit.
+	history:       common.RoomHistoryVisibility,
+	historyNote:   string,
+	historyLocked: bool,
+	// Join this room (Create): the toggle's label; joinLocked for a Public room, which always
+	// includes its creator.
+	creatorJoins:  bool,
+	joinLabel:     string,
+	joinNote:      string,
+	joinLocked:    bool,
 	error:         string,
 }
 
@@ -418,7 +434,7 @@ buildRoomEditorView :: proc(
 ) -> (
 	view: RoomEditorView,
 ) {
-	if !State_roomEditorVisible(state) {
+	if !State_roomEditorVisible(state) || state.roomEditor.mode == .Members {
 		return
 	}
 	editor := &state.roomEditor
@@ -428,18 +444,42 @@ buildRoomEditorView :: proc(
 	view.error = editor.error
 	view.roomType = roomTypeShown(editor.roomType)
 	view.typeNote = roomTypeNote(view.roomType)
+	view.access = roomAccessShown(editor.access)
+	view.accessNote = roomAccessNote(view.access)
+	view.history = common.roomEffectiveHistoryVisibility(view.access, editor.history)
+	view.historyNote = roomHistoryNote(view.access, view.history)
 	if view.isCreate {
 		view.title = "New room"
 		view.submitLabel = editor.pending == .Create ? "Creating…" : "Create"
+		view.historyLocked = view.access == .Public
+		view.joinLocked = view.access == .Public
+		view.creatorJoins = editor.creatorJoins || view.joinLocked
+		view.joinLabel = view.creatorJoins ? "Join this room: on" : "Join this room: off"
+		switch {
+		case view.joinLocked:
+			view.joinNote = "A public room includes everyone, you too."
+		case view.creatorJoins:
+			view.joinNote = "You are a member and see its messages."
+		case:
+			view.joinNote =
+				"You are not a member: you do not see its messages, but you can still add " +
+				"and remove members and delete it from Server settings → Admin."
+		}
 		return
 	}
+	view.historyLocked = true
 	view.title = "Edit room"
-	if index := State_serverRoomCacheIndex(state^, editor.serverID); index >= 0 {
-		for room in state.server_room_caches[index].rooms {
-			if room.id == editor.roomID {
-				view.title = fmt.aprintf("Edit #%s", room.name, allocator = allocator)
-				break
-			}
+	room := State_knownRoom(state, editor.serverID, editor.roomID)
+	if room != nil {
+		view.title = fmt.aprintf("Edit #%s", room.name, allocator = allocator)
+		current := roomAccessShown(room.access)
+		switch {
+		case view.access == current:
+		case view.access == .Public:
+			view.accessWarning = "Saving adds every account on the server to the room."
+		case current == .Public:
+			view.accessWarning =
+				"Everyone in the room stays a member; new accounts no longer join it."
 		}
 	}
 	view.submitLabel = editor.pending == .Save ? "Saving…" : "Save"

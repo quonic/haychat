@@ -244,6 +244,10 @@ HeadlessEventKind :: enum {
 	AccountUpdated,
 	AdminResult,
 	SessionEnded,
+	// Room access modes (protocol 15).
+	RoomMembers,
+	AdminRooms,
+	RoomMemberResult,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -275,6 +279,9 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.AccountUpdated = "account_updated",
 	.AdminResult    = "admin_result",
 	.SessionEnded   = "session_ended",
+	.RoomMembers    = "room_members",
+	.AdminRooms     = "admin_rooms",
+	.RoomMemberResult = "room_member_result",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -430,21 +437,56 @@ HeadlessRoomHistoryJSON :: struct {
 	messages: []HeadlessHistoryMessageJSON,
 }
 
+// userID (protocol 15) is the account that joined or left: yours, or another member's when you
+// are in the room (or asked for the change).
 HeadlessRoomMembershipJSON :: struct {
 	event:    string,
 	serverID: int,
 	roomID:   int,
 	joined:   bool,
+	userID:   int,
 }
 
-// roomType is the protocol's number: 1 text, 2 voice, 3 both (protocol 14).
+// roomType is the protocol's number: 1 text, 2 voice, 3 both (protocol 14). access is 1
+// Public, 2 Member invite, 3 Admin invite, and historyVisibility 1 From join, 2 Full (always 2
+// for a Public room) (protocol 15). isMember is set on room_created: false for a room created
+// without joining it.
 HeadlessRoomEditedJSON :: struct {
-	event:       string,
-	serverID:    int,
-	roomID:      int,
-	name:        string,
-	description: string,
-	roomType:    int,
+	event:             string,
+	serverID:          int,
+	roomID:            int,
+	name:              string,
+	description:       string,
+	roomType:          int,
+	access:            int,
+	historyVisibility: int,
+	isMember:          bool,
+}
+
+// ServerRoomMembers: the room's members, ascending.
+HeadlessRoomMembersJSON :: struct {
+	event:    string,
+	serverID: int,
+	roomID:   int,
+	userIDs:  []int,
+}
+
+// ServerAdminRooms: every room on the server, with the admin's membership and member count.
+HeadlessAdminRoomsJSON :: struct {
+	event:    string,
+	serverID: int,
+	rooms:    []common.AdminRoomSummary,
+}
+
+// The answer to this session's room-add (added true) or room-remove: changed false when the
+// account already was (or was not) a member.
+HeadlessRoomMemberResultJSON :: struct {
+	event:    string,
+	serverID: int,
+	roomID:   int,
+	userID:   int,
+	added:    bool,
+	changed:  bool,
 }
 
 HeadlessRoomEventJSON :: struct {
@@ -686,6 +728,7 @@ headlessRenderRuntimeEvent :: proc(
 				serverID = event.serverID,
 				roomID = event.roomID,
 				joined = event.joined,
+				userID = event.peerUserID,
 			},
 			allocator,
 		)
@@ -699,6 +742,8 @@ headlessRenderRuntimeEvent :: proc(
 				name = event.room.name,
 				description = event.room.description,
 				roomType = int(event.room.roomType),
+				access = int(event.room.access),
+				historyVisibility = int(event.room.historyVisibility),
 			},
 			allocator,
 		)
@@ -712,6 +757,43 @@ headlessRenderRuntimeEvent :: proc(
 				name = event.room.name,
 				description = event.room.description,
 				roomType = int(event.room.roomType),
+				access = int(event.room.access),
+				historyVisibility = int(event.room.historyVisibility),
+				isMember = event.isMember,
+			},
+			allocator,
+		)
+	case .RoomMembersReceived:
+		kind = .RoomMembers
+		line = headlessMarshal(
+			HeadlessRoomMembersJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.roomID,
+				userIDs = event.userIDs[:],
+			},
+			allocator,
+		)
+	case .AdminRoomsReceived:
+		kind = .AdminRooms
+		line = headlessMarshal(
+			HeadlessAdminRoomsJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				rooms = event.adminRooms[:],
+			},
+			allocator,
+		)
+	case .RoomMemberResult:
+		kind = .RoomMemberResult
+		line = headlessMarshal(
+			HeadlessRoomMemberResultJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.roomID,
+				userID = event.peerUserID,
+				added = event.joined,
+				changed = event.changed,
 			},
 			allocator,
 		)
@@ -1067,13 +1149,29 @@ HeadlessConversationsResultJSON :: struct {
 // event, or as a protocol_error (for example "Admin permission required"). roomType is the
 // protocol's number (1 text, 2 voice, 3 both; 0 for room-delete).
 HeadlessRoomRequestJSON :: struct {
-	ok:          bool,
-	cmd:         string,
-	serverID:    int,
-	roomID:      int,
-	name:        string,
-	description: string,
-	roomType:    int,
+	ok:                bool,
+	cmd:               string,
+	serverID:          int,
+	roomID:            int,
+	name:              string,
+	description:       string,
+	roomType:          int,
+	// Protocol 15: room-create and room-edit echo the access mode; room-create also the
+	// history setting and whether you join.
+	access:            int,
+	historyVisibility: int,
+	creatorJoins:      bool,
+}
+
+// room-members, room-add, room-remove, room-leave and admin-rooms: the request went out. The
+// answer is room_members, room_member_result (and room_membership), admin_rooms, or a
+// protocol_error naming the refusal.
+HeadlessRoomMemberRequestJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
+	roomID:   int,
+	userID:   int,
 }
 
 // The result of admin-role, admin-rename, admin-kick, admin-ban, and admin-unban: the request
@@ -1183,12 +1281,29 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"dm-history", 1, 1, .None, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
-	{"room-create", 2, 0, .Optional, "room-create text|voice|both NAME [DESCRIPTION...]",
-		"admins: creates a room of that type; it arrives as room_created",
+	{"room-create", 2, 0, .Optional,
+		"room-create TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join] " +
+		"NAME [DESCRIPTION...]",
+		"admins: creates a room (TYPE text|voice|both); it arrives as room_created",
 		headlessCommandRoomCreate},
-	{"room-edit", 3, 0, .Optional, "room-edit ROOM_ID text|voice|both NAME [DESCRIPTION...]",
-		"admins: sets a room's type, name, and description (empty without one)",
+	{"room-edit", 3, 0, .Optional,
+		"room-edit ROOM_ID TYPE[,public|member-invite|admin-invite] NAME [DESCRIPTION...]",
+		"admins: sets a room's type, access, name, and description (empty without one)",
 		headlessCommandRoomEdit},
+	{"room-members", 1, 0, .None, "room-members ROOM_ID",
+		"members and admins: the room's members; they arrive as room_members",
+		headlessCommandRoomMembers},
+	{"room-add", 2, 0, .None, "room-add ROOM_ID USER_ID",
+		"adds an account to a room as its mode allows; answered by room_member_result",
+		headlessCommandRoomAdd},
+	{"room-remove", 2, 0, .None, "room-remove ROOM_ID USER_ID",
+		"admins: removes an account from a room; answered by room_member_result",
+		headlessCommandRoomRemove},
+	{"room-leave", 1, 0, .None, "room-leave ROOM_ID",
+		"leaves a non-public room; answered by room_membership", headlessCommandRoomLeave},
+	{"admin-rooms", 0, 0, .None, "admin-rooms",
+		"admins: every room, joined or not; it arrives as admin_rooms",
+		headlessCommandAdminRooms},
 	{"room-delete", 1, 0, .None, "room-delete ROOM_ID",
 		"admins: deletes a room and its history; it arrives as room_deleted",
 		headlessCommandRoomDelete},
@@ -1880,6 +1995,7 @@ headlessWriteRoomRequest :: proc(
 	roomID: int,
 	name, description: string,
 	roomType: common.RoomType = {},
+	options: HeadlessRoomOptions = {},
 ) {
 	if len(errorMessage) > 0 {
 		headlessWriteError(harness, command.name, errorMessage)
@@ -1895,18 +2011,76 @@ headlessWriteRoomRequest :: proc(
 			name = name,
 			description = description,
 			roomType = int(roomType),
+			access = int(options.access),
+			historyVisibility = int(options.history),
+			creatorJoins = options.creatorJoins,
 		},
 	)
 }
 
+// The TYPE[,OPTION...] word of room-create and room-edit (protocol 15). Options: public,
+// member-invite, admin-invite; from-join, full (room-create); no-join (room-create).
+HeadlessRoomOptions :: struct {
+	roomType:     common.RoomType,
+	access:       common.RoomAccess,
+	hasAccess:    bool,
+	history:      common.RoomHistoryVisibility,
+	creatorJoins: bool,
+}
+
+headlessParseRoomOptions :: proc(word: string, create: bool) -> (HeadlessRoomOptions, bool) {
+	options := HeadlessRoomOptions {
+		access       = .Public,
+		history      = .FromJoin,
+		creatorJoins = true,
+	}
+	remaining := word
+	first := true
+	for part in strings.split_iterator(&remaining, ",") {
+		if first {
+			roomType, ok := headlessParseRoomType(part)
+			if !ok {
+				return options, false
+			}
+			options.roomType = roomType
+			first = false
+			continue
+		}
+		switch part {
+		case "public":
+			options.access, options.hasAccess = .Public, true
+		case "member-invite":
+			options.access, options.hasAccess = .MemberInvite, true
+		case "admin-invite":
+			options.access, options.hasAccess = .AdminInvite, true
+		case "from-join":
+			if !create {
+				return options, false
+			}
+			options.history = .FromJoin
+		case "full":
+			if !create {
+				return options, false
+			}
+			options.history = .Full
+		case "no-join":
+			if !create {
+				return options, false
+			}
+			options.creatorJoins = false
+		case:
+			return options, false
+		}
+	}
+	return options, !first
+}
+
 headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
-	roomType, typeOK := headlessParseRoomType(command.args[0])
-	if !typeOK {
-		headlessWriteError(
-			harness,
-			command.name,
-			"usage: room-create text|voice|both NAME [DESCRIPTION...]",
-		)
+	options, optionsOK := headlessParseRoomOptions(command.args[0], true)
+	if !optionsOK {
+		usage := strings.concatenate({"usage: ", command.command.usage})
+		defer delete(usage)
+		headlessWriteError(harness, command.name, usage)
 		return
 	}
 	name := command.args[1]
@@ -1917,7 +2091,10 @@ headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 		state.selected_server_id,
 		name,
 		description,
-		roomType,
+		options.roomType,
+		options.access,
+		options.history,
+		options.creatorJoins,
 	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
 	headlessWriteRoomRequest(
@@ -1927,33 +2104,39 @@ headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 		0,
 		cleanName,
 		cleanDescription,
-		roomType,
+		options.roomType,
+		options,
 	)
 }
 
 headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
 	roomID, roomOK := headlessParseNumber(command.args[0])
-	roomType, typeOK := headlessParseRoomType(command.args[1])
-	if !roomOK || roomID == 0 || !typeOK {
-		headlessWriteError(
-			harness,
-			command.name,
-			"usage: room-edit ROOM_ID text|voice|both NAME [DESCRIPTION...]",
-		)
+	options, optionsOK := headlessParseRoomOptions(command.args[1], false)
+	if !roomOK || roomID == 0 || !optionsOK {
+		usage := strings.concatenate({"usage: ", command.command.usage})
+		defer delete(usage)
+		headlessWriteError(harness, command.name, usage)
 		return
 	}
 	name := command.args[2]
 	description := command.argCount > 3 ? command.args[3] : ""
 	state := &harness.state
+	// Without an access option the room keeps the mode the client knows for it.
+	if !options.hasAccess {
+		options.access = State_roomAccess(state, state.selected_server_id, roomID)
+	}
 	errorMessage := State_sendEditRoom(
 		state,
 		state.selected_server_id,
 		roomID,
 		name,
 		description,
-		roomType,
+		options.roomType,
+		options.access,
 	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
+	options.creatorJoins = false
+	options.history = {}
 	headlessWriteRoomRequest(
 		harness,
 		command,
@@ -1961,7 +2144,8 @@ headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 		roomID,
 		cleanName,
 		cleanDescription,
-		roomType,
+		options.roomType,
+		options,
 	)
 }
 
@@ -2086,6 +2270,118 @@ headlessCommandAdminUnban :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	state := &harness.state
 	errorMessage := State_sendAdminBanUser(state, state.selected_server_id, userID, false, "")
 	headlessWriteAdminRequest(harness, command, errorMessage, userID)
+}
+
+// room-members, room-add, room-remove, room-leave and admin-rooms. Like room management, the
+// harness checks nothing the server checks, so an agent can see the server refuse.
+@(private = "file")
+headlessWriteRoomMemberRequest :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	errorMessage: string,
+	roomID, userID: int,
+) {
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessRoomMemberRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = harness.state.selected_server_id,
+			roomID = roomID,
+			userID = userID,
+		},
+	)
+}
+
+// ROOM_ID and, with withUser, USER_ID; ok false after an error line.
+@(private = "file")
+headlessRoomMemberArgs :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	withUser: bool,
+) -> (
+	roomID, userID: int,
+	ok: bool,
+) {
+	roomOK, userOK := false, true
+	roomID, roomOK = headlessParseNumber(command.args[0])
+	if withUser {
+		userID, userOK = headlessParseNumber(command.args[1])
+		userOK = userOK && userID > 0
+	}
+	if !roomOK || roomID == 0 || !userOK {
+		usage := strings.concatenate({"usage: ", command.command.usage})
+		defer delete(usage)
+		headlessWriteError(harness, command.name, usage)
+		return 0, 0, false
+	}
+	return roomID, userID, true
+}
+
+headlessCommandRoomMembers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, _, ok := headlessRoomMemberArgs(harness, command, false)
+	if !ok {
+		return
+	}
+	state := &harness.state
+	errorMessage := State_fetchRoomMembers(state, state.selected_server_id, roomID)
+	headlessWriteRoomMemberRequest(harness, command, errorMessage, roomID, 0)
+}
+
+headlessCommandRoomAdd :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, userID, ok := headlessRoomMemberArgs(harness, command, true)
+	if !ok {
+		return
+	}
+	state := &harness.state
+	errorMessage := State_addRoomMember(
+		state,
+		state.selected_server_id,
+		roomID,
+		userID,
+		checkRights = false,
+	)
+	headlessWriteRoomMemberRequest(harness, command, errorMessage, roomID, userID)
+}
+
+headlessCommandRoomRemove :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, userID, ok := headlessRoomMemberArgs(harness, command, true)
+	if !ok {
+		return
+	}
+	state := &harness.state
+	errorMessage := State_removeRoomMember(
+		state,
+		state.selected_server_id,
+		roomID,
+		userID,
+		checkRights = false,
+	)
+	headlessWriteRoomMemberRequest(harness, command, errorMessage, roomID, userID)
+}
+
+headlessCommandRoomLeave :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, _, ok := headlessRoomMemberArgs(harness, command, false)
+	if !ok {
+		return
+	}
+	state := &harness.state
+	errorMessage := State_leaveRoom(state, state.selected_server_id, roomID, checkRights = false)
+	headlessWriteRoomMemberRequest(harness, command, errorMessage, roomID, 0)
+}
+
+headlessCommandAdminRooms :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	state := &harness.state
+	serverID := state.selected_server_id
+	// Sent whatever the admin flag says, so a non-admin sees the server refuse.
+	cache := State_serverRoomCache(state, serverID)
+	cache.adminRoomsLoading = false
+	errorMessage := State_sendAdminRoomList(state, serverID)
+	headlessWriteRoomMemberRequest(harness, command, errorMessage, 0, 0)
 }
 
 headlessCommandRoomDelete :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {

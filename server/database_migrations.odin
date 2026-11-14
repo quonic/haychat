@@ -254,6 +254,40 @@ DATABASE_ADMIN_CHECKS ::
 	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
 	"AND conname = 'rooms_room_type_check'))"
 
+// Migration 4 (protocol 15): room access modes and history for new members.
+//
+// - rooms.access: common.RoomAccess as a number, Public (1), Member invite (2) or Admin invite
+//   (3). Every existing room becomes Public, which is what rooms were before: every account a
+//   member, new accounts joining.
+// - rooms.history_visibility: common.RoomHistoryVisibility, From join (1) or Full (2), chosen
+//   at creation and fixed afterwards. Existing rooms, and any row inserted without one (the
+//   default room), get Full: Public rooms always read full history, so an existing room that
+//   an admin later makes invite-only keeps showing its members what they could read before.
+//
+// Columns are added with defaults, so every existing row keeps its data. Never edit it; append
+// a migration instead.
+DATABASE_MIGRATION_4_ROOM_ACCESS_SQL ::
+	"ALTER TABLE rooms ADD COLUMN access SMALLINT NOT NULL DEFAULT 1 " +
+	"CONSTRAINT rooms_access_check CHECK (access IN (1, 2, 3)); " +
+	"ALTER TABLE rooms ADD COLUMN history_visibility SMALLINT NOT NULL DEFAULT 2 " +
+	"CONSTRAINT rooms_history_visibility_check CHECK (history_visibility IN (1, 2));"
+
+// What migration 4 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ROOM_ACCESS_CHECKS ::
+	"('rooms access', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'access' AND data_type = 'smallint' AND is_nullable = 'NO')), " +
+	"('rooms history_visibility', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'history_visibility' AND data_type = 'smallint' " +
+	"AND is_nullable = 'NO')), " +
+	"('rooms access check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_access_check')), " +
+	"('rooms history visibility check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_history_visibility_check'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -268,6 +302,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "admin",
 		sql = DATABASE_MIGRATION_3_ADMIN_SQL,
 		checks = DATABASE_ADMIN_CHECKS,
+	},
+	{
+		version = 4,
+		name = "room access",
+		sql = DATABASE_MIGRATION_4_ROOM_ACCESS_SQL,
+		checks = DATABASE_ROOM_ACCESS_CHECKS,
 	},
 }
 
@@ -373,6 +413,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_READ_MARKERS_CHECKS +
 	", " +
 	DATABASE_ADMIN_CHECKS +
+	", " +
+	DATABASE_ROOM_ACCESS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

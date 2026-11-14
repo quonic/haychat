@@ -36,14 +36,22 @@ viewContextMenu :: proc(state: ^State, ctx: ^ui.Context) {
 		return
 	}
 	items := make([dynamic]ui.MenuItem, 0, len(view.entries) + 4, context.temp_allocator)
-	for entry in view.entries {
+	// The entry behind each item, -1 for a separator.
+	itemEntries := make([dynamic]int, 0, len(view.entries) + 4, context.temp_allocator)
+	for entry, entryIndex in view.entries {
 		if entry.separatorBefore && len(items) > 0 {
 			append(&items, ui.MenuItem{separator = true})
+			append(&itemEntries, -1)
 		}
+		key := int(entry.action)
+		if entry.roomID > 0 {
+			key = CONTEXT_MENU_ROOM_KEY_BASE + entry.roomID
+		}
+		append(&itemEntries, entryIndex)
 		append(
 			&items,
 			ui.MenuItem {
-				key = int(entry.action),
+				key = key,
 				label = entry.label,
 				enabled = entry.enabled,
 				danger = entry.danger,
@@ -62,8 +70,8 @@ viewContextMenu :: proc(state: ^State, ctx: ^ui.Context) {
 		State_setContextMenuVolume(state, result.slider.value, result.slider.released)
 		ui.requestFrame(ctx)
 	} else if result.clicked >= 0 {
-		action := ContextMenuAction(items[result.clicked].key)
-		effect := State_runContextMenuAction(state, action, time.tick_now())
+		entry := view.entries[itemEntries[result.clicked]]
+		effect := State_runContextMenuAction(state, entry.action, time.tick_now(), entry.roomID)
 		if len(effect.copyText) > 0 {
 			ui.setClipboardText(effect.copyText)
 		}

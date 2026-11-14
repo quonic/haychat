@@ -17,7 +17,8 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   is bound into its authentication tag.
 - **Not end-to-end.** The server decrypts every message and stores it unencrypted in its
   PostgreSQL database, so the server and its operator can read room chat and direct messages.
-  Voice is relayed and never stored or logged.
+  Voice is relayed and never stored or logged. Invite-only rooms (protocol 15) limit which
+  accounts the server lets read a room; they do not hide it from the server.
 
 No TLS certificate is involved: the pinned identity key takes its place.
 
@@ -38,6 +39,7 @@ version below therefore needs clients and servers rebuilt together.
 | 12 | `ServerVoiceParticipants.recipientJoined`, so a client completes a voice join only on the acknowledgement of its own session, not on any list that names its account |
 | 13 | One voice session per account: every voice join carries the profile's device ID and whether it is the automatic re-join after a reconnect; a join without a device ID is refused |
 | 14 | Admin actions on accounts (role, rename with name lock, kick, ban and unban) and room types (text, voice, or both), with schema migration 3 |
+| 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).

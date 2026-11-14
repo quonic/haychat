@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 14
+protocolVersion: ProtocolVersion = 15
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -346,6 +346,13 @@ MessageType :: enum {
 	ServerUserUpdated, // ServerUserUpdatedPayload: an account's directory entry changed
 	ServerAccountUpdated, // ServerAccountUpdatedPayload: this account's role or name changed
 	ServerSessionEnded, // ServerSessionEndedPayload: the server is about to end this session
+
+	// Room access modes (protocol 15), appended so no existing wire value moves. ClientLeaveRoom,
+	// ClientAddRoomMember and ClientRemoveRoomMember above complete the set.
+	ClientFetchRoomMembers, // ClientFetchRoomMembersPayload: a room's members (members, admins)
+	ServerRoomMembers, // ServerRoomMembersPayload: answer to ClientFetchRoomMembers
+	ClientAdminListRooms, // ClientAdminListRoomsPayload: admins: every room, joined or not
+	ServerAdminRooms, // ServerAdminRoomsPayload: answer to ClientAdminListRooms
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -377,6 +384,43 @@ roomTypeAllowsChat :: proc(roomType: RoomType) -> bool {
 // Whether a room of this type has a voice session (a text-only room does not).
 roomTypeAllowsVoice :: proc(roomType: RoomType) -> bool {
 	return roomType == .Voice || roomType == .ChatAndVoice
+}
+
+// Who may join a room (protocol 15, rooms.access). Public rooms include every account: new
+// accounts join them and a new Public room includes everyone. Member invite rooms take whoever a
+// member or an admin adds; Admin invite rooms only whom an admin adds. In every mode only
+// admins remove members, any member of a non-public room may leave it, and admins rename,
+// edit and delete it. The values are the database's and the wire's; they are pinned in
+// protocol_test.odin.
+RoomAccess :: enum u8 {
+	Public       = 1,
+	MemberInvite = 2,
+	AdminInvite  = 3,
+}
+
+roomAccessIsSupported :: proc(access: RoomAccess) -> bool {
+	return access == .Public || access == .MemberInvite || access == .AdminInvite
+}
+
+// What a new member of a room reads (protocol 15, rooms.history_visibility), chosen when the
+// room is created and fixed afterwards. From join: only messages sent after the member was
+// added (room_members.joined_at; someone removed and added again counts from the second
+// addition). Full: everything the room has. A Public room always reads as Full.
+RoomHistoryVisibility :: enum u8 {
+	FromJoin = 1,
+	Full     = 2,
+}
+
+roomHistoryVisibilityIsSupported :: proc(visibility: RoomHistoryVisibility) -> bool {
+	return visibility == .FromJoin || visibility == .Full
+}
+
+// The history a room's new members read: a Public room always has Full history.
+roomEffectiveHistoryVisibility :: proc(
+	access: RoomAccess,
+	visibility: RoomHistoryVisibility,
+) -> RoomHistoryVisibility {
+	return access == .Public ? .Full : visibility
 }
 
 Rooms :: struct {
@@ -453,6 +497,11 @@ RoomSummary :: struct {
 	unreadCount:       int,
 	// Text, voice, or both (protocol 14). Every payload that embeds a RoomSummary carries it.
 	roomType:          RoomType,
+	// Who may join (protocol 15), and the history new members read: Full for every Public
+	// room, whatever was chosen at creation. Every payload that embeds a RoomSummary carries
+	// them.
+	access:            RoomAccess,
+	historyVisibility: RoomHistoryVisibility,
 }
 
 ClientListRoomsPayload :: struct {}
@@ -484,46 +533,124 @@ ServerRoomHistoryPayload :: struct {
 
 // Room management is for accounts with the admin server role; anyone else gets
 // ServerProtocolError "Admin permission required". ServerCreateRoom answers the creator with
-// the new room, and every authenticated session gets ServerRoomMembershipChanged{joined} (rooms
-// are open, so every account is a member). ServerEditRoom and ServerDeleteRoom go to the
-// room's members and to the admin who asked.
+// the new room, and every session of every member gets ServerRoomMembershipChanged{joined} (for
+// a Public room every account, for an invite room the creator when they joined).
+// ServerEditRoom and ServerDeleteRoom go to the room's members and to the admin who asked.
 //
 // roomType (protocol 14) must be Chat, Voice or ChatAndVoice; anything else is refused like
 // bad metadata. A voice-only room refuses chat messages ("Chat is disabled in this room"), and
 // a text-only room refuses voice joins ("voice is disabled in this room"); editing a room to
 // text-only removes its voice participants with ServerVoiceLeft.
+//
+// Access modes (protocol 15): access is Public, MemberInvite or AdminInvite and
+// historyVisibility FromJoin or Full (a Public room is always Full, whatever is sent). A Public
+// room includes every account. An invite room includes only its creator, and only when
+// creatorJoins is set: an admin who clears it creates a room they are not a member of, which
+// they still manage (add, remove, edit, delete) from the Admin section. CBOR leaves a missing
+// bool false, so clients always send creatorJoins (the create form starts with it on). Later
+// fields (E4's encrypted) are appended after these.
 ClientCreateRoomPayload :: struct {
-	name:        string,
-	description: string,
-	roomType:    RoomType,
+	name:              string,
+	description:       string,
+	roomType:          RoomType,
+	access:            RoomAccess,
+	historyVisibility: RoomHistoryVisibility,
+	creatorJoins:      bool,
 }
 
+// access (protocol 15) changes the room's mode; the history setting cannot change. Switching a
+// room to Public adds every account to it (each gets ServerRoomMembershipChanged); switching
+// away from Public keeps every member.
 ClientEditRoomPayload :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
 	roomType:    RoomType,
+	access:      RoomAccess,
 }
 
 ClientDeleteRoomPayload :: struct {
 	roomId: int,
 }
 
+// ClientAddRoomMember and ClientRemoveRoomMember (protocol 15 rules). An add is allowed to an
+// admin in a Member invite or Admin invite room, and to a member in a Member invite room; adds
+// to Public rooms are refused ("Public rooms include every account"). Only admins remove
+// members, in every mode. The requester gets ServerRoomMemberAdded or ServerRoomMemberRemoved
+// (ServerRoomMutationPayload with roomId, userId, and changed false when nothing moved: the
+// account already was, or was not, a member). Refusals are ServerProtocolError: "Admin
+// permission required", "Not a room member", "Room not found", "Unknown user".
 ClientRoomMembershipPayload :: struct {
 	roomId: int,
 	userId: int,
 }
 
+// ClientLeaveRoom (protocol 15): the requester leaves a non-public room. Leaving a Public room
+// is refused ("You cannot leave a public room"), and so is a room the requester is not in.
+ClientLeaveRoomPayload :: struct {
+	roomId: int,
+}
+
+// ServerRoomMembershipChanged: userId (protocol 15) joined or left roomId. Sent to every
+// session of userId, and for adds, removals and leaves also to the sessions of the room's
+// other members and of the requester, so an open member list can refresh. A client refreshes
+// its room list when userId is its own account.
 ServerRoomMembershipChangedPayload :: struct {
 	roomId: int,
 	joined: bool,
+	userId: int,
 }
 
+// isMember (protocol 15) is set on ServerCreateRoom: whether the creator is a member of the new
+// room (false for an invite room created without joining). Other payloads leave it false.
 ServerRoomMutationPayload :: struct {
-	room:    RoomSummary,
+	room:     RoomSummary,
+	roomId:   int,
+	userId:   int,
+	changed:  bool,
+	isMember: bool,
+}
+
+// ClientFetchRoomMembers (protocol 15): the room's members, for its members and for admins
+// (members or not). Anyone else is refused with "Not a room member".
+ClientFetchRoomMembersPayload :: struct {
+	roomId: int,
+}
+
+// ServerRoomMembers: every member's user ID, ascending. userIds is owned once decoded.
+ServerRoomMembersPayload :: struct {
 	roomId:  int,
-	userId:  int,
-	changed: bool,
+	userIds: [dynamic]int,
+}
+
+ServerRoomMembersPayload_deinit :: proc(payload: ^ServerRoomMembersPayload) {
+	delete(payload.userIds)
+	payload.userIds = nil
+}
+
+// ClientAdminListRooms (protocol 15): admins only ("Admin permission required" otherwise).
+ClientAdminListRoomsPayload :: struct {}
+
+// One room as the Admin section lists it. room carries no read state.
+AdminRoomSummary :: struct {
+	room:        RoomSummary,
+	isMember:    bool, // Whether the requesting admin is a member
+	memberCount: int,
+}
+
+// ServerAdminRooms: every room on the server, by name, whether the admin is in it or not.
+// Every string and the array are owned once decoded.
+ServerAdminRoomsPayload :: struct {
+	rooms: [dynamic]AdminRoomSummary,
+}
+
+ServerAdminRoomsPayload_deinit :: proc(payload: ^ServerAdminRoomsPayload) {
+	for &entry in payload.rooms {
+		delete(entry.room.name)
+		delete(entry.room.description)
+	}
+	delete(payload.rooms)
+	payload.rooms = nil
 }
 
 // Direct messages are per server, between any two accounts, and stored server side in plain
@@ -934,14 +1061,14 @@ DatabaseQueryRequest :: union {
 	DatabaseCreateRoomRequest,
 	DatabaseEditRoomRequest,
 	DatabaseDeleteRoomRequest,
-	DatabaseAddRoomMemberRequest,
-	DatabaseRemoveRoomMemberRequest,
+	DatabaseRoomMemberActionRequest,
 	DatabasePostDirectMessageRequest,
 	DatabaseDirectHistoryRequest,
 	DatabaseDirectConversationListRequest,
 	DatabaseUserDirectoryRequest,
 	DatabaseMarkReadRequest,
 	DatabaseAdminUserRequest,
+	DatabaseAdminRoomListRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -980,31 +1107,53 @@ DatabaseUserServerAdminRequest :: struct {
 	userId: int,
 }
 
+// Protocol 15: a Public room includes every account (and stores Full history); an invite room
+// includes the creator only when creatorJoins is set.
 DatabaseCreateRoomRequest :: struct {
-	creatorUserId: int,
-	name:          string,
-	description:   string,
-	roomType:      RoomType,
+	creatorUserId:     int,
+	name:              string,
+	description:       string,
+	roomType:          RoomType,
+	access:            RoomAccess,
+	historyVisibility: RoomHistoryVisibility,
+	creatorJoins:      bool,
 }
 
+// Switching access to Public adds every account in the same statement.
 DatabaseEditRoomRequest :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
 	roomType:    RoomType,
+	access:      RoomAccess,
 }
 
 DatabaseDeleteRoomRequest :: struct {
 	roomId: int,
 }
 
-DatabaseRoomMemberMutationRequest :: struct {
-	roomId: int,
-	userId: int,
+// What a DatabaseRoomMemberActionRequest does (protocol 15). Fetch changes nothing.
+RoomMemberAction :: enum u8 {
+	Add,
+	Remove,
+	Leave,
+	Fetch,
 }
 
-DatabaseAddRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
-DatabaseRemoveRoomMemberRequest :: distinct DatabaseRoomMemberMutationRequest
+// One statement checks who actorUserId is (admin, member) against the room's access mode, and
+// for Add and Remove that targetUserId exists, and makes the change; Leave and Fetch ignore
+// targetUserId (Leave acts on the actor).
+DatabaseRoomMemberActionRequest :: struct {
+	action:       RoomMemberAction,
+	actorUserId:  int,
+	roomId:       int,
+	targetUserId: int,
+}
+
+// Every admin's view of every room.
+DatabaseAdminRoomListRequest :: struct {
+	actorUserId: int,
+}
 
 // Checks that the recipient exists and is not the sender, stores the message, and reads both
 // nicknames in one statement, so the check and the insert cannot race.
@@ -1075,6 +1224,8 @@ DatabaseQueryResult :: union {
 	DatabaseUserDirectoryResult,
 	DatabaseMarkReadResult,
 	DatabaseAdminUserResult,
+	DatabaseRoomMemberActionResult,
+	DatabaseAdminRoomListResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -1128,9 +1279,39 @@ DatabaseUserServerAdminResult :: struct {
 	isAdmin: bool,
 }
 
+// Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
+// lists the accounts an edit to Public added.
 DatabaseRoomMutationResult :: struct {
-	room:    RoomSummary,
-	changed: bool,
+	room:         RoomSummary,
+	changed:      bool,
+	isMember:     bool,
+	addedUserIDs: [dynamic]int,
+}
+
+// How a room member statement ended (protocol 15). Applied means the rules passed (changed says
+// whether a row moved); every other value is a refusal and nothing changed.
+DatabaseRoomMemberOutcome :: enum u8 {
+	Applied,
+	AdminRequired, // An Admin invite add or any removal by someone who is not an admin
+	NotMember, // A non-admin who is not a member (or the room does not exist, to non-admins)
+	UnknownRoom, // To admins: no room has the ID
+	UnknownUser, // No account has the target ID
+	PublicRoom, // An add to, or a leave of, a Public room
+}
+
+// memberUserIDs (owned) are the room's members after the action, ascending; access is the
+// room's mode. Both are set only when outcome is Applied.
+DatabaseRoomMemberActionResult :: struct {
+	outcome:       DatabaseRoomMemberOutcome,
+	changed:       bool,
+	access:        RoomAccess,
+	memberUserIDs: [dynamic]int,
+}
+
+// isAdmin false means the requester is not an admin and rooms is empty. rooms is owned.
+DatabaseAdminRoomListResult :: struct {
+	isAdmin: bool,
+	rooms:   [dynamic]AdminRoomSummary,
 }
 
 // When recipientExists is false nothing was stored and storedMessage is empty. It is false

@@ -10,7 +10,10 @@ import "ui"
 //
 // Widget IDs for GUI automation: room-editor-name and room-editor-description (server and room
 // ID, 0 while creating), room-type N (N the protocol's type number: 1 text, 2 voice, 3 both),
-// room-editor-submit, room-editor-cancel, room-editor-delete.
+// room-access N (1 Public, 2 Member invite, 3 Admin invite), room-history N (1 From join,
+// 2 Full; Create only), room-editor-join (Create), room-editor-members (Edit),
+// room-editor-submit, room-editor-cancel, room-editor-delete. The Members page
+// (view_room_members.odin) has its own.
 
 ROOM_EDITOR_COLUMN_WIDTH :: 480
 ROOM_EDITOR_SECTION_GAP :: 20
@@ -50,7 +53,50 @@ roomEditorField :: proc(
 	return result.submitted
 }
 
+// A row of equal option buttons; returns the index clicked, or -1. ids names each option's
+// widget ID (idOf(name, ids[i])).
+@(private = "file")
+roomEditorSelector :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	name: string,
+	labels: []string,
+	ids: []int,
+	selected: int,
+	enabled := true,
+) -> int {
+	clicked := -1
+	row := ui.cutTop(column, ui.dp(ctx, ROW_HEIGHT))
+	gap := ui.dp(ctx, PANEL_PADDING)
+	optionW := (row.w - gap * f32(len(labels) - 1)) / f32(len(labels))
+	for label, index in labels {
+		rect := ui.cutLeft(&row, optionW)
+		_ = ui.cutLeft(&row, gap)
+		isSelected := index == selected
+		options := ui.ButtonOptions {
+			align      = .Center,
+			selected   = isSelected,
+			color      = isSelected ? ctx.theme.onPrimary : ctx.theme.fg,
+			background = isSelected ? ctx.theme.primary : ctx.theme.hover,
+		}
+		if isSelected {
+			options.font = .Bold
+		}
+		if !enabled && !isSelected {
+			options.color = ctx.theme.fgMuted
+		}
+		if ui.button(ctx, ui.idOf(name, ids[index]), rect, label, options) && enabled {
+			clicked = index
+		}
+	}
+	return clicked
+}
+
 viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^ConnectionBanner) {
+	if state.roomEditor.mode == .Members {
+		viewRoomMembers(state, ctx, r, banner)
+		return
+	}
 	view := buildRoomEditorView(state)
 	if !view.visible {
 		return
@@ -62,12 +108,18 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 
 	padding := ui.dp(ctx, 24)
 	width := min(area.w - padding * 2, ui.dp(ctx, ROOM_EDITOR_COLUMN_WIDTH))
-	column := ui.Rect{area.x + (area.w - width) / 2, area.y + padding, width, area.h - padding}
-	ui.pushClip(ctx, area)
-	defer ui.popClip(ctx)
+	scrollID := ui.idOf("room-editor-scroll", editor.serverID, editor.roomID)
+	offset := ui.scrollBegin(ctx, scrollID, area, editor.contentH)
+	column := ui.Rect {
+		area.x + (area.w - width) / 2,
+		area.y + padding - offset,
+		width,
+		max(f32(1e6), area.h),
+	}
+	top := column.y
 
 	sectionGap := ui.dp(ctx, ROOM_EDITOR_SECTION_GAP)
-	intro := "Every account on the server is a member of every room."
+	intro := "Choose who can join the room and what new members can read."
 	if !view.isCreate {
 		intro = "Renaming or describing a room shows the change to everyone at once."
 	}
@@ -110,33 +162,124 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	roomEditorLabel(ctx, &column, "Type")
 	typeClicked := -1
 	{
-		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
-		gap := ui.dp(ctx, PANEL_PADDING)
-		optionW := (row.w - gap * f32(len(ROOM_EDITOR_TYPES) - 1)) / f32(len(ROOM_EDITOR_TYPES))
+		labels: [len(ROOM_EDITOR_TYPES)]string
+		ids: [len(ROOM_EDITOR_TYPES)]int
+		selected := -1
 		for roomType, index in ROOM_EDITOR_TYPES {
-			rect := ui.cutLeft(&row, optionW)
-			_ = ui.cutLeft(&row, gap)
-			selected := view.roomType == roomType
-			options := ui.ButtonOptions {
-				align      = .Center,
-				selected   = selected,
-				color      = selected ? ctx.theme.onPrimary : ctx.theme.fg,
-				background = selected ? ctx.theme.primary : ctx.theme.hover,
-			}
-			if selected {
-				options.font = .Bold
-			}
-			id := ui.idOf("room-type", int(roomType))
-			if ui.button(ctx, id, rect, roomTypeLabel(roomType), options) {
-				typeClicked = index
+			labels[index] = roomTypeLabel(roomType)
+			ids[index] = int(roomType)
+			if roomType == view.roomType {
+				selected = index
 			}
 		}
+		typeClicked = roomEditorSelector(ctx, &column, "room-type", labels[:], ids[:], selected)
 	}
 	_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 	roomEditorWrapped(ctx, &column, view.typeNote, ctx.theme.fgMuted)
 	if len(view.typeWarning) > 0 {
 		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 		roomEditorWrapped(ctx, &column, view.typeWarning, ctx.theme.warning)
+	}
+
+	// Who can join (protocol 15).
+	_ = ui.cutTop(&column, sectionGap)
+	roomEditorLabel(ctx, &column, "Who can join")
+	accessClicked := -1
+	{
+		labels: [len(ROOM_EDITOR_ACCESS_MODES)]string
+		ids: [len(ROOM_EDITOR_ACCESS_MODES)]int
+		selected := -1
+		for access, index in ROOM_EDITOR_ACCESS_MODES {
+			labels[index] = roomAccessLabel(access)
+			ids[index] = int(access)
+			if access == view.access {
+				selected = index
+			}
+		}
+		accessClicked = roomEditorSelector(
+			ctx,
+			&column,
+			"room-access",
+			labels[:],
+			ids[:],
+			selected,
+		)
+	}
+	_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+	roomEditorWrapped(ctx, &column, view.accessNote, ctx.theme.fgMuted)
+	if len(view.accessWarning) > 0 {
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		roomEditorWrapped(ctx, &column, view.accessWarning, ctx.theme.warning)
+	}
+
+	// History for new members: chosen once, here; shown in Edit.
+	_ = ui.cutTop(&column, sectionGap)
+	roomEditorLabel(ctx, &column, "History for new members")
+	historyClicked := -1
+	if view.isCreate {
+		labels: [len(ROOM_EDITOR_HISTORY_OPTIONS)]string
+		ids: [len(ROOM_EDITOR_HISTORY_OPTIONS)]int
+		selected := -1
+		for history, index in ROOM_EDITOR_HISTORY_OPTIONS {
+			labels[index] = roomHistoryLabel(history)
+			ids[index] = int(history)
+			if history == view.history {
+				selected = index
+			}
+		}
+		historyClicked = roomEditorSelector(
+			ctx,
+			&column,
+			"room-history",
+			labels[:],
+			ids[:],
+			selected,
+			enabled = !view.historyLocked,
+		)
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+	} else {
+		roomEditorWrapped(
+			ctx,
+			&column,
+			roomHistoryLabel(view.history),
+			ctx.theme.fg,
+		)
+	}
+	roomEditorWrapped(ctx, &column, view.historyNote, ctx.theme.fgMuted)
+
+	joinClicked := false
+	membersClicked := false
+	if view.isCreate {
+		_ = ui.cutTop(&column, sectionGap)
+		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+		joinRect := ui.cutLeft(&row, min(row.w, ui.dp(ctx, 200)))
+		joinOptions := ui.ButtonOptions {
+			align      = .Center,
+			selected   = view.creatorJoins,
+			background = ctx.theme.hover,
+			color      = view.joinLocked ? ctx.theme.fgMuted : ctx.theme.fg,
+		}
+		if ui.button(ctx, ui.idOf("room-editor-join"), joinRect, view.joinLabel, joinOptions) &&
+		   !view.joinLocked {
+			joinClicked = true
+		}
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		roomEditorWrapped(ctx, &column, view.joinNote, ctx.theme.fgMuted)
+	} else {
+		_ = ui.cutTop(&column, sectionGap)
+		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+		membersRect := ui.cutLeft(&row, min(row.w, ui.dp(ctx, 160)))
+		membersOptions := ui.ButtonOptions {
+			align      = .Center,
+			background = ctx.theme.hover,
+		}
+		membersClicked = ui.button(
+			ctx,
+			ui.idOf("room-editor-members"),
+			membersRect,
+			"Members…",
+			membersOptions,
+		)
 	}
 
 	if len(view.generalNotice) > 0 {
@@ -195,10 +338,26 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		)
 	}
 
+	_ = ui.cutTop(&column, sectionGap)
+	contentH := column.y - top
+	ui.scrollEnd(ctx, scrollID, area)
+	if contentH != editor.contentH {
+		editor.contentH = contentH
+		ui.requestFrame(ctx)
+	}
+
 	// Actions run last: a send can change the room list drawn in the sidebar.
 	switch {
 	case typeClicked >= 0:
 		State_setRoomEditorType(state, ROOM_EDITOR_TYPES[typeClicked])
+	case accessClicked >= 0:
+		State_setRoomEditorAccess(state, ROOM_EDITOR_ACCESS_MODES[accessClicked])
+	case historyClicked >= 0:
+		State_setRoomEditorHistory(state, ROOM_EDITOR_HISTORY_OPTIONS[historyClicked])
+	case joinClicked:
+		State_toggleRoomEditorCreatorJoins(state)
+	case membersClicked:
+		State_openRoomMembers(state, editor.serverID, editor.roomID)
 	case cancelClicked:
 		State_closeRoomEditor(state)
 	case deleteClicked:

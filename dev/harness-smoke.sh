@@ -174,7 +174,7 @@ echo "    a< $created_line"
 [[ "$created_line" =~ \"roomID\":([0-9]+), ]] || fail "[admin] room_created has no roomID"
 new_room=${BASH_REMATCH[1]}
 membership_line=$(wait_for_line b2 \
-	"{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":$new_room,\"joined\":true}" \
+	"{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":$new_room,\"joined\":true," \
 	"$admin_start_b") || fail "[admin] client b did not receive room_membership for $new_room"
 echo "    b< $membership_line"
 wait_for_match b2 "^\\{\"event\":\"room_list\",.*\"name\":\"$room_name\"" \
@@ -241,7 +241,7 @@ dm_unread_pattern="\\{\"peerUserID\":$user_c,[^}]*\"unreadCount\":"
 expect_room_unread() {
 	local client=$1 expected=$2 why=$3
 	expect_ok "$client" rooms
-	[[ "$last_result" =~ ${room_unread_pattern}${expected},\"roomType\":[0-9]+\} ]] ||
+	[[ "$last_result" =~ ${room_unread_pattern}${expected},\"roomType\":[0-9]+, ]] ||
 		fail "[read] client $client: expected $expected unread in room $room_id $why"
 }
 expect_dm_unread() {

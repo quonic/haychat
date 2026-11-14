@@ -188,7 +188,7 @@ created_line=$(wait_for_match a "^\\{\"event\":\"room_created\",.*\"name\":\"$ro
 echo "    a< $created_line"
 [[ "$created_line" =~ \"roomID\":([0-9]+), ]] || fail "room_created has no roomID"
 room=${BASH_REMATCH[1]}
-[[ "$created_line" == *'"roomType":3}'* ]] || fail "the new room is not text and voice"
+[[ "$created_line" == *'"roomType":3,'* ]] || fail "the new room is not text and voice"
 expect_event b "^\\{\"event\":\"room_list\",.*\"name\":\"$room_name\"" "$start_b" \
 	"client b's room list never listed $room_name"
 expect_ok b voice-join "$room"
@@ -199,7 +199,7 @@ expect_ok a room-edit "$room" text "$room_name" "admin proof"
 text_only_reason="\"roomID\":$room,\"reason\":\"voice is disabled in this room\"\\}$"
 expect_event b "^\\{\"event\":\"voice_left\",\"serverID\":1,$text_only_reason" \
 	"$start_b" "client b was not removed from the text-only room's voice"
-expect_event b "^\\{\"event\":\"room_edited\",.*\"roomID\":$room,.*\"roomType\":1\\}$" \
+expect_event b "^\\{\"event\":\"room_edited\",.*\"roomID\":$room,.*\"roomType\":1,\"access\":1," \
 	"$start_b" "client b did not see the room become text-only"
 start_b=$(lines b)
 expect_ok b voice-join "$room"

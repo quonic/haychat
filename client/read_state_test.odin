@@ -527,7 +527,7 @@ testHeadlessReadStateCommandsAndEvents :: proc(t: ^testing.T) {
 	output = testHeadlessTakeOutput(&builder)
 	assert(
 		strings.contains(output, `"name":"general","description":"","lastReadMessageId":2,` +
-			`"unreadCount":2,"roomType":3}`),
+			`"unreadCount":2,"roomType":3,"access":0,"historyVisibility":0}`),
 		fmt.tprintf("expected #general with its marker and 2 unread, got %s", output),
 	)
 	testApplyUserList(&harness.state, 906, {id = 3, nickname = "me"}, {id = 4, nickname = "bob"})

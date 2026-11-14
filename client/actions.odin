@@ -52,6 +52,7 @@ ServerRoomCache_deinit :: proc(cache: ^ServerRoomCache) {
 		RoomCache_deinit(&cache.roomCaches[index])
 	}
 	delete(cache.roomCaches)
+	AdminRoomSummaries_deinit(&cache.adminRooms)
 	cache^ = {}
 }
 
@@ -411,7 +412,19 @@ State_fallBackFromRemovedRoom :: proc(state: ^State, serverID, roomID: int) {
 	}
 }
 
-State_roomMembershipChanged :: proc(state: ^State, serverID, roomID: int, joined: bool) {
+// userID (protocol 15) is the account that joined or left. Another account's change only
+// refreshes the room's member list where it is shown; this account's (or 0, which an older
+// notice never sends) changes the room list.
+State_roomMembershipChanged :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	joined: bool,
+	userID := 0,
+) {
+	State_roomMembersChanged(state, serverID, roomID)
+	if userID != 0 && userID != State_selfUserID(state, serverID) {
+		return
+	}
 	if !joined {
 		ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 		State_fallBackFromRemovedRoom(state, serverID, roomID)
@@ -428,6 +441,18 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 	// The form would otherwise save over a change it never showed.
 	State_roomEditorRoomChanged(state, serverID, roomID)
 	cache := State_serverRoomCache(state, serverID)
+	// An admin's list of every room keeps its own copy.
+	for &entry in cache.adminRooms {
+		if entry.room.id == roomID {
+			delete(entry.room.name)
+			delete(entry.room.description)
+			entry.room = room^
+			entry.room.name = strings.clone(room.name)
+			entry.room.description = strings.clone(room.description)
+			entry.room.lastReadMessageId = 0
+			entry.room.unreadCount = 0
+		}
+	}
 	for index in 0 ..< len(cache.rooms) {
 		if cache.rooms[index].id == roomID {
 			delete(cache.rooms[index].name)
@@ -443,7 +468,16 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 }
 
 State_roomDeleted :: proc(state: ^State, serverID, roomID: int) {
-	State_roomEditorRoomChanged(state, serverID, roomID)
+	State_roomEditorRoomDeleted(state, serverID, roomID)
+	cache := State_serverRoomCache(state, serverID)
+	for index in 0 ..< len(cache.adminRooms) {
+		if cache.adminRooms[index].room.id == roomID {
+			delete(cache.adminRooms[index].room.name)
+			delete(cache.adminRooms[index].room.description)
+			ordered_remove(&cache.adminRooms, index)
+			break
+		}
+	}
 	ServerRoomCache_removeRoom(State_serverRoomCache(state, serverID), roomID)
 	State_fallBackFromRemovedRoom(state, serverID, roomID)
 	State_voiceRoomRemoved(state, serverID, roomID)
@@ -459,6 +493,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	}
 	State_directProtocolError(state, serverID)
 	State_roomEditorProtocolError(state, serverID, message)
+	State_roomMembersProtocolError(state, serverID)
 	State_adminProtocolError(state, serverID, message)
 	State_setChatStatus(state, message)
 }
@@ -489,13 +524,19 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.hasOlder,
 		)
 	case .RoomMembershipChanged:
-		State_roomMembershipChanged(state, event.serverID, event.roomID, event.joined)
+		State_roomMembershipChanged(
+			state,
+			event.serverID,
+			event.roomID,
+			event.joined,
+			event.peerUserID,
+		)
 	case .RoomEdited:
 		State_roomEdited(state, event.serverID, event.roomID, &event.room)
 	case .RoomDeleted:
 		State_roomDeleted(state, event.serverID, event.roomID)
 	case .RoomCreated:
-		State_roomCreated(state, event.serverID, &event.room)
+		State_roomCreated(state, event.serverID, &event.room, event.isMember)
 	case .ProtocolError:
 		State_transportProtocolError(state, event.serverID, event.message)
 	case .Connecting:
@@ -551,6 +592,19 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .SessionEnded:
 		// The transport already ended the session as a failure that is not retried.
 		State_connectionFailed(state, event)
+	case .RoomMembersReceived:
+		State_receiveRoomMembers(state, event.serverID, event.roomID, &event.userIDs)
+	case .AdminRoomsReceived:
+		State_receiveAdminRooms(state, event.serverID, &event.adminRooms)
+	case .RoomMemberResult:
+		State_roomMemberResult(
+			state,
+			event.serverID,
+			event.roomID,
+			event.peerUserID,
+			event.joined,
+			event.changed,
+		)
 	case .None:
 	}
 }

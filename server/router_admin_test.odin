@@ -718,7 +718,12 @@ testMainRouterRoomTypesAreValidatedAndEnforced :: proc(t: ^testing.T) {
 			&clients[0].transport,
 			1,
 			.ClientCreateRoom,
-			common.ClientCreateRoomPayload{name = "lobby", roomType = roomType},
+			common.ClientCreateRoomPayload {
+				name = "lobby",
+				roomType = roomType,
+				access = .Public,
+				historyVisibility = .FromJoin,
+			},
 		)
 		routerTestExpectProtocolError(&h, peers[:], "Invalid room metadata")
 		routerTestSendSealed(
@@ -726,7 +731,12 @@ testMainRouterRoomTypesAreValidatedAndEnforced :: proc(t: ^testing.T) {
 			&clients[0].transport,
 			1,
 			.ClientEditRoom,
-			common.ClientEditRoomPayload{roomId = 5, name = "lobby", roomType = roomType},
+			common.ClientEditRoomPayload {
+				roomId = 5,
+				name = "lobby",
+				roomType = roomType,
+				access = .Public,
+			},
 		)
 		routerTestExpectProtocolError(&h, peers[:], "Invalid room edit")
 		routerTestExpectNoDatabaseQuery(&h, fmt.tprintf("expected %v refused", roomType))
@@ -736,7 +746,13 @@ testMainRouterRoomTypesAreValidatedAndEnforced :: proc(t: ^testing.T) {
 		&clients[0].transport,
 		1,
 		.ClientCreateRoom,
-		common.ClientCreateRoomPayload{name = "lobby", roomType = .Voice},
+		common.ClientCreateRoomPayload {
+			name = "lobby",
+			roomType = .Voice,
+			access = .Public,
+			historyVisibility = .FromJoin,
+			creatorJoins = true,
+		},
 	)
 	adminCheck := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(adminCheck.request)
@@ -818,7 +834,7 @@ testMainRouterEditToTextOnlyEndsTheRoomsVoice :: proc(t: ^testing.T) {
 		&clients[0].transport,
 		1,
 		.ClientEditRoom,
-		common.ClientEditRoomPayload{roomId = 5, name = "lobby", roomType = .Chat},
+		common.ClientEditRoomPayload{roomId = 5, name = "lobby", roomType = .Chat, access = .Public},
 	)
 	adminCheck := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(adminCheck.request)

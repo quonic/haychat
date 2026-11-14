@@ -201,7 +201,7 @@ pins the server's identity key on its first connection, so no TLS certificate is
 ## First-Time Setup
 
 A fresh server is ready to chat: on its first start (whenever the `rooms` table is empty) it
-creates `#general` as room 1, and every account joins every room. The log shows
+creates `#general` as room 1, a Public room that every account joins. The log shows
 `Created default room #general`. Testers only need the host and port.
 
 Optionally, give your own account the admin role, which lets it create, rename, and delete

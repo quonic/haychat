@@ -193,7 +193,7 @@ testChannelMenuEntriesAndAdminGating :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Mark as read (off),Join voice,Copy room name,|Edit room…,Delete room…!",
+		"Mark as read (off),Join voice,Copy room name,Members…,|Edit room…,Delete room…!",
 		"a channel for an admin",
 	)
 

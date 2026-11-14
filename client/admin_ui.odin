@@ -325,9 +325,13 @@ AdminMemberRow :: struct {
 }
 
 AdminRoomRow :: struct {
-	roomID:    int,
-	label:     string, // "# name", in the view allocator
-	typeLabel: string, // Static
+	roomID:      int,
+	label:       string, // "# name", in the view allocator
+	typeLabel:   string, // Static
+	// Protocol 15: the access mode, "Public · 4 members" or "Admin invite · not joined · 2
+	// members" (view allocator), and whether the admin is in it.
+	accessLabel: string,
+	isMember:    bool,
 }
 
 AdminStatusTone :: enum u8 {
@@ -410,17 +414,47 @@ buildAdminSectionView :: proc(
 	}
 	view.members = members[:]
 
+	// Every room from ServerAdminRooms (protocol 15), joined or not; until it arrives, the
+	// rooms this admin is in.
 	rooms := make([dynamic]AdminRoomRow, 0, allocator)
 	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
-		for room in state.server_room_caches[index].rooms {
-			append(
-				&rooms,
-				AdminRoomRow {
-					roomID = room.id,
-					label = fmt.aprintf("# %s", room.name, allocator = allocator),
-					typeLabel = roomTypeLabel(roomTypeShown(room.roomType)),
-				},
-			)
+		cache := &state.server_room_caches[index]
+		if cache.adminRoomsLoaded {
+			for entry in cache.adminRooms {
+				room := entry.room
+				access := roomAccessLabel(room.access)
+				members := fmt.aprintf(
+					"%d %s",
+					entry.memberCount,
+					entry.memberCount == 1 ? "member" : "members",
+					allocator = allocator,
+				)
+				joined := entry.isMember ? "" : " · not joined"
+				label := fmt.aprintf("%s%s · %s", access, joined, members, allocator = allocator)
+				append(
+					&rooms,
+					AdminRoomRow {
+						roomID = room.id,
+						label = fmt.aprintf("# %s", room.name, allocator = allocator),
+						typeLabel = roomTypeLabel(roomTypeShown(room.roomType)),
+						accessLabel = label,
+						isMember = entry.isMember,
+					},
+				)
+			}
+		} else {
+			for room in cache.rooms {
+				append(
+					&rooms,
+					AdminRoomRow {
+						roomID = room.id,
+						label = fmt.aprintf("# %s", room.name, allocator = allocator),
+						typeLabel = roomTypeLabel(roomTypeShown(room.roomType)),
+						accessLabel = roomAccessLabel(room.access),
+						isMember = true,
+					},
+				)
+			}
 		}
 	}
 	view.rooms = rooms[:]

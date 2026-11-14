@@ -120,6 +120,8 @@ State_openServerSettings :: proc(state: ^State, serverID: int) -> bool {
 	ServerSettingsForm_setMessages(form, "", "")
 	State_cancelAdminConfirm(state)
 	State_clearAdminRequestStatus(state)
+	// The Admin section lists every room, also those the admin is not in (protocol 15).
+	State_requestAdminRooms(state, serverID)
 	return true
 }
 

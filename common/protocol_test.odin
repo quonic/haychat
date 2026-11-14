@@ -26,6 +26,7 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerListRooms, 45},
 	{.ClientFetchRoomHistory, 46},
 	{.ServerRoomHistory, 47},
+	{.ClientLeaveRoom, 36},
 	{.ClientCreateRoom, 51},
 	{.ServerCreateRoom, 52},
 	{.ClientDeleteRoom, 53},
@@ -67,6 +68,10 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerUserUpdated, 154},
 	{.ServerAccountUpdated, 155},
 	{.ServerSessionEnded, 156},
+	{.ClientFetchRoomMembers, 157},
+	{.ServerRoomMembers, 158},
+	{.ClientAdminListRooms, 159},
+	{.ServerAdminRooms, 160},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -93,6 +98,112 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 		int(SessionEndedKind.Kicked) == 0 && int(SessionEndedKind.Banned) == 1,
 		"expected SessionEndedKind to stay Kicked 0, Banned 1",
 	)
+	// Protocol 15, and rooms.access / rooms.history_visibility in the database.
+	assert(
+		int(RoomAccess.Public) == 1 &&
+		int(RoomAccess.MemberInvite) == 2 &&
+		int(RoomAccess.AdminInvite) == 3,
+		"expected RoomAccess to stay Public 1, MemberInvite 2, AdminInvite 3",
+	)
+	assert(
+		int(RoomHistoryVisibility.FromJoin) == 1 && int(RoomHistoryVisibility.Full) == 2,
+		"expected RoomHistoryVisibility to stay FromJoin 1, Full 2",
+	)
+}
+
+@(test)
+testRoomAccessModesAndHistoryVisibility :: proc(t: ^testing.T) {
+	_ = t
+	for access in RoomAccess {
+		assert(roomAccessIsSupported(access), fmt.tprintf("expected %v supported", access))
+	}
+	assert(
+		!roomAccessIsSupported(RoomAccess(0)) && !roomAccessIsSupported(RoomAccess(4)),
+		"expected 0 and 4 to be no access mode",
+	)
+	assert(
+		!roomHistoryVisibilityIsSupported(RoomHistoryVisibility(0)) &&
+		!roomHistoryVisibilityIsSupported(RoomHistoryVisibility(3)),
+		"expected 0 and 3 to be no history setting",
+	)
+	assert(
+		roomEffectiveHistoryVisibility(.Public, .FromJoin) == .Full &&
+		roomEffectiveHistoryVisibility(.MemberInvite, .FromJoin) == .FromJoin &&
+		roomEffectiveHistoryVisibility(.AdminInvite, .Full) == .Full,
+		"expected Public rooms to read full history and invite rooms their own setting",
+	)
+}
+
+// The protocol 15 payloads survive CBOR, and the owned ones free cleanly.
+@(test)
+testRoomAccessPayloadsRoundTrip :: proc(t: ^testing.T) {
+	_ = t
+	{
+		encoded, err := cbor.marshal(
+			ClientCreateRoomPayload {
+				name = "secret",
+				roomType = .Chat,
+				access = .AdminInvite,
+				historyVisibility = .Full,
+				creatorJoins = true,
+			},
+		)
+		assert(err == nil, "expected ClientCreateRoomPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientCreateRoomPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected the create to decode")
+		defer delete(decoded.name)
+		defer delete(decoded.description)
+		assert(
+			decoded.access == .AdminInvite &&
+			decoded.historyVisibility == .Full &&
+			decoded.creatorJoins,
+			fmt.tprintf("expected the access fields to survive, got %v", decoded),
+		)
+	}
+	{
+		userIDs := make([dynamic]int)
+		defer delete(userIDs)
+		append(&userIDs, 3, 5)
+		encoded, err := cbor.marshal(ServerRoomMembersPayload{roomId = 9, userIds = userIDs})
+		assert(err == nil, "expected ServerRoomMembersPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerRoomMembersPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected the members to decode")
+		defer ServerRoomMembersPayload_deinit(&decoded)
+		assert(
+			decoded.roomId == 9 &&
+			len(decoded.userIds) == 2 &&
+			decoded.userIds[0] == 3 &&
+			decoded.userIds[1] == 5,
+			fmt.tprintf("expected room 9 with 3 and 5, got %v", decoded),
+		)
+	}
+	{
+		rooms := make([dynamic]AdminRoomSummary)
+		defer delete(rooms)
+		append(
+			&rooms,
+			AdminRoomSummary {
+				room = {id = 4, name = "ops", access = .AdminInvite, historyVisibility = .FromJoin},
+				memberCount = 2,
+			},
+		)
+		encoded, err := cbor.marshal(ServerAdminRoomsPayload{rooms = rooms})
+		assert(err == nil, "expected ServerAdminRoomsPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerAdminRoomsPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected the admin rooms to decode")
+		defer ServerAdminRoomsPayload_deinit(&decoded)
+		assert(
+			len(decoded.rooms) == 1 &&
+			decoded.rooms[0].room.name == "ops" &&
+			decoded.rooms[0].room.access == .AdminInvite &&
+			!decoded.rooms[0].isMember &&
+			decoded.rooms[0].memberCount == 2,
+			fmt.tprintf("expected the ops room, got %v", decoded),
+		)
+	}
 }
 
 @(test)
@@ -294,18 +405,19 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsFourteenForAdminActionsAndRoomTypes :: proc(t: ^testing.T) {
+testProtocolVersionIsFifteenForRoomAccessModes :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
 	// ServerVoiceParticipants.recipientJoined; 13 added ClientJoinVoice.rejoin and deviceId for
 	// one voice session per user; 14 added the admin actions, ServerAuthSuccess.nickname and
-	// nicknameLocked, UserSummary.isAdmin and isBanned, and room types, so peers on 13 or
-	// older cannot talk to this build.
+	// nicknameLocked, UserSummary.isAdmin and isBanned, and room types; 15 added room access
+	// modes, history visibility, member fetches, leaving, and the admin room list, so peers on
+	// 14 or older cannot talk to this build.
 	assert(
-		protocolVersion == 14,
+		protocolVersion == 15,
 		fmt.tprintf(
-			"expected protocol version 14 for admin actions and room types, got %d",
+			"expected protocol version 15 for room access modes, got %d",
 			protocolVersion,
 		),
 	)
