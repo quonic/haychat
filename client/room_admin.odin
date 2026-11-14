@@ -343,6 +343,16 @@ State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	}
 }
 
+// Opens the edit form with its delete armed: the next click on "Confirm delete" sends. The
+// channel menu's Delete room… and the Admin section's Delete use it.
+State_openRoomEditorForDelete :: proc(state: ^State, roomID: int) {
+	State_openRoomEditor(state, roomID)
+	editor := &state.roomEditor
+	if editor.mode == .Edit && editor.roomID == roomID {
+		editor.confirmDelete = true
+	}
+}
+
 State_closeRoomEditor :: proc(state: ^State) {
 	State_resetRoomEditor(state, .Closed, 0, 0)
 }
@@ -353,6 +363,19 @@ State_closeRoomEditorForServer :: proc(state: ^State, serverID: int) {
 	if state.roomEditor.mode != .Closed && state.roomEditor.serverID == serverID {
 		State_closeRoomEditor(state)
 	}
+}
+
+// The type selector: Text (Chat), Voice, or Text and voice. Nothing is sent until Create or
+// Save.
+State_setRoomEditorType :: proc(state: ^State, roomType: common.RoomType) {
+	editor := &state.roomEditor
+	if editor.mode == .Closed ||
+	   editor.pending != .None ||
+	   !common.roomTypeIsSupported(roomType) {
+		return
+	}
+	editor.roomType = roomType
+	editor.confirmDelete = false
 }
 
 // Create or Save. The form stays open until the server answers: RoomCreated or RoomEdited

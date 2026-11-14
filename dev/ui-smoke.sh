@@ -23,6 +23,17 @@ set -euo pipefail
 #      second time). bob then posts in alice's new room, which she is not viewing; she waits
 #      for its unread badge, right-clicks the channel and clicks "Mark as read". A second
 #      headless session of alice's account (her profile) must get the read_marker for it.
+#   7. admin (plan P4): alice right-clicks bob in Members and clicks "Make admin"; bob's harness
+#      must see account_updated with isAdmin true without reconnecting. She removes the role
+#      again (another admin cannot be banned), clicks "Ban…" in his menu, which opens Server
+#      settings → Admin with the ban confirmation, types a reason and confirms; bob must get
+#      session_ended "banned" with that reason. She unbans him with the Admin section's Unban
+#      and bob's `reconnect` signs in again. bob joins #general's voice; alice right-clicks his
+#      voice row and mutes him for herself from the menu, which also holds his volume slider.
+#      Last, she edits her room to "Voice" in the room form (a note replaces the composer),
+#      then to "Text", and Join voice disappears from its header and its menu; bob's room list
+#      must show the room as text-only (roomType 1). She opens Server settings from the rail
+#      button's menu and scrolls to the Admin section's rooms list.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -94,6 +105,7 @@ dm_message="ui smoke dm from bob $run_tag"
 reply_message="ui smoke reply from alice $run_tag"
 admin_room="ui-room-$run_tag"
 unread_message="ui smoke unread from bob $run_tag"
+ban_reason="ui smoke ban $run_tag"
 
 echo "==> [ui] starting headless bob"
 start_client bob "$nickname_bob"
@@ -195,6 +207,87 @@ wait-text "Mark as read" 5000
 screenshot $screenshot_dir/15-channel-menu.bmp
 click "Mark as read"
 screenshot $screenshot_dir/16-channel-read.bmp
+# Admin: make bob an admin from his Members row. The menu is rebuilt every frame, so once the
+# server's user_updated arrives his entry reads "Remove admin".
+right-click-id dm-member 1 $user_bob
+wait-text "Make admin" 5000
+screenshot $screenshot_dir/17-member-admin-menu.bmp
+click "Make admin"
+right-click-id dm-member 1 $user_bob
+wait-text "Remove admin" 10000
+screenshot $screenshot_dir/18-bob-admin.bmp
+# Another admin cannot be banned (D6): remove the role, then ban from the same menu. Ban… opens
+# Server settings → Admin with the confirmation open and scrolled into view.
+click "Remove admin"
+right-click-id dm-member 1 $user_bob
+wait-text "Make admin" 10000
+click "Ban…"
+wait-text "Ban $nickname_bob" 5000
+wait 500
+click-id admin-confirm-text 1 $user_bob
+type "$ban_reason"
+screenshot $screenshot_dir/19-ban-confirm.bmp
+click-id admin-confirm 1 $user_bob
+# The server's answer is shown above the table; his row keeps its place (sorted by name).
+wait-text "Banned $nickname_bob" 10000
+wait 300
+screenshot $screenshot_dir/20-bob-banned.bmp
+click-id admin-member-ban 1 $user_bob
+wait-text "Unbanned $nickname_bob" 10000
+wait 300
+screenshot $screenshot_dir/21-bob-unbanned.bmp
+click-id server-settings-close 1
+# bob signs in again and joins #general's voice: his name is then drawn a third time (after his
+# conversation and Members rows), under the channel. His voice row's menu mutes him for alice
+# only and holds his volume.
+wait-count 3 "$nickname_bob" 30000
+right-click-id voice-participant 1 1 $user_bob
+wait-text "Mute for me" 5000
+screenshot $screenshot_dir/22-participant-menu.bmp
+click "Mute for me"
+right-click-id voice-participant 1 1 $user_bob
+wait-text "Unmute for me" 5000
+key Escape
+wait-gone "Unmute for me" 5000
+# Room types, from the room form: alice's room becomes voice only (a note replaces the
+# composer), then text only (Join voice goes from its header and its menu).
+click "# $admin_room"
+wait-text "Join voice" 5000
+right-click "# $admin_room"
+click "Edit room…"
+wait-text "Text and voice" 5000
+click-id room-type 2
+click-id room-editor-submit
+wait-text "This room is voice only" 10000
+assert-text "Join voice"
+screenshot $screenshot_dir/23-room-voice-only.bmp
+right-click "# $admin_room"
+click "Edit room…"
+wait-text "Type" 5000
+click-id room-type 1
+screenshot $screenshot_dir/24-room-type-text.bmp
+click-id room-editor-submit
+wait-text "Message #$admin_room (Enter to send, Shift+Enter for newline)" 10000
+wait-gone "Join voice" 5000
+screenshot $screenshot_dir/25-room-text-only.bmp
+right-click "# $admin_room"
+wait-text "Copy room name" 5000
+assert-text "Mark as read"
+wait-gone "Join voice" 1000
+screenshot $screenshot_dir/26-text-only-menu.bmp
+key Escape
+# Server settings from the rail button's menu, scrolled to the end (the offset clamps there),
+# where the Admin section's rooms list sits above the server key. Under --all the server has
+# every earlier proof's accounts, so the page is long.
+right-click-id rail-server 1
+click "Server settings"
+wait-text "Display name on this server" 5000
+scroll 760 400 100
+scroll 760 400 100
+scroll 760 400 100
+wait-text "Create room…" 5000
+screenshot $screenshot_dir/27-admin-rooms.bmp
+click-id server-settings-close 1
 quit
 EOF
 
@@ -281,6 +374,36 @@ marker_line=$(wait_for_match alice-watch "$marker_pattern") ||
 	fail "[menu] alice's account never got a read marker for $admin_room"
 echo "    alice-watch< $marker_line"
 
+echo "==> [ui] alice makes bob an admin from his member menu, bob sees it without reconnecting"
+admin_on=$(wait_for_match bob '^\{"event":"account_updated",.*"isAdmin":true,' "$admin_start") ||
+	fail "[admin] bob never got account_updated with isAdmin true"
+echo "    bob< $admin_on"
+admin_off=$(wait_for_match bob '^\{"event":"account_updated",.*"isAdmin":false,' "$admin_start") ||
+	fail "[admin] bob never got account_updated with isAdmin false"
+echo "    bob< $admin_off"
+
+echo "==> [ui] alice bans bob from his member menu with a reason"
+ban_pattern="^\\{\"event\":\"session_ended\",.*\"kind\":\"banned\",.*\"reason\":\"$ban_reason\""
+ban_line=$(wait_for_match bob "$ban_pattern" "$admin_start") ||
+	fail "[admin] bob never got session_ended banned with the reason"
+echo "    bob< $ban_line"
+
+echo "==> [ui] alice unbans bob in the Admin section, bob signs in again and joins voice"
+unbanned_shot="\"file\":\"$screenshot_dir/21-bob-unbanned.bmp\""
+for ((attempt = 0; attempt < command_timeout_secs * 5; attempt++)); do
+	grep -Fq -- "$unbanned_shot" "$work_dir/alice.out" && break
+	kill -0 "$gui_pid" 2>/dev/null || fail "[admin] alice's window exited before the unban"
+	sleep 0.2
+done
+grep -Fq -- "$unbanned_shot" "$work_dir/alice.out" || fail "[admin] alice never unbanned bob"
+reconnect_start=$(wc -l <"$work_dir/bob.out")
+expect_ok bob reconnect
+reconnected=$(wait_for_line bob '{"event":"connected",' "$reconnect_start") ||
+	fail "[admin] bob could not sign in again after the unban"
+echo "    bob< $reconnected"
+expect_ok bob wait room_list 5000
+expect_ok bob voice-join 1
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -288,6 +411,12 @@ sed 's/^/    alice< /' "$work_dir/alice.out"
 [[ $gui_status -eq 0 ]] || fail "the GUI script exited with status $gui_status"
 grep -Fqx '{"event":"ui_script_done","failed":0,"skipped":0}' "$work_dir/alice.out" ||
 	fail "the GUI script did not report every command as done"
+
+echo "==> [ui] alice made her room text-only in the room form, bob lists it as text-only"
+expect_ok bob rooms
+[[ "$last_result" =~ \{\"id\":$admin_room_id,\"name\":\"$admin_room\",[^}]*\"roomType\":1 ]] ||
+	fail "[admin] bob's rooms do not list $admin_room as text-only: $last_result"
+expect_ok bob voice-leave
 
 stop_client alice-watch
 stop_client bob
@@ -299,5 +428,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 16 ]] || fail "expected 16 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 27 ]] || fail "expected 27 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

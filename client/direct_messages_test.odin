@@ -105,6 +105,8 @@ testApplyUserList :: proc(state: ^State, serverID: int, users: ..common.UserSumm
 				id = user.id,
 				nickname = strings.clone(user.nickname),
 				isOnline = user.isOnline,
+				isAdmin = user.isAdmin,
+				isBanned = user.isBanned,
 			},
 		)
 	}

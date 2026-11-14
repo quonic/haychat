@@ -343,7 +343,12 @@ testUserMenusForConversationsMembersSendersAndVoice :: proc(t: ^testing.T) {
 	contextMenuTestVoice(&state, 933, 1, CONTEXT_MENU_TEST_SELF, CONTEXT_MENU_TEST_PEER)
 	target := VoiceParticipantMenuTarget{933, 1, CONTEXT_MENU_TEST_PEER}
 	State_openContextMenu(&state, target, {10, 10})
-	contextMenuTestExpect(t, contextMenuTestEntries(&state), "Send message,Copy name", "voice")
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Copy name,|Mute for me,Volume: 100 %",
+		"voice",
+	)
 	State_openContextMenu(&state, VoiceParticipantMenuTarget{933, 1, CONTEXT_MENU_TEST_SELF}, {})
 	contextMenuTestExpect(
 		t,
@@ -467,7 +472,7 @@ testServerMenuRetriesAndRemovesAfterConfirmation :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Copy address,|Remove server…!",
+		"Server settings,Copy address,|Remove server…!",
 		"a connected server",
 	)
 	effect := State_runContextMenuAction(&state, .CopyAddress, now)
@@ -482,7 +487,7 @@ testServerMenuRetriesAndRemovesAfterConfirmation :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Retry now,Copy address,|Remove server…!",
+		"Server settings,Retry now,Copy address,|Remove server…!",
 		"a server that is not connected",
 	)
 
@@ -493,7 +498,7 @@ testServerMenuRetriesAndRemovesAfterConfirmation :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Retry now,Copy address,|Click again to remove!",
+		"Server settings,Retry now,Copy address,|Click again to remove!",
 		"the armed removal",
 	)
 	_ = State_runContextMenuAction(&state, .ConfirmRemoveServer, now)
@@ -569,4 +574,254 @@ testContextMenuRequestsWaitForTheFrameToOpen :: proc(t: ^testing.T) {
 	State_openContextMenu(&state, ServerMenuTarget{939}, {1, 1})
 	assert(menu.serial == serial + 1, "expected each menu opened to be a new menu")
 	assert(menu.selectionText == "", "expected the old selection freed")
+}
+
+// The admin directory for the admin entries: self (an admin), peer, carol (another admin) and
+// dave (banned).
+CONTEXT_MENU_TEST_CAROL :: 11
+CONTEXT_MENU_TEST_DAVE :: 12
+
+@(private = "file")
+contextMenuTestAdminDirectory :: proc(state: ^State, serverID: int) {
+	testApplyUserList(
+		state,
+		serverID,
+		{id = CONTEXT_MENU_TEST_SELF, nickname = "self", isOnline = true, isAdmin = true},
+		{id = CONTEXT_MENU_TEST_PEER, nickname = "peer", isOnline = true},
+		{id = CONTEXT_MENU_TEST_CAROL, nickname = "carol", isAdmin = true},
+		{id = CONTEXT_MENU_TEST_DAVE, nickname = "dave", isBanned = true},
+	)
+}
+
+@(test)
+testAdminEntriesInUserMenusFollowTheRole :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := contextMenuTestState(961, true)
+	defer State_deinit(&state)
+	contextMenuTestAdminDirectory(&state, 961)
+
+	USER :: "Send message,Copy name"
+	State_openContextMenu(&state, MemberMenuTarget{961, CONTEXT_MENU_TEST_PEER}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		USER + ",|Rename…,Make admin,Kick…!,Ban…!",
+		"a member for an admin",
+	)
+	State_openContextMenu(&state, MemberMenuTarget{961, CONTEXT_MENU_TEST_CAROL}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		USER + ",|Rename…,Remove admin,Kick…! (off),Ban…! (off)",
+		"another admin: no kick or ban (D6)",
+	)
+	State_openContextMenu(&state, MemberMenuTarget{961, CONTEXT_MENU_TEST_DAVE}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		USER + ",|Rename…,Make admin (off),Kick…!,Unban",
+		"a banned account",
+	)
+	// Yourself, through your sender name: only Rename.
+	testApplyRoomChat(&state, 961, 1, CONTEXT_MENU_TEST_SELF, 50, "mine", "self")
+	State_openContextMenu(&state, SenderMenuTarget{961, .Room, 1, 50}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message (off),Copy name,|Rename…,Remove admin (off),Kick…! (off),Ban…! (off)",
+		"yourself",
+	)
+	contextMenuTestConversation(&state, 961, 40, 0)
+	State_openContextMenu(&state, ConversationMenuTarget{961, CONTEXT_MENU_TEST_PEER}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Mark as read (off),Copy name,|Rename…,Make admin,Kick…!,Ban…!",
+		"a conversation for an admin",
+	)
+	contextMenuTestVoice(&state, 961, 1, CONTEXT_MENU_TEST_PEER)
+	State_openContextMenu(&state, VoiceParticipantMenuTarget{961, 1, CONTEXT_MENU_TEST_PEER}, {})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Copy name,|Mute for me,Volume: 100 %,|Rename…,Make admin,Kick…!,Ban…!",
+		"a voice participant for an admin",
+	)
+
+	// Without the role there are no admin entries anywhere.
+	testApplyConnectedAs(&state, 961, CONTEXT_MENU_TEST_SELF, false)
+	contextMenuTestAdminDirectory(&state, 961)
+	State_openContextMenu(&state, MemberMenuTarget{961, CONTEXT_MENU_TEST_PEER}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Mark as read (off),Copy name",
+		"a member for a member",
+	)
+}
+
+@(test)
+testAdminMenuActionsUseTheAdminSection :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	sync.mutex_lock(&adminSendBridgeTestMutex)
+	defer sync.mutex_unlock(&adminSendBridgeTestMutex)
+	testAdminUseStub()
+	defer testAdminRestore()
+
+	state := contextMenuTestState(962, true)
+	defer State_deinit(&state)
+	contextMenuTestAdminDirectory(&state, 962)
+	now := time.tick_now()
+
+	// Entries that need input open Server settings → Admin with the confirmation open.
+	Opens :: struct {
+		action: ContextMenuAction,
+		kind:   AdminConfirmKind,
+	}
+	for entry in ([]Opens{{.AdminRename, .Rename}, {.AdminKick, .Kick}, {.AdminBan, .Ban}}) {
+		State_closeServerSettings(&state)
+		State_openContextMenu(&state, MemberMenuTarget{962, CONTEXT_MENU_TEST_PEER}, {10, 10})
+		_ = State_runContextMenuAction(&state, entry.action, now)
+		confirm := state.serverSettings.adminConfirm
+		testing.expectf(
+			t,
+			state.contextMenu.target == nil &&
+			State_serverSettingsVisible(&state) &&
+			confirm.kind == entry.kind &&
+			confirm.userID == CONTEXT_MENU_TEST_PEER,
+			"expected %v to open its confirmation, got %v",
+			entry.action,
+			confirm,
+		)
+	}
+	testing.expect(t, adminSendBridgeTestCount == 0, "expected nothing sent before Confirm")
+
+	// Make admin, Remove admin and Unban send at once.
+	Sends :: struct {
+		action:   ContextMenuAction,
+		userID:   int,
+		expected: AdminRequest,
+	}
+	sends := []Sends {
+		{
+			.MakeAdmin,
+			CONTEXT_MENU_TEST_PEER,
+			{action = .SetRole, userID = CONTEXT_MENU_TEST_PEER, flag = true},
+		},
+		{
+			.RemoveAdmin,
+			CONTEXT_MENU_TEST_CAROL,
+			{action = .SetRole, userID = CONTEXT_MENU_TEST_CAROL},
+		},
+		{.AdminUnban, CONTEXT_MENU_TEST_DAVE, {action = .Ban, userID = CONTEXT_MENU_TEST_DAVE}},
+	}
+	for entry, index in sends {
+		State_openContextMenu(&state, MemberMenuTarget{962, entry.userID}, {10, 10})
+		_ = State_runContextMenuAction(&state, entry.action, now)
+		testing.expectf(
+			t,
+			adminSendBridgeTestCount == index + 1 && adminSendBridgeTestLast == entry.expected,
+			"expected %v to send %v, got %v",
+			entry.action,
+			entry.expected,
+			adminSendBridgeTestLast,
+		)
+	}
+	// A disabled entry does nothing even if it is run.
+	State_openContextMenu(&state, MemberMenuTarget{962, CONTEXT_MENU_TEST_CAROL}, {10, 10})
+	_ = State_runContextMenuAction(&state, .AdminKick, now)
+	testing.expect(
+		t,
+		state.serverSettings.adminConfirm.kind != .Kick ||
+		state.serverSettings.adminConfirm.userID != CONTEXT_MENU_TEST_CAROL,
+		"expected no kick confirmation for another admin",
+	)
+	testing.expect(t, adminSendBridgeTestCount == len(sends), "expected nothing more sent")
+}
+
+@(test)
+testVoiceParticipantMenuMutesAndSetsTheVolume :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := contextMenuTestState(963, false)
+	defer State_deinit(&state)
+	now := time.tick_now()
+	contextMenuTestVoice(&state, 963, 1, CONTEXT_MENU_TEST_SELF, CONTEXT_MENU_TEST_PEER)
+	target := VoiceParticipantMenuTarget{963, 1, CONTEXT_MENU_TEST_PEER}
+
+	State_openContextMenu(&state, target, {10, 10})
+	_ = State_runContextMenuAction(&state, .MuteForMe, now)
+	_, muted := State_userVoice(&state, 963, CONTEXT_MENU_TEST_PEER)
+	testing.expect(t, muted, "expected the peer muted for this client")
+	State_openContextMenu(&state, target, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Copy name,|Unmute for me,Volume: 100 %",
+		"a participant muted for me",
+	)
+
+	// The slider applies while dragged, keeps the menu open, and keeps the mute.
+	testing.expect(t, State_setContextMenuVolume(&state, 0.5, false), "expected the volume set")
+	volume, stillMuted := State_userVoice(&state, 963, CONTEXT_MENU_TEST_PEER)
+	testing.expect(
+		t,
+		volume == 0.5 && stillMuted && state.contextMenu.target != nil,
+		fmt.tprintf("expected 50 %% kept muted with the menu open, got %v %v", volume, stillMuted),
+	)
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Send message,Copy name,|Unmute for me,Volume: 50 %",
+		"the new volume in the menu",
+	)
+	_ = State_runContextMenuAction(&state, .UnmuteForMe, now)
+	volume, muted = State_userVoice(&state, 963, CONTEXT_MENU_TEST_PEER)
+	testing.expect(t, volume == 0.5 && !muted, "expected unmuted at the same volume")
+
+	// Yourself: no local mute or volume.
+	State_openContextMenu(&state, VoiceParticipantMenuTarget{963, 1, CONTEXT_MENU_TEST_SELF}, {})
+	testing.expect(
+		t,
+		!State_setContextMenuVolume(&state, 0.2, true),
+		"expected no volume for yourself",
+	)
+}
+
+@(test)
+testServerMenuOpensServerSettingsAndTextOnlyRoomsHaveNoJoinVoice :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	state := contextMenuTestState(964, false)
+	defer State_deinit(&state)
+	now := time.tick_now()
+
+	State_openContextMenu(&state, ServerMenuTarget{964}, {10, 10})
+	_ = State_runContextMenuAction(&state, .ServerSettings, now)
+	testing.expect(
+		t,
+		State_serverSettingsVisible(&state) && state.contextMenu.target == nil,
+		"expected Server settings open and the menu closed",
+	)
+	State_closeServerSettings(&state)
+
+	contextMenuTestRooms(
+		&state,
+		964,
+		{id = 1, name = "general"},
+		{id = 2, name = "notes", roomType = .Chat},
+		{id = 3, name = "stage", roomType = .Voice},
+	)
+	State_openContextMenu(&state, ChannelMenuTarget{964, 2}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Mark as read (off),Copy room name",
+		"a text-only room",
+	)
+	State_openContextMenu(&state, ChannelMenuTarget{964, 3}, {10, 10})
+	contextMenuTestExpect(
+		t,
+		contextMenuTestEntries(&state),
+		"Mark as read (off),Join voice,Copy room name",
+		"a voice-only room",
+	)
 }

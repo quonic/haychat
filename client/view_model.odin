@@ -19,16 +19,22 @@ RoomView :: struct {
 	hasSelectedRoom:  bool,
 	// Admins get an "Edit room" control in the room header.
 	canEditRoom:      bool,
+	// False for a voice-only room (protocol 14): no composer, voiceOnlyNote instead.
+	allowsChat:       bool,
+	voiceOnlyNote:    string,
 	hasOlder:         bool,
 	isLoadingHistory: bool,
 	lines:            []TranscriptLine,
 	status:           string, // Borrowed from State
 }
 
+ROOM_VOICE_ONLY_NOTE :: "This room is voice only"
+
 // Builds the selected room's view without creating caches. Lines borrow message content from
 // the room cache, so the result is only valid until State next changes.
 buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (view: RoomView) {
 	view.status = state.chat_status_message
+	view.allowsChat = true
 	serverCacheIndex := State_serverRoomCacheIndex(state^, state.selected_server_id)
 	if serverCacheIndex < 0 {
 		return
@@ -37,6 +43,12 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	view.hasSelectedRoom = ServerRoomCache_roomIsJoined(serverCache, state.selected_channel_id)
 	view.canEditRoom =
 		view.hasSelectedRoom && State_isServerAdmin(state, state.selected_server_id)
+	view.allowsChat =
+		!view.hasSelectedRoom ||
+		State_roomAllowsChat(state, state.selected_server_id, state.selected_channel_id)
+	if !view.allowsChat {
+		view.voiceOnlyNote = ROOM_VOICE_ONLY_NOTE
+	}
 	roomCacheIndex := ServerRoomCache_roomCacheIndex(serverCache^, state.selected_channel_id)
 	if roomCacheIndex < 0 {
 		return
@@ -372,7 +384,26 @@ RoomEditorView :: struct {
 	// Shown above the buttons when editing #general (room 1), which is special only in that
 	// the server recreates it on its next start when no rooms are left.
 	generalNotice: string,
+	// The type selector (protocol 14): the chosen type and what it means.
+	roomType:      common.RoomType,
+	typeNote:      string,
+	// Edit to text-only of a room with people in its voice: they are removed.
+	typeWarning:   string,
 	error:         string,
+}
+
+// The room types the form offers, in the selector's order.
+ROOM_EDITOR_TYPES := [3]common.RoomType{.Chat, .Voice, .ChatAndVoice}
+
+// What a room type means, for the form.
+roomTypeNote :: proc(roomType: common.RoomType) -> string {
+	#partial switch roomType {
+	case .Chat:
+		return "Messages only. The room has no voice and no Join voice button."
+	case .Voice:
+		return "Voice only. The room has no composer; its earlier messages stay readable."
+	}
+	return "Messages and voice."
 }
 
 ROOM_EDITOR_GENERAL_NOTICE ::
@@ -395,6 +426,8 @@ buildRoomEditorView :: proc(
 	view.isCreate = editor.mode == .Create
 	view.busy = editor.pending != .None
 	view.error = editor.error
+	view.roomType = roomTypeShown(editor.roomType)
+	view.typeNote = roomTypeNote(view.roomType)
 	if view.isCreate {
 		view.title = "New room"
 		view.submitLabel = editor.pending == .Create ? "Creating…" : "Create"
@@ -421,6 +454,15 @@ buildRoomEditorView :: proc(
 	}
 	if editor.roomID == common.GENERAL_ROOM_ID {
 		view.generalNotice = ROOM_EDITOR_GENERAL_NOTICE
+	}
+	inVoice := len(State_voiceRoomParticipants(state, editor.serverID, editor.roomID))
+	if !common.roomTypeAllowsVoice(view.roomType) && inVoice > 0 {
+		view.typeWarning = fmt.aprintf(
+			"%d %s in this room's voice will be removed from it when you save.",
+			inVoice,
+			inVoice == 1 ? "person" : "people",
+			allocator = allocator,
+		)
 	}
 	return
 }

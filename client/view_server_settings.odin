@@ -10,6 +10,12 @@ import "ui"
 // Widget IDs for GUI automation (all take the server ID; the voice ones also the user ID):
 // server-settings (the sidebar header's gear), server-settings-name, -label, -short, -host,
 // -port, -save, -close, -forget-key, -remove, server-voice-volume, server-voice-mute.
+//
+// The Admin section (admins only, admin_ui.odin), all with the server ID and then the user or
+// room ID: admin-member-rename, admin-member-role (Make admin / Remove admin),
+// admin-member-kick, admin-member-ban (Ban… / Unban); the open confirmation's
+// admin-confirm-text, admin-confirm-lock (Rename only), admin-confirm, admin-confirm-cancel;
+// admin-room-edit, admin-room-delete, and admin-room-create (server ID only).
 
 SERVER_SETTINGS_COLUMN_WIDTH :: 520
 SERVER_SETTINGS_SHORT_WIDTH :: 96
@@ -135,6 +141,10 @@ viewServerSettings :: proc(
 	padding := ui.dp(ctx, 24)
 	width := min(area.w - padding * 2, ui.dp(ctx, SERVER_SETTINGS_COLUMN_WIDTH))
 	scrollID := ui.idOf("server-settings-scroll", serverID)
+	if form.scrollToTop {
+		ui.scrollState(ctx, scrollID)^ = {}
+		form.scrollToTop = false
+	}
 	offset := ui.scrollBegin(ctx, scrollID, area, form.contentH)
 	column := ui.Rect {
 		area.x + (area.w - width) / 2,
@@ -150,28 +160,41 @@ viewServerSettings :: proc(
 
 	// ── Profile ──
 	serverSettingsHeading(ctx, &column, "Profile")
-	serverSettingsLabel(ctx, &column, "Display name on this server")
-	nameID := ui.idOf("server-settings-name", serverID)
-	nameRect := ui.cutTop(&column, ui.textInputHeight(ctx, nameID, form.displayName[:], width))
-	namePlaceholder := fmt.tprintf("Your name everywhere else: %s", view.globalName)
-	if serverSettingsField(
-		ctx,
-		nameRect,
-		nameID,
-		&form.displayName,
-		namePlaceholder,
-		DISPLAY_NAME_MAX_BYTES,
-	) {
-		submitted = true
+	if view.nameLocked {
+		// An admin renamed this account and locked the name (D3): the server keeps it
+		// whatever name this client signs in with, so there is nothing to edit here.
+		serverSettingsLabel(ctx, &column, "Name on this server")
+		lockedRect := ui.cutTop(&column, ui.lineHeight(ctx, .Bold))
+		ui.label(ctx, lockedRect, view.lockedName, ctx.theme.fg, .Bold)
+		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		serverSettingsWrapped(ctx, &column, SERVER_SETTINGS_LOCKED_NAME_NOTE, ctx.theme.fgMuted)
+	} else {
+		serverSettingsLabel(ctx, &column, "Display name on this server")
+		nameID := ui.idOf("server-settings-name", serverID)
+		nameRect := ui.cutTop(
+			&column,
+			ui.textInputHeight(ctx, nameID, form.displayName[:], width),
+		)
+		namePlaceholder := fmt.tprintf("Your name everywhere else: %s", view.globalName)
+		if serverSettingsField(
+			ctx,
+			nameRect,
+			nameID,
+			&form.displayName,
+			namePlaceholder,
+			DISPLAY_NAME_MAX_BYTES,
+		) {
+			submitted = true
+		}
+		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		serverSettingsWrapped(
+			ctx,
+			&column,
+			"Leave it empty to use your name from Settings. Changing it renames you on this " +
+			"server only and reconnects to it.",
+			ctx.theme.fgMuted,
+		)
 	}
-	_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
-	serverSettingsWrapped(
-		ctx,
-		&column,
-		"Leave it empty to use your name from Settings. Changing it renames you on this " +
-		"server only and reconnects to it.",
-		ctx.theme.fgMuted,
-	)
 	_ = ui.cutTop(&column, sectionGap)
 
 	// ── Server ──
@@ -330,6 +353,13 @@ viewServerSettings :: proc(
 
 	_ = ui.cutTop(&column, sectionGap)
 
+	// ── Admin (admins only) ──
+	adminAction: AdminSectionAction
+	if view.admin.visible {
+		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
+		_ = ui.cutTop(&column, sectionGap)
+	}
+
 	// ── Key and removal, last: rarely needed and not undone by Close ──
 	serverSettingsLabel(ctx, &column, "Server key")
 	fingerprintText := "No key pinned yet. The next connection pins the key the server presents."
@@ -399,6 +429,30 @@ viewServerSettings :: proc(
 	case voiceAction.toggleMute:
 		State_setUserVoiceMuted(state, serverID, voiceAction.userID, voiceAction.muted)
 	}
+	switch adminAction.kind {
+	case .None:
+	case .OpenConfirm:
+		State_openAdminConfirm(state, serverID, adminAction.confirmKind, adminAction.userID)
+	case .CancelConfirm:
+		State_cancelAdminConfirm(state)
+	case .SubmitConfirm:
+		State_submitAdminConfirm(state)
+	case .ToggleLock:
+		State_toggleAdminConfirmLock(state)
+	case .SetRole:
+		State_adminSetRole(state, serverID, adminAction.userID, adminAction.grant)
+	case .Unban:
+		State_adminUnban(state, serverID, adminAction.userID)
+	case .EditRoom:
+		State_openRoomEditor(state, adminAction.roomID)
+		return
+	case .DeleteRoom:
+		State_openRoomEditorForDelete(state, adminAction.roomID)
+		return
+	case .CreateRoom:
+		State_openRoomCreator(state)
+		return
+	}
 	switch {
 	case closeClicked:
 		State_closeServerSettings(state)
@@ -409,4 +463,411 @@ viewServerSettings :: proc(
 	case submitted:
 		State_applyServerSettings(state)
 	}
+}
+
+SERVER_SETTINGS_LOCKED_NAME_NOTE ::
+	"Set by an admin of this server. It stays this way whatever name you choose in Settings."
+
+// What the Admin section asks for this frame; viewServerSettings runs it after drawing.
+@(private = "file")
+AdminSectionActionKind :: enum u8 {
+	None,
+	OpenConfirm,
+	CancelConfirm,
+	SubmitConfirm,
+	ToggleLock,
+	SetRole,
+	Unban,
+	EditRoom,
+	DeleteRoom,
+	CreateRoom,
+}
+
+@(private = "file")
+AdminSectionAction :: struct {
+	kind:        AdminSectionActionKind,
+	confirmKind: AdminConfirmKind,
+	userID:      int,
+	roomID:      int,
+	grant:       bool,
+}
+
+// A small button laid out from the left of row. A disabled control is drawn muted, never
+// clicks, and says why in its tooltip.
+@(private = "file")
+adminButton :: proc(
+	ctx: ^ui.Context,
+	row: ^ui.Rect,
+	id: ui.ID,
+	control: AdminControl,
+	danger := false,
+) -> bool {
+	width := ui.textSize(ui.textGet(ctx, 0, .Regular, control.label)).x
+	width += ui.dp(ctx, ctx.theme.padding * 3)
+	rect := ui.cutLeft(row, width)
+	_ = ui.cutLeft(row, ui.dp(ctx, PANEL_PADDING / 2))
+	if !control.enabled {
+		ui.fillRoundedRect(ctx, rect, ui.dp(ctx, ctx.theme.cornerRadius), ctx.theme.surface)
+		ui.label(ctx, rect, control.label, ctx.theme.fgMuted, align = .Center)
+		if len(control.reason) > 0 {
+			ui.tooltip(ctx, id, rect, control.reason)
+		}
+		return false
+	}
+	options := ui.ButtonOptions {
+		align      = .Center,
+		color      = danger ? ctx.theme.danger : ctx.theme.fg,
+		background = ctx.theme.hover,
+	}
+	return ui.button(ctx, id, rect, control.label, options)
+}
+
+// A small pill after a member's name ("Admin", "Banned"), laid out from the left of row.
+@(private = "file")
+adminBadge :: proc(ctx: ^ui.Context, row: ^ui.Rect, text: string, color: ui.Color) {
+	badgeH := ui.dp(ctx, 18)
+	badgeW := ui.textSize(ui.textGet(ctx, 0, .Bold, text)).x + ui.dp(ctx, 12)
+	slot := ui.cutLeft(row, badgeW)
+	_ = ui.cutLeft(row, ui.dp(ctx, 6))
+	badge := ui.Rect{slot.x, slot.y + (slot.h - badgeH) / 2, badgeW, badgeH}
+	ui.fillRoundedRect(ctx, badge, badgeH / 2, color)
+	ui.label(ctx, badge, text, ctx.theme.onPrimary, .Bold, .Center)
+}
+
+// Draws the Admin section into column and returns what was clicked. scrollID and area are the
+// screen's scroll area, which it scrolls to an open confirmation that a menu asked for.
+@(private = "file")
+viewAdminSection :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: AdminSectionView,
+	serverID: int,
+	area: ui.Rect,
+	scrollID: ui.ID,
+) -> (
+	action: AdminSectionAction,
+) {
+	form := &state.serverSettings
+	gap := ui.dp(ctx, PANEL_PADDING)
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	serverSettingsHeading(ctx, column, "Admin")
+	serverSettingsWrapped(ctx, column, view.note, ctx.theme.fgMuted)
+	statusOnRow := false
+	for member in view.members {
+		statusOnRow ||= member.userID == view.statusUserID
+	}
+	if !statusOnRow {
+		viewAdminStatus(ctx, column, view)
+	}
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
+
+	serverSettingsLabel(ctx, column, "Members")
+	for member in view.members {
+		rowTop := column.y
+		// Line 1: online dot, name, badges.
+		{
+			line := ui.cutTop(column, rowH)
+			dotSize := ui.dp(ctx, 8)
+			dot := ui.Rect{line.x, line.y + (line.h - dotSize) / 2, dotSize, dotSize}
+			dotColor := member.isOnline ? ctx.theme.success : ctx.theme.border
+			ui.fillRoundedRect(ctx, dot, dotSize / 2, dotColor)
+			_ = ui.cutLeft(&line, dotSize + gap)
+			badgesW: f32 = 0
+			if member.isAdmin {
+				badgesW += ui.textSize(ui.textGet(ctx, 0, .Bold, "Admin")).x + ui.dp(ctx, 18)
+			}
+			if member.isBanned {
+				badgesW += ui.textSize(ui.textGet(ctx, 0, .Bold, "Banned")).x + ui.dp(ctx, 18)
+			}
+			nameW := min(ui.textSize(ui.textGet(ctx, 0, .Bold, member.label)).x, line.w - badgesW)
+			nameRect := ui.cutLeft(&line, max(0, nameW))
+			_ = ui.cutLeft(&line, gap)
+			{
+				ui.pushClip(ctx, nameRect)
+				defer ui.popClip(ctx)
+				nameColor := member.isOnline ? ctx.theme.fg : ctx.theme.fgMuted
+				ui.label(ctx, nameRect, member.label, nameColor, .Bold)
+			}
+			if member.isAdmin {
+				adminBadge(ctx, &line, "Admin", ctx.theme.primary)
+			}
+			if member.isBanned {
+				adminBadge(ctx, &line, "Banned", ctx.theme.danger)
+			}
+		}
+		// Line 2: the controls.
+		{
+			line := ui.cutTop(column, rowH)
+			_ = ui.cutLeft(&line, ui.dp(ctx, 8) + gap)
+			userID := member.userID
+			if adminButton(
+				ctx,
+				&line,
+				ui.idOf("admin-member-rename", serverID, userID),
+				member.rename,
+			) {
+				action = {kind = .OpenConfirm, confirmKind = .Rename, userID = userID}
+			}
+			roleID := ui.idOf("admin-member-role", serverID, userID)
+			if adminButton(ctx, &line, roleID, member.role) {
+				action = {kind = .SetRole, userID = userID, grant = member.grant}
+			}
+			if adminButton(
+				ctx,
+				&line,
+				ui.idOf("admin-member-kick", serverID, userID),
+				member.kick,
+				danger = true,
+			) {
+				action = {kind = .OpenConfirm, confirmKind = .Kick, userID = userID}
+			}
+			if adminButton(
+				ctx,
+				&line,
+				ui.idOf("admin-member-ban", serverID, userID),
+				member.ban,
+				danger = member.banning,
+			) {
+				if member.banning {
+					action = {kind = .OpenConfirm, confirmKind = .Ban, userID = userID}
+				} else {
+					action = {kind = .Unban, userID = userID}
+				}
+			}
+		}
+		if statusOnRow && member.userID == view.statusUserID {
+			_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING))
+			viewAdminStatus(ctx, column, view, ui.dp(ctx, 8) + gap)
+		}
+		if view.confirm.kind != .None && view.confirm.userID == member.userID {
+			_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+			if confirmAction := viewAdminConfirm(state, ctx, column, view.confirm, serverID);
+			   confirmAction.kind != .None {
+				action = confirmAction
+			}
+			// Opened from a menu: bring the member and the confirmation into view.
+			if form.adminConfirm.scrollTo {
+				adminScrollIntoView(ctx, form, scrollID, area, rowTop, column.y)
+			}
+		}
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
+	}
+	if len(view.members) == 0 {
+		serverSettingsWrapped(
+			ctx,
+			column,
+			"The member list has not arrived yet.",
+			ctx.theme.fgMuted,
+		)
+	}
+
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
+	{
+		header := ui.cutTop(column, rowH)
+		createControl := AdminControl{label = "Create room…", enabled = true}
+		createW := ui.textSize(ui.textGet(ctx, 0, .Regular, createControl.label)).x
+		createW += ui.dp(ctx, ctx.theme.padding * 3)
+		createRect := header
+		_ = ui.cutLeft(&createRect, header.w - createW)
+		if adminButton(ctx, &createRect, ui.idOf("admin-room-create", serverID), createControl) {
+			action = {kind = .CreateRoom}
+		}
+		ui.label(ctx, header, "Rooms", ctx.theme.fgMuted, .Bold)
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	}
+	for room in view.rooms {
+		line := ui.cutTop(column, rowH)
+		editControl := AdminControl{label = "Edit…", enabled = true}
+		deleteControl := AdminControl{label = "Delete…", enabled = true}
+		buttonsW :=
+			ui.textSize(ui.textGet(ctx, 0, .Regular, editControl.label)).x +
+			ui.textSize(ui.textGet(ctx, 0, .Regular, deleteControl.label)).x +
+			ui.dp(ctx, ctx.theme.padding * 6 + PANEL_PADDING)
+		buttons := ui.cutRight(&line, buttonsW)
+		editID := ui.idOf("admin-room-edit", serverID, room.roomID)
+		if adminButton(ctx, &buttons, editID, editControl) {
+			action = {kind = .EditRoom, roomID = room.roomID}
+		}
+		if adminButton(
+			ctx,
+			&buttons,
+			ui.idOf("admin-room-delete", serverID, room.roomID),
+			deleteControl,
+			danger = true,
+		) {
+			action = {kind = .DeleteRoom, roomID = room.roomID}
+		}
+		_ = ui.cutRight(&line, gap)
+		typeW := ui.textSize(ui.textGet(ctx, 0, .Regular, room.typeLabel)).x
+		typeRect := ui.cutRight(&line, typeW)
+		_ = ui.cutRight(&line, gap)
+		ui.label(ctx, typeRect, room.typeLabel, ctx.theme.fgMuted)
+		{
+			ui.pushClip(ctx, line)
+			defer ui.popClip(ctx)
+			ui.label(ctx, line, room.label, ctx.theme.fg)
+		}
+		_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING * 2))
+	}
+	if len(view.rooms) == 0 {
+		serverSettingsWrapped(ctx, column, "No rooms yet.", ctx.theme.fgMuted)
+	}
+	return
+}
+
+// The answer to the last admin request, inset by indent (under a member's controls).
+@(private = "file")
+viewAdminStatus :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: AdminSectionView,
+	indent: f32 = 0,
+) {
+	if len(view.status) == 0 {
+		return
+	}
+	color := ctx.theme.fgMuted
+	#partial switch view.statusTone {
+	case .Success:
+		color = ctx.theme.success
+	case .Error:
+		color = ctx.theme.danger
+	}
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	area := column^
+	_ = ui.cutLeft(&area, indent)
+	height := ui.wrappedTextHeight(ctx, view.status, area.w)
+	ui.wrappedLabel(ctx, ui.Rect{area.x, area.y, area.w, height}, view.status, color)
+	_ = ui.cutTop(column, height)
+}
+
+// Scrolls the screen so the member row starting at rowTop (screen y) and its confirmation,
+// ending at bottom, are in view, and stops asking once they are or the area cannot scroll
+// further.
+@(private = "file")
+adminScrollIntoView :: proc(
+	ctx: ^ui.Context,
+	form: ^ServerSettingsForm,
+	scrollID: ui.ID,
+	area: ui.Rect,
+	rowTop, bottom: f32,
+) {
+	margin := ui.dp(ctx, PANEL_PADDING * 2)
+	if rowTop >= area.y && bottom <= area.y + area.h {
+		form.adminConfirm.scrollTo = false
+		return
+	}
+	scroll := ui.scrollState(ctx, scrollID)
+	target := scroll.offset + (rowTop - area.y) - margin
+	if bottom - rowTop + margin * 2 < area.h {
+		// It fits: show it whole, as low as possible when it is below the view.
+		if bottom > area.y + area.h {
+			target = scroll.offset + (bottom - (area.y + area.h)) + margin
+		}
+	}
+	target = clamp(target, 0, ui.scrollMaxOffset(form.contentH, area.h))
+	if abs(target - scroll.offset) < 1 {
+		form.adminConfirm.scrollTo = false
+		return
+	}
+	scroll.pendingDelta = target - scroll.offset
+	ui.requestFrame(ctx)
+}
+
+// The inline confirmation under a member: a title, the text field (a new name or a reason),
+// the lock toggle for a rename, a note, and Confirm / Cancel.
+@(private = "file")
+viewAdminConfirm :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: AdminConfirmView,
+	serverID: int,
+) -> (
+	action: AdminSectionAction,
+) {
+	confirm := &state.serverSettings.adminConfirm
+	padding := ui.dp(ctx, PANEL_PADDING * 1.5)
+	labelGap := ui.dp(ctx, SETTINGS_LABEL_GAP)
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	innerW := column.w - padding * 2
+	userID := view.userID
+	textID := ui.idOf("admin-confirm-text", serverID, userID)
+	inputH := ui.textInputHeight(ctx, textID, confirm.text[:], innerW)
+	noteH := ui.wrappedTextHeight(ctx, view.note, innerW)
+	boxH := padding * 2
+	boxH += ui.lineHeight(ctx, .Bold) + labelGap
+	boxH += ui.lineHeight(ctx) + labelGap + inputH + labelGap
+	if view.showLock {
+		boxH += rowH + labelGap
+	}
+	boxH += noteH + labelGap * 2 + rowH
+	box := ui.cutTop(column, boxH)
+	ui.fillRoundedRect(ctx, box, ui.dp(ctx, ctx.theme.cornerRadius), ctx.theme.border)
+	ui.fillRoundedRect(
+		ctx,
+		ui.shrink(box, max(1, ui.dp(ctx, 1))),
+		ui.dp(ctx, ctx.theme.cornerRadius),
+		ctx.theme.elevated,
+	)
+	inner := ui.shrink(box, padding)
+	ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx, .Bold)), view.title, ctx.theme.fg, .Bold)
+	_ = ui.cutTop(&inner, labelGap)
+	ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx)), view.fieldLabel, ctx.theme.fgMuted)
+	_ = ui.cutTop(&inner, labelGap)
+	if serverSettingsField(
+		ctx,
+		ui.cutTop(&inner, inputH),
+		textID,
+		&confirm.text,
+		view.placeholder,
+		view.maxBytes,
+	) {
+		action = {kind = .SubmitConfirm, userID = userID}
+	}
+	_ = ui.cutTop(&inner, labelGap)
+	if view.showLock {
+		lockRow := ui.cutTop(&inner, rowH)
+		lockW := ui.textSize(ui.textGet(ctx, 0, .Regular, view.lockLabel)).x
+		lockW += ui.dp(ctx, ctx.theme.padding * 4)
+		lockOptions := ui.ButtonOptions {
+			align      = .Center,
+			selected   = confirm.lockName,
+			color      = confirm.lockName ? ctx.theme.fg : ctx.theme.fgMuted,
+			background = ctx.theme.hover,
+		}
+		if ui.button(
+			ctx,
+			ui.idOf("admin-confirm-lock", serverID, userID),
+			ui.cutLeft(&lockRow, lockW),
+			view.lockLabel,
+			lockOptions,
+		) {
+			action = {kind = .ToggleLock, userID = userID}
+		}
+		_ = ui.cutTop(&inner, labelGap)
+	}
+	serverSettingsWrapped(ctx, &inner, view.note, ctx.theme.fgMuted)
+	_ = ui.cutTop(&inner, labelGap * 2)
+	buttons := ui.cutTop(&inner, rowH)
+	if serverSettingsButton(
+		ctx,
+		&buttons,
+		ui.idOf("admin-confirm", serverID, userID),
+		view.confirmLabel,
+		view.danger ? .DangerArmed : .Primary,
+	) {
+		action = {kind = .SubmitConfirm, userID = userID}
+	}
+	if serverSettingsButton(
+		ctx,
+		&buttons,
+		ui.idOf("admin-confirm-cancel", serverID, userID),
+		"Cancel",
+		.Plain,
+	) {
+		action = {kind = .CancelConfirm, userID = userID}
+	}
+	return
 }

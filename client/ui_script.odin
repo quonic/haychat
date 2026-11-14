@@ -23,6 +23,10 @@ UI_SCRIPT_EXIT_USAGE :: 1
 UI_SCRIPT_EXIT_FAILED :: 3
 UI_SCRIPT_DEFAULT_TIMEOUT_MS :: 5000
 UI_SCRIPT_MAX_COUNT :: 1000
+// How far one scroll command may turn the wheel, in notches either way.
+UI_SCRIPT_MAX_SCROLL_NOTCHES :: 100
+UI_SCRIPT_SCROLL_USAGE ::
+	"usage: scroll X Y N (N wheel notches, -100 to 100, positive scrolls down)"
 UI_SCRIPT_MAX_IDS :: 4
 UI_SCRIPT_MAX_WINDOW_SIZE :: 16384
 // Longest the loop sleeps while a script runs, so waits and timeouts are checked promptly.
@@ -147,6 +151,8 @@ UIScriptCommandKind :: enum u8 {
 	RightClick,
 	RightClickAt,
 	RightClickID,
+	WaitGone,
+	Scroll,
 }
 
 UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
@@ -164,6 +170,8 @@ UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
 	.RightClick   = "right-click",
 	.RightClickAt = "right-click",
 	.RightClickID = "right-click-id",
+	.WaitGone     = "wait-gone",
+	.Scroll       = "scroll",
 }
 
 UIScriptKey :: struct {
@@ -176,9 +184,9 @@ UIScriptCommand :: struct {
 	kind:      UIScriptCommandKind,
 	line:      int, // 1-based line in the script file
 	text:      string, // Owned: the TEXT, NAME, or FILE argument, or the key's name
-	count:     int, // wait-count: how many times the text must be drawn
+	count:     int, // wait-count: how many times the text must be drawn; scroll: the notches
 	timeoutMS: int, // wait: the duration; wait-text, wait-count: the timeout
-	x, y:      f32, // click X Y and right-click X Y, in window coordinates
+	x, y:      f32, // click X Y, right-click X Y and scroll X Y N, in window coordinates
 	ids:       [UI_SCRIPT_MAX_IDS]int, // click-id, right-click-id: the integers after the name
 	idCount:   int,
 	key:       UIScriptKey,
@@ -334,6 +342,16 @@ uiScriptParseLine :: proc(
 			return {}, false, "usage: wait-text \"TEXT\" [TIMEOUT_MS]"
 		}
 		text = args[0].text
+	case "wait-gone":
+		command.kind = .WaitGone
+		ok = len(args) >= 1 && len(args) <= 2 && len(args[0].text) > 0
+		if ok {
+			command.timeoutMS, ok = uiScriptParseTimeout(args, 1)
+		}
+		if !ok {
+			return {}, false, "usage: wait-gone \"TEXT\" [TIMEOUT_MS]"
+		}
+		text = args[0].text
 	case "wait-count":
 		command.kind = .WaitCount
 		ok = len(args) >= 2 && len(args) <= 3 && !args[0].quoted && len(args[1].text) > 0
@@ -369,6 +387,24 @@ uiScriptParseLine :: proc(
 				return {}, false, "usage: right-click \"TEXT\" or right-click X Y"
 			}
 			return {}, false, "usage: click \"TEXT\" or click X Y"
+		}
+	case "scroll":
+		command.kind = .Scroll
+		ok = len(args) == 3 && !args[2].quoted
+		if ok {
+			xOK, yOK, nOK: bool
+			command.x, xOK = uiScriptParseCoordinate(args[0])
+			command.y, yOK = uiScriptParseCoordinate(args[1])
+			command.count, nOK = strconv.parse_int(args[2].text, 10)
+			ok =
+				xOK &&
+				yOK &&
+				nOK &&
+				command.count != 0 &&
+				abs(command.count) <= UI_SCRIPT_MAX_SCROLL_NOTCHES
+		}
+		if !ok {
+			return {}, false, UI_SCRIPT_SCROLL_USAGE
 		}
 	case "click-id", "right-click-id":
 		right := tokens[0].text == "right-click-id"
@@ -600,7 +636,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		line = command.line,
 	}
 	switch command.kind {
-	case .WaitText, .WaitCount, .AssertText, .Click, .RightClick, .Type:
+	case .WaitText, .WaitCount, .WaitGone, .AssertText, .Click, .RightClick, .Type:
 		result.text = command.text
 	case .ClickID, .RightClickID:
 		result.name = command.text
@@ -610,7 +646,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		result.file = command.text
 	case .Wait:
 		result.ms = command.timeoutMS
-	case .ClickAt, .RightClickAt, .Quit:
+	case .ClickAt, .RightClickAt, .Scroll, .Quit:
 	}
 	return result
 }
@@ -699,6 +735,31 @@ uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2, button: u8 = SDL.BUTT
 	release.button.type = .MOUSE_BUTTON_UP
 	release.button.down = false
 	return uiScriptPushEvent(&motion) && uiScriptPushEvent(&press) && uiScriptPushEvent(&release)
+}
+
+// Moves the pointer to p and turns the wheel by notches (positive scrolls the content down,
+// which SDL reports as a negative y).
+@(private = "file")
+uiScriptPushWheel :: proc(window: ^SDL.Window, p: ui.Vec2, notches: int) -> bool {
+	windowID := SDL.GetWindowID(window)
+	motion: SDL.Event
+	motion.motion = SDL.MouseMotionEvent {
+		type     = .MOUSE_MOTION,
+		windowID = windowID,
+		x        = p.x,
+		y        = p.y,
+	}
+	wheel: SDL.Event
+	wheel.wheel = SDL.MouseWheelEvent {
+		type      = .MOUSE_WHEEL,
+		windowID  = windowID,
+		y         = -f32(notches),
+		integer_y = -i32(notches),
+		direction = .NORMAL,
+		mouse_x   = p.x,
+		mouse_y   = p.y,
+	}
+	return uiScriptPushEvent(&motion) && uiScriptPushEvent(&wheel)
 }
 
 // The mouse button a click command presses.
@@ -801,6 +862,22 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 				),
 			)
 		}
+	case .WaitGone:
+		drawn := ui.Automation_countText(automation, command.text)
+		if drawn == 0 {
+			result.waitedMS = elapsed
+			uiScriptAdvance(runner, result)
+		} else if elapsed >= command.timeoutMS {
+			uiScriptFail(
+				runner,
+				result,
+				fmt.tprintf(
+					"timed out after %d ms: still drawn %d time(s)",
+					command.timeoutMS,
+					drawn,
+				),
+			)
+		}
 	case .AssertText:
 		if ui.Automation_countText(automation, command.text) > 0 {
 			uiScriptAdvance(runner, result)
@@ -832,6 +909,10 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		result.x, result.y = command.x, command.y
 		point := ui.Vec2{command.x, command.y}
 		pushOK = uiScriptPushClick(window, point, uiScriptButton(command.kind))
+		pushed = true
+	case .Scroll:
+		result.x, result.y = command.x, command.y
+		pushOK = uiScriptPushWheel(window, ui.Vec2{command.x, command.y}, command.count)
 		pushed = true
 	case .Type:
 		pushOK = uiScriptPushText(runner, window, command.text)

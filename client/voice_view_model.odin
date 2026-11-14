@@ -164,7 +164,7 @@ voiceParticipantRows :: proc(
 
 // The voice button in a room's header.
 VoiceHeaderAction :: enum u8 {
-	None, // not connected, or not a member of the room
+	None, // not connected, not a member of the room, or a text-only room
 	Join,
 	Leave, // joined, joining or re-joining this room
 }
@@ -194,6 +194,10 @@ roomVoiceHeaderAction :: proc(state: ^State, serverID, roomID: int) -> VoiceHead
 			}
 		case .Unavailable:
 		}
+	}
+	// A text-only room (protocol 14) has no voice to join.
+	if !State_roomAllowsVoice(state, serverID, roomID) {
+		return .None
 	}
 	return .Join
 }

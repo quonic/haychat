@@ -599,6 +599,20 @@ State_voiceConnectionLost :: proc(state: ^State, serverID: int) {
 	}
 }
 
+// An admin kicked or banned this account on serverID (D4, D5): its session there ended for
+// good, so voice is not re-joined when the user presses Retry later. Unlike a lost session,
+// the want goes too, and voice there goes back to Idle on no server.
+State_voiceEndedByAdmin :: proc(state: ^State, serverID: int) {
+	if state.voice.serverID != serverID {
+		return
+	}
+	State_voiceStopEngine(state)
+	state.voice.status = .Idle
+	state.voice.serverID = 0
+	state.voice.roomID = 0
+	state.voice.wantVoiceRoomID = 0
+}
+
 // A session on serverID was established: re-join the wanted room. The join is marked as
 // automatic, so the server refuses it instead of taking voice from another device.
 State_voiceConnected :: proc(state: ^State, serverID: int) {

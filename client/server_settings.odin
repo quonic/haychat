@@ -17,9 +17,11 @@ import "core:unicode/utf8"
 //     fingerprint with Forget key, and Remove server.
 //   - Voice: a volume (0 to 200 %) and Mute for me per user (user_voice.odin), applied to the
 //     running voice engine at once.
+//   - Admin (admins only, admin_ui.odin): the server's accounts with Rename, the admin role,
+//     Kick and Ban, and its rooms with their type, Edit, Delete and Create.
 //
-// State_openServerSettings opens it for a server (the sidebar header's gear; the rail's menu
-// gets an entry later). Switching servers or rooms, opening a conversation, the room form or
+// State_openServerSettings opens it for a server (the sidebar header's gear and the rail
+// button's context menu). Switching servers or rooms, opening a conversation, the room form or
 // the general settings closes it, and so does removing its server.
 
 SERVER_LABEL_MAX_BYTES :: 64
@@ -41,8 +43,13 @@ ServerSettingsForm :: struct {
 	confirmRemove:    bool,
 	error:            string, // Owned
 	notice:           string, // Owned; what the last save did
+	// The Admin section's confirmation (admin_ui.odin), open under one member.
+	adminConfirm:     AdminConfirm,
 	// The view's content height last frame, for its scroll area.
 	contentH:         f32,
+	// Set when the screen opens: the view starts it at the top rather than where an earlier
+	// visit left it.
+	scrollToTop:      bool,
 }
 
 ServerSettingsForm_deinit :: proc(form: ^ServerSettingsForm) {
@@ -53,6 +60,7 @@ ServerSettingsForm_deinit :: proc(form: ^ServerSettingsForm) {
 	delete(form.port)
 	delete(form.error)
 	delete(form.notice)
+	AdminConfirm_deinit(&form.adminConfirm)
 	form^ = {}
 }
 
@@ -107,8 +115,11 @@ State_openServerSettings :: proc(state: ^State, serverID: int) -> bool {
 	form := &state.serverSettings
 	form.open = true
 	form.serverID = serverID
+	form.scrollToTop = true
 	ServerSettingsForm_load(form, server^)
 	ServerSettingsForm_setMessages(form, "", "")
+	State_cancelAdminConfirm(state)
+	State_clearAdminRequestStatus(state)
 	return true
 }
 
@@ -119,6 +130,7 @@ State_closeServerSettings :: proc(state: ^State) {
 	form.confirmForgetKey = false
 	form.confirmRemove = false
 	ServerSettingsForm_setMessages(form, "", "")
+	State_cancelAdminConfirm(state)
 }
 
 // Closes the screen when its server is no longer configured (removed in Settings or here).
@@ -364,11 +376,16 @@ ServerSettingsView :: struct {
 	forgetKeyLabel:   string,
 	removeLabel:      string,
 	connected:        bool,
+	// An admin renamed this account and locked the name (protocol 14, D3): the Profile section
+	// shows lockedName, the name the server keeps, instead of the field.
+	nameLocked:       bool,
+	lockedName:       string,
 	// Users for the Voice section: those in voice first, then the server's directory order
 	// (online first, then by name), then users with a stored setting who are not in the
 	// directory (the server is not connected yet).
 	voiceUsers:       []ServerVoiceUserRow,
 	voiceNote:        string,
+	admin:            AdminSectionView,
 	error:            string,
 	notice:           string,
 }
@@ -503,6 +520,12 @@ buildServerSettingsView :: proc(
 	view.forgetKeyLabel = form.confirmForgetKey ? "Confirm forget key" : "Forget key"
 	view.removeLabel = form.confirmRemove ? "Confirm remove" : "Remove server"
 	view.connected = State_isServerConnected(state, form.serverID)
+	if index := State_serverConnectionIndex(state^, form.serverID); index >= 0 && view.connected {
+		connection := &state.serverConnections[index]
+		view.nameLocked = connection.nicknameLocked
+		view.lockedName = connection.nickname
+	}
+	view.admin = buildAdminSectionView(state, form.serverID, allocator)
 	view.voiceUsers = buildServerVoiceUserRows(state, form.serverID, allocator)
 	switch {
 	case len(view.voiceUsers) > 0:

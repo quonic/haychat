@@ -673,7 +673,10 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 
 	serverID := state.selected_server_id
 	roomID := state.selected_channel_id
-	if draft := State_selectedRoomDraft(state); draft != nil {
+	if !view.allowsChat {
+		// A voice-only room takes no messages: a note sits where the composer would.
+		viewComposerNote(ctx, &area, view.voiceOnlyNote, view.status)
+	} else if draft := State_selectedRoomDraft(state); draft != nil {
 		placeholder := "Message… (Enter to send, Shift+Enter for newline)"
 		if hasRoom {
 			placeholder = fmt.tprintf(
@@ -732,6 +735,19 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 		State_joinVoice(state, serverID, roomID)
 	case leaveVoiceClicked:
 		State_leaveVoice(state)
+	}
+}
+
+// A muted note in the composer's place (a voice-only room), with the status line above it.
+@(private = "file")
+viewComposerNote :: proc(ctx: ^ui.Context, area: ^ui.Rect, note: string, status: string) {
+	padding := ui.dp(ctx, COMPOSER_PADDING)
+	noteH := ui.dp(ctx, ROW_HEIGHT + 4)
+	noteArea := ui.shrink(ui.cutBottom(area, noteH + padding * 2), padding)
+	ui.fillRoundedRect(ctx, noteArea, ui.dp(ctx, ctx.theme.cornerRadius), ctx.theme.surface)
+	ui.label(ctx, ui.shrinkXY(noteArea, padding, 0), note, ctx.theme.fgMuted, align = .Center)
+	if len(status) > 0 {
+		viewComposerStatusOnly(ctx, area, status)
 	}
 }
 

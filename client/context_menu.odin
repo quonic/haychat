@@ -11,8 +11,10 @@ import "ui"
 // entries and their enabled state are testable without a window, and a target that no longer
 // exists (a deleted room, a removed server, a message that left the cache) closes the menu.
 // view_context_menu.odin draws it in a ui overlay and calls State_runContextMenuAction for the
-// chosen entry. The menus offer only actions the client already has; admin entries are limited
-// to Edit room… and Delete room… on channels, shown to admins only.
+// chosen entry (State_setContextMenuVolume for the voice participant's volume slider). The
+// menus offer only actions the client already has. Admin entries are shown to admins only:
+// Edit room… and Delete room… on channels, and Rename…, Make admin / Remove admin, Kick… and
+// Ban… / Unban on accounts (admin_ui.odin), disabled where the server refuses them (D6).
 
 ChannelMenuTarget :: struct {
 	serverID: int,
@@ -157,14 +159,27 @@ ContextMenuAction :: enum u8 {
 	Copy,
 	Paste,
 	SelectAll,
+	ServerSettings,
+	AdminRename,
+	MakeAdmin,
+	RemoveAdmin,
+	AdminKick,
+	AdminBan,
+	AdminUnban,
+	MuteForMe,
+	UnmuteForMe,
+	Volume,
 }
 
 ContextMenuEntry :: struct {
 	action:          ContextMenuAction,
-	label:           string, // Static
+	label:           string, // Static, or in the view allocator
 	enabled:         bool,
 	danger:          bool,
 	separatorBefore: bool,
+	// A slider row instead of an item (Volume): value is the current linear volume.
+	slider:          bool,
+	value:           f32,
 }
 
 // What the view knows that State does not: a right-clicked text input's facts (from the ui
@@ -226,7 +241,10 @@ buildContextMenu :: proc(
 				ContextMenuEntry{action = .LeaveVoice, label = "Leave voice", enabled = true},
 			)
 		case .None:
-			append(&entries, ContextMenuEntry{action = .JoinVoice, label = "Join voice"})
+			// A text-only room has no voice to join; otherwise voice is just unavailable now.
+			if State_roomAllowsVoice(state, target.serverID, target.roomID) {
+				append(&entries, ContextMenuEntry{action = .JoinVoice, label = "Join voice"})
+			}
 		}
 		append(
 			&entries,
@@ -256,11 +274,13 @@ buildContextMenu :: proc(
 			return
 		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, target.peerUserID)
+		contextMenuAppendAdminEntries(state, &entries, target.serverID, target.peerUserID)
 	case MemberMenuTarget:
 		if !contextMenuUserKnown(state, target.serverID, target.userID) {
 			return
 		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, target.userID)
+		contextMenuAppendAdminEntries(state, &entries, target.serverID, target.userID)
 	case VoiceParticipantMenuTarget:
 		if _, found := contextMenuVoiceParticipant(state, target); !found {
 			return
@@ -275,6 +295,31 @@ buildContextMenu :: proc(
 			},
 			ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true},
 		)
+		// Volume and Mute for me (issue 47) are local: only this client plays them differently.
+		if target.userID != selfUserID {
+			volume, muted := State_userVoice(state, target.serverID, target.userID)
+			append(
+				&entries,
+				ContextMenuEntry {
+					action = muted ? .UnmuteForMe : .MuteForMe,
+					label = muted ? "Unmute for me" : "Mute for me",
+					enabled = true,
+					separatorBefore = true,
+				},
+				ContextMenuEntry {
+					action = .Volume,
+					label = fmt.aprintf(
+						"Volume: %d %%",
+						int(volume * 100 + 0.5),
+						allocator = allocator,
+					),
+					enabled = true,
+					slider = true,
+					value = volume,
+				},
+			)
+		}
+		contextMenuAppendAdminEntries(state, &entries, target.serverID, target.userID)
 	case MessageMenuTarget:
 		message, found := contextMenuMessage(
 			state,
@@ -330,10 +375,15 @@ buildContextMenu :: proc(
 			return
 		}
 		contextMenuAppendUserEntries(state, &entries, target.serverID, message.senderID)
+		contextMenuAppendAdminEntries(state, &entries, target.serverID, message.senderID)
 	case ServerMenuTarget:
 		if _, found := State_serverConfig(state, target.serverID); !found {
 			return
 		}
+		append(
+			&entries,
+			ContextMenuEntry{action = .ServerSettings, label = "Server settings", enabled = true},
+		)
 		if !State_isServerConnected(state, target.serverID) {
 			append(
 				&entries,
@@ -414,6 +464,49 @@ contextMenuAppendUserEntries :: proc(
 		)
 	}
 	append(entries, ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true})
+}
+
+// Rename…, Make admin / Remove admin, Kick… and Ban… / Unban for an admin of serverID, for an
+// account the directory lists, disabled where the server refuses them (buildAdminUserControls).
+@(private = "file")
+contextMenuAppendAdminEntries :: proc(
+	state: ^State,
+	entries: ^[dynamic]ContextMenuEntry,
+	serverID, userID: int,
+) {
+	if !State_isServerAdmin(state, serverID) {
+		return
+	}
+	controls, known := buildAdminUserControls(state, serverID, userID)
+	if !known {
+		return
+	}
+	append(
+		entries,
+		ContextMenuEntry {
+			action = .AdminRename,
+			label = controls.rename.label,
+			enabled = controls.rename.enabled,
+			separatorBefore = true,
+		},
+		ContextMenuEntry {
+			action = controls.grant ? .MakeAdmin : .RemoveAdmin,
+			label = controls.role.label,
+			enabled = controls.role.enabled,
+		},
+		ContextMenuEntry {
+			action = .AdminKick,
+			label = controls.kick.label,
+			enabled = controls.kick.enabled,
+			danger = true,
+		},
+		ContextMenuEntry {
+			action = controls.banning ? .AdminBan : .AdminUnban,
+			label = controls.ban.label,
+			enabled = controls.ban.enabled,
+			danger = controls.banning,
+		},
+	)
 }
 
 // Whether the server's directory or conversation list knows the account.
@@ -551,11 +644,7 @@ State_runContextMenuAction :: proc(
 		case .DeleteRoom:
 			// The form opens with its delete armed: the next click on "Confirm delete" sends.
 			if target.serverID == state.selected_server_id {
-				State_openRoomEditor(state, target.roomID)
-				editor := &state.roomEditor
-				if editor.mode == .Edit && editor.roomID == target.roomID {
-					editor.confirmDelete = true
-				}
+				State_openRoomEditorForDelete(state, target.roomID)
 			}
 		}
 	case ConversationMenuTarget:
@@ -624,6 +713,10 @@ State_runContextMenuAction :: proc(
 			break
 		}
 		#partial switch action {
+		case .ServerSettings:
+			State_closeContextMenu(state)
+			State_openServerSettings(state, target.serverID)
+			return
 		case .RetryConnection:
 			State_retryConnection(state, target.serverID)
 		case .CopyAddress:
@@ -672,8 +765,34 @@ State_runUserMenuAction :: proc(
 		State_markConversationReadAll(state, .Direct, serverID, userID, now)
 	case .CopyName:
 		effect.copyText = contextMenuUserName(state, serverID, userID, fallbackName)
+	case .AdminRename:
+		State_openAdminConfirm(state, serverID, .Rename, userID)
+	case .AdminKick:
+		State_openAdminConfirm(state, serverID, .Kick, userID)
+	case .AdminBan:
+		State_openAdminConfirm(state, serverID, .Ban, userID)
+	case .MakeAdmin:
+		State_adminSetRole(state, serverID, userID, true)
+	case .RemoveAdmin:
+		State_adminSetRole(state, serverID, userID, false)
+	case .AdminUnban:
+		State_adminUnban(state, serverID, userID)
+	case .MuteForMe:
+		State_setUserVoiceMuted(state, serverID, userID, true)
+	case .UnmuteForMe:
+		State_setUserVoiceMuted(state, serverID, userID, false)
 	}
 	return
+}
+
+// The voice participant menu's volume slider moved (persist false while it is dragged) or was
+// let go (persist true, which saves the config). The menu stays open.
+State_setContextMenuVolume :: proc(state: ^State, volume: f32, persist: bool) -> bool {
+	target, isParticipant := state.contextMenu.target.(VoiceParticipantMenuTarget)
+	if !isParticipant || target.userID == State_selfUserID(state, target.serverID) {
+		return false
+	}
+	return State_setUserVoiceVolume(state, target.serverID, target.userID, volume, persist)
 }
 
 // Marks a whole conversation read, including messages that are not loaded: up to its newest

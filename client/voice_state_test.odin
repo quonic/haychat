@@ -806,3 +806,68 @@ testVoiceTakeoverAndOtherDeviceRefusalClearTheWantAndShowInTheBar :: proc(t: ^te
 		"expected no further re-join after the refusal",
 	)
 }
+
+// A kick (ServerSessionEnded) or a ban ends voice for good: the want goes, so the reconnect
+// that Retry starts later does not join voice by itself (plan decisions D4, D5).
+@(test)
+testVoiceKickAndBanClearTheRejoinWant :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	state := testVoiceState(929)
+	defer State_deinit(&state)
+	sync.mutex_lock(&voiceControlSendBridgeTestMutex)
+	defer sync.mutex_unlock(&voiceControlSendBridgeTestMutex)
+	testVoiceControlUseStub()
+	defer testVoiceControlRestore()
+
+	Ending :: struct {
+		kind:        ClientTransportRuntimeEventKind,
+		failureKind: ClientConnectFailureKind,
+		message:     string,
+	}
+	endings := [2]Ending {
+		{.SessionEnded, .Kicked, CLIENT_KICKED_MESSAGE},
+		{.ConnectFailed, .Banned, SERVER_BANNED_MESSAGE},
+	}
+	for ending in endings {
+		_ = State_joinVoice(&state, 929, 2)
+		testApplyVoiceParticipants(&state, 929, 2, TEST_VOICE_SELF_USER_ID)
+		testing.expectf(t, state.voice.status == .Joined, "expected Joined before %v", ending)
+
+		event := ClientTransportRuntimeEvent {
+			kind        = ending.kind,
+			serverID    = 929,
+			failureKind = ending.failureKind,
+			message     = strings.clone(ending.message),
+		}
+		State_applyRuntimeEvent(&state, &event)
+		ClientTransportRuntimeEvent_deinit(&event)
+		testing.expectf(
+			t,
+			state.voice.status == .Idle &&
+			state.voice.engine == nil &&
+			state.voice.wantVoiceRoomID == 0 &&
+			state.voice.serverID == 0,
+			"expected %v to stop voice and clear the want, got %v want %d",
+			ending.failureKind,
+			state.voice.status,
+			state.voice.wantVoiceRoomID,
+		)
+		testing.expect(
+			t,
+			buildVoiceBarView(&state).kind != .Rejoining,
+			"expected no Rejoining voice bar",
+		)
+
+		requestsBefore := voiceControlTestCount
+		testApplyConnected(&state, 929, TEST_VOICE_SELF_USER_ID)
+		testing.expectf(
+			t,
+			voiceControlTestCount == requestsBefore && state.voice.status == .Idle,
+			"expected the next connection after %v not to re-join voice",
+			ending.failureKind,
+		)
+	}
+}

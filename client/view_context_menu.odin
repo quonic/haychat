@@ -47,11 +47,21 @@ viewContextMenu :: proc(state: ^State, ctx: ^ui.Context) {
 				label = entry.label,
 				enabled = entry.enabled,
 				danger = entry.danger,
+				slider = entry.slider,
+				value = entry.value,
+				low = 0,
+				high = SERVER_USER_VOICE_VOLUME_MAX,
+				step = SERVER_SETTINGS_VOLUME_STEP,
 			},
 		)
 	}
 	result := ui.menu(ctx, ui.idOf("context-menu", menu.serial), menu.position, items[:])
-	if result.clicked >= 0 {
+	if result.sliderIndex >= 0 {
+		// The volume applies while it is dragged and is saved when it is let go; the menu
+		// stays open either way.
+		State_setContextMenuVolume(state, result.slider.value, result.slider.released)
+		ui.requestFrame(ctx)
+	} else if result.clicked >= 0 {
 		action := ContextMenuAction(items[result.clicked].key)
 		effect := State_runContextMenuAction(state, action, time.tick_now())
 		if len(effect.copyText) > 0 {
