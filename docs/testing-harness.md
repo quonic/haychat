@@ -65,7 +65,7 @@ again, so an agent can `wait connected` to see it come back.
 | Code | When |
 | --- | --- |
 | 0 | `quit`, or EOF on stdin |
-| 1 | Bad arguments, or the config and identity key could not be loaded or created |
+| 1 | Bad arguments, the config and identity key could not be loaded or created, or the profile has no display name (pass `--name`) |
 | 2 | No server is configured, connecting failed for a reason retrying cannot fix, or `--connect-timeout` passed (a `connect_failed` event says why) |
 
 Closing stdin counts as `quit`. A script that wants a client to stay online between commands
@@ -94,12 +94,12 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
 | `admin-role USER_ID on\|off` | Admins: grants or revokes the server's admin role (protocol 14). `ok` (`serverID`, `userID`) means the request went out. The answer is `admin_result`; every connected client gets `user_updated`, and the target's sessions get `account_updated` with the new `isAdmin`, without reconnecting. Refusals are `protocol_error`: `Admin permission required`, `Unknown user`, `You cannot remove your own admin role`, `The server must keep at least one admin`, `Unban the account before making it an admin`. |
 | `admin-rename USER_ID lock\|unlock [NAME...]` | Admins: renames the account to NAME (3 to 32 bytes; without NAME only the lock changes) and locks or unlocks its name. While locked, the account signs in under that name whatever its client asks for, so the target's next `connected` carries it with `"nicknameLocked":true`. The answer is `admin_result`, then `user_updated` everywhere, `account_updated` on the target's sessions, and `presence` with the new name while it is online. A name another account holds is `protocol_error "That name is already in use on this server"`. Renaming yourself is allowed. |
-| `admin-kick USER_ID [REASON...]` | Admins: ends every session of the account. The target's sessions print `session_ended` (`kind` `kicked`) and do not reconnect by themselves; `reconnect` signs in again. Refused for yourself (`You cannot kick yourself`) and for another admin (`Remove the admin role before kicking an admin`). Reasons are at most 256 bytes. |
-| `admin-ban USER_ID [REASON...]` | Admins: bans the account and ends its sessions (`session_ended` `kind` `banned`); its next sign-in is refused with `connect_failed` `failure` `Banned` (`detail` "This account is banned from this server", plus ": REASON" when there is one). Everyone gets `user_updated` with `"isBanned":true`. Refused for yourself and for another admin, like a kick. Sign-up is open, so a banned person can still connect with a new identity key as a new account. |
+| `admin-kick USER_ID [REASON...]` | Admins: ends every session of the account. The target's sessions print `session_ended` (`kind` `kicked`) and do not reconnect by themselves; `reconnect` signs in again. Refused for yourself (`You cannot kick yourself`) and for another admin (`Remove the admin role before kicking an admin`). Reasons are at most 256 bytes; a longer one is an `ok:false` result. |
+| `admin-ban USER_ID [REASON...]` | Admins: bans the account and ends its sessions (`session_ended` `kind` `banned`); its next sign-in is refused with `connect_failed` `failure` `Banned` (`detail` "This account is banned from this server", plus ": REASON" when there is one). Everyone gets `user_updated` with `"isBanned":true`. Refused for yourself (`You cannot ban yourself`) and for another admin (`Remove the admin role before banning an admin`), like a kick. Sign-up is open, so a banned person can still connect with a new identity key as a new account. |
 | `admin-unban USER_ID` | Admins: lifts a ban; everyone gets `user_updated` with `"isBanned":false`, and the account can sign in again. |
 | `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
 | `voice-join ROOM_ID` | Joins the room's voice on the selected server (leaving any other first). `ok` (`serverID`, `roomID`, `status` `joining`) means the request went out; the join completes with `voice_participants` carrying `"recipientJoined":true`, then `voice_status` `joined` once the engine runs. A refusal arrives as `voice_join_rejected`. See [Voice](#voice). |
-| `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice). A file sink is closed, complete, at this point. |
+| `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice, and the `status` after it). A file sink is closed, complete, at this point. |
 | `voice-source SPEC` | What the next join sends: `tone:HZ[:AMP]` (a sine, amplitude 0 to 1, default 0.5), `file:PATH` (raw F32LE mono 48 kHz, silent after its end), `silence` (the default), or `device[:NAME]` (an SDL recording device; the only way SDL audio is initialised). |
 | `voice-sink SPEC` | Where the next join plays: `file:PATH` (every speaker mixed into raw F32LE mono 48 kHz, silence written while nobody speaks), `null` (the default: decode and discard), or `device[:NAME]` (an SDL playback device). |
 | `voice-gate vad [THRESHOLD_DB]\|ptt\|open` | Voice activity (threshold in dBFS, -100 to below 0, default -45), push-to-talk, or `open`: push-to-talk with the key held, so every frame is sent. Applies at once and to the next join. |
@@ -225,8 +225,9 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   changes: `joining` after `voice-join` (or a re-join after a reconnect), `joined` once the
   server acknowledged this session and the engine runs, `idle` after a leave, a rejection, a
   removal or a lost connection (`wantRoomID` is the room a reconnect joins again, 0 when none),
-  and `unavailable` when the engine could not start; `error` then says why (no libopus, a
-  device or file that cannot be opened).
+  and `unavailable` when the engine could not start. `error` is why voice last stopped or
+  failed: the server's reason after a rejection or a removal, or for `unavailable` no libopus
+  or a device or file that cannot be opened.
 - `voice_speaking` is printed on each edge of a speaker being heard. For another participant
   (`"self":false`, `userID` is the sender) it follows the engine's talk spurt for that speaker:
   it starts with the first frame and ends on the sender's end-of-spurt flag, or 200 ms after
@@ -235,12 +236,14 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   attack and hangover), so the edges are stable enough to `wait` for; when the engine stops,
   every speaker still speaking gets a `false` edge.
 - `voice_join_rejected` answers a join the server refused: `not a room member`, `voice room is
-  full`, `voice is disabled`, `invalid room`, `voice is unavailable, try again`, `invalid voice
-  device ID`, or `voice is active on another device` (an automatic re-join while another device
-  of the account is in voice).
+  full`, `voice is disabled` (voice is off on the server), `voice is disabled in this room` (a
+  text-only room, protocol 14), `invalid room`, `voice is unavailable, try again`, `invalid
+  voice device ID`, or `voice is active on another device` (an automatic re-join while another
+  device of the account is in voice).
 - `voice_left` means the server took this session out of a room's voice: `removed from the
-  room`, `the room was deleted` (it comes before `room_deleted`), `joined another voice room`,
-  or `joined voice on another device` (another session of the account joined voice).
+  room`, `the room was deleted` (it comes before `room_deleted`), `voice is disabled in this
+  room` (an admin made the room text-only), `joined another voice room`, or `joined voice on
+  another device` (another session of the account joined voice).
 - An account has one voice session (protocol 13). `voice-join` is a join the user asked for, so
   it takes voice over from the account's other session. Two harness clients count as two
   devices only with different `device_id` values in their profiles' `config.json`: a profile
@@ -305,11 +308,11 @@ odin run dev/tools/voice-check -- --write-tone mic.f32 --freq 440 --seconds 10  
 
 It finds the longest stretch of 20 ms blocks within 20 dB of the expected level (from
 `--amplitude`, default 0.5), trims 100 ms from each end, and checks it in half-second windows:
-every window's dominant frequency within `--tolerance` Hz of `--freq` and its SNR (the target
-bin over the median bin) at least `--min-snr` dB (default 20); the stretch's RMS level within
-`--level-tolerance` dB (default 6) of the expected level; and the stretch at least
-`--min-seconds` long. It prints the measured frequency (median and worst window), level and
-SNR either way, and exits 0 on a pass, 1 on a failure and 2 on a usage or file error.
+every window's dominant frequency within `--tolerance` Hz (default 5) of `--freq` and its SNR
+(the target bin over the median bin) at least `--min-snr` dB (default 20); the stretch's RMS
+level within `--level-tolerance` dB (default 6) of the expected level; and the stretch at least
+`--min-seconds` long (default 1). It prints the measured frequency (median and worst window),
+level and SNR either way, and exits 0 on a pass, 1 on a failure and 2 on a usage or file error.
 `--channels N` reads interleaved files (the first channel is checked) and `--rate HZ` another
 sample rate. `--freq` must lie inside the analyser's scan range, 50 to 4050 Hz; anything else
 is a usage error (exit 2), since the check could only fail. `--write-tone` takes any frequency
@@ -341,6 +344,12 @@ below half the rate.
    spurt is pre-roll rather than a repair); `maxGapRun` is at most 2; and F received at least
    95 % of what E sent and the hook did not drop. The script also checks that the normal
    client binary does not contain the hook. `HAYCHAT_VOICE_PROOF_FAULTS=0` skips the stage.
+4. One session per user (protocol 13): G and H share one identity key (H's profile is a copy
+   of G's, with the copy's `device_id` changed in its `config.json`), so both sign in as the
+   same user. G joins room 1, then H joins room 1: G must print `voice_left` "joined voice on
+   another device" and `voice_status` `idle` with `wantRoomID` 0 (no re-join), H a
+   `voice_participants` with `recipientJoined` true and G one with `recipientJoined` false,
+   both naming the user exactly once.
 
 It needs libopus (in the dev image and CI) and nothing else: no audio server, no device, no
 display. Each stage prints its counters, including the jitter buffer's playout delay.
@@ -397,8 +406,8 @@ Each agent runs its own client with its own profile. Alice's side (`>` is stdin,
 
 ```text
 < {"event":"connecting","serverID":1,"attempt":1}
-< {"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false}
-< {"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"..."}]}
+< {"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false}
+< {"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":0,"unreadCount":0,"roomType":3}]}
 > wait room_list
 < {"ok":true,"cmd":"wait","event":"room_list","waitedMS":0}
 > send 1 hello bob
@@ -428,7 +437,7 @@ messages him:
 ```text
 < {"event":"presence","serverID":1,"userID":4,"nickname":"bob-1","isOnline":true}
 > users
-< {"ok":true,"cmd":"users","serverID":1,"loaded":true,"loading":false,"users":[{"id":3,"nickname":"alice-1","isOnline":true},{"id":4,"nickname":"bob-1","isOnline":true}]}
+< {"ok":true,"cmd":"users","serverID":1,"loaded":true,"loading":false,"users":[{"id":3,"nickname":"alice-1","isOnline":true,"lastReadMessageId":0,"unreadCount":0,"isAdmin":false,"isBanned":false},{"id":4,"nickname":"bob-1","isOnline":true,"lastReadMessageId":0,"unreadCount":0,"isAdmin":false,"isBanned":false}]}
 > dm 4 hello bob
 < {"ok":true,"cmd":"dm","serverID":1,"peerUserID":4}
 < {"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice-1","recipientID":4,"recipientNickname":"bob-1","timestamp":"...","content":"hello bob"}
@@ -501,8 +510,9 @@ voice, B joins its voice, A makes it text-only, and B must print `voice_left` an
 `voice-join` refused, both with "voice is disabled in this room".
 
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on open rooms: a new
-account joins every existing room, and `dev/live-proof.sh` loads the `#general` fixture before
-any client connects. If the sender is not a member of room 1 the server answers with
+account joins every existing room, and the server creates `#general` (room 1) on an empty
+database before it reports readiness, which `dev/live-proof.sh` checks before any client
+connects. If the sender is not a member of room 1 the server answers with
 `protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
 
 ## GUI Automation
@@ -526,7 +536,7 @@ SDL_VIDEO_DRIVER=offscreen ./haychat-client --ui-script smoke.uis \
 | Option | Meaning |
 | --- | --- |
 | `--ui-script FILE` | The script to run. Every line is parsed before the window opens, so a bad line runs nothing. |
-| `--name`, `--server`, `--config-dir` | Exactly as in headless mode (the same parser). Without a name or server the window opens the first-run screen, which a script can fill in. |
+| `--name`, `--server`, `--config-dir` | Exactly as in headless mode (the same parser). Without a name or server the window opens the first-run screen, which a script can fill in. `--headless` and `--connect-timeout` are refused. |
 | `--window WxH` | Window size in window coordinates, at least `800x480` (default `1280x800`), so screenshots have a known size. |
 
 ### Running Without a Display
@@ -556,7 +566,7 @@ Timeouts default to 5000 ms and may be at most 600000.
 | --- | --- |
 | `wait MS` | Lets the UI run and draw for MS milliseconds. |
 | `wait-text "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn in the current frame. |
-| `wait-count N "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn at least N times (e.g. a user under both Direct Messages and Members). |
+| `wait-count N "TEXT" [TIMEOUT_MS]` | Waits until TEXT is drawn at least N times, N from 1 to 1000 (e.g. a user under both Direct Messages and Members). |
 | `wait-gone "TEXT" [TIMEOUT_MS]` | Waits until TEXT is no longer drawn (e.g. `wait-gone "Join voice"` after a room became text-only). |
 | `assert-text "TEXT"` | Fails unless TEXT is drawn in the current frame. |
 | `click "TEXT"` | Clicks the centre of the most recently drawn TEXT that lies on a widget (button, sidebar row, rail button, input placeholder), or else the most recent TEXT anywhere. A sidebar row therefore wins over a header repeating its label. |
@@ -569,9 +579,9 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
 | `quit` | Ends the script and closes the window. Reaching the end of the file does the same. |
 
-After `click`, `right-click`, `type` and `key` the next command waits until two more frames
-are drawn, so the input has been handled and its effects are on screen. Waits re-check every
-frame and at least every 10 ms.
+After every click and right-click command (by text, ID or coordinates), `scroll`, `type` and
+`key` the next command waits until two more frames are drawn, so the input has been handled
+and its effects are on screen. Waits re-check every frame and at least every 10 ms.
 
 ### Context Menus
 
@@ -609,9 +619,12 @@ key Return
 
 ### Admin Screens
 
-Server settings (`click-id server-settings SERVER` or the rail menu's **Server settings**)
-shows an Admin section to admins, below Voice. Its widget IDs take the server ID and then the
-user or room ID:
+Server settings (`click-id server-settings SERVER` or the rail menu's **Server settings**;
+`click-id server-settings-close SERVER` closes it) has a Voice section that lists every other
+account on the server with its volume slider, `server-voice-volume SERVER USER`, and its
+**Mute for me** / **Muted for me** button, `server-voice-mute SERVER USER`: the same local
+setting as the harness's `voice-volume` and `voice-mute-user`. It shows an Admin section to
+admins, below Voice. Its widget IDs take the server ID and then the user or room ID:
 
 | Widget | Meaning |
 | --- | --- |
@@ -658,7 +671,7 @@ bad line prints `{"ok":false,"cmd":"parse","line":N,"error":"..."}` before anyth
 | Code | Meaning |
 | --- | --- |
 | 0 | Every command succeeded. |
-| 1 | Usage error: bad options, an unreadable script, a parse error, or SDL could not start. |
+| 1 | Usage error: bad options, an unreadable script, a parse error, a profile whose config and identity key could not be loaded or created, or SDL could not start. |
 | 3 | A wait timed out, an assertion failed, a lookup found nothing, or the window was closed before the script finished. |
 
 ### Screenshot of a Given State
@@ -706,9 +719,10 @@ which holds the volume slider, and mutes him for herself. Last, she edits her ro
 only in the room form ("This room is voice only" replaces the composer) and then to text only:
 **Join voice** disappears from its header and its menu, and bob's `rooms` must list it with
 `"roomType":1`. She opens Server settings from the rail button's menu and scrolls to the
-Admin section's rooms list. alice takes twenty-eight screenshots on the way and the script
-prints their paths. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise
-in a new temporary directory, which disappears with the container under `./dev.sh`; set
+Admin section's rooms list. alice takes twenty-eight screenshots on the way (`01-…` to `27-…`
+and `06b-server-settings.bmp`); the script prints the paths of the 27 numbered `NN-*.bmp`
+ones and checks that all 27 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.
 

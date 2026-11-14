@@ -1270,7 +1270,7 @@ channel 3 (it reuses the per-channel transport from H1), and server metrics.
   `server/ipc.odin`, `server/main.odin`, `server/database.odin`,
   `server/network_event_handler_test.odin`, `client/transport.odin`,
   `client/network_worker.odin`, `client/app.odin`, `client/main.odin`, `client/view.odin`,
-  `client/AGENTS.md`, `server/AGENTS.md`, `docs/assessment-2026-10.md` (items 6 and 9),
+  `client/AGENTS.md`, `server/AGENTS.md`, `docs/plan/2026-10-assessment.md` (items 6 and 9),
   `dev/Containerfile`, `dev/install-packages.sh`, `dev/bootstrap-odin.sh`,
   `dev/live-proof.sh`, `check.sh`, `README.md`.
 - Odin vendor (host `db92c6de`; SDL3 audio and ENet are unchanged since the pinned

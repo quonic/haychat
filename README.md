@@ -2,337 +2,107 @@
 
 ![HayChat Logo](assets/icon.png)
 
-HayChat is a self-hosted alternative to Discord. It features encrypted client-server transport, a responsive user interface, and a modular architecture for easy extensibility.
+HayChat is a self-hosted alternative to Discord: text rooms, direct messages and voice rooms on
+a server you run yourself, with a lightweight native client for Windows and Linux.
 
 > [!IMPORTANT]
-> HayChat is currently in early development and is not yet ready for production use. The project is open-source and welcomes contributions from the community.
+> HayChat is in early development and not yet ready for production use. The project is
+> open-source and welcomes contributions from the community.
 
 ## Features
 
-- Encrypted transport between client and server: Ed25519 identities, X25519 key exchange, and XChaCha20-Poly1305 packets, with the server key pinned on first connect. The server decrypts messages and stores them unencrypted in its PostgreSQL database; end-to-end encryption is not implemented yet. Each transport channel has its own keys: the handshake derives four with HKDF (control and voice, one per direction), the control channel (ENet channel 1) keeps a strict sequence counter, and the voice channel (ENet channel 2) gets a 64-packet replay window. This key schedule arrived with protocol version 9, so clients and servers must be rebuilt together: older ones refuse each other with "Unsupported protocol version", which the client shows as the two speaking different protocol versions. Protocol version 10 adds the voice control messages (join, leave, mute and deafen state, participant lists) and binds each voice datagram's kind byte into its authentication tag. The server handles voice joins and relays voice frames (see Voice under Server Configuration), and the client joins, sends and plays voice (see Voice rooms under Using the Client). Clients and servers on protocol 10 must again be rebuilt together. Protocol version 12 adds a per-session flag to every voice participant list, so a client completes a join only on the server's acknowledgement of its own session rather than on any list that names its account; it, too, needs clients and servers rebuilt together. Protocol version 13 keeps one voice session per account: every voice join carries the profile's device ID and whether it is the client's automatic re-join after a reconnect, and a server on 13 refuses a join without a device ID, so clients and servers must be rebuilt together once more. Protocol version 14 adds admin actions on accounts (role, rename, kick, ban) and room types (see Rooms), with schema migration 3; clients and servers must be rebuilt together for it too.
-- Real-time messaging with low latency
-- User-friendly interface with customizable themes
-- Server chat in shared rooms, and direct messages between any two accounts on a server
-- Cross-platform compatibility (Windows, Linux, macOS(planned))
-- Modular architecture for easy addition of new features
-- Comprehensive testing suite for reliability
+- **Text rooms** with persistent, paged history, shared by every account on the server.
+- **Direct messages** between any two accounts on a server, with online presence.
+- **Voice rooms** with Opus audio, voice activity or push-to-talk (also while another window has
+  focus), per-user volume and mute, and automatic re-join after a reconnect.
+- **Unread counts** kept by the server, so they follow you to every device.
+- **Several servers** in one client, each with its own display name and settings.
+- **Administration from the client:** create, edit and delete rooms (text, voice, or both),
+  grant the admin role, rename, kick, ban and unban accounts.
+- **Encrypted transport:** Ed25519 identities, X25519 key exchange and XChaCha20-Poly1305, with
+  the server's key pinned on first connect. No passwords: your identity key is your account.
+  Messages are not end-to-end encrypted; the server can read them (see
+  [docs/protocol.md](docs/protocol.md)).
+- **Small footprint:** written in [Odin](https://odin-lang.org/), with its own immediate-mode UI
+  on SDL3, a single-process server, and PostgreSQL for storage.
 
-## Advantages over Discord
+Windows and Linux are supported; macOS is planned.
 
-- Open-source and self-hosted, giving users full control over their data and privacy
-- Lightweight and optimized for performance, reducing resource usage
-- Focus on security and privacy: self-hosted, encrypted in transit, and no data collection
-- Customizable and extensible architecture, allowing users to tailor the application to their needs
-- Transparent development process with community involvement and contributions
+### Why HayChat
+
+- **Your server, your data:** open-source and self-hosted, with no data collection.
+- **Lightweight:** a native client and server instead of a browser engine.
+- **Open development:** extensible, and built in the open with community contributions.
 
 ## Getting Started
 
-Clone the repository, install podman, and run `./dev.sh ci` to build the toolchain image and run every check. See Development Environment below to run a local server and clients.
+- **Testing HayChat?** Read the [tester guide](docs/tester-guide.md): download the client,
+  connect, and report problems.
+- **Running a server?** Follow [deploy/README.md](deploy/README.md) to run the server image with
+  PostgreSQL under podman, then [give yourself the admin
+  role](deploy/README.md#first-time-setup).
+- **Developing?** Install [podman](https://podman.io/) and run:
 
-- **Testers:** [docs/tester-guide.md](docs/tester-guide.md) explains how to get the client, connect, and report problems.
-- **Running a server for testers:** see [Deployment](#deployment) and [deploy/README.md](deploy/README.md).
+  ```sh
+  ./dev.sh ci              # build the toolchain image and run every check
+  ./dev.sh up              # start PostgreSQL and a dev server
+  ./dev.sh client alice    # open a client window as "alice"
+  ```
 
-On Linux, the client stores its config at `XDG_CONFIG_HOME/haychat/config.json`, defaulting to `$HOME/.config/haychat/config.json` when `XDG_CONFIG_HOME` is unset. Startup also migrates the original historical malformed path formula `$HOME$XDG_CONFIG_HOME/haychat/config.json`, which means older installs are recovered from either the default `$HOME$HOME/.config/haychat/config.json` shape or a custom `XDG_CONFIG_HOME` variant if that file still exists.
+  [docs/development.md](docs/development.md) explains the dev environment, and
+  [CONTRIBUTING.md](CONTRIBUTING.md) how to contribute.
 
-### Using the Client
+## Documentation
 
-The window opens at once; connecting happens in the background.
-
-- **First run.** When the config has no display name or no server, the client shows a setup screen asking for a display name (3 to 32 bytes; accented letters and emoji count as 2 to 4), a server host, and a port (default `12345`; `host:port` in the host field works too). **Connect** saves the config and connects.
-- **Settings.** The gear button at the bottom of the server rail opens the same screen later, to change the global display name, add servers, and open a server's own settings from the server list. Changing the global name reconnects every server that has no name of its own, and each server renames your account (see Display names).
-- **Server settings.** The gear in the selected server's sidebar header (or **Server settings** in the server button's right-click menu) opens that server's own settings in the main pane (switching rooms, servers or conversations closes them again). They apply to that server only and are kept in this profile's `config.json`, so they are not synced between devices:
-  - **Profile:** a display name for this server only; empty uses the global one. Saving a new one renames your account on this server and reconnects only this server. When an admin of the server renamed you and locked the name, the section shows that name with "Set by an admin of this server" instead of the field.
-  - **Server:** the label (headers and the rail tooltip) and short label (the rail button, up to 3 characters; empty fields are filled in from the address), the host and port (a new address reconnects only this server and pins its key afresh), the pinned key's fingerprint with **Forget key** (two clicks: clears the pin and reconnects, and the next connection pins whatever key the server presents; only when you know the server was reinstalled), and **Remove server** (two clicks).
-  - **Voice:** every other user of the server, those in voice first, with a volume slider (0 to 200 %) and **Mute for me**. Only you hear the change, at once, also while in voice; the user and the server are not told. A muted user's voice is dropped before it is decoded. A voice participant's right-click menu has the same **Mute for me** and volume slider.
-  - **Admin** (admins only, see Rooms): the server's accounts and rooms, to change roles, rename, kick, ban and unban, and to create, edit and delete rooms.
-- **Connection status.** The sidebar footer shows the selected server's status ("Connected as alice", "Connecting…", "Reconnecting in 4 s"), and a dot on each rail button shows every server's status (green connected, amber connecting or waiting, red stopped). While the selected server is not connected, a banner above the room explains why, with a **Retry now** button.
-- **Reconnecting.** After a lost connection or a failed attempt the client retries after 1 s, 2 s, 4 s, and so on, capped at 30 s, each shortened by up to 20% of random jitter so clients do not all return at once. Restarting the server therefore reconnects every client without user action.
-- **Failures that stop retrying.** Some causes cannot fix themselves, so the client stops and says what to do:
-  - the name belongs to another account (another person, or another device's key) on that server: choose another name in Settings, or one for that server only in its Server settings (**Open settings** in the banner goes to the one the server uses);
-  - the server's identity key does not match the pinned one (expected after a server reset or reinstall): **Trust the new key** replaces the pin, saves the config, and reconnects;
-  - the client and server speak different protocol versions;
-  - the display name is too short or too long, or the identity key in the config is corrupt;
-  - an admin kicked or banned the account: the banner says **Kicked** or **Banned** with the admin's reason, and **Retry now** connects again (after a kick, or once the ban is lifted). Voice is not rejoined by itself afterwards.
-- **Context menus.** Right-click opens a menu at the pointer, kept inside the window. Up and Down move through it, Enter picks, and Esc or a click outside closes it (that click does nothing else).
-  - **Channel:** Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name; admins also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes).
-  - **Direct Messages and Members rows, sender names above messages:** Send message, Mark as read (for an existing conversation with unread messages), Copy name. A voice participant in the channel list has Send message and Copy name, and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings).
-  - **Admin entries** (admins only, on all of the above): Rename…, Make admin or Remove admin, Kick…, Ban… or Unban, greyed out where the server refuses them (see Rooms). Rename…, Kick… and Ban… open Server settings → Admin with that account's confirmation open, since they need a name or a reason.
-  - **Message:** Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer), and in rooms Send message to sender for other people's messages.
-  - **Server button in the rail:** Server settings, Retry now (while not connected), Copy address, Remove server… (the entry turns into "Click again to remove"; the second click removes it, like Settings does).
-  - **Text fields** (the composer and the Settings fields): Cut, Copy, Paste, Select all.
-
-- **Voice rooms.** Every room carries voice unless an admin made it text-only (see Rooms), and the client is in at most one room's voice at a time. It sends its microphone encoded with Opus on ENet channel 2 and plays every other participant, mutes (nothing leaves the client after the click) and deafens (playback stops at once), and joins the same room again by itself after a reconnect. An account has one voice session: joining voice on a second device moves you there, and the first device leaves voice with "joined voice on another device". The automatic re-join after a reconnect never moves voice away from another device: while another device of yours is in voice it is refused with "voice is active on another device", and that device stays in voice. Voice needs libopus (see Client Dependencies); without it, or without a working audio device, voice reports why and chat keeps working. There is no echo cancellation: use headphones. The headless harness drives voice from scripts too (`voice-join`, `voice-source`, `voice-sink`, `voice-stats`; see [docs/testing-harness.md](docs/testing-harness.md#voice)).
-  - **Room header:** **Join voice**, or **Leave voice** while in (or joining, or re-joining) that room's voice.
-  - **Channel list:** a room with anyone in its voice shows a speaker and a count, and lists the participants under it, also for rooms you are not in. Each user is listed once; a dot ringed green means they are speaking (known for the room you are in), and "muted" or "deafened" follows the name.
-  - **Voice bar** (bottom of the sidebar): "Voice connected: #room on Server" with your own speaking dot, an input level meter, and **Mute**, **Deafen** and **Leave**; "Joining voice…" and "Rejoining voice…" while on the way; the error ("Voice unavailable: libopus not found", "Microphone not available: …", or the server's refusal) with **Dismiss** when voice failed.
-  - **Settings → Voice:** input and output device lists ("System default" first; a chosen device that is unplugged stays listed as "(not connected)", and the default plays meanwhile), voice activity or push-to-talk, the push-to-talk key (click it, press a key; Esc cancels), the voice activity threshold over a live input level meter, input gain, output volume, and the Opus bitrate. **Test microphone** runs a loopback (microphone → Opus → your own speakers) while the section is open and you are not in voice. Every change applies at once: levels, mode and bitrate to the running voice session in place, a new device by reopening the audio devices while the session stays joined (the sender's frame sequence carries on across the reopen, so listeners do not drop what follows). Devices are listed only while the section is open, and refreshed on hotplug; a session on a named device that is unplugged reopens on the system default, and returns to the named device when it is plugged back in.
-  - **Push-to-talk** reads the key from the HayChat window while it has focus, and, with **In other windows too** on (the default, `voice_ptt_global`), while another window has focus as well. A key that types (a letter, digit, punctuation, Space, Enter, Tab, Backspace, Delete or Esc) is ignored while a HayChat text field has keyboard focus, so it types there instead of opening the microphone; in other windows it does open the microphone while you type, so modifiers such as the default Left Ctrl and F-keys suit push-to-talk best.
-  - **In other windows** push-to-talk works per platform (`client/hotkey`). The key is followed only while you are in voice (or joining it) or testing the microphone, and nothing is read or set up before that.
-    - **Windows:** `GetAsyncKeyState` reads the one configured key; no keyboard hook is installed.
-    - **Linux on X11:** `XQueryKeymap` reads the one configured key (libX11 is loaded at runtime).
-    - **Linux on Wayland:** the desktop's GlobalShortcuts portal (KDE Plasma, GNOME 48 and later, Hyprland), over libdbus-1 loaded at runtime. The desktop owns the shortcut: the first time you use push-to-talk in voice it asks you to confirm the key HayChat proposes (a modifier alone, such as Left Ctrl, is not proposed, so you choose one), and Settings → Voice shows the shortcut it assigned, with **Change shortcut** where the portal supports it. Inside the window the configured key works as well.
-    - Where none of these is available (a Wayland desktop without the portal, or an unmapped key), Settings → Voice says why, and push-to-talk works while the window has focus.
-
-Client config keys (`config.json`):
-
-| Key | Purpose |
+| Document | Contents |
 | --- | --- |
-| `display_name` | The nickname sent to every server that has no `servers[].display_name` of its own. A server's account belongs to the identity key: a new key gets an account under this name, and a new name renames that key's account (see Display names) |
-| `private_key`, `public_key` | The client's Ed25519 identity, generated on first start. Keep the file private (it is written with mode `0600`) |
-| `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
-| `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes or by **Forget key** in Server settings; replaced by **Trust the new key** |
-| `servers[].display_name` | The display name used on this server only, set in Server settings. Default unset: the global `display_name`. Surrounding spaces are dropped when the config is read; a name of the wrong length is refused by the client like a bad global name ("Choose another name") |
-| `servers[].user_voice[]` | Voice playback per user of this server, set in Server settings → Voice: `user_id` (the server's account ID), `volume` (linear, 0 to 2, i.e. 0 to 200 %; unset is 1) and `muted` (Mute for me: this client does not play that user). Only entries that differ from the default are written, at most 256 per server. When the config is read, entries without a valid `user_id` or equal to the default are dropped, volumes are clamped, and of repeated users the last entry wins. Local only: the server never learns about them |
-| `device_id` | This profile's voice device ID: 32 lowercase hex characters, random, generated on first start and sent with every voice join. The server compares it only when the client re-joins voice by itself after a reconnect, to tell this device's stale voice session (replaced) from another device's (left alone). Not a secret, but not logged either. A missing or malformed value is replaced with a new one at start, so deleting the key resets it. A profile directory copied to another machine keeps the same ID, and the two then count as one device for re-joins: delete `device_id` in the copy |
-| `voice_input_device` | Microphone, by SDL device name. Default `""`: the system default. A name that is not connected falls back to the system default |
-| `voice_output_device` | Speakers or headphones, by SDL device name. Default `""`: the system default |
-| `voice_mode` | `"voice_activity"` (default: send while louder than the threshold) or `"push_to_talk"` (send while the push-to-talk key is held and the window has focus) |
-| `voice_ptt_key` | The push-to-talk key as an SDL key name, e.g. `"Space"`. Default `"Left Ctrl"`; an unknown name uses the default |
-| `voice_ptt_global` | `true` (default: push-to-talk also works while another window has focus, see Push-to-talk above) or `false` (only while the HayChat window has focus) |
-| `voice_vad_threshold_db` | Voice activity threshold in dBFS, −80 to 0. Default −45 |
-| `voice_input_gain` | Linear microphone gain, 0 to 4. Default 1 |
-| `voice_output_volume` | Linear output volume, 0 to 2. Default 1 |
-| `voice_bitrate` | Opus bitrate in bit/s, 12000 to 64000. Default 24000 |
-
-The voice keys are written by Settings → Voice and only when they differ from the default, so a later change of a default reaches everyone who did not choose otherwise. Out-of-range numbers are clamped and invalid strings fall back to the default when the config is read.
-
-### Development Environment
-
-Development runs in [podman](https://podman.io/) containers, so the host needs only podman (`sudo dnf install podman` on Fedora, `sudo apt install podman` on Debian/Ubuntu). `./dev.sh` is the single entry point. Run `./dev.sh help` for the full command list.
-
-Every container uses the dev image built from `dev/Containerfile`: Fedora 44, the system libraries HayChat links against, and the Odin toolchain and shared libraries at the commits pinned in `dev/bootstrap-odin.sh`. The image tag is a hash of those inputs. Changing a package or a pin produces a new tag, and the next `./dev.sh` command rebuilds the image (the first build takes a few minutes). Containers never see the repository directly. Each gets a snapshot of the working tree: tracked files, including uncommitted edits, plus untracked files that `.gitignore` does not exclude. Local leftovers such as `logs/`, `storage/`, built binaries, and your `~/.config/haychat` never reach a container, and no command touches them.
-
-#### Checks
-
-| Command | What it runs |
-| --- | --- |
-| `./dev.sh check` | `./check.sh`: `odin check` for the server and for the client on Linux and Windows, then every test suite with leak detection (a test fails on any leak or bad free) |
-| `./dev.sh live` | `dev/live-proof.sh`: builds and starts the server against a throwaway PostgreSQL, checks that it created `#general`, loads the `server/sql/auth_bootstrap.sql` fixture, then runs the live startup auth proof. `--all` adds the two-client room chat, direct message and voice proofs, the harness and GUI smoke tests, the two-process voice proof, and the server SQL proof |
-| `./dev.sh live --harness` | Only `dev/harness-smoke.sh` against the live server: headless clients connect, list rooms, chat, exchange a direct message, and (made admin with `deploy/sql/make-admin.sql`) create, rename, and delete a room (see [docs/testing-harness.md](docs/testing-harness.md)). `--all` runs it too |
-| `./dev.sh live --voice` | Only `dev/voice-proof.sh` against the live server: two headless client processes join room 1's voice; one sends a 440 Hz tone and the other records it into a file, which `dev/tools/voice-check` must find at the right frequency and level, with no frames lost; then the same through SDL's disk audio driver; then through a client built with `-define:HAYCHAT_TEST_FAULTS=true` that drops 5 % of received frames and delays the rest by up to 20 ms, where FEC and PLC must repair every loss and no more than 2 frames in a row may go unrepaired; then two clients with one identity key and different device IDs, where the second join must take voice over from the first and the participant list must name the user once (see [docs/testing-harness.md](docs/testing-harness.md#voice)). `--all` runs it too |
-| `./dev.sh live --ui` | Only `dev/ui-smoke.sh` against the live server: the real client window, on SDL's offscreen driver, is driven by `--ui-script` to chat, exchange a direct message with a headless client, create a room as an admin, make the headless client an admin, ban and unban it, and change a room's type, taking screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them; see [docs/testing-harness.md](docs/testing-harness.md#gui-automation)). `--all` runs it too |
-| `./dev.sh live --sql` | Only the server SQL proof: database-backed server tests (gated on `HAYCHAT_DATABASE_SQL_TEST=1`) that run the direct message statements against the throwaway PostgreSQL. `--all` runs it too |
-| `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
-
-Voice on real audio devices is a manual check, outside CI: `dev/voice-manual-test.sh [HOST:PORT]` runs on a Linux host with PipeWire against a running server (the dev pod by default). It creates virtual PipeWire devices (never touching your speakers, microphone or default devices, and removing them afterwards), plays a tone, espeak-ng speech at several levels and click trains through two headless clients on SDL's PipeWire driver, and reports frequency, level and SNR, how much speech the voice activity gate passed or clipped, and the mouth-to-ear delay (p50 and p95). See [docs/voice-manual-test.md](docs/voice-manual-test.md), which also has the Windows voice checklist.
-
-Each run gets fresh containers. `live` and `ci` also get a fresh PostgreSQL in a tmpfs, so live test users never pile up. The throwaway pod publishes no ports, so it runs alongside the dev environment or a host server without conflicts.
-
-#### Dev Environment
-
-`./dev.sh up` starts the pod `haychat-dev`: PostgreSQL 17 and a server built from your working tree. The containers share the pod's network and reach each other on `127.0.0.1`. Clients connect on `localhost:12345/udp`, the only published port.
-
-| Command | Purpose |
-| --- | --- |
-| `./dev.sh up` | Build the server and start the pod |
-| `./dev.sh restart` | Rebuild the server from the working tree and restart it. A compile error leaves the running server up |
-| `./dev.sh status` | Containers and ports |
-| `./dev.sh logs [-f]` | Server output |
-| `./dev.sh seed` | Load the `server/sql/auth_bootstrap.sql` fixture (see Seeded test identities) |
-| `./dev.sh psql [ARGS...]` | psql on the dev database |
-| `./dev.sh client [PROFILE]` | Build the client and open its window on your Wayland or X11 display. Each profile has its own config and identity key. A new profile's display name is the profile name and its server is the dev server, so two profiles are two users. Profiles created before the first-run screen existed have no server: enter `localhost` once on that screen |
-| `./dev.sh key [PROFILE]` | Print a profile's public key, for `HAYCHAT_ADMIN_PUBLIC_KEY` |
-| `./dev.sh down` | Remove the pod. The database, server state, and client profiles are kept in volumes |
-| `./dev.sh reset` | `down`, then delete those volumes. The next `up` starts with an empty database and a new server identity key |
-| `./dev.sh shell` | Interactive shell in the dev image with the repository mounted read-write at `/src`, for ad-hoc `odin` commands; `./dev.sh shell CMD [ARGS...]` runs one command there without a terminal |
-| `./dev.sh image [--pull]` | Rebuild the dev image; `--pull` also refreshes the Fedora base image |
-
-The server keeps its logs, storage, and identity key in the `haychat-dev-state` volume, and PostgreSQL keeps its data in `haychat-dev-pgdata`. Client profiles live in `haychat-dev-client-<profile>` volumes. A client running on the host (`odin run client`) also reaches the dev server, at its default `localhost:12345`.
-
-Containers that run the server or the tests use podman's default seccomp profile and SELinux label. Only `./dev.sh client` (for the host display socket) and `./dev.sh shell` (for the read-write repository mount) run without SELinux confinement. All of them are rootless.
-
-`./dev.sh` reads these environment variables:
-
-- `HAYCHAT_DEV_PORT`: host UDP port published for client connections (default `12345`)
-- `HAYCHAT_DEV_ENV_FILE`: server overrides file (default `.env`, see below)
-- `HAYCHAT_DEV_POSTGRES_IMAGE`: PostgreSQL image (default `docker.io/library/postgres:17`)
-- `HAYCHAT_SERVER_READY_TIMEOUT_SECS`: how long to wait for the server to report readiness. `./dev.sh up` and `restart` default to `120`; `dev/live-proof.sh` defaults to `60`, and `./dev.sh live` and `ci` pass the variable through to it when it is set
-
-#### Without Containers
-
-`./check.sh` and `dev/live-proof.sh` also run directly on a host that has `odin` on `PATH`. On Fedora 44, `sudo dev/install-packages.sh` installs the system packages and `dev/bootstrap-odin.sh [odin_root]` builds the pinned Odin toolchain and shared libraries. `dev/live-proof.sh` expects a PostgreSQL it can reach through `HAYCHAT_DATABASE_*`, and that role must be able to create and alter objects in `public` and to create and drop schemas (the SQL proofs run in schemas of their own).
-
-### Client Dependencies
-
-The client draws its own immediate-mode UI with `vendor:sdl3` (windowing, input, and the 2D renderer) and `vendor:sdl3/ttf` (text shaping and layout), both from Odin's vendor collection. No other GUI library is needed.
-
-- Linux: the dev image includes SDL3 and SDL3_ttf. On a host, install the development packages (`SDL3-devel SDL3_ttf-devel` on Fedora, `libsdl3-dev libsdl3-ttf-dev` on Ubuntu 25.04+/Debian 13+).
-- Windows: Odin's vendor collection ships the import libraries. To run the client, copy `SDL3.dll` from `%ODIN_ROOT%\vendor\sdl3\` and `SDL3_ttf.dll` from `%ODIN_ROOT%\vendor\sdl3\ttf\` next to `client.exe`. `./check.sh` type-checks the Windows client from Linux, but CI does not build or run it on Windows.
-- Voice codec (libopus): the client loads libopus at runtime with `core:dynlib` (`client/opus`) and never links it, so building needs no Opus headers or import library, and a client without libopus still starts and chats; voice then reports "libopus not found". On Linux it opens `libopus.so.0` from the runtime package (`opus` on Fedora and Arch, `libopus0` on Debian/Ubuntu; not `opus-devel`), which the dev image and CI install. On Windows it opens `libopus-0.dll` next to `client.exe` first, then the DLL search path: copy it from `%ODIN_ROOT%\vendor\sdl3\mixer\` (Odin ships it for SDL3_mixer; in a fresh Odin checkout it is a Git LFS file), and its licence `LICENSE.opus.txt` from the same folder. The release archive includes both. `./check.sh` sets `HAYCHAT_REQUIRE_OPUS=1`, so the Opus and voice engine tests fail instead of skipping when libopus is missing; set `HAYCHAT_REQUIRE_OPUS=0` to let them skip on a host without it.
-
-The UI fonts (Inter, under the SIL Open Font License, and Twemoji, under CC-BY 4.0) are embedded into the client binary from `client/assets/fonts/`, where their license files live.
-
-### Server Configuration
-
-The server reads its configuration from environment variables. In the dev pod, `./dev.sh` sets the database, listen, and path settings itself. Every other key can be set in `.env` (`cp .env.example .env`), which `./dev.sh up` and `./dev.sh restart` pass to the server. Running `odin run server` directly reads the same keys from the process environment. When startup fails (invalid configuration, an unreachable or incompatible database, or a service thread that cannot start), the server prints a line starting with `[Startup]` and exits with status 1, so a service manager's `Restart=on-failure` and scripts can tell a failed start from a clean shutdown, which exits 0.
-
-Database (set by `./dev.sh` in the pod):
-
-- `HAYCHAT_DATABASE_URL` (default `localhost`)
-- `HAYCHAT_DATABASE_PORT` (default `5432`)
-- `HAYCHAT_DATABASE_USER` (default `haychat`)
-- `HAYCHAT_DATABASE_PASS` (default `haychat`)
-- `HAYCHAT_DATABASE_NAME` (default `haychat`)
-
-Network and paths (set by `./dev.sh` in the pod):
-
-- `HAYCHAT_LISTEN_ADDR` (default `0.0.0.0`)
-- `HAYCHAT_LISTEN_PORT` (default `12345`)
-- `HAYCHAT_LOG_DIR` (default `./logs`)
-- `HAYCHAT_FILE_STORAGE_PATH` (default `./storage`)
-- `HAYCHAT_SERVER_IDENTITY_FILE` (default `$HAYCHAT_FILE_STORAGE_PATH/server_identity.json`)
-
-Paths are resolved relative to the server's working directory.
-
-Runtime (configurable in `.env`):
-
-- `HAYCHAT_LOG_LEVEL` (default `info`)
-- `HAYCHAT_MAX_RESTARTS` (default `5`)
-- `HAYCHAT_RESTART_BACKOFF_MIN` (seconds, default `0.1`)
-- `HAYCHAT_RESTART_BACKOFF_MAX` (seconds, default `10.0`)
-- `HAYCHAT_MAX_NETWORK_THREADS` (default `4`): ENet peer capacity, 16 connections per unit (64 by default). It no longer starts threads; the network worker pool it once sized was removed.
-- `HAYCHAT_MAX_FILE_SIZE` (bytes, default `10485760`)
-- `HAYCHAT_MAX_STORAGE_CAPACITY` (bytes, default `1073741824`)
-- `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`: fixed server identity. When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE`.
-- `HAYCHAT_ADMIN_PUBLIC_KEY`: hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key.
-
-Voice (configurable in `.env`). Voice rides the same UDP port as chat (`HAYCHAT_LISTEN_PORT`, ENet channel 2), so it needs no extra port or firewall rule. Every room can carry voice. The server relays each voice frame to the room's other participants on its network thread and never stores or logs audio. Out-of-range values are clamped to the range; a value that does not parse uses the default.
-
-- `HAYCHAT_VOICE_ENABLED` (default `true`): `false` (or `0`, `no`, `off`) turns voice off server-wide; every join is refused with "voice is disabled".
-- `HAYCHAT_VOICE_MAX_PARTICIPANTS` (default `25`, range 1 to 200): voice sessions per room. An account has one voice session, so a user joining from a second device takes the first device's place rather than a second one. A join into a full room is refused with "voice room is full".
-- `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` (default `60`, range 1 to 1000): per-connection rate limit for voice datagrams, as a token bucket with a burst of a third of the rate. A client sends 50 per second while talking, so values below 50 cut speech up.
-- `HAYCHAT_VOICE_MAX_FRAME_BYTES` (default `512`, range 64 to 512): the largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes.
-
-The server owns its schema and migrates it at startup, before it reports readiness. The migrations (`server/database_migrations.odin`) are numbered, applied in order inside one transaction under an advisory lock (so two servers never migrate one database at once), and recorded in the `schema_migrations` table. An empty database gets every migration; a database created before migrations existed (v0.1.0-rc1 and earlier dev databases) is adopted as version 1 with every row kept; an older version gets the missing migrations. Migration 1 is the v0.1.0-rc1 schema; migration 2 adds the read markers behind unread counts (see "Unread counts" under Rooms); migration 3 (protocol 14) adds the name lock and ban columns to `users` and the room type to `rooms` (existing accounts stay unlocked and unbanned, existing rooms become text and voice). The server never drops data: a database whose recorded version is newer than the server knows (a downgrade), or whose tables it does not recognise, stops startup with a `[Startup]` error and exit status 1 and is left exactly as it was (see deploy/README.md "Upgrades" for restoring a backup or resetting a throwaway database). The configured role must be able to create and alter objects in its schema (`public`). When the `rooms` table is empty, startup then creates `#general` (see Rooms). `server/sql/auth_bootstrap.sql` is a test-data fixture only and is not used by normal startup.
-
-### Server Status Log
-
-The server has no admin port or HTTP endpoint. Every five minutes (`SERVER_STATUS_LOG_INTERVAL` in `server/status.odin`), and once when it shuts down, the main thread logs one line of space-separated `key=value` pairs, for example:
-
-```text
-[Status] uptime=300 connected_peers=2 network_running=true database_running=true network_restart_pending=false database_restart_pending=false shutdown_requested=false voice_rooms=1 voice_participants=2 voice_frames_in=15000 voice_frames_relayed=14990 voice_frames_out=14990 voice_send_failures=0 voice_drops_unknown_peer=0 ...
-```
-
-`uptime` is in seconds. The `*_running` and `*_restart_pending` pairs are the supervisor's view of the network and database service threads. The voice pairs are `voice_rooms` and `voice_participants` (rooms with an active voice session and the sessions in them), `voice_frames_in` (datagrams received on the voice channel), `voice_frames_relayed` (frames that passed every check), `voice_frames_out` (datagrams sent to recipients), `voice_send_failures`, and one `voice_drops_<reason>` pair per drop reason (`unknown_peer`, `not_in_room`, `rate_limited`, `malformed`, `replayed`, `too_old`, `bad_tag`, `inactive`, `malformed_frame`, `wrong_room`, `muted`, `oversize`, `bad_duration`). The frame counters start over when the network service restarts. A dropped datagram never disconnects anyone. In the dev pod, read the latest line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`.
-
-### Typical Workflow
-
-1. `./dev.sh up` to start PostgreSQL and the server.
-2. Optionally, `./dev.sh seed` to load the fixture users. You only need it for the `admin` account; the server creates `#general` by itself.
-3. To connect as `admin`: run `./dev.sh client admin` once to create the profile (it cannot claim `admin` yet) and close it. Put the output of `./dev.sh key admin` in `.env` as `HAYCHAT_ADMIN_PUBLIC_KEY=...`, run `./dev.sh restart`, then run `./dev.sh client admin` again.
-4. Open more clients with `./dev.sh client alice`, `./dev.sh client bob`, and so on. A profile's display name is its profile name, so each profile is a distinct user.
-5. To manage rooms, connect as `admin` (step 3): it holds the admin role, so its sidebar shows **+ New room** and each room header **Edit room** (see Rooms). To make another profile an admin instead, run `./dev.sh psql -v owner=alice <deploy/sql/make-admin.sql` after it connected once, then reopen that client.
-6. After code changes, `./dev.sh restart` for the server and reopen clients to rebuild them.
-7. Before pushing, run `./dev.sh ci`.
-8. `./dev.sh down` when done, or `./dev.sh reset` to start over.
-
-Seeded test identities:
-
-- `admin` resolves to user ID `1` and holds the `admin` server role. Set `HAYCHAT_ADMIN_PUBLIC_KEY` to your client's public key before connecting as `admin`.
-- `haypeer` resolves to user ID `2` and is bound to the first client key that connects with that nickname.
-- `#general` is room ID `1`. The server creates it; loading the fixture restores its name and description and makes every existing account a member of it.
-
-### Rooms
-
-Rooms are open: every account is a member of every room. A nickname that connects for the first time joins every existing room, and a new room includes every account, so testers can chat as soon as they connect. Membership is still stored per account in `room_members`, which the server checks for every send and history request; that is where private rooms will plug in.
-
-Admins manage rooms from the client. An admin is an account holding the `admin` server role; every other account sees no room controls. In the selected server's sidebar, the **Channels** header shows **+ New room**, which opens a form in the main pane (name of 1 to 64 bytes, a leading `#` is dropped; optional description of up to 256 bytes; **Create** or **Cancel**). The server adds every account to the new room, every connected client refreshes its room list, and the admin's client selects the new room. A room's header shows **Edit room**, which opens the same form filled in, with **Save**, **Cancel**, and **Delete room**; delete asks for a second click (**Confirm delete**) and removes the room with its history. Clients whose selected room was deleted move to `#general`, or to the first room when `#general` is gone. Deleting `#general` itself is allowed: the form warns that the server only recreates it on its next start when no rooms are left. The form closes when its room is renamed or deleted by another admin, and shows the server's answer when it refuses (for example a duplicate name, or "Admin permission required" when the role was revoked). A channel's right-click menu offers the same **Edit room…** and **Delete room…** (the form opens with the delete armed). Rooms are open, so the client has no member management: `ClientAddRoomMember` and `ClientRemoveRoomMember` stay in the protocol for private rooms later, and the client never sends them.
-
-To become an admin, connect once with the display name that should own the server, then run `deploy/sql/make-admin.sql` against the database (`psql -v owner=NICKNAME -f deploy/sql/make-admin.sql`, see deploy/README.md "First-Time Setup"). In the dev pod, either pipe it into `./dev.sh psql -v owner=NICKNAME`, or `./dev.sh seed` and claim the fixture's `admin` account with `HAYCHAT_ADMIN_PUBLIC_KEY` (see Typical Workflow). The server sends the flag in `ServerAuthSuccess.isAdmin` when a session signs in, so a client made admin while connected sees the controls after its next connection (restart it, or press **Retry now** after a disconnect); the server checks the role again for every room request either way. The flag arrived with protocol version 8: clients and servers must be rebuilt together, and older ones refuse each other with "Unsupported protocol version". Since protocol version 14, a role an admin grants or revokes from a client reaches the account's connected sessions at once; a role changed in the database with `make-admin.sql` still shows on the next connection.
-
-#### Admin actions and room types
-
-Protocol version 14 (schema migration 3) gives admins actions on accounts and rooms a type. The server checks the admin role, and the rules below, in the database for every request, in the same statement as the change:
-
-- **Role:** an admin can grant and revoke the admin role. The account's connected sessions learn it at once and show or hide the admin controls without reconnecting. Nobody can revoke their own role, and the server always keeps at least one admin.
-- **Rename:** an admin can rename an account and lock its name. While it is locked, the account signs in under that name whatever display name its client asks for, so the next connection does not undo the rename; an admin can unlock it again, after which the client's display name wins again on its next sign-in.
-- **Kick:** ends every session of an account. Its client tells the user and does not reconnect by itself until the user presses Retry. Admins cannot kick themselves or another admin (revoke the role first).
-- **Ban and unban:** a ban ends every session of the account and refuses its sign-in ("This account is banned from this server", with the admin's reason); its client does not retry. Bans are per account, and the same rules as for a kick apply. An unban lets the account sign in again.
-- **Room types:** a room takes text, voice, or both (existing rooms and new rooms by default: both). A voice-only room refuses chat messages, a text-only room refuses voice joins, and making a room text-only removes everyone from its voice.
-
-Every account sees which accounts are admins and which are banned in the user list; banned accounts stay listed because history names them.
-
-In the client, admins get these actions in two places. **Server settings → Admin** (open it from the sidebar header's gear or the server button's menu) lists every account of the server, you included, with an online dot, **Admin** and **Banned** badges, and **Rename…**, **Make admin** / **Remove admin**, **Kick…** and **Ban…** / **Unban**. What the server would refuse is greyed out, and its tooltip says why: kicking, banning or removing the role of yourself, kicking or banning another admin (remove their role first), and making a banned account an admin. **Rename…**, **Kick…** and **Ban…** open a short confirmation under the account: a new name with **Lock name** (on by default; an empty name with the lock off unlocks the name the account has), or an optional reason the person is shown. **Make admin**, **Remove admin** and **Unban** act at once. The server's answer, or its refusal, is shown under the account it concerns. Below it, every room is listed with its type, **Edit…**, **Delete…** and **Create room…**. The same account actions are in the right-click menus of Direct Messages and Members rows, voice participants and sender names. The room form has a **Type** selector (**Text**, **Voice**, **Text and voice**): a voice-only room shows "This room is voice only" where the composer would be, and a text-only room has no **Join voice**; the form warns before a save that would remove people from a room's voice. A kicked or banned client says so in its banner, with the admin's reason, and neither reconnects nor rejoins voice by itself. The headless harness has the same actions (`admin-role`, `admin-rename`, `admin-kick`, `admin-ban`, `admin-unban`, and the room type of `room-create` and `room-edit`, see [docs/testing-harness.md](docs/testing-harness.md)).
-
-On startup, a server whose `rooms` table is empty creates `#general` ("General discussion", room ID `1` on a new database) and makes every existing account a member, so a fresh server is ready to chat with no fixture. It logs `Created default room #general` when it does. Once any room exists it creates nothing, so an admin who renames or deletes `#general` keeps that change across restarts, as long as another room remains. A room the server creates has no creator (`rooms.created_by_user_id` is `NULL`); servers that ran protocol 7 drop that column's `NOT NULL` in place, keeping their data. Admins create further rooms from the client (above). Only accounts created after this change join rooms automatically: an account that already existed keeps the memberships it had, so an admin's `ClientRemoveRoomMember` lasts across reconnects.
-
-#### Display names
-
-An account is its client identity key; the nickname is only its current name. The first time a key connects, the server creates an account under the client's display name (or, for a keyless fixture account such as `haypeer`, binds the key to it). When the same key later connects with a different display name, the server renames that account in place: same user ID, same rooms, same direct messages. The rename succeeds only while no other account holds the new name; otherwise the login is refused and the client says the name is already in use. A renamed account does not join any rooms it was not already in. Connected users learn the new name at once, through the same online notice used for presence, and their clients update the Members and Direct Messages lists. Messages a client has already loaded keep the name they were sent with until it fetches that history again (on its next start, for example): fetched history shows each sender's current name, because the server reads it when the history is requested. The server logs `[Main] User N renamed from "old-name" on peer P` for each rename. The old name is free for anyone after a rename.
-
-#### Direct messages
-
-Any two accounts on a server can message each other directly. Direct messages belong to that one server: they are stored in its `direct_messages` table, survive restarts, and are paged like room history. Like room chat, they are encrypted in transit to the server but are not end-to-end encrypted, so the server and its operator can read them. A sent message is delivered to every connected session of both the sender and the recipient. The server also lists every account with an online flag (online while at least one of its sessions is authenticated) and tells connected sessions when an account comes online or goes offline. Direct messages arrived with protocol version 7; clients and servers on older versions refuse each other with "Unsupported protocol version".
-
-In the client, the selected server's sidebar lists its channels, then **Direct Messages** (recent conversations, newest first) and **Members** (every other account, online first, then alphabetical). A green dot marks an account that is online. Clicking a conversation or a member opens the conversation in the main pane, with the person's name and online state in the header, the transcript (your own messages are labelled "You"), **Load older messages** while older ones exist, and a composer like the room one; clicking a channel goes back to it. A message that arrives for a conversation moves it to the top of **Direct Messages**. Conversations belong to one server; the rail has no separate direct-message button.
-
-#### Unread counts
-
-The server keeps read state (protocol version 11, schema migration 2): one read marker per account and room and per account and direct conversation, holding the newest message ID that account has read. Unread counts therefore survive a client restart and follow the account to every device. A channel or conversation with unread messages is drawn bold with a count badge in the sidebar ("99+" from 100 on; the server stops counting at 100).
-
-- In a room, unread means messages from other people after your marker. Before you have read a room at all, it means the messages from others that arrived after you joined it, so a new account or a new room starts with nothing unread.
-- In a direct conversation, unread means the other person's messages after your marker; before you have read it, every message from them.
-- Your own messages never count.
-- The client marks the conversation you are looking at (selected, with the window focused) read up to its newest loaded message: when you open it and as new messages arrive, at most once per second. The server then tells every connected session of your account, so reading on one device clears the badge on the others.
-
-An upgraded server starts with nothing unread: migration 2 gives every existing room member and both sides of every existing conversation a marker at the newest message. The read state arrived with protocol version 11: clients and servers must be rebuilt together, and older ones refuse each other with "Unsupported protocol version".
-
-### Deployment
-
-[deploy/README.md](deploy/README.md) covers running HayChat for real users: the production server image (`deploy/Containerfile`, a multi-stage build that uses the same package script and Odin pins as the dev image), systemd quadlet units that run it next to PostgreSQL (`deploy/quadlet/`), first-time setup (`deploy/sql/make-admin.sql` gives your account the admin role), the firewall, backups, and upgrades.
-
-| Command | Purpose |
-| --- | --- |
-| `./dev.sh release-image` | Build the production server image as `localhost/haychat-server:dev` |
-| `./dev.sh release-image --smoke` | Also run it against a throwaway PostgreSQL, check that a headless client connects and sees `#general`, and run `deploy/sql/make-admin.sql` |
-| `deploy/release-artifacts.sh VERSION OUT_DIR [--windows]` | Build the release archives (server binary, Linux client, cross-compiled Windows client) inside `./dev.sh shell` |
-
-`.forgejo/workflows/release.yml` runs on tags `v*`: it builds the archives and the image, pushes the image to the repository's container registry, and publishes a Forgejo release (see deploy/README.md "Release Builds").
-
-### Continuous Integration
-
-HayChat is developed on Forgejo, and `.forgejo/workflows/ci.yml` runs on every push to `main` and on every pull request. The Linux runner uses a Fedora 44 job container with a PostgreSQL 17 service. It runs `dev/install-packages.sh`, `dev/bootstrap-odin.sh`, `./check.sh`, and `dev/live-proof.sh --all`, the same steps as `./dev.sh ci`. The Odin toolchain is cached under `/opt/Odin` when the runner's cache is enabled; the cache is saved only after a successful run.
-
-The job container needs no special seccomp or SELinux settings. A runner host set up for the old web admin (an io_uring seccomp profile in `containers.conf.d/` and `--security-opt label=disable` in the runner's `config.yml`) can drop both.
-
-### Known Limitations
-
-- Private rooms are not implemented. Every account joins every room (see Rooms), so the client has no member management; admins create, rename, and delete rooms from the client.
-- A role granted or revoked from a client reaches the account at once, but a role changed directly in the database (`deploy/sql/make-admin.sql`) shows in the client's controls only on its next connection (the server enforces it at once either way).
-- The Admin section lists every account of the server at once, with no search or paging, so it gets long on a server with many accounts.
-- Bans are per account, and sign-up is open: a banned person can connect again with a new identity key as a new account. Closed sign-up (#43) is the fix.
-- Account registration (`ClientRegister`) is not implemented; accounts are created when a new identity key first connects.
-- A display name change renames the same account rather than making a new one, and only through the client's own key (or an admin's rename, which locks the name): there is no way to move an account to another device or key. Messages a client has already loaded keep the name they were sent with (see Display names).
-- Messages are not end-to-end encrypted (see Features).
+| [User guide](docs/user-guide.md) | Every screen and control of the client |
+| [Client configuration](docs/client-configuration.md) | `config.json` location and keys |
+| [Deployment](deploy/README.md) | Server image, quadlet units, setup, backups, upgrades, releases |
+| [Server configuration](docs/server-configuration.md) | Environment variables, migrations, status log |
+| [Rooms and accounts](docs/rooms-and-accounts.md) | Server rules for accounts, rooms, admins, direct messages, unread counts |
+| [Development](docs/development.md) | `./dev.sh`, checks, the dev pod, dependencies, CI |
+| [Protocol](docs/protocol.md) | Transport encryption and protocol versions |
+
+The full index, including the testing harness, voice tests, and design plans, is in
+[docs/README.md](docs/README.md).
+
+## Known Limitations
+
+- Private rooms are not implemented: every account joins every room.
+- Messages are encrypted in transit but not end-to-end; the server stores them in plain text.
+- Sign-up is open and bans are per account, so a banned person can return with a new identity
+  key. There is no account registration or way to move an account to another device.
 - Voice has no echo cancellation or noise suppression: use headphones.
-- Server settings (a per-server name, labels, per-user volumes and mutes) live in one profile's `config.json` and are not synced between devices.
-- Push-to-talk in other windows needs a Wayland desktop with the GlobalShortcuts portal; on other Wayland desktops it works only while the window has focus. Under Wayland the desktop, not HayChat, chooses the key there.
+- Per-server settings (names, labels, per-user volumes and mutes) live in one client profile and
+  are not synced between devices.
+- Push-to-talk in other windows needs the GlobalShortcuts portal on Wayland; elsewhere on
+  Wayland it works only while the HayChat window has focus.
+- The admin account list has no search or paging.
+- The Windows client is cross-compiled for releases and type-checked in CI, but has not yet been
+  tested on a real Windows machine.
 
 ## License
 
-HayChat is licensed under the AGPLv3 License. See the [LICENSE](LICENSE) file for more information.
+HayChat is licensed under the AGPLv3 License. See the [LICENSE](LICENSE) file for more
+information.
 
-Remember that if you distribute modified versions of the software, you must also distribute the source code and include the same license. Always ensure you have the right to use and distribute any code you contribute under the AGPLv3 License.
+If you distribute modified versions of the software, you must also distribute the source code
+under the same license. Using HayChat in a commercial product requires complying with the AGPLv3,
+which may require releasing your own source code under the same license. Always make sure you
+have the right to use and distribute any code you contribute under the AGPLv3.
 
-If a user wants to use HayChat in a commercial product, they would need to comply with the AGPLv3 License terms, which may require them to release their own source code under the same license if they distribute the software. This is a key aspect of the AGPLv3 License, which promotes open-source software and ensures that derivative works also remain open-source.
+**Modding.** If you sell a mod publicly, it must be dynamically linked: your mod can interact
+with HayChat, but it cannot include the HayChat codebase. It should be a separate module that
+communicates with HayChat through defined interfaces or APIs, so the core HayChat code remains
+open while still allowing creative modifications and extensions.
 
-### Licences and Credits
-
-Release builds contain third-party code, libraries and fonts: the Odin core library, the
-`pg` package in the server, ENet, SDL3 (with HIDAPI, yuv2rgb and fdlibm
-code), SDL3_ttf (with FreeType, HarfBuzz, PlutoSVG and PlutoVG) and libopus in the Windows
-client, and the Inter and Twemoji fonts in both clients.
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each release artifact contains,
-with each licence, copyright line, and required credit. Every archive ships it as
-`THIRD_PARTY_NOTICES.txt` beside a `licenses/` folder, and the server image has both in
-`/usr/share/licenses/haychat-server/`. `./check.sh` runs
-`deploy/release-artifacts.sh --check-licences`, which fails when a licence file is missing
-from the repository or the pinned toolchain, or when `SDL3.dll` or `SDL3_ttf.dll` changes.
-
-### Modding
-
-If you sell a mod publicly, it must be dynamically linked. This means that you can create a mod that interacts with HayChat, but you cannot include the entire HayChat codebase in your mod. Instead, your mod should be a separate module that communicates with HayChat through defined interfaces or APIs. This allows for greater flexibility and ensures that the core HayChat code remains open and accessible to the community while still allowing for creative modifications and extensions.
+**Third-party credits.** Release builds contain third-party code, libraries and fonts (the Odin
+core library, `pg`, ENet, SDL3, SDL3_ttf, libopus, Inter and Twemoji).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists what each release artifact contains, with
+each licence, copyright line, and required credit; every archive ships it as
+`THIRD_PARTY_NOTICES.txt` beside a `licenses/` folder.
 
 ## Contributing
 
-Contributions are welcome! Please read the contributing guidelines in the `CONTRIBUTING.md` file for more information on how to contribute to the project.
+Contributions are welcome! Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.

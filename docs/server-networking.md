@@ -89,9 +89,10 @@ packet). It logs nothing per packet. A disconnect (`handlePeerDisconnect`, or a 
 router hears about it. A router-commanded disconnect uses `peer_disconnect_later`, so the
 router's last packets to the peer (a `ServerAuthFailure`, a protocol error, or
 `ServerSessionEnded` for a kick or ban) are delivered first; the peer leaves the peer manager,
-and the router gets `NetworkPeerDisconnected`, when ENet reports the disconnect. A `NetworkVoiceSessionOpen` for a peer that already disconnected is
-dropped and wiped. The counters are published with atomic stores (`voiceRelayPublishedStats`)
-for the main thread's periodic `[Status]` log line (`server/status.odin`).
+and the router gets `NetworkPeerDisconnected`, when ENet reports the disconnect. A
+`NetworkVoiceSessionOpen` for a peer that already disconnected is dropped and wiped. The
+counters are published with atomic stores (`voiceRelayPublishedStats`) for the main thread's
+periodic `[Status]` log line (`server/status.odin`).
 
 ## Logging
 

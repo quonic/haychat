@@ -154,4 +154,4 @@ These are in priority order. None of them was in scope for the five steps above.
 ./dev.sh ci      # what CI runs: ./check.sh, then the live startup auth proof
 ```
 
-The helper scripts this assessment originally listed here (`run-test-server.sh` and friends) were replaced by `./dev.sh` in November 2026; see the README's Development Environment section.
+The helper scripts this assessment originally listed here (`run-test-server.sh` and friends) were replaced by `./dev.sh` in November 2026; see docs/development.md.
