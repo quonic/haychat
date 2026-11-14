@@ -63,6 +63,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | Package | PR | Merge | Protocol | Migration |
 | --- | --- | --- | --- | --- |
 | E0 Primitives | #58 | da6c708 | – | – |
+| E3 Room access modes | #59 | 076cbe3 | 15 | 4 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -70,3 +71,11 @@ refused, i64 LE for every protocol `int`, a fixed binary sender-key distribution
 member log's encoding details (format byte, settings only on `Create` and `SetAccess`, access
 values 2/3 and history values 1/2), pins looked up but never written during log replay, and a
 strict CBOR reader for the sealed plaintext. E5 must give `RoomKeyForward` its own AAD label.
+
+E3's decisions are listed in #59. The main ones: `rooms.history_visibility` defaults to Full
+for existing rooms (they are Public, and stay readable if later made invite-only); a
+non-admin asking about a room it cannot see gets "Not a room member" whether or not the room
+exists; removing or leaving also deletes the read marker; `ServerRoomMembershipChanged` gained
+`userId` and goes to the room's members, so Members pages refresh live. Known limitation: the
+Admin section's room list does not refresh when another admin changes a room this admin is
+not in.
