@@ -81,5 +81,5 @@ ENTRYPOINT ["/usr/local/bin/haychat-server"]
 
 LABEL org.opencontainers.image.title="HayChat server" \
 	org.opencontainers.image.description="Self-hosted chat server (encrypted ENet transport)" \
-	org.opencontainers.image.source="https://git.spyingwind.com/jim/haychat" \
+	org.opencontainers.image.source="https://git.spyingwind.com/quonic/haychat" \
 	org.opencontainers.image.licenses="AGPL-3.0-only"

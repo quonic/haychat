@@ -7,21 +7,21 @@ not need to be a developer.
 ## What HayChat Is
 
 HayChat is a chat app, a bit like a small Discord, that its users host themselves. The person
-who invited you (the *maintainer*) runs a HayChat server; you run the HayChat client on your
+who invited you (the _maintainer_) runs a HayChat server; you run the HayChat client on your
 computer and connect to it. HayChat is in early development, so expect rough edges: finding
 them is the point of this test.
 
 What works today:
 
-| Feature | State |
-| --- | --- |
-| Text rooms | Works. Every account is in every room; `#general` is open to everyone on the server. The maintainer (a server admin) can add, rename, and delete rooms; new rooms show up in your list by themselves |
-| Room history | Works. Messages are stored on the server; **Load older messages** at the top of a room fetches earlier ones, also after a restart |
-| Direct messages | Works. Below the rooms, the sidebar lists **Direct Messages** (recent conversations) and **Members** (everyone on the server, online first, with a green dot when online). Click a person to message them |
-| Several servers | Works. The client can connect to more than one server at once |
-| Voice rooms | Works. Every room has voice: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation) |
-| Creating rooms | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room |
-| Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity)) |
+| Feature                              | State                                                                                                                                                                                                     |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text rooms                           | Works. Every account is in every room; `#general` is open to everyone on the server. The maintainer (a server admin) can add, rename, and delete rooms; new rooms show up in your list by themselves      |
+| Room history                         | Works. Messages are stored on the server; **Load older messages** at the top of a room fetches earlier ones, also after a restart                                                                         |
+| Direct messages                      | Works. Below the rooms, the sidebar lists **Direct Messages** (recent conversations) and **Members** (everyone on the server, online first, with a green dot when online). Click a person to message them |
+| Several servers                      | Works. The client can connect to more than one server at once                                                                                                                                             |
+| Voice rooms                          | Works. Every room has voice: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation)                                                           |
+| Creating rooms                       | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room                                                                 |
+| Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity))                                                                                                                       |
 
 > [!IMPORTANT]
 > Messages are encrypted between your computer and the server, but they are **not end-to-end
@@ -32,7 +32,7 @@ What works today:
 
 ### Download (recommended)
 
-Open the releases page, <https://git.spyingwind.com/jim/haychat/releases>, and download the
+Open the releases page, <https://git.spyingwind.com/quonic/haychat/releases>, and download the
 newest release for your system:
 
 - **Windows:** `haychat-client-VERSION-windows-x86_64.zip`. Extract the whole zip into a folder
@@ -43,15 +43,16 @@ newest release for your system:
 - **Linux:** `haychat-client-VERSION-linux-x86_64.tar.gz`. Install the libraries it needs
   first:
 
-  | Distribution | Command |
-  | --- | --- |
-  | Fedora 44 | `sudo dnf install SDL3 SDL3_ttf enet opus` |
+  | Distribution              | Command                                                     |
+  | ------------------------- | ----------------------------------------------------------- |
+  | Fedora 44                 | `sudo dnf install SDL3 SDL3_ttf enet opus`                  |
   | Ubuntu 25.04+, Debian 13+ | `sudo apt install libsdl3-0 libsdl3-ttf0 libenet7 libopus0` |
-  | Arch Linux | `sudo pacman -S sdl3 sdl3_ttf enet opus` |
+  | Arch Linux                | `sudo pacman -S sdl3 sdl3_ttf enet opus`                    |
 
   Then extract the archive and start `./haychat-client` from the extracted folder. Older
   distributions such as Ubuntu 24.04 do not have SDL3 yet; build from source instead, or ask
   the maintainer.
+
 - **macOS** is not supported yet.
 
 `README.txt` inside each download repeats these steps. `THIRD_PARTY_NOTICES.txt`, `LICENSE.txt`
@@ -65,7 +66,7 @@ you can build the client. This needs the Odin compiler at the exact version HayC
 takes about ten minutes the first time. On Linux with podman installed, the simplest way is:
 
 ```sh
-git clone https://git.spyingwind.com/jim/haychat.git
+git clone https://git.spyingwind.com/quonic/haychat.git
 cd haychat
 ./dev.sh shell                                # opens a shell in the build container
 odin build client -o:speed -out:haychat-client
@@ -120,25 +121,25 @@ a new one, or ask the maintainer to free the old one.
 The narrow bar on the left lists your servers. A **dot** on each server button shows its
 connection:
 
-| Dot | Meaning |
-| --- | --- |
-| Green | Connected |
-| Amber | Connecting, or waiting before the next attempt |
-| Red | Stopped: something needs your attention (read the banner) |
+| Dot   | Meaning                                                   |
+| ----- | --------------------------------------------------------- |
+| Green | Connected                                                 |
+| Amber | Connecting, or waiting before the next attempt            |
+| Red   | Stopped: something needs your attention (read the banner) |
 
 At the bottom of the room list, a status line repeats the state of the selected server, for
 example "Connected as alice", "Connecting…", or "Reconnecting in 4 s".
 
 While the selected server is not connected, a **banner** above the room explains why:
 
-| Banner | What it means | What to do |
-| --- | --- | --- |
-| "Connecting to …" | The client is trying to reach the server | Wait a few seconds |
-| "Could not connect to …" / "Disconnected from …", with a countdown | The server cannot be reached or the connection dropped. The client tries again after 1, 2, 4, … seconds, up to every 30 seconds | Nothing; it reconnects by itself when the server is back. **Retry now** skips the wait. If it never connects, check the host and port with the maintainer |
-| "The name … is already in use on this server" | Someone else, or another of your computers, already has that name | Open **Settings** and choose another name |
-| "The server's identity key does not match the one pinned for it" | The server presents a different identity than the first time you connected. That is expected after the maintainer reset or reinstalled the server, but it could also mean someone is pretending to be the server | Ask the maintainer whether the server was reset. Only then press **Trust the new key** |
-| "This client and the server speak different protocol versions" | Your client is older or newer than the server | Download the client version that matches the server |
-| "Display names must be 3 to 32 bytes long" | The name in Settings is too short or too long | Change it in **Settings** |
+| Banner                                                             | What it means                                                                                                                                                                                                    | What to do                                                                                                                                                |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| "Connecting to …"                                                  | The client is trying to reach the server                                                                                                                                                                         | Wait a few seconds                                                                                                                                        |
+| "Could not connect to …" / "Disconnected from …", with a countdown | The server cannot be reached or the connection dropped. The client tries again after 1, 2, 4, … seconds, up to every 30 seconds                                                                                  | Nothing; it reconnects by itself when the server is back. **Retry now** skips the wait. If it never connects, check the host and port with the maintainer |
+| "The name … is already in use on this server"                      | Someone else, or another of your computers, already has that name                                                                                                                                                | Open **Settings** and choose another name                                                                                                                 |
+| "The server's identity key does not match the one pinned for it"   | The server presents a different identity than the first time you connected. That is expected after the maintainer reset or reinstalled the server, but it could also mean someone is pretending to be the server | Ask the maintainer whether the server was reset. Only then press **Trust the new key**                                                                    |
+| "This client and the server speak different protocol versions"     | Your client is older or newer than the server                                                                                                                                                                    | Download the client version that matches the server                                                                                                       |
+| "Display names must be 3 to 32 bytes long"                         | The name in Settings is too short or too long                                                                                                                                                                    | Change it in **Settings**                                                                                                                                 |
 
 When the server restarts, every client reconnects on its own; you should not need to do
 anything.
@@ -236,7 +237,7 @@ Anything confusing counts as a problem worth reporting, not only crashes.
 
 ## Reporting Problems
 
-Open an issue at <https://git.spyingwind.com/jim/haychat/issues> (you need an account on that
+Open an issue at <https://git.spyingwind.com/quonic/haychat/issues> (you need an account on that
 site; if you do not have one, send the same details to the maintainer directly). Please
 include:
 

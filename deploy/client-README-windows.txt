@@ -3,7 +3,7 @@ HayChat client @VERSION@ for Windows (x86-64)
 
 HayChat is an early test build of a self-hosted chat app. The tester guide explains what
 works and what to try:
-https://git.spyingwind.com/jim/haychat/src/branch/main/docs/tester-guide.md
+https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/tester-guide.md
 
 Run it
 ------
@@ -34,7 +34,7 @@ Licences and credits
 --------------------
 
 HayChat is licensed under the GNU AGPL v3 (LICENSE.txt). Its source code is at
-https://git.spyingwind.com/jim/haychat (this build is tag @VERSION@).
+https://git.spyingwind.com/quonic/haychat (this build is tag @VERSION@).
 
 THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
 licences, and their copyright lines; the licence texts are in licenses\. They cover SDL3 and

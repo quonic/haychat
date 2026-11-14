@@ -8,7 +8,7 @@ image (`/usr/share/licenses/haychat-server/`). The full licence texts it refers 
 `licenses/` folder next to it; notices that exist only as source comments are reproduced in
 full at the end of this file.
 
-The source code of HayChat is at <https://git.spyingwind.com/jim/haychat>; each release is a
+The source code of HayChat is at <https://git.spyingwind.com/quonic/haychat>; each release is a
 tag of that repository.
 
 ## Required Credits
@@ -29,23 +29,23 @@ tag of that repository.
 "Linked from the system" means the artifact does not contain that library: the binary loads
 the copy installed on the machine, which comes with its own licence from the distribution.
 
-| Component | Licence | Server archive | Server image | Linux client | Windows client |
-| --- | --- | --- | --- | --- | --- |
-| Odin core and base library | zlib (Odin) | compiled in | compiled in | compiled in | compiled in |
-| Third-party code in Odin core (below) | various | compiled in | compiled in | compiled in | compiled in |
-| odin-postgresql (`pg`) | MIT | compiled in | compiled in | - | - |
-| ENet | MIT | system | Fedora `enet` | system | compiled in |
-| libpq (PostgreSQL client) | PostgreSQL | system | Fedora `libpq` | - | - |
-| SDL3 | zlib | - | - | system | `SDL3.dll` |
-| Third-party code in SDL3 (below) | various | - | - | system | in `SDL3.dll` |
-| SDL3_ttf | zlib | - | - | system | `SDL3_ttf.dll` |
-| FreeType 2.13.2 | FreeType License | - | - | system | in `SDL3_ttf.dll` |
-| HarfBuzz 8.5.0 | Old MIT | - | - | system | in `SDL3_ttf.dll` |
-| PlutoSVG, PlutoVG | MIT | - | - | system | in `SDL3_ttf.dll` |
-| Opus (libopus) | BSD-3-Clause | - | - | system, at runtime | `libopus-0.dll` |
-| Inter fonts | SIL OFL 1.1 | - | - | embedded | embedded |
-| Twemoji-Mozilla font | CC BY 4.0 | - | - | embedded | embedded |
-| Microsoft C runtime | Visual Studio licence | - | - | - | compiled in |
+| Component                             | Licence               | Server archive | Server image   | Linux client       | Windows client    |
+| ------------------------------------- | --------------------- | -------------- | -------------- | ------------------ | ----------------- |
+| Odin core and base library            | zlib (Odin)           | compiled in    | compiled in    | compiled in        | compiled in       |
+| Third-party code in Odin core (below) | various               | compiled in    | compiled in    | compiled in        | compiled in       |
+| odin-postgresql (`pg`)                | MIT                   | compiled in    | compiled in    | -                  | -                 |
+| ENet                                  | MIT                   | system         | Fedora `enet`  | system             | compiled in       |
+| libpq (PostgreSQL client)             | PostgreSQL            | system         | Fedora `libpq` | -                  | -                 |
+| SDL3                                  | zlib                  | -              | -              | system             | `SDL3.dll`        |
+| Third-party code in SDL3 (below)      | various               | -              | -              | system             | in `SDL3.dll`     |
+| SDL3_ttf                              | zlib                  | -              | -              | system             | `SDL3_ttf.dll`    |
+| FreeType 2.13.2                       | FreeType License      | -              | -              | system             | in `SDL3_ttf.dll` |
+| HarfBuzz 8.5.0                        | Old MIT               | -              | -              | system             | in `SDL3_ttf.dll` |
+| PlutoSVG, PlutoVG                     | MIT                   | -              | -              | system             | in `SDL3_ttf.dll` |
+| Opus (libopus)                        | BSD-3-Clause          | -              | -              | system, at runtime | `libopus-0.dll`   |
+| Inter fonts                           | SIL OFL 1.1           | -              | -              | embedded           | embedded          |
+| Twemoji-Mozilla font                  | CC BY 4.0             | -              | -              | embedded           | embedded          |
+| Microsoft C runtime                   | Visual Studio licence | -              | -              | -                  | compiled in       |
 
 The server image is Fedora (`fedora-minimal:44`); every Fedora package in it, including
 `libpq`, `enet` and their dependencies, has its licence under `/usr/share/licenses/<package>`.
@@ -71,20 +71,20 @@ These parts of `base` and `core` come from other projects and reach HayChat bina
 optimiser inlines or drops much of it, so not every routine below is in every binary; the
 notices are kept for all of them.
 
-| Code | Origin | Licence | Required in binaries |
-| --- | --- | --- | --- |
-| `runtime.fixuint`, `runtime.fixint` | LLVM compiler-rt | Apache-2.0 WITH LLVM-exception | nothing (LLVM exception); text in `licenses/compiler-rt-LICENSE.txt` |
-| `core:math` rounding | Go (`src/math/floor.go`) | BSD-3-Clause | the notice ([Go](#go-bsd-3-clause)) |
-| `core:math` elementary functions | fdlibm (Sun Microsystems), via FreeBSD msun | fdlibm notice | the notice ([fdlibm](#fdlibm)) |
-| `core:math` gamma, sine and cosine | Cephes Math Library (Stephen L. Moshier) | Cephes terms | none stated ([Cephes](#cephes)) |
-| `core:unicode` tables | Unicode Character Database | Unicode License V3 | the notice ([Unicode](#unicode-license-v3)) |
-| `core:crypto` field arithmetic | fiat-crypto | BSD-1-Clause | nothing (source only) ([fiat-crypto](#fiat-crypto-bsd-1-clause)) |
-| `core:crypto` constant-time helpers | BearSSL (Thomas Pornin) | BSD-style, source clause only | nothing (source only) ([BearSSL](#bearssl)) |
-| `core:strconv` float parsing | fast_float, ffc.h | BSL-1.0 | nothing for object code |
-| `core:strconv` float printing | Żmij (Victor Zverovich) | BSL-1.0 | nothing for object code |
-| `core:hash` CRC-64 (server) | Mark Adler | zlib | nothing |
-| `core:math/big` | LibTomMath; BPSW test by Thomas R. Nicely | public domain | nothing |
-| ChaCha20 SIMD, SHA-256 (Intel SHA) | Ted Krovetz; Jeffrey Walton | public domain | nothing |
+| Code                                | Origin                                      | Licence                        | Required in binaries                                                 |
+| ----------------------------------- | ------------------------------------------- | ------------------------------ | -------------------------------------------------------------------- |
+| `runtime.fixuint`, `runtime.fixint` | LLVM compiler-rt                            | Apache-2.0 WITH LLVM-exception | nothing (LLVM exception); text in `licenses/compiler-rt-LICENSE.txt` |
+| `core:math` rounding                | Go (`src/math/floor.go`)                    | BSD-3-Clause                   | the notice ([Go](#go-bsd-3-clause))                                  |
+| `core:math` elementary functions    | fdlibm (Sun Microsystems), via FreeBSD msun | fdlibm notice                  | the notice ([fdlibm](#fdlibm))                                       |
+| `core:math` gamma, sine and cosine  | Cephes Math Library (Stephen L. Moshier)    | Cephes terms                   | none stated ([Cephes](#cephes))                                      |
+| `core:unicode` tables               | Unicode Character Database                  | Unicode License V3             | the notice ([Unicode](#unicode-license-v3))                          |
+| `core:crypto` field arithmetic      | fiat-crypto                                 | BSD-1-Clause                   | nothing (source only) ([fiat-crypto](#fiat-crypto-bsd-1-clause))     |
+| `core:crypto` constant-time helpers | BearSSL (Thomas Pornin)                     | BSD-style, source clause only  | nothing (source only) ([BearSSL](#bearssl))                          |
+| `core:strconv` float parsing        | fast_float, ffc.h                           | BSL-1.0                        | nothing for object code                                              |
+| `core:strconv` float printing       | Żmij (Victor Zverovich)                     | BSL-1.0                        | nothing for object code                                              |
+| `core:hash` CRC-64 (server)         | Mark Adler                                  | zlib                           | nothing                                                              |
+| `core:math/big`                     | LibTomMath; BPSW test by Thomas R. Nicely   | public domain                  | nothing                                                              |
+| ChaCha20 SIMD, SHA-256 (Intel SHA)  | Ted Krovetz; Jeffrey Walton                 | public domain                  | nothing                                                              |
 
 ### odin-postgresql, `pg` (server)
 
@@ -114,16 +114,16 @@ parts of other projects into it (read from SDL 3.4.18's source and `VisualC/SDL/
 the project SDL builds its Windows release with). The licence texts SDL keeps beside them are
 copied unchanged into this repository's `deploy/licenses/`.
 
-| Code | Origin | Licence | Required in binaries |
-| --- | --- | --- | --- |
-| HID device access for game controllers (`src/hidapi`) | HIDAPI (Alan Ott, Signal 11 Software) | GPL-3.0, BSD-style, or the original HIDAPI licence, at the user's choice; HayChat takes the **BSD-style** licence | the notice, `licenses/hidapi-LICENSE-bsd.txt` |
-| YUV to RGB conversion (`src/video/yuv2rgb`) | yuv2rgb (Adrien Descamps) | BSD-3-Clause | the notice, `licenses/yuv2rgb-LICENSE.txt` |
-| Math functions SDL does not take from the C runtime (`src/libm`) | fdlibm (Sun Microsystems) | fdlibm notice | the notice ([fdlibm, in SDL3](#fdlibm-in-sdl3)) |
-| PNG and JPEG decoding (`stb_image.h` 2.30) | stb (Sean Barrett) | MIT or public domain; HayChat takes public domain | nothing |
-| Deflate for PNG writing (`miniz.h` 1.15) | miniz (Rich Geldreich) | public domain (Unlicense) | nothing |
-| Controller tables and Steam controller support | Valve Corporation | zlib | nothing |
-| Surface rotation (`SDL_rotate.c`) | SDL_gfx (Andreas Schiffler) | zlib | nothing |
-| Several HIDAPI controller and haptics drivers | their authors, named in each file | zlib | nothing |
+| Code                                                             | Origin                                | Licence                                                                                                           | Required in binaries                            |
+| ---------------------------------------------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| HID device access for game controllers (`src/hidapi`)            | HIDAPI (Alan Ott, Signal 11 Software) | GPL-3.0, BSD-style, or the original HIDAPI licence, at the user's choice; HayChat takes the **BSD-style** licence | the notice, `licenses/hidapi-LICENSE-bsd.txt`   |
+| YUV to RGB conversion (`src/video/yuv2rgb`)                      | yuv2rgb (Adrien Descamps)             | BSD-3-Clause                                                                                                      | the notice, `licenses/yuv2rgb-LICENSE.txt`      |
+| Math functions SDL does not take from the C runtime (`src/libm`) | fdlibm (Sun Microsystems)             | fdlibm notice                                                                                                     | the notice ([fdlibm, in SDL3](#fdlibm-in-sdl3)) |
+| PNG and JPEG decoding (`stb_image.h` 2.30)                       | stb (Sean Barrett)                    | MIT or public domain; HayChat takes public domain                                                                 | nothing                                         |
+| Deflate for PNG writing (`miniz.h` 1.15)                         | miniz (Rich Geldreich)                | public domain (Unlicense)                                                                                         | nothing                                         |
+| Controller tables and Steam controller support                   | Valve Corporation                     | zlib                                                                                                              | nothing                                         |
+| Surface rotation (`SDL_rotate.c`)                                | SDL_gfx (Andreas Schiffler)           | zlib                                                                                                              | nothing                                         |
+| Several HIDAPI controller and haptics drivers                    | their authors, named in each file     | zlib                                                                                                              | nothing                                         |
 
 SDL's other third-party files are interface headers (Khronos EGL, OpenGL and Vulkan; Microsoft
 Direct3D 12) and code for other platforms (X11, Wayland, macOS, Android, OpenVR), which the

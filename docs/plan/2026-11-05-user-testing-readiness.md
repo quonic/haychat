@@ -3,7 +3,7 @@
 Goal: get HayChat to a state where real people can test it. Text rooms and direct messages
 must work end to end. Voice rooms are a stretch goal. Everything is orchestrated by one lead
 agent; each work package below runs as a separate agent in its own git worktree and lands as
-its own pull request on the Forgejo repo `jim/haychat` (https://git.spyingwind.com/jim/haychat).
+its own pull request on the Forgejo repo `quonic/haychat` (https://git.spyingwind.com/quonic/haychat).
 
 Read this whole file before starting any work package. It is the only shared context.
 
@@ -90,9 +90,10 @@ containers and are safe to run concurrently with other agents.
 ### B. Direct messages end to end (large, after A merges)
 
 Protocol (bump `protocolVersion` to 7):
+
 - `ClientDirectMessagePayload{recipientUserId: int, content: string}`
 - `ServerDirectMessagePayload{id, senderId, senderNickname, recipientId, recipientNickname,
-  timestamp: string, content}` sent to every live session of both users.
+timestamp: string, content}` sent to every live session of both users.
 - `ClientFetchDirectHistoryPayload{peerUserId, beforeMessageID, limit}` and
   `ServerDirectHistoryPayload{peerUserId, messages: [dynamic]StoredDirectMessage, hasOlder}`,
   cursor paginated exactly like room history.
@@ -100,23 +101,23 @@ Protocol (bump `protocolVersion` to 7):
   every account on the server, online flag from live sessions. Reuse the existing
   `ClientUserList`/`ServerUserList` enum members.
 - `ClientListDirectConversations` / `ServerDirectConversations{conversations:
-  [dynamic]DirectConversationSummary{peerUserId, peerNickname, lastMessageID, lastTimestamp,
-  lastContent}}` ordered by most recent.
+[dynamic]DirectConversationSummary{peerUserId, peerNickname, lastMessageID, lastTimestamp,
+lastContent}}` ordered by most recent.
 - `ServerUserPresence{userId, nickname, isOnline}` broadcast to all authenticated sessions when a
   user's first session authenticates or last session disconnects.
-Database: `direct_messages(id identity, sender_user_id, recipient_user_id, content, created_at)`
-with indexes on `(sender_user_id, recipient_user_id, id)` and the reverse; schema validation
-updated. Post must verify the recipient exists in one statement.
-Server router: handlers, pending request types, result handling, fan-out to both users.
-Client: transport encode/decode into new runtime event kinds; `State` gets per-server DM
-caches keyed by `(serverID, peerUserID)` with drafts, history paging, and a user directory;
-replace the fake friends list. UI: inside the selected server's sidebar, a "Direct Messages"
-section (recent conversations) and a "Members" section (all users, online first); clicking a
-user opens the DM transcript in the main pane with a composer. Keep the rail "DM" button only
-if it can list recent conversations across all servers cheaply; otherwise remove it and
-`State_addFriend`. Delete `Config.friends` only if nothing else uses it.
-Tests: router tests for post/history/list, client action tests for cache isolation and paging,
-and a live two-client DM proof added to `dev/live-proof.sh --all`.
+  Database: `direct_messages(id identity, sender_user_id, recipient_user_id, content, created_at)`
+  with indexes on `(sender_user_id, recipient_user_id, id)` and the reverse; schema validation
+  updated. Post must verify the recipient exists in one statement.
+  Server router: handlers, pending request types, result handling, fan-out to both users.
+  Client: transport encode/decode into new runtime event kinds; `State` gets per-server DM
+  caches keyed by `(serverID, peerUserID)` with drafts, history paging, and a user directory;
+  replace the fake friends list. UI: inside the selected server's sidebar, a "Direct Messages"
+  section (recent conversations) and a "Members" section (all users, online first); clicking a
+  user opens the DM transcript in the main pane with a composer. Keep the rail "DM" button only
+  if it can list recent conversations across all servers cheaply; otherwise remove it and
+  `State_addFriend`. Delete `Config.friends` only if nothing else uses it.
+  Tests: router tests for post/history/list, client action tests for cache isolation and paging,
+  and a live two-client DM proof added to `dev/live-proof.sh --all`.
 
 ### C. Client: connection lifecycle and first run (large, parallel with A)
 
@@ -142,13 +143,14 @@ and a live two-client DM proof added to `dev/live-proof.sh --all`.
    the GUI path, but keep a way for tests to get a default config.
 6. Keep every existing client test passing or rewrite it deliberately; keep the live proofs in
    `dev/live-proof.sh` working (they use `startupAuthBridge`; adapt them to the new flow).
-Avoid editing `common/protocol.odin` and `server/` in this package; A owns protocol changes.
-Expect to add a new file for the connect/settings screen rather than growing `view.odin`.
+   Avoid editing `common/protocol.odin` and `server/` in this package; A owns protocol changes.
+   Expect to add a new file for the connect/settings screen rather than growing `view.odin`.
 
 ### D. Headless client harness for agents (medium, parallel with A and C)
 
 Purpose: let an agent (or a script) act as a user without a display. Build it into the client
 binary so it reuses `State`, actions, transport and the network worker.
+
 - `client --headless [--name NAME] [--server HOST:PORT] [--config-dir DIR]`. Without SDL
   initialisation. `--config-dir` (or `XDG_CONFIG_HOME`) isolates identities so several headless
   clients run side by side on one machine. `--name`/`--server` override and persist to that
@@ -167,8 +169,8 @@ binary so it reuses `State`, actions, transport and the network worker.
   room 1, so make the smoke script's two-client assertion runnable but expected to fail; verify
   the single-client path (connect, status, rooms) passes now.
 - Document in `docs/testing-harness.md` and reference it from `AGENTS.md` so future agents find it.
-Keep the SDL loop in `app.odin` untouched except for a small branch in `main` on `--headless`;
-put the harness in a new file (e.g. `client/headless.odin`).
+  Keep the SDL loop in `app.odin` untouched except for a small branch in `main` on `--headless`;
+  put the harness in a new file (e.g. `client/headless.odin`).
 
 ### E. Voice rooms: design only (research, parallel)
 
@@ -205,20 +207,20 @@ a tone on one client and verify frequency on another. Estimate work in PR-sized 
 
 Every package above landed on `main` the same day, each as its own reviewed PR on Forgejo:
 
-| PR | Package | What landed |
-| --- | --- | --- |
-| #2 | A | Open rooms (every account is in every room), sender nicknames on the wire, protocol 6, `MessageType` value pin test, `live --all` in CI |
-| #3 | D | `client --headless`: JSON-over-stdio harness for agents, `dev/harness-smoke.sh` |
-| #4 | E | `docs/plan/voice-rooms-design.md` |
-| #5 | C | Background connect with reconnect and backoff, connection status, readable failures, first-run and Settings screens |
-| #6 | B1 | Direct messages, user directory and presence on the server, protocol 7 |
-| #7 | A2 | The server creates `#general` on first start |
-| #8 | H0 | Network loop drains IPC in full, ring-buffer IPC queues, thread pool removed |
-| #9 | B2 | Direct messages in the client sidebar and pane, harness `users`/`dm`/`dm-history` |
-| #10 | G | `deploy/Containerfile`, quadlet units, release workflow (Linux and Windows clients), `docs/tester-guide.md` |
-| #11 | A3 | Changing the display name renames the same account; startup failures exit 1 |
-| #12 | D2 | `client --ui-script`: scripted clicks, typing and screenshots of the real window; offscreen GUI proof in CI |
-| #13 | F | Admins create, rename and delete rooms from the client; `isAdmin` on sign-in, protocol 8; harness `room-create`/`room-edit`/`room-delete` |
+| PR  | Package | What landed                                                                                                                               |
+| --- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| #2  | A       | Open rooms (every account is in every room), sender nicknames on the wire, protocol 6, `MessageType` value pin test, `live --all` in CI   |
+| #3  | D       | `client --headless`: JSON-over-stdio harness for agents, `dev/harness-smoke.sh`                                                           |
+| #4  | E       | `docs/plan/voice-rooms-design.md`                                                                                                         |
+| #5  | C       | Background connect with reconnect and backoff, connection status, readable failures, first-run and Settings screens                       |
+| #6  | B1      | Direct messages, user directory and presence on the server, protocol 7                                                                    |
+| #7  | A2      | The server creates `#general` on first start                                                                                              |
+| #8  | H0      | Network loop drains IPC in full, ring-buffer IPC queues, thread pool removed                                                              |
+| #9  | B2      | Direct messages in the client sidebar and pane, harness `users`/`dm`/`dm-history`                                                         |
+| #10 | G       | `deploy/Containerfile`, quadlet units, release workflow (Linux and Windows clients), `docs/tester-guide.md`                               |
+| #11 | A3      | Changing the display name renames the same account; startup failures exit 1                                                               |
+| #12 | D2      | `client --ui-script`: scripted clicks, typing and screenshots of the real window; offscreen GUI proof in CI                               |
+| #13 | F       | Admins create, rename and delete rooms from the client; `isAdmin` on sign-in, protocol 8; harness `room-create`/`room-edit`/`room-delete` |
 
 Acceptance (see above) was checked against the dev server with the headless harness and the
 GUI: two fresh users chat in `#general` with nicknames, exchange direct messages and see the

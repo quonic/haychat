@@ -28,18 +28,18 @@ The lead first adopted the recommendation of every question in `voice-rooms-desi
 section 8 so work could start. The maintainer answered them on 2026-11-05; this table records
 those answers, and packages follow it.
 
-| # | Decision |
-| --- | --- |
-| Q1 | Every room carries voice in v1. After v1, admins can turn voice off per room and change a room's type; that needs a migration and admin UI (package A4, later). |
-| Q2 | **One voice session per user.** The participant list shows each user once, and a newer join replaces the user's older voice session (package V1). The automatic re-join after a reconnect stays; it only replaces a stale session of the same device, never another device's voice. Built first as one session per device (H3/H5/H6); V1 changes that. |
-| Q3 | Push-to-talk works while the window has focus. Voice activity is the default mode. A global hotkey can come later. |
-| Q4 | Opus DTX off; the VAD gate covers silence. |
-| Q5 | Constrained VBR, 24 kbit/s by default, and the bitrate setting capped at 64 kbit/s (confirmed by the maintainer). |
-| Q6 | No noise suppression or echo cancellation in v1. The tester guide recommends headphones. |
-| Q7 | Hop-by-hop encryption, as for chat (left to the lead). The binary envelope leaves room for end-to-end keys later. |
-| Q8 | The network thread owns each peer's voice crypto state and relays frames (`VoiceRelay`). Voice frames never pass through the router, the IPC queues or the database. |
-| Q9 | Voice counters (frames in, out and dropped; rooms; participants) on web admin `/status`. |
-| Q10 | Windows release archives ship `libopus-0.dll` next to `SDL3.dll`, **with every third-party credit its licence requires**. Package L2 audits all release artifacts and completes the notices. |
+| #   | Decision                                                                                                                                                                                                                                                                                                                                               |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Q1  | Every room carries voice in v1. After v1, admins can turn voice off per room and change a room's type; that needs a migration and admin UI (package A4, later).                                                                                                                                                                                        |
+| Q2  | **One voice session per user.** The participant list shows each user once, and a newer join replaces the user's older voice session (package V1). The automatic re-join after a reconnect stays; it only replaces a stale session of the same device, never another device's voice. Built first as one session per device (H3/H5/H6); V1 changes that. |
+| Q3  | Push-to-talk works while the window has focus. Voice activity is the default mode. A global hotkey can come later.                                                                                                                                                                                                                                     |
+| Q4  | Opus DTX off; the VAD gate covers silence.                                                                                                                                                                                                                                                                                                             |
+| Q5  | Constrained VBR, 24 kbit/s by default, and the bitrate setting capped at 64 kbit/s (confirmed by the maintainer).                                                                                                                                                                                                                                      |
+| Q6  | No noise suppression or echo cancellation in v1. The tester guide recommends headphones.                                                                                                                                                                                                                                                               |
+| Q7  | Hop-by-hop encryption, as for chat (left to the lead). The binary envelope leaves room for end-to-end keys later.                                                                                                                                                                                                                                      |
+| Q8  | The network thread owns each peer's voice crypto state and relays frames (`VoiceRelay`). Voice frames never pass through the router, the IPC queues or the database.                                                                                                                                                                                   |
+| Q9  | Voice counters (frames in, out and dropped; rooms; participants) on web admin `/status`.                                                                                                                                                                                                                                                               |
+| Q10 | Windows release archives ship `libopus-0.dll` next to `SDL3.dll`, **with every third-party credit its licence requires**. Package L2 audits all release artifacts and completes the notices.                                                                                                                                                           |
 
 ## Coordination rules
 
@@ -50,7 +50,7 @@ those answers, and packages follow it.
 - **Schema version.** M1 introduces the migration list. Migration 1 is the schema `main` has
   today (identical to `v0.1.0-rc1`). B3 adds migration 2. Voice adds no migration (Q1). Never
   edit a migration that has merged; add a new one.
-- **One PR per package** on Forgejo `jim/haychat`, from the package's own worktree and branch.
+- **One PR per package** on Forgejo `quonic/haychat`, from the package's own worktree and branch.
   Agents do not merge; the lead reviews, waits for CI and the `proval` review bot, merges and
   closes the PR.
 - **Dev pod.** The lead owns the shared dev pod (`./dev.sh up`, `down`, `reset`, `restart`,
@@ -131,15 +131,15 @@ test.
 
 H0–H8 are implemented (H0 in PR #8, H1–H7 in their own PRs, H8 in two parts).
 
-| Step | Branch | Starts after | Status |
-| --- | --- | --- | --- |
-| H2 voice wire format and control protocol | `voice-wire-protocol` | H1 | Implemented |
-| H3 server voice: router control plane and network-thread relay | `server-voice-relay` | H2, L1 | Implemented |
-| H5 client voice networking and actions | `client-voice-networking` | H3, H4 | Implemented |
-| H6 client voice UI | `client-voice-ui` | H5 | Implemented |
-| H7 harness commands and live voice proof | `voice-live-proof` | H5 | Implemented |
-| H8a voice hardening | `voice-hardening` | H6, H7 | Implemented |
-| H8b manual test kit and tuning | `voice-manual-test-kit` | H6, H7 | Implemented: `dev/voice-manual-test.sh`, `docs/voice-manual-test.md` |
+| Step                                                           | Branch                    | Starts after | Status                                                               |
+| -------------------------------------------------------------- | ------------------------- | ------------ | -------------------------------------------------------------------- |
+| H2 voice wire format and control protocol                      | `voice-wire-protocol`     | H1           | Implemented                                                          |
+| H3 server voice: router control plane and network-thread relay | `server-voice-relay`      | H2, L1       | Implemented                                                          |
+| H5 client voice networking and actions                         | `client-voice-networking` | H3, H4       | Implemented                                                          |
+| H6 client voice UI                                             | `client-voice-ui`         | H5           | Implemented                                                          |
+| H7 harness commands and live voice proof                       | `voice-live-proof`        | H5           | Implemented                                                          |
+| H8a voice hardening                                            | `voice-hardening`         | H6, H7       | Implemented                                                          |
+| H8b manual test kit and tuning                                 | `voice-manual-test-kit`   | H6, H7       | Implemented: `dev/voice-manual-test.sh`, `docs/voice-manual-test.md` |
 
 H8 also takes two jitter buffer edges from the review of PR #17: `JitterBuffer_endSpurt`
 may clip the start of a spurt after a fast push-to-talk re-press, and a spurt that starts
@@ -175,22 +175,22 @@ change, server enforcement in the voice join path, and admin UI.
 
 Every package of this phase except A4 has merged:
 
-| Package | PR | Merged as |
-| --- | --- | --- |
-| L1 `IPC__route_to` | #14 | 4d636c8 |
-| H1 per-channel keys (protocol 9) | #15 | fbce66f |
-| M1 schema migrations | #16 | 80ef1c8 |
-| H4 audio and Opus | #17 | 53aa456 |
-| H2 voice wire format (protocol 10) | #18 | d2807c6 |
-| B3 read state (protocol 11, migration 2) | #19, polish #21 | e357351, 6f522f6 |
-| H3 server voice relay | #20 | c1559f4 |
-| H5 client voice networking (protocol 12) | #22 | 60d3d3d |
-| H7 harness voice and live proof | #23 | 3267cad |
-| H6 voice UI and settings | #24 | c484ed7 |
-| H8a voice hardening | #25 | 30a3725 |
-| L2 release notices | #26, follow-up #28 | f047c5c, 6227cf3 |
-| V1 one voice session per user (protocol 13) | #27 | 8534308 |
-| H8b manual voice test kit | #29 | 08d4521 |
+| Package                                     | PR                 | Merged as        |
+| ------------------------------------------- | ------------------ | ---------------- |
+| L1 `IPC__route_to`                          | #14                | 4d636c8          |
+| H1 per-channel keys (protocol 9)            | #15                | fbce66f          |
+| M1 schema migrations                        | #16                | 80ef1c8          |
+| H4 audio and Opus                           | #17                | 53aa456          |
+| H2 voice wire format (protocol 10)          | #18                | d2807c6          |
+| B3 read state (protocol 11, migration 2)    | #19, polish #21    | e357351, 6f522f6 |
+| H3 server voice relay                       | #20                | c1559f4          |
+| H5 client voice networking (protocol 12)    | #22                | 60d3d3d          |
+| H7 harness voice and live proof             | #23                | 3267cad          |
+| H6 voice UI and settings                    | #24                | c484ed7          |
+| H8a voice hardening                         | #25                | 30a3725          |
+| L2 release notices                          | #26, follow-up #28 | f047c5c, 6227cf3 |
+| V1 one voice session per user (protocol 13) | #27                | 8534308          |
+| H8b manual voice test kit                   | #29                | 08d4521          |
 
 ## Follow-ups
 

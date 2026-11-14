@@ -5,7 +5,7 @@
 This guide is for the person who runs a HayChat server for testers. It covers the production
 server image, running it with PostgreSQL under podman, first-time setup, backups, upgrades,
 and the release builds that produce the image and the client downloads. Testers need only
-[docs/tester-guide.md](https://git.spyingwind.com/jim/haychat/src/branch/main/docs/tester-guide.md).
+[docs/tester-guide.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/tester-guide.md).
 
 > [!NOTE]
 > HayChat is unreleased. A new server version migrates the database in place on startup and
@@ -14,23 +14,23 @@ and the release builds that produce the image and the client downloads. Testers 
 
 ## What Is Here
 
-| File | Purpose |
-| --- | --- |
-| `deploy/Containerfile` | Multi-stage build of the server image: Fedora 44 with the pinned Odin toolchain builds the server; a `fedora-minimal:44` stage runs it |
-| `deploy/quadlet/` | systemd units (podman quadlet): `haychat.pod`, `haychat-db.container`, `haychat-server.container` |
-| `deploy/sql/make-admin.sql` | Gives one existing account the admin role |
-| `deploy/release-artifacts.sh` | Builds the server binary and client archives for a release |
-| `deploy/client-README-*.txt` | The `README.txt` shipped in each client archive |
-| `THIRD_PARTY_NOTICES.md` | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt` |
-| `.forgejo/workflows/release.yml` | Release builds on Forgejo (see [Release Builds](#release-builds)) |
-| `.containerignore` | Limits the image's build context to the files it needs |
+| File                             | Purpose                                                                                                                                |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `deploy/Containerfile`           | Multi-stage build of the server image: Fedora 44 with the pinned Odin toolchain builds the server; a `fedora-minimal:44` stage runs it |
+| `deploy/quadlet/`                | systemd units (podman quadlet): `haychat.pod`, `haychat-db.container`, `haychat-server.container`                                      |
+| `deploy/sql/make-admin.sql`      | Gives one existing account the admin role                                                                                              |
+| `deploy/release-artifacts.sh`    | Builds the server binary and client archives for a release                                                                             |
+| `deploy/client-README-*.txt`     | The `README.txt` shipped in each client archive                                                                                        |
+| `THIRD_PARTY_NOTICES.md`         | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt`                                    |
+| `.forgejo/workflows/release.yml` | Release builds on Forgejo (see [Release Builds](#release-builds))                                                                      |
+| `.containerignore`               | Limits the image's build context to the files it needs                                                                                 |
 
 ## The Server Image
 
 Releases push the image to the repository's container registry:
 
 ```sh
-podman pull git.spyingwind.com/jim/haychat/server:v0.1.0   # or :latest
+podman pull git.spyingwind.com/quonic/haychat/server:v0.1.0   # or :latest
 ```
 
 To build it yourself from a checkout (the build context must be the repository root):
@@ -46,17 +46,17 @@ reuse that layer until `dev/install-packages.sh` or `dev/bootstrap-odin.sh` chan
 stage uses those two scripts, so the image is built with exactly the packages and Odin commits
 the dev image and CI use.
 
-| Property | Value |
-| --- | --- |
-| Base | `registry.fedoraproject.org/fedora-minimal:44`, about 150 MB in total |
-| Runtime packages | `libpq` and `enet` (the binary links `libpq.so.5`, `libenet.so.7`, and glibc) |
-| Entrypoint | `/usr/local/bin/haychat-server` |
-| User | `haychat`, UID/GID `10001`, not root |
-| Working directory | `/var/lib/haychat` |
-| Volumes | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) |
-| Port | `12345/udp` (clients) |
-| Stop signal | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0 |
-| Also included | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Property          | Value                                                                                                                                                                                                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Base              | `registry.fedoraproject.org/fedora-minimal:44`, about 150 MB in total                                                                                                                                                                                                          |
+| Runtime packages  | `libpq` and `enet` (the binary links `libpq.so.5`, `libenet.so.7`, and glibc)                                                                                                                                                                                                  |
+| Entrypoint        | `/usr/local/bin/haychat-server`                                                                                                                                                                                                                                                |
+| User              | `haychat`, UID/GID `10001`, not root                                                                                                                                                                                                                                           |
+| Working directory | `/var/lib/haychat`                                                                                                                                                                                                                                                             |
+| Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key)                                                                                                                                                  |
+| Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
+| Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
+| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the three
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
@@ -149,7 +149,7 @@ podman run -d --pod haychat --name haychat-server --init \
 	--env-file "$HOME/.config/haychat-server/server.env" \
 	-v haychat-logs:/var/lib/haychat/logs \
 	-v haychat-storage:/var/lib/haychat/storage \
-	git.spyingwind.com/jim/haychat/server:v0.1.0
+	git.spyingwind.com/quonic/haychat/server:v0.1.0
 
 podman logs -f haychat-server       # "=== Server Running ===" means it is ready
 ```
@@ -162,15 +162,15 @@ and waits for the graceful shutdown. Leave out `--env-file` when you have no ove
 
 ## Environment Variables
 
-Every server setting is a `HAYCHAT_*` environment variable; [README.md "Server Configuration"](https://git.spyingwind.com/jim/haychat/src/branch/main/README.md#server-configuration)
-lists them all with defaults, and [`.env.example`](https://git.spyingwind.com/jim/haychat/src/branch/main/.env.example) documents the optional ones. In this
+Every server setting is a `HAYCHAT_*` environment variable; [README.md "Server Configuration"](https://git.spyingwind.com/quonic/haychat/src/branch/main/README.md#server-configuration)
+lists them all with defaults, and [`.env.example`](https://git.spyingwind.com/quonic/haychat/src/branch/main/.env.example) documents the optional ones. In this
 deployment:
 
-| Set by | Variables |
-| --- | --- |
-| The image | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE` |
-| The quadlet unit (or your `podman run`) | `HAYCHAT_DATABASE_URL=127.0.0.1`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_NAME`, and `HAYCHAT_DATABASE_PASS` from the `haychat-db-password` secret |
-| You, in `server.env` (all optional) | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES` |
+| Set by                                  | Variables                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The image                               | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE`                                                                                                                                                                                                                                                                                                 |
+| The quadlet unit (or your `podman run`) | `HAYCHAT_DATABASE_URL=127.0.0.1`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_NAME`, and `HAYCHAT_DATABASE_PASS` from the `haychat-db-password` secret                                                                                                                                                                                                                                               |
+| You, in `server.env` (all optional)     | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES` |
 
 `server.env` holds a secret when you set a fixed server key, so keep it
 at mode `0600`. To keep the server listening on another port inside the pod, set
@@ -208,28 +208,28 @@ rooms from the client (**+ New room** next to the room list, **Edit room** in a 
 header):
 
 1. Connect once with the client, using the display name that should own the server (for
-   example `jim`). The server creates the account and binds the name to your client's key.
+   example `quonic`). The server creates the account and binds the name to your client's key.
 2. Run `deploy/sql/make-admin.sql` against the database:
 
    ```sh
-   podman exec -i haychat-db psql -U haychat -d haychat -v owner=jim <deploy/sql/make-admin.sql
+   podman exec -i haychat-db psql -U haychat -d haychat -v owner=quonic <deploy/sql/make-admin.sql
    ```
 
    Without a checkout, use the copy in the image:
 
    ```sh
    podman exec haychat-server cat /usr/share/haychat/sql/make-admin.sql \
-   	| podman exec -i haychat-db psql -U haychat -d haychat -v owner=jim
+   	| podman exec -i haychat-db psql -U haychat -d haychat -v owner=quonic
    ```
 
-   It prints `jim is an admin`. It fails without changing anything when no account has that
+   It prints `quonic is an admin`. It fails without changing anything when no account has that
    name, and it is safe to run again. The equivalent statements, for typing into
    `podman exec -it haychat-db psql -U haychat -d haychat`:
 
    ```sql
    INSERT INTO server_roles (name) VALUES ('admin') ON CONFLICT DO NOTHING;
    INSERT INTO user_server_roles (user_id, role_id)
-   	SELECT u.id, r.id FROM users u, server_roles r WHERE u.nickname = 'jim' AND r.name = 'admin'
+   	SELECT u.id, r.id FROM users u, server_roles r WHERE u.nickname = 'quonic' AND r.name = 'admin'
    	ON CONFLICT DO NOTHING;
    ```
 
@@ -329,6 +329,7 @@ exits with status 1, leaving the database exactly as it was, when:
 
    With plain podman: `podman pull` the new tag, `podman rm -f haychat-server`, and run it
    again with the same volumes.
+
 4. Watch the log for the migration lines and `=== Server Running ===`. Keep the
    `haychat-storage` volume: it holds the identity key that every client has pinned.
 
@@ -388,22 +389,22 @@ git tag -a v0.1.0 -m "HayChat v0.1.0"
 git push origin v0.1.0
 ```
 
-| Job | What it does |
-| --- | --- |
-| `archives` | In a Fedora 44 job container with the same package script and Odin pins as CI, runs `deploy/release-artifacts.sh VERSION dist --windows` and keeps `dist/` as a workflow artifact |
-| `image` | On a tag (or a manual run with `push_image`): builds `deploy/Containerfile` with buildah and pushes `git.spyingwind.com/jim/haychat/server:TAG` and `:latest` (`:edge` for manual runs) |
-| `release` | On a tag: creates a pre-release named after the tag (or reuses it on a re-run) and uploads the archives and `SHA256SUMS` through the Forgejo API |
+| Job        | What it does                                                                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `archives` | In a Fedora 44 job container with the same package script and Odin pins as CI, runs `deploy/release-artifacts.sh VERSION dist --windows` and keeps `dist/` as a workflow artifact          |
+| `image`    | On a tag (or a manual run with `push_image`): builds `deploy/Containerfile` with buildah and pushes `git.spyingwind.com/quonic/haychat/server:TAG` and `:latest` (`:edge` for manual runs) |
+| `release`  | On a tag: creates a pre-release named after the tag (or reuses it on a re-run) and uploads the archives and `SHA256SUMS` through the Forgejo API                                           |
 
 Release assets:
 
-| Asset | Contents |
-| --- | --- |
-| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, pg) |
-| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji) |
-| `haychat-client-TAG-windows-x86_64.zip` | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus) |
-| `SHA256SUMS` | Checksums of the three archives |
+| Asset                                    | Contents                                                                                                                                                                                                                |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, pg)                                                                                       |
+| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji)                                                                                         |
+| `haychat-client-TAG-windows-x86_64.zip`  | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus) |
+| `SHA256SUMS`                             | Checksums of the three archives                                                                                                                                                                                         |
 
-**Licences.** [THIRD_PARTY_NOTICES.md](https://git.spyingwind.com/jim/haychat/src/branch/main/THIRD_PARTY_NOTICES.md)
+**Licences.** [THIRD_PARTY_NOTICES.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/THIRD_PARTY_NOTICES.md)
 says what each artifact contains and what each licence requires; the Windows `README.txt`
 carries the FreeType credit, and both client READMEs the Twemoji attribution. The per-artifact
 file lists are the `*_LICENCES` tables in `deploy/release-artifacts.sh`; the image build

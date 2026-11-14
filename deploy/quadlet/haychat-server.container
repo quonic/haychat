@@ -12,7 +12,7 @@ After=haychat-db.service
 ContainerName=haychat-server
 Pod=haychat.pod
 # Pin a release tag (for example :v0.1.0) rather than :latest, and change it to upgrade.
-Image=git.spyingwind.com/jim/haychat/server:latest
+Image=git.spyingwind.com/quonic/haychat/server:latest
 RunInit=true
 Volume=haychat-logs:/var/lib/haychat/logs
 Volume=haychat-storage:/var/lib/haychat/storage
