@@ -14,6 +14,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 import "core:time"
+import "hotkey"
 import "opus"
 import SDL "vendor:sdl3"
 
@@ -959,4 +960,192 @@ testVoiceRedrawDueFollowsTheEngine :: proc(t: ^testing.T) {
 		!State_voiceRedrawDue(&state, now, &pollAt),
 		"expected no checks once the test stopped",
 	)
+}
+
+// ── Global push-to-talk (issue 45) ────────────────────────────────
+
+// The window's key and the global monitor combine, and a global key that types is ignored
+// only while HayChat has focus with a text field focused.
+@(test)
+testVoicePushToTalkCombinesTheWindowAndTheGlobalKey :: proc(t: ^testing.T) {
+	letter := voicePushToTalkKeyFromName("V")
+	ctrl := voicePushToTalkKeyFromName("Left Ctrl")
+	cases := []struct {
+		window, global, focused, textFocused: bool,
+		key:                                  SDL.Keycode,
+		want:                                 bool,
+		name:                                 string,
+	} {
+		{false, false, true, false, ctrl, false, "nothing held"},
+		{true, false, true, false, ctrl, true, "the window's key"},
+		{false, true, false, false, ctrl, true, "the global key in another window"},
+		{false, true, true, true, ctrl, true, "Ctrl in a focused text field still talks"},
+		{false, true, true, true, letter, false, "a letter typed in HayChat's text field"},
+		{false, true, false, true, letter, true, "a letter in another window talks"},
+		{false, true, true, false, letter, true, "a letter in HayChat outside a text field"},
+		{true, true, true, true, letter, true, "the window's own state wins"},
+	}
+	for c in cases {
+		got := voicePushToTalkCombined(c.window, c.global, c.focused, c.textFocused, c.key)
+		testing.expectf(t, got == c.want, "%s: want %v, got %v", c.name, c.want, got)
+	}
+}
+
+// The monitor follows the configured key and is armed only while push-to-talk is in use and
+// allowed in other windows; the window's key reaches the engine through the sync.
+@(test)
+testVoiceSyncPushToTalkArmsTheMonitorOnlyWhileInUse :: proc(t: ^testing.T) {
+	state := testVoiceUIState(947)
+	defer State_deinit(&state)
+	monitor := hotkey.create(.None, nil, nil)
+	state.voice.globalPushToTalk = monitor
+	armed :: proc(monitor: ^hotkey.Monitor) -> bool {
+		return sync.atomic_load(&monitor.armed)
+	}
+
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, !armed(monitor), "voice activity mode: the monitor is not armed")
+	settings := State_voiceSettings(&state)
+	settings.mode = .PushToTalk
+	State_applyVoiceSettings(&state, settings, persist = false)
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, !armed(monitor), "push-to-talk out of voice: not armed")
+	testing.expectf(
+		t,
+		sync.atomic_load(&monitor.key) == voicePushToTalkKeyFromName("Left Ctrl"),
+		"the monitor follows the configured key, got %v",
+		sync.atomic_load(&monitor.key),
+	)
+
+	state.voice.status = .Joining
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, armed(monitor), "push-to-talk while joining voice: armed")
+	settings.pttGlobal = false
+	State_applyVoiceSettings(&state, settings, persist = false)
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, !armed(monitor), "global push-to-talk off: not armed")
+
+	state.voice.pushToTalkWindowHeld = true
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, state.voice.pushToTalkHeld, "the window's key holds push-to-talk")
+	state.voice.pushToTalkWindowHeld = false
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(t, !state.voice.pushToTalkHeld, "and releases it")
+
+	state.voice.pushToTalkWindowHeld = true
+	settings.mode = .VoiceActivity
+	State_applyVoiceSettings(&state, settings, persist = false)
+	_ = State_voiceSyncPushToTalk(&state, false)
+	testing.expect(
+		t,
+		!state.voice.pushToTalkHeld && !state.voice.pushToTalkWindowHeld,
+		"leaving push-to-talk mode releases the key",
+	)
+	state.voice.status = .Idle
+}
+
+@(private = "file")
+testHotkeyReport :: proc(
+	backend: hotkey.Backend,
+	status: hotkey.Status,
+	message := "",
+	trigger := "",
+	canConfigure := false,
+) -> (
+	report: hotkey.StatusReport,
+) {
+	report.backend = backend
+	report.status = status
+	report.messageLength = copy(report.messageBuffer[:], message)
+	report.triggerLength = copy(report.triggerBuffer[:], trigger)
+	report.canConfigure = canConfigure
+	return
+}
+
+// The settings note says where push-to-talk works for each backend and status.
+@(test)
+testVoicePushToTalkNoticeFollowsTheMonitor :: proc(t: ^testing.T) {
+	settings := VOICE_DEFAULT_SETTINGS
+	settings.mode = .PushToTalk
+	notice := voicePushToTalkNotice(settings, {}, false)
+	testing.expectf(t, notice == VOICE_PTT_FOCUS_NOTICE, "no monitor: %q", notice)
+
+	notice = voicePushToTalkNotice(settings, testHotkeyReport(.None, .Idle), true)
+	testing.expectf(t, notice == VOICE_PTT_NO_GLOBAL_NOTICE, "no backend: %q", notice)
+
+	notice = voicePushToTalkNotice(settings, testHotkeyReport(.X11, .Active), true)
+	testing.expectf(t, notice == VOICE_PTT_GLOBAL_POLLING_NOTICE, "X11 active: %q", notice)
+
+	off := settings
+	off.pttGlobal = false
+	notice = voicePushToTalkNotice(off, testHotkeyReport(.Windows, .Active), true)
+	testing.expectf(t, notice == VOICE_PTT_FOCUS_NOTICE, "turned off: %q", notice)
+
+	notice = voicePushToTalkNotice(
+		settings,
+		testHotkeyReport(.X11, .Unavailable, "cannot open the X display"),
+		true,
+	)
+	testing.expectf(
+		t,
+		strings.has_prefix(notice, VOICE_PTT_FOCUS_NOTICE) &&
+		strings.contains(notice, "cannot open the X display"),
+		"unavailable: %q",
+		notice,
+	)
+
+	notice = voicePushToTalkNotice(settings, testHotkeyReport(.X11, .KeyUnsupported), true)
+	testing.expectf(t, notice == VOICE_PTT_GLOBAL_UNSUPPORTED_KEY_NOTICE, "unsupported: %q", notice)
+
+	notice = voicePushToTalkNotice(settings, testHotkeyReport(.Portal, .Idle), true)
+	testing.expectf(t, notice == VOICE_PTT_PORTAL_IDLE_NOTICE, "portal idle: %q", notice)
+	notice = voicePushToTalkNotice(
+		settings,
+		testHotkeyReport(.Portal, .Active, trigger = "Ctrl+Space"),
+		true,
+	)
+	testing.expectf(t, strings.contains(notice, "Ctrl+Space"), "portal active: %q", notice)
+	notice = voicePushToTalkNotice(settings, testHotkeyReport(.Portal, .Active), true)
+	testing.expectf(t, notice == VOICE_PTT_PORTAL_UNASSIGNED_NOTICE, "unassigned: %q", notice)
+
+	// A key that types warns about other windows only where it is read there.
+	typing := settings
+	typing.pttKey = "V"
+	notice = voicePushToTalkNotice(typing, testHotkeyReport(.Windows, .Active), true)
+	testing.expectf(
+		t,
+		notice == VOICE_PTT_GLOBAL_POLLING_NOTICE + VOICE_PTT_GLOBAL_TYPING_ADDENDUM,
+		"typing key on Windows: %q",
+		notice,
+	)
+	notice = voicePushToTalkNotice(typing, {}, false)
+	testing.expectf(t, notice == VOICE_PTT_TYPING_NOTICE, "typing key, no monitor: %q", notice)
+}
+
+// The toggle is offered only with a global backend, and Change shortcut only for an active
+// portal session that supports it.
+@(test)
+testVoiceSettingsViewOffersTheGlobalToggle :: proc(t: ^testing.T) {
+	state := testVoiceUIState(948)
+	defer State_deinit(&state)
+	settings := State_voiceSettings(&state)
+	settings.mode = .PushToTalk
+	State_applyVoiceSettings(&state, settings, persist = false)
+	view := buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expect(t, !view.pttGlobalOffered, "no monitor: no toggle")
+
+	state.voice.globalPushToTalk = hotkey.create(.None, nil, nil)
+	state.voice.globalReport = testHotkeyReport(.None, .Idle)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expect(t, !view.pttGlobalOffered, "no backend: no toggle")
+
+	state.voice.globalReport = testHotkeyReport(.Portal, .Active, "", "Ctrl+Space", true)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expect(t, view.pttGlobalOffered && view.pttCanConfigure, "portal v2: toggle + dialog")
+	state.voice.globalReport = testHotkeyReport(.Portal, .Active, "", "Ctrl+Space", false)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expect(t, view.pttGlobalOffered && !view.pttCanConfigure, "portal v1: no dialog")
+	state.voice.globalReport = testHotkeyReport(.X11, .Active)
+	view = buildVoiceSettingsView(&state, context.temp_allocator)
+	testing.expect(t, view.pttGlobalOffered && !view.pttCanConfigure, "X11: toggle only")
 }

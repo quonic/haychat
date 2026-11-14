@@ -165,10 +165,14 @@ server, and keep chatting anywhere while you are.
   line on the meter) without joining a room.
 - **Voice activity or push-to-talk:** by default HayChat sends while you speak louder than the
   threshold. In **Push-to-talk** mode it sends only while you hold the push-to-talk key
-  (Left Ctrl unless you change it). **Push-to-talk works only while the HayChat window has
-  focus**: if you click into another window while holding the key, HayChat stops sending.
-  A push-to-talk key that types (a letter, a digit or Space) does nothing while you are typing
-  in a text field, so pick a key such as Ctrl or an F-key if you want to talk while typing.
+  (Left Ctrl unless you change it). It also works while another window has focus (turn
+  **In other windows too** off in Settings → Voice if you do not want that). On Windows and
+  on Linux with X11 HayChat follows the key itself. On Linux with Wayland your desktop
+  handles it: the first time you use push-to-talk in voice it asks you to confirm a shortcut
+  (pick one if Left Ctrl is not offered), and Settings → Voice shows the one it set. A
+  push-to-talk key that types (a letter, a digit or Space) does nothing while you are typing
+  in a HayChat text field, but opens your microphone while you type in other windows, so a
+  key such as Ctrl or an F-key works best.
 - **Linux needs libopus:** the `opus` package on Fedora and Arch, `libopus0` on Debian and
   Ubuntu (it is in the install commands above). Without it the voice bar says "Voice
   unavailable: libopus not found" and chat still works.
@@ -227,7 +231,8 @@ Use HayChat as you would use any chat app, and keep an eye on these:
   count on the other. Your own messages should never count.
 - **Voice:** join a room's voice with another tester (with headphones), talk, mute, deafen,
   and leave. Check that the speaking ring follows whoever talks, that mute and deafen show
-  for the others, and that voice comes back by itself after a reconnect. Try push-to-talk,
+  for the others, and that voice comes back by itself after a reconnect. Try push-to-talk
+  (also while another window, such as a game or browser, has focus),
   a different microphone in **Settings → Voice** while you are in a room, and **Test
   microphone**. Tell us about delay, choppy sound, echo, or a level meter that does not move.
 - **The window:** resizing, high-DPI screens, typing with an input method (for example

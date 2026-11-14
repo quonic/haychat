@@ -7,6 +7,7 @@ package client
 import "../common"
 import "core:os"
 import "core:strings"
+import "hotkey"
 
 CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
 
@@ -176,6 +177,9 @@ State_deinit :: proc(state: ^State) {
 	// The voice engine sends through the worker and its transports, so it stops first; then
 	// the worker stops before the transports it services are freed.
 	State_setVoiceSettingsVisible(state, false)
+	// Its thread wakes the UI loop through SDL, so it stops while SDL is still up.
+	hotkey.destroy(state.voice.globalPushToTalk)
+	state.voice.globalPushToTalk = nil
 	State_voiceShutdown(state)
 	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)

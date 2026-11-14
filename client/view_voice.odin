@@ -347,7 +347,7 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	pttClicked := ui.button(ctx, ui.idOf("voice-mode-ptt"), modeRow, "Push-to-talk", pttOptions)
 	_ = ui.cutTop(&column, sectionGap)
 
-	keyClicked := false
+	keyClicked, globalClicked, shortcutClicked := false, false, false
 	if settings.mode == .PushToTalk {
 		voiceSettingsLabel(ctx, &column, "Push-to-talk key")
 		keyRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
@@ -361,6 +361,37 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 			keyText = fmt.tprintf("%s  (change)", view.pttKeyLabel)
 		}
 		keyClicked = ui.button(ctx, ui.idOf("voice-ptt-key"), keyRow, keyText, keyOptions)
+		if view.pttGlobalOffered {
+			_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+			globalRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+			globalOptions := ui.ButtonOptions {
+				selected = settings.pttGlobal,
+				color    = settings.pttGlobal ? ctx.theme.fg : ctx.theme.fgMuted,
+			}
+			if view.pttCanConfigure {
+				shortcutW := min(globalRow.w / 3, ui.dp(ctx, 180))
+				shortcutRow := ui.cutRight(&globalRow, shortcutW)
+				_ = ui.cutRight(&globalRow, gap)
+				shortcutClicked = ui.button(
+					ctx,
+					ui.idOf("voice-ptt-shortcut"),
+					shortcutRow,
+					"Change shortcut",
+					{align = .Center},
+				)
+			}
+			globalText := "In other windows too: off"
+			if settings.pttGlobal {
+				globalText = "In other windows too: on"
+			}
+			globalClicked = ui.button(
+				ctx,
+				ui.idOf("voice-ptt-global"),
+				globalRow,
+				globalText,
+				globalOptions,
+			)
+		}
 		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
 		voiceSettingsWrapped(ctx, &column, view.pttNotice, ctx.theme.fgMuted)
 		_ = ui.cutTop(&column, sectionGap)
@@ -485,6 +516,9 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	case pttClicked:
 		next.mode = .PushToTalk
 		changed = next.mode != settings.mode
+	case globalClicked:
+		next.pttGlobal = !settings.pttGlobal
+		changed = true
 	}
 	for result, index in ([4]ui.SliderResult{threshold, gain, volume, bitrate}) {
 		if !result.changed && !result.released {
@@ -510,6 +544,8 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	switch {
 	case keyClicked:
 		State_setVoiceKeyCapture(state, !panel.capturingKey)
+	case shortcutClicked:
+		State_configureGlobalPushToTalk(state)
 	case testClicked:
 		if panel.testEngine != nil {
 			State_stopVoiceTest(state)

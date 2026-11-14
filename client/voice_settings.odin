@@ -10,6 +10,7 @@ package client
 import "core:c"
 import "core:math"
 import "core:strings"
+import "hotkey"
 import "opus"
 import SDL "vendor:sdl3"
 
@@ -34,6 +35,8 @@ VoiceSettings :: struct {
 	outputDevice:   string, // "" is the system default
 	mode:           VoiceGateMode,
 	pttKey:         string,
+	// Push-to-talk also follows the key while another window has focus (client/hotkey).
+	pttGlobal:      bool,
 	vadThresholdDB: f32,
 	inputGain:      f32,
 	outputVolume:   f32,
@@ -43,6 +46,7 @@ VoiceSettings :: struct {
 VOICE_DEFAULT_SETTINGS :: VoiceSettings {
 	mode           = .VoiceActivity,
 	pttKey         = VOICE_DEFAULT_PTT_KEY,
+	pttGlobal      = true,
 	vadThresholdDB = VOICE_VAD_DEFAULT_THRESHOLD_DB,
 	inputGain      = 1,
 	outputVolume   = 1,
@@ -119,6 +123,9 @@ Config_voiceSettings :: proc(config: Config) -> VoiceSettings {
 	if len(config.voice_ptt_key) > 0 {
 		settings.pttKey = config.voice_ptt_key
 	}
+	if value, ok := config.voice_ptt_global.?; ok {
+		settings.pttGlobal = value
+	}
 	if value, ok := config.voice_vad_threshold_db.?; ok {
 		settings.vadThresholdDB = value
 	}
@@ -158,6 +165,10 @@ Config_setVoiceSettings :: proc(config: ^Config, settings: VoiceSettings) {
 	voiceSetConfigString(&config.voice_mode, mode, VOICE_MODE_VOICE_ACTIVITY)
 	voiceSetConfigString(&config.voice_ptt_key, pttKey, VOICE_DEFAULT_PTT_KEY)
 	defaults := VOICE_DEFAULT_SETTINGS
+	config.voice_ptt_global = nil
+	if valid.pttGlobal != defaults.pttGlobal {
+		config.voice_ptt_global = valid.pttGlobal
+	}
 	config.voice_vad_threshold_db = nil
 	if valid.vadThresholdDB != defaults.vadThresholdDB {
 		config.voice_vad_threshold_db = valid.vadThresholdDB
@@ -251,8 +262,11 @@ State_applyVoiceSettings :: proc(state: ^State, settings: VoiceSettings, persist
 	}
 	State_voiceUpdateTemplate(state, next)
 
-	if next.mode != .PushToTalk && state.voice.pushToTalkHeld {
-		State_voicePushToTalkChanged(state, false)
+	if next.mode != .PushToTalk {
+		state.voice.pushToTalkWindowHeld = false
+		if state.voice.pushToTalkHeld {
+			State_voicePushToTalkChanged(state, false)
+		}
 	}
 	if state.voice.engine != nil {
 		if devicesChanged {
@@ -277,13 +291,82 @@ State_saveVoiceSettings :: proc(state: ^State) {
 	State_saveConfig(state)
 }
 
-// The push-to-talk key went down or up (the GUI calls this only while its window has focus,
-// and with false when focus is lost). It drives the joined engine and the microphone test.
+// Push-to-talk went down or up (from State_voiceSyncPushToTalk in the GUI). It drives the
+// joined engine and the microphone test.
 State_voicePushToTalkChanged :: proc(state: ^State, held: bool) {
 	State_setVoicePushToTalk(state, held)
 	if state.voicePanel.testEngine != nil {
 		VoiceEngine_setPushToTalk(state.voicePanel.testEngine, held)
 	}
+}
+
+// ── Global push-to-talk (issue 45) ────────────────────────────────
+
+// Whether push-to-talk can matter now: voice is joining or joined, or the microphone test
+// runs. Only then is the global monitor armed, so it reads no key and (on Wayland) shows no
+// desktop dialog at any other time.
+State_voicePushToTalkInUse :: proc(state: ^State) -> bool {
+	return(
+		state.voice.status == .Joining ||
+		state.voice.status == .Joined ||
+		state.voicePanel.testEngine != nil \
+	)
+}
+
+// Push-to-talk from both sources: the window's own key events and the global monitor. A held
+// global key that types is ignored while HayChat has focus and a text field has keyboard
+// focus, exactly like the window's own key events (voicePushToTalkKeyEvent), so typing that
+// letter in the message box never opens the microphone.
+voicePushToTalkCombined :: proc(
+	windowHeld, globalHeld, focused, textFocused: bool,
+	key: SDL.Keycode,
+) -> bool {
+	if globalHeld && focused && textFocused && voiceKeyEditsText(key) {
+		return windowHeld
+	}
+	return windowHeld || globalHeld
+}
+
+// Runs once per GUI loop pass, after the events: points the global monitor at the configured
+// key, arms it while push-to-talk is in use and allowed in other windows, and applies the
+// combined state to the engine and the test. Returns true when the settings view shows
+// something new (the monitor's report changed).
+State_voiceSyncPushToTalk :: proc(state: ^State, textFocused: bool) -> bool {
+	settings := State_voiceSettings(state)
+	key := SDL.Keycode(0)
+	if settings.mode == .PushToTalk {
+		key = voicePushToTalkKeyFromName(settings.pttKey)
+	}
+	monitor := state.voice.globalPushToTalk
+	armed := key != 0 && settings.pttGlobal && State_voicePushToTalkInUse(state)
+	hotkey.setKey(monitor, key)
+	hotkey.setArmed(monitor, armed)
+	globalHeld := armed && hotkey.held(monitor)
+	windowHeld := key != 0 && state.voice.pushToTalkWindowHeld
+	held := voicePushToTalkCombined(
+		windowHeld,
+		globalHeld,
+		state.windowFocused,
+		textFocused,
+		key,
+	)
+	if held != state.voice.pushToTalkHeld {
+		State_voicePushToTalkChanged(state, held)
+	}
+	if monitor == nil {
+		return false
+	}
+	report := hotkey.report(monitor)
+	if report == state.voice.globalReport {
+		return false
+	}
+	state.voice.globalReport = report
+	return state.voicePanel.visible
+}
+
+// Opens the desktop's dialog for the push-to-talk shortcut (Wayland portal version 2).
+State_configureGlobalPushToTalk :: proc(state: ^State) {
+	hotkey.requestConfigure(state.voice.globalPushToTalk)
 }
 
 // ── Settings → Voice panel ────────────────────────────────────────

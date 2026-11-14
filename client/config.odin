@@ -24,6 +24,8 @@ Config :: struct {
 	voice_output_device:    string `json:"voice_output_device,omitempty"`,
 	voice_mode:             string `json:"voice_mode,omitempty"`,
 	voice_ptt_key:          string `json:"voice_ptt_key,omitempty"`,
+	// Whether push-to-talk also works while another window has focus (client/hotkey).
+	voice_ptt_global:       Maybe(bool) `json:"voice_ptt_global,omitempty"`,
 	voice_vad_threshold_db: Maybe(f32) `json:"voice_vad_threshold_db,omitempty"`,
 	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
 	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
@@ -323,6 +325,7 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_output_device = strings.clone(config.voice_output_device),
 		voice_mode = strings.clone(config.voice_mode),
 		voice_ptt_key = strings.clone(config.voice_ptt_key),
+		voice_ptt_global = config.voice_ptt_global,
 		voice_vad_threshold_db = config.voice_vad_threshold_db,
 		voice_input_gain = config.voice_input_gain,
 		voice_output_volume = config.voice_output_volume,
