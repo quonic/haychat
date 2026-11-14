@@ -212,3 +212,40 @@ Protocol 14, new `MessageType` members at the end, each pinned in `protocol_test
 
 #39 and #41 close with P3 + P4. #47 closes with P2 (and P4's menu entries). #42 gets a comment:
 admin rename done, the key move left open.
+
+## Status (2026-11-14)
+
+Every package merged; `main` is at protocol 14 and schema migration 3.
+
+| Package | PR | Merge |
+| --- | --- | --- |
+| P1 Context menus | #51 | 495f8cb |
+| P2 Server settings | #50 | 5ac02aa |
+| P3 Admin server and protocol | #52 | a3e6604 |
+| P4 Admin UI | #53 | fa0ce06 |
+
+Also merged: #49 (`HAYCHAT_DEV_UI_SCREENSHOTS` under SELinux) and, in #52, a fix for a race
+in `dev/harness-lib.sh` (a client that answers and exits at once was reported as exited).
+#39, #41 and #47 are closed; #42 has a comment (admin rename done, moving an account to
+another key still open).
+
+Changes from the plan made while building:
+
+- P3: each admin action is one SQL statement that checks the role, applies the D6 guards and
+  makes the change; there is no separate admin check first. An empty rename name changes only
+  the lock (how an admin unlocks a name). A banned account cannot be made an admin.
+- P3: router-commanded disconnects use `peer_disconnect_later`, so the last packets
+  (`ServerSessionEnded`, `ServerAuthFailure`, protocol errors) reach the client, and the router
+  gets `NetworkPeerDisconnected` for those peers instead of keeping their sessions.
+- P4: a kick or ban clears the voice re-join, so Retry does not rejoin voice. The Admin member
+  table is sorted by name only. UI scripts gained `wait-gone` and `scroll`.
+
+Follow-ups:
+
+- The last-admin guard relies on the one database worker running statements in order; two
+  servers sharing one database could let two admins revoke each other at once. One server per
+  database is the supported setup.
+- The Admin member table has no search or paging (README Known Limitations).
+- Roles changed directly in the database still reach clients only on their next connection (D8).
+- Out of scope this round and still open: private rooms (#40), closed sign-up (#43), moving an
+  account to another key (#42), server-side message edit and delete.
