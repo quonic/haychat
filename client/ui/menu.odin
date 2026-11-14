@@ -15,12 +15,17 @@ import SDL "vendor:sdl3"
 //
 // or, with every entry known up front, ui.menu(ctx, id, anchor, items).
 //
+// A menu can also hold a labelled slider (menuSlider, or a MenuItem with slider set): the label
+// above a track, for a value the caller keeps. Moving it does not close the menu, and Up and
+// Down skip it.
+//
 // Each item's widget ID is idOf("menu-item", key), so it is stable however the entries
 // around it change, and its label goes through the automation text hook.
 
 MENU_MIN_WIDTH :: 180
 MENU_ITEM_HEIGHT :: 28
 MENU_SEPARATOR_HEIGHT :: 9
+MENU_SLIDER_HEIGHT :: 48
 MENU_PADDING :: 4 // Between the border and the items
 MENU_MAX_ITEMS :: 32
 
@@ -30,11 +35,21 @@ MenuItem :: struct {
 	enabled:   bool,
 	danger:    bool, // Drawn in the danger color, for destructive entries
 	separator: bool, // A divider line instead of an item; the other fields are ignored
+	// A labelled slider (menuSlider) instead of an item: value in low..high, snapped to step.
+	slider:    bool,
+	value:     f32,
+	low:       f32,
+	high:      f32,
+	step:      f32,
 }
 
 MenuResult :: struct {
 	clicked:   int, // Index into the items of the one activated this frame, -1 for none
 	dismissed: bool, // Esc, a press outside the menu, or the window lost focus
+	// The slider item that moved or was let go this frame (index into the items, -1 for
+	// none) and what it reported.
+	sliderIndex: int,
+	slider:      SliderResult,
 }
 
 // What the toolkit keeps for the open menu between frames.
@@ -61,7 +76,7 @@ menuSize :: proc(ctx: ^Context, items: []MenuItem) -> Vec2 {
 			height += dp(ctx, MENU_SEPARATOR_HEIGHT)
 			continue
 		}
-		height += dp(ctx, MENU_ITEM_HEIGHT)
+		height += dp(ctx, item.slider ? MENU_SLIDER_HEIGHT : MENU_ITEM_HEIGHT)
 		labelW = max(labelW, textSize(textGet(ctx, 0, .Regular, item.label)).x)
 	}
 	width := labelW + dp(ctx, ctx.theme.padding * 2 + MENU_PADDING * 2 + 8)
@@ -166,6 +181,32 @@ menuItem :: proc(
 	return activated
 }
 
+// Draws a labelled slider row: text above a track for value in low..high, snapped to step. Its
+// widget ID is idOf("menu-slider", key). It never takes the highlight, so Up and Down skip it,
+// and moving it does not count as activating the menu.
+menuSlider :: proc(
+	ctx: ^Context,
+	key: int,
+	text: string,
+	value, low, high: f32,
+	step: f32 = 0,
+) -> SliderResult {
+	menu := &ctx.menu
+	index := menu.count
+	menu.count += 1
+	if index < MENU_MAX_ITEMS {
+		menu.enabled[index] = false
+	}
+	inset := dp(ctx, MENU_PADDING)
+	r := Rect{menu.rect.x + inset, menu.y, menu.rect.w - inset * 2, dp(ctx, MENU_SLIDER_HEIGHT)}
+	menu.y += r.h
+	content := shrinkXY(r, dp(ctx, ctx.theme.padding), dp(ctx, 4))
+	label(ctx, cutTop(&content, lineHeight(ctx)), text, ctx.theme.fg)
+	trackH := dp(ctx, SLIDER_KNOB_SIZE + 4)
+	track := Rect{content.x, content.y + (content.h - trackH) / 2, content.w, trackH}
+	return slider(ctx, idOf("menu-slider", key), track, value, low, high, step)
+}
+
 menuSeparator :: proc(ctx: ^Context) {
 	menu := &ctx.menu
 	height := dp(ctx, MENU_SEPARATOR_HEIGHT)
@@ -224,11 +265,26 @@ menuMoveHot :: proc(enabled: []bool, hot: int, moves: int) -> int {
 // A whole menu from a list of entries, placed at anchor inside the window.
 menu :: proc(ctx: ^Context, id: ID, anchor: Vec2, items: []MenuItem) -> (result: MenuResult) {
 	result.clicked = -1
+	result.sliderIndex = -1
 	r := menuPlace(anchor, menuSize(ctx, items), ctx.windowRect)
 	menuBegin(ctx, id, r)
 	for item, index in items {
 		if item.separator {
 			menuSeparator(ctx)
+		} else if item.slider {
+			moved := menuSlider(
+				ctx,
+				item.key,
+				item.label,
+				item.value,
+				item.low,
+				item.high,
+				item.step,
+			)
+			if moved.changed || moved.released {
+				result.sliderIndex = index
+				result.slider = moved
+			}
 		} else if menuItem(ctx, item.key, item.label, item.enabled, item.danger) {
 			result.clicked = index
 		}

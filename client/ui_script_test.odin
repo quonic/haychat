@@ -223,3 +223,47 @@ testUIScriptParsesRightClicks :: proc(t: ^testing.T) {
 		testing.expectf(t, lineErr == entry[1], "%q: got %q", entry[0], lineErr)
 	}
 }
+
+@(test)
+testUIScriptParsesWaitGone :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	commands, errLine, err := uiScriptParse("wait-gone \"Join voice\"\nwait-gone gone 2500\n")
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0 && len(commands) == 2, "expected two wait-gone commands")
+	assert(commands[0].kind == .WaitGone && commands[0].text == "Join voice", "expected text")
+	assert(
+		commands[0].timeoutMS == UI_SCRIPT_DEFAULT_TIMEOUT_MS,
+		"expected the default timeout",
+	)
+	assert(commands[1].text == "gone" && commands[1].timeoutMS == 2500, "expected a timeout")
+	assert(UI_SCRIPT_COMMAND_NAMES[.WaitGone] == "wait-gone", "expected the JSON name")
+	for line in ([]string{"wait-gone", "wait-gone a b", "wait-gone a 1 2"}) {
+		lines, _, lineErr := uiScriptParse(line)
+		assert(lines == nil, "expected nothing parsed from a bad line")
+		testing.expectf(
+			t,
+			lineErr == `usage: wait-gone "TEXT" [TIMEOUT_MS]`,
+			"%q: got %q",
+			line,
+			lineErr,
+		)
+	}
+}
+
+@(test)
+testUIScriptParsesScroll :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	commands, errLine, err := uiScriptParse("scroll 640 400 5\nscroll 10.5 20 -3\n")
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0 && len(commands) == 2, "expected two scroll commands")
+	assert(commands[0].kind == .Scroll && commands[0].x == 640, "expected the x coordinate")
+	assert(commands[0].y == 400 && commands[0].count == 5, "expected y and five notches down")
+	assert(commands[1].x == 10.5 && commands[1].count == -3, "expected three notches up")
+	assert(UI_SCRIPT_COMMAND_NAMES[.Scroll] == "scroll", "expected the JSON name")
+	bad := []string{"scroll", "scroll 1 2", "scroll 1 2 0", "scroll 1 2 101", `scroll 1 2 "3"`}
+	for line in bad {
+		lines, _, lineErr := uiScriptParse(line)
+		assert(lines == nil, "expected nothing parsed from a bad line")
+		testing.expectf(t, lineErr == UI_SCRIPT_SCROLL_USAGE, "%q: got %q", line, lineErr)
+	}
+}
