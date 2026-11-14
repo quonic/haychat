@@ -368,6 +368,9 @@ run_live_proof() {
 	# mounted for them.
 	if [[ -n "${HAYCHAT_DEV_UI_SCREENSHOTS:-}" ]]; then
 		mkdir -p -- "$HAYCHAT_DEV_UI_SCREENSHOTS"
+		# Like `shell`, labelling is disabled rather than relabelling the user's directory
+		# with :z; without either, SELinux denies the container's writes to it.
+		run_args+=(--security-opt label=disable)
 		run_args+=(-v "$(cd -- "$HAYCHAT_DEV_UI_SCREENSHOTS" && pwd):/screenshots")
 		run_args+=(-e HAYCHAT_UI_SCREENSHOT_DIR=/screenshots)
 	fi
