@@ -107,8 +107,11 @@ NetworkVoiceRouteMember :: struct {
 // every join, leave, mute or deafen change. It replaces the relay's previous set for roomId;
 // an empty members list removes the room. members is owned.
 NetworkVoiceRoute :: struct {
-	roomId:  int,
-	members: []NetworkVoiceRouteMember,
+	roomId:    int,
+	members:   []NetworkVoiceRouteMember,
+	// Protocol 21: the room is encrypted, so its frames carry sealed payloads the relay checks
+	// for shape only (voice_relay.odin).
+	encrypted: bool,
 }
 
 // Router -> network thread: forget every voice session and route. Sent when the network

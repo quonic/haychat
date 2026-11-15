@@ -549,6 +549,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_setChatStatus(state, message)
 	// After the status: a refused sealed message puts its own reason there.
 	State_roomChainsProtocolError(state, serverID, message)
+	State_voiceE2EEProtocolError(state, serverID, message)
 }
 
 // Applies one decoded runtime event. Fields whose ownership moves into State are cleared on
@@ -653,6 +654,10 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_voiceJoinRejected(state, event.serverID, event.roomID, &event.message)
 	case .VoiceLeft:
 		State_voiceLeft(state, event.serverID, event.roomID, &event.message)
+	case .VoiceKeyReceived:
+		State_voiceE2EEReceiveKey(state, event.serverID, &event.voiceKey)
+	case .VoiceKeyRequested:
+		State_voiceE2EEReceiveRequest(state, event.serverID, event.roomID, event.peerUserID)
 	case .UserUpdated:
 		// The entry carries the account's identity key and bundle flag (protocol 15).
 		summary := event.user

@@ -343,7 +343,7 @@ networkLoop__voiceSessionOpen :: proc(userData: rawptr, msg: ^NetworkVoiceSessio
 
 networkLoop__voiceRoute :: proc(userData: rawptr, msg: NetworkVoiceRoute) {
 	state := cast(^NetworkLoopState)userData
-	VoiceRelay_applyRoute(state.voiceRelay, msg.roomId, msg.members)
+	VoiceRelay_applyRoute(state.voiceRelay, msg.roomId, msg.members, msg.encrypted)
 }
 
 networkLoop__voiceReset :: proc(userData: rawptr) {

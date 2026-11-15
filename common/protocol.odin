@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 20
+protocolVersion: ProtocolVersion = 21
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -378,6 +378,12 @@ MessageType :: enum {
 	ServerRoomKeys, // ServerRoomKeysPayload: answer to ClientFetchRoomKeys, one page
 	ClientRequestRoomKey, // ClientRequestRoomKeyPayload: ask a chain's sender to re-seal it
 	ServerRoomKeyRequest, // ServerRoomKeyRequestPayload: the request, relayed to the sender
+	// End-to-end encrypted voice in encrypted rooms (protocol 21, e2ee-voice-design.md 3.2),
+	// appended so no existing wire value moves. Voice frames stay binary on channel 2.
+	ClientVoiceKey, // ClientVoiceKeyPayload: this participant's VoiceKey envelope
+	ServerVoiceKey, // ServerVoiceKeyPayload: another participant's current VoiceKey envelope
+	ClientRequestVoiceKey, // ClientRequestVoiceKeyPayload: ask a speaker for a new voice key
+	ServerVoiceKeyRequest, // ServerVoiceKeyRequestPayload: the request, relayed to the speaker
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -808,7 +814,6 @@ ENCRYPTED_ROOM_ACCESS_MESSAGE :: "An encrypted room's access changes through its
 ENCRYPTED_ROOM_FULL_MESSAGE :: "This encrypted room is full"
 // A plaintext message to an encrypted room (protocol 19: only sealed messages are stored there).
 ENCRYPTED_ROOM_CHAT_MESSAGE :: "This room is encrypted: messages must be sealed"
-ENCRYPTED_ROOM_VOICE_MESSAGE :: "voice is not available in encrypted rooms yet"
 ROOM_LOG_REQUIRED_MESSAGE :: "This room is encrypted: its members change through its member list"
 ROOM_LOG_INVALID_MESSAGE :: "Invalid member list entry"
 ROOM_LOG_CONFLICT_MESSAGE :: "The member list changed on the server; try again"
@@ -946,6 +951,70 @@ ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
 ROOM_KEY_REQUEST_INVALID_MESSAGE :: "Invalid room key request"
 // A sealed message to a room that is not encrypted.
 SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
+
+// End-to-end encrypted voice (protocol 21, e2ee-voice-design.md 3-4). Each voice participant
+// of an encrypted room makes a random voice key per generation, seals it in a VoiceKey envelope
+// (common/e2ee.odin) with one wrap per other member of its verified log's current epoch, and
+// sends it as ClientVoiceKey before any frame under it. The router (server/voice.odin) checks
+// the envelope's structure, kind and signature against the session's identity key over the
+// voice key AAD, that the session is in roomId's voice, and that epoch is the room's current
+// log version; it keeps the latest one per participant in memory only (never in the database,
+// never forwarded to anyone outside the room's voice), sends it to every other session in the
+// room's voice as ServerVoiceKey, and hands each joiner every other participant's current key
+// right after its ServerVoiceParticipants with recipientJoined. A refusal is a
+// ServerProtocolError (VOICE_KEY_OUT_OF_DATE_MESSAGE for a stale epoch, so the client fetches
+// the log and rekeys; VOICE_KEY_INVALID_MESSAGE otherwise); the session stays.
+//
+// voiceSessionId and envelope are CBOR byte strings; createdAt is the key's creation time
+// (Unix seconds, the sender's clock), carried because the AAD binds it and the server checks
+// the signature. A decoded payload owns envelope: free it with the *_deinit helper.
+
+ClientVoiceKeyPayload :: struct {
+	roomId:         int,
+	epoch:          int,
+	voiceSessionId: VoiceSessionID,
+	generation:     u32,
+	createdAt:      i64,
+	envelope:       []u8,
+}
+
+ClientVoiceKeyPayload_deinit :: proc(payload: ^ClientVoiceKeyPayload) {
+	delete(payload.envelope)
+	payload.envelope = nil
+}
+
+// ServerVoiceKey: senderId's current voice key, to the other sessions in the room's voice.
+ServerVoiceKeyPayload :: struct {
+	roomId:         int,
+	senderId:       int,
+	epoch:          int,
+	voiceSessionId: VoiceSessionID,
+	generation:     u32,
+	createdAt:      i64,
+	envelope:       []u8,
+}
+
+ServerVoiceKeyPayload_deinit :: proc(payload: ^ServerVoiceKeyPayload) {
+	delete(payload.envelope)
+	payload.envelope = nil
+}
+
+// ClientRequestVoiceKey: a listener in roomId's voice holds no usable key of senderId's. The
+// server passes it to senderId's voice session as ServerVoiceKeyRequest, at most once per
+// requester and speaker every VOICE_KEY_REQUEST_INTERVAL_SECONDS, and drops anything else
+// silently. The speaker answers by rotating (a new key for every member of its epoch).
+ClientRequestVoiceKeyPayload :: struct {
+	roomId:   int,
+	senderId: int,
+}
+
+ServerVoiceKeyRequestPayload :: struct {
+	roomId:      int,
+	requesterId: int,
+}
+
+VOICE_KEY_OUT_OF_DATE_MESSAGE :: "Voice key is out of date"
+VOICE_KEY_INVALID_MESSAGE :: "Invalid voice key"
 
 // Direct messages are per server, between any two accounts. Since protocol 17 (e2ee-design.md
 // 4.5, 4.6) a message is either end-to-end encrypted (an envelope of common/e2ee.odin's binary
@@ -1842,10 +1911,13 @@ DatabaseRoomListResult :: struct {
 // (protocol 14), which the voice join check reads.
 // encrypted (protocol 18) refuses voice joins until encrypted voice exists (E6).
 DatabaseRoomMemberListResult :: struct {
-	userIDs:   [dynamic]int,
-	roomFound: bool,
-	roomType:  RoomType,
-	encrypted: bool,
+	userIDs:    [dynamic]int,
+	roomFound:  bool,
+	roomType:   RoomType,
+	encrypted:  bool,
+	// Protocol 21: the room's member log version (0 for an unencrypted room), the epoch a voice
+	// key must name (server/voice.odin).
+	logVersion: int,
 }
 
 // When isMember is false, or chatDisabled is true (a voice-only room, protocol 14), nothing was

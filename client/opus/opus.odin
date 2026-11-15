@@ -275,6 +275,10 @@ EncoderSettings :: struct {
 	inbandFEC:         bool,
 	dtx:               bool,
 	constrainedVBR:    bool,
+	// Constant bitrate (protocol 21, e2ee-voice-design.md 8): every 20 ms packet the same
+	// length, so the lengths of an encrypted room's frames do not follow the speech. The zero
+	// value keeps VBR (constrained when constrainedVBR is set).
+	cbr:               bool,
 }
 
 // HayChat's voice settings (voice-rooms-design.md section 2.1, Q4 and Q5): 24 kbit/s
@@ -321,7 +325,7 @@ configureEncoder :: proc(encoder: ^Encoder, settings: EncoderSettings) -> c.int 
 	requests := [?][2]i32 {
 		{SET_SIGNAL_REQUEST, SIGNAL_VOICE},
 		{SET_BITRATE_REQUEST, settings.bitrate},
-		{SET_VBR_REQUEST, 1},
+		{SET_VBR_REQUEST, settings.cbr ? 0 : 1},
 		{SET_VBR_CONSTRAINT_REQUEST, settings.constrainedVBR ? 1 : 0},
 		{SET_COMPLEXITY_REQUEST, settings.complexity},
 		{SET_INBAND_FEC_REQUEST, settings.inbandFEC ? 1 : 0},

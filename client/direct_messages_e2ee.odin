@@ -342,6 +342,8 @@ State_directKeysChanged :: proc(state: ^State, serverID: int) {
 	State_roomLogsPinsChanged(state, serverID)
 	// Sender chains (room_chains.odin): distributions and key answers that waited for keys.
 	State_roomChainsKeysChanged(state, serverID)
+	// Encrypted voice (voice_e2ee.odin): rotations and voice keys that waited for pins.
+	State_voiceE2EEKeysChanged(state, serverID)
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return

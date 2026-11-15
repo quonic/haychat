@@ -12,6 +12,13 @@ import "core:sync"
 //
 // The relay is a pure state machine: sending a datagram and reading the clock are injected, so
 // tests drive it without ENet. Only the network thread touches it, so it has no mutex.
+//
+// Encrypted rooms (protocol 21, e2ee-voice-design.md 6): a route marked encrypted carries
+// SealedVoicePayloads (common/voice_e2ee.odin) in the frames' opus field. The relay cannot read
+// the Opus TOC there, so it skips the duration check, drops a payload that is not a version 1
+// sealed payload with at least one Opus byte (NotSealed), applies maxFrameBytes to the payload
+// minus VOICE_E2EE_OVERHEAD, and forwards the payload byte for byte. Unencrypted rooms are
+// relayed exactly as before.
 
 // Sends one sealed datagram to peerId, unreliable and unsequenced on the voice channel. The
 // datagram is a scratch buffer that the relay reuses, so the sender must copy it (ENet's
@@ -42,6 +49,9 @@ VoiceRelayDropReason :: enum u8 {
 	Muted, // the sender is muted
 	Oversize, // the Opus payload is over HAYCHAT_VOICE_MAX_FRAME_BYTES
 	BadDuration, // the Opus TOC byte does not describe exactly 20 ms
+	// Protocol 21: in an encrypted room, a payload shorter than a sealed one with one Opus byte,
+	// or whose version byte is not VOICE_E2EE_VERSION, so plaintext never reaches listeners.
+	NotSealed,
 }
 
 VoiceRelayStats :: struct {
@@ -71,6 +81,8 @@ VoiceRelayPeer :: struct {
 	roomId:    int, // 0 when not in voice
 	muted:     bool,
 	deafened:  bool,
+	// The room the peer is in is encrypted (NetworkVoiceRoute.encrypted).
+	encrypted: bool,
 	bucket:    VoiceTokenBucket,
 }
 
@@ -194,7 +206,12 @@ VoiceRelay_hasPeer :: proc(relay: ^VoiceRelay, peerId: u32) -> bool {
 // Replaces roomId's recipient set with members. Members without a voice session (a peer that
 // disconnected after the router built the route) are skipped. A member that was in another
 // room leaves it, and a former member that is not listed leaves this one.
-VoiceRelay_applyRoute :: proc(relay: ^VoiceRelay, roomId: int, members: []NetworkVoiceRouteMember) {
+VoiceRelay_applyRoute :: proc(
+	relay: ^VoiceRelay,
+	roomId: int,
+	members: []NetworkVoiceRouteMember,
+	encrypted := false,
+) {
 	if roomId <= 0 {
 		return
 	}
@@ -206,6 +223,7 @@ VoiceRelay_applyRoute :: proc(relay: ^VoiceRelay, roomId: int, members: []Networ
 				peer.roomId = 0
 				peer.muted = false
 				peer.deafened = false
+				peer.encrypted = false
 			}
 		}
 		delete(previous)
@@ -219,6 +237,7 @@ VoiceRelay_applyRoute :: proc(relay: ^VoiceRelay, roomId: int, members: []Networ
 		if peerOK && peer.roomId != 0 && peer.roomId != roomId {
 			VoiceRelay__removeFromRoom(relay, peer.roomId, member.peerId)
 			peer.roomId = 0
+			peer.encrypted = false
 		}
 	}
 
@@ -231,6 +250,7 @@ VoiceRelay_applyRoute :: proc(relay: ^VoiceRelay, roomId: int, members: []Networ
 		peer.roomId = roomId
 		peer.muted = member.muted
 		peer.deafened = member.deafened
+		peer.encrypted = encrypted
 		append(&list, member.peerId)
 	}
 	if len(list) == 0 {
@@ -339,13 +359,26 @@ VoiceRelay_handleDatagram :: proc(relay: ^VoiceRelay, peerId: u32, datagram: []u
 		VoiceRelay__drop(relay, .Muted)
 		return
 	}
-	if len(frame.opus) > relay.config.maxFrameBytes {
-		VoiceRelay__drop(relay, .Oversize)
-		return
-	}
-	if !common.opusPacketIsVoiceFrameDuration(frame.opus) {
-		VoiceRelay__drop(relay, .BadDuration)
-		return
+	if sender.encrypted {
+		// A sealed payload: its version byte and length are all the relay can check. The
+		// receiving client checks the Opus duration after opening it.
+		if !common.voicePayloadLooksSealed(frame.opus) {
+			VoiceRelay__drop(relay, .NotSealed)
+			return
+		}
+		if len(frame.opus) - common.VOICE_E2EE_OVERHEAD > relay.config.maxFrameBytes {
+			VoiceRelay__drop(relay, .Oversize)
+			return
+		}
+	} else {
+		if len(frame.opus) > relay.config.maxFrameBytes {
+			VoiceRelay__drop(relay, .Oversize)
+			return
+		}
+		if !common.opusPacketIsVoiceFrameDuration(frame.opus) {
+			VoiceRelay__drop(relay, .BadDuration)
+			return
+		}
 	}
 
 	// Rewrite the plaintext in place as the frame every recipient gets; frame.opus is a slice

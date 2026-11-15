@@ -269,6 +269,9 @@ HeadlessEventKind :: enum {
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
+	// Encrypted voice (protocol 21, headless_voice.odin): a voice key sent, accepted or
+	// refused, or a key request sent or received.
+	VoiceKey,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -310,6 +313,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RoomQueue      = "room_queue",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
+	.VoiceKey       = "voice_key",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -1005,6 +1009,9 @@ headlessRenderRuntimeEvent :: proc(
 	case .RoomKeyEnvelopeReceived, .RoomKeysReceived, .RoomKeyRequested:
 		// Printed as room_key and room_key_request after State handled them.
 		return "", {}, false
+	case .VoiceKeyReceived, .VoiceKeyRequested:
+		// Printed as voice_key after State handled them (headlessPollVoice).
+		return "", {}, false
 	case .RoomChatReceived:
 		// The harness prints room messages after State opened them (headlessWriteRoomChat).
 		if info.state != nil {
@@ -1699,6 +1706,9 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"engine, jitter, speaker and network voice counters", headlessCommandVoiceStats},
 	{"voice-flush", 0, 0, .None, "voice-flush",
 		"replies once the file sink's audio so far is on disk", headlessCommandVoiceFlush},
+	{"voice-key-rotate", 1, 0, .None, "voice-key-rotate SECONDS",
+		"rotates this client's voice key in encrypted rooms every SECONDS (default 1800)",
+		headlessCommandVoiceKeyRotate},
 	{"wait", 1, 1, .None, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
 	{"sleep", 1, 0, .None, "sleep MS", "keeps servicing the connection for MS milliseconds",
@@ -2251,6 +2261,7 @@ headlessConnectAndWait :: proc(
 	state.recordDirectNotes = true
 	state.recordRoomLogNotes = true
 	state.recordRoomChainNotes = true
+	state.voice.e2ee.recordNotes = true
 	// The key store is written like the GUI writes it (keystore.odin), so a profile run twice
 	// keeps its pins.
 	if len(harness.keyStoreDir) > 0 {

@@ -1371,6 +1371,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientFetchRoomKeys(pm, state, peerID, packet.payload)
 	case .ClientRequestRoomKey:
 		MainRouterState_handleClientRequestRoomKey(pm, state, peerID, packet.payload)
+	case .ClientVoiceKey:
+		MainRouterState_handleClientVoiceKey(pm, state, peerID, packet.payload)
+	case .ClientRequestVoiceKey:
+		MainRouterState_handleClientRequestVoiceKey(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)

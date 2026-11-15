@@ -2,6 +2,7 @@ package server
 
 import "../common"
 import "core:encoding/cbor"
+import "core:time"
 
 // The voice control plane (voice-rooms-design.md 4.2). The router is the single source of truth
 // for who is in which room's voice session: joining needs the database membership check, and
@@ -17,6 +18,19 @@ import "core:encoding/cbor"
 // replaces only a session with the same device ID, a stale one the server has not timed out
 // yet, and is refused while another device is in voice, so a laptop coming back from a network
 // drop never pulls voice away from the phone the user switched to.
+//
+// Encrypted rooms (protocol 21, e2ee-voice-design.md 3.3): voice is end to end encrypted. Every
+// participant sends its VoiceKey envelope as ClientVoiceKey; the router checks it (structure,
+// kind, the signature against the session's identity key over every field of the voice key
+// AAD, no wrap for the sender), accepts it only from a session in that room's voice and only
+// for the room's current log version, and keeps the latest one per participant here, in memory
+// only: never in the database, and forgotten when the participant leaves voice, is taken over,
+// evicted or disconnects, or when the log moves past its epoch. An accepted key goes to every
+// other session in the room's voice as ServerVoiceKey, and a session whose join is acknowledged
+// gets every other participant's current key right after its participant list. Listeners ask
+// a speaker for a new key with ClientRequestVoiceKey, relayed as ServerVoiceKeyRequest at most
+// once per requester and speaker every VOICE_KEY_REQUEST_INTERVAL_SECONDS. The router never
+// sees a voice key, only envelopes it cannot open.
 
 // Reasons sent to people in ServerVoiceJoinRejected and ServerVoiceLeft.
 VOICE_REJECT_NOT_AUTHENTICATED :: "not authenticated"
@@ -46,9 +60,34 @@ VoiceParticipantState :: struct {
 	deviceID: common.VoiceDeviceID,
 }
 
+// A participant's current voice key envelope (protocol 21), as the router accepted it.
+VoiceStoredKey :: struct {
+	peerID:         u32,
+	userID:         int,
+	epoch:          int,
+	voiceSessionID: common.VoiceSessionID,
+	generation:     u32,
+	createdAt:      i64,
+	envelope:       []u8, // owned
+}
+
+// When a requester last had a key request relayed to a speaker.
+VoiceKeyRequestStamp :: struct {
+	requesterPeerID: u32,
+	senderUserID:    int,
+	at:              time.Tick,
+}
+
 VoiceRoomState :: struct {
 	roomID:        int,
 	participants:  [dynamic]VoiceParticipantState, // small: linear scans are fine
+	// Protocol 21: whether the room is encrypted (from the join check), its member log version
+	// (the epoch a voice key must name; from the join check and every ServerRoomLog fan-out), the
+	// participants' current keys and the key requests' rate limit.
+	encrypted:     bool,
+	logVersion:    int,
+	keys:          [dynamic]VoiceStoredKey,
+	requestStamps: [dynamic]VoiceKeyRequestStamp,
 	// Who hears about this room's participant changes. Leaves, mute changes and disconnects
 	// use this cached member list instead of asking the database again (the design left the
 	// choice to this step): a leave or a disconnect must fan out even while the database is
@@ -62,7 +101,49 @@ VoiceRoomState :: struct {
 VoiceRoomState_deinit :: proc(room: ^VoiceRoomState) {
 	delete(room.participants)
 	delete(room.memberUserIDs)
+	for key in room.keys {
+		delete(key.envelope)
+	}
+	delete(room.keys)
+	delete(room.requestStamps)
 	room^ = {}
+}
+
+// Forgets the stored keys and request stamps of sessions that are no longer participants.
+VoiceRoomState_pruneKeys :: proc(room: ^VoiceRoomState) {
+	for index := 0; index < len(room.keys); index += 1 {
+		if !VoiceRoomState_hasParticipant(room^, room.keys[index].peerID) {
+			delete(room.keys[index].envelope)
+			ordered_remove(&room.keys, index)
+			index -= 1
+		}
+	}
+	for index := 0; index < len(room.requestStamps); index += 1 {
+		if !VoiceRoomState_hasParticipant(room^, room.requestStamps[index].requesterPeerID) {
+			ordered_remove(&room.requestStamps, index)
+			index -= 1
+		}
+	}
+}
+
+VoiceRoomState_hasParticipant :: proc(room: VoiceRoomState, peerID: u32) -> bool {
+	for participant in room.participants {
+		if participant.peerID == peerID {
+			return true
+		}
+	}
+	return false
+}
+
+// Drops the stored keys of epochs before the room's log version, so no joiner gets one.
+VoiceRoomState_dropStaleKeys :: proc(room: ^VoiceRoomState) {
+	for index := 0; index < len(room.keys); index += 1 {
+		if room.keys[index].epoch < room.logVersion {
+			delete(room.keys[index].envelope)
+			ordered_remove(&room.keys, index)
+			index -= 1
+		}
+	}
 }
 
 // Frees every voice room and both maps. MainRouterState_deinit and the network-stop reset use it.
@@ -131,10 +212,14 @@ MainRouterState_voiceSendRoute :: proc(pm: ^ProcessManager, state: ^MainRouterSt
 			}
 		}
 	}
+	encrypted := false
+	if room, ok := state.voiceRooms[roomID]; ok {
+		encrypted = room.encrypted
+	}
 	IPC_Server_send(
 		&pm.config.networkSocket,
 		pm.config.networkFd,
-		NetworkVoiceRoute{roomId = roomID, members = members},
+		NetworkVoiceRoute{roomId = roomID, members = members, encrypted = encrypted},
 	)
 }
 
@@ -190,6 +275,7 @@ MainRouterState_voiceRoomChanged :: proc(
 	if !ok {
 		return
 	}
+	VoiceRoomState_pruneKeys(room)
 
 	payload := MainRouterState_voiceBuildParticipants(state, room^)
 	defer delete(payload.participants)
@@ -265,6 +351,7 @@ MainRouterState_voiceRemoveParticipant :: proc(
 				index -= 1
 			}
 		}
+		VoiceRoomState_pruneKeys(room)
 	}
 	return roomID, true
 }
@@ -420,20 +507,10 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		return
 	}
 	// After the membership check, so the refusal tells a non-member nothing about the room.
+	// Encrypted rooms are joined like any other (protocol 21): their voice is end to end
+	// encrypted, and a participant that never sends a key is simply unheard.
 	if !common.roomTypeAllowsVoice(members.roomType) {
 		MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_TEXT_ONLY)
-		return
-	}
-	// Protocol 18: voice in an encrypted room would be readable by the server; encrypted voice
-	// is a later package (E6), so joins are refused until then.
-	if members.encrypted {
-		MainRouterState_sendVoiceJoinRejected(
-			pm,
-			state,
-			peerID,
-			roomID,
-			common.ENCRYPTED_ROOM_VOICE_MESSAGE,
-		)
 		return
 	}
 
@@ -543,7 +620,14 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 	}
 	clear(&room.memberUserIDs)
 	append(&room.memberUserIDs, ..members.userIDs[:])
+	room.encrypted = members.encrypted
+	if members.logVersion > room.logVersion {
+		room.logVersion = members.logVersion
+		VoiceRoomState_dropStaleKeys(room)
+	}
 	MainRouterState_voiceRoomChanged(pm, state, roomID)
+	// Right after the list that acknowledges the join: every other participant's current key.
+	MainRouterState_voiceSendStoredKeys(pm, state, roomID, peerID)
 }
 
 MainRouterState_handleClientLeaveVoice :: proc(
@@ -719,4 +803,237 @@ MainRouterState_voiceSendActiveParticipants :: proc(
 		MainRouterState_sendPeerMessage(pm, state, peerID, .ServerVoiceParticipants, payload)
 		delete(payload.participants)
 	}
+}
+
+// ── Voice keys in encrypted rooms (protocol 21) ───────────────────
+
+// Sends peerID every other participant's stored key in roomID, as ServerVoiceKey.
+MainRouterState_voiceSendStoredKeys :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	roomID: int,
+	peerID: u32,
+) {
+	room, ok := state.voiceRooms[roomID]
+	if !ok || !room.encrypted || !MainRouterState_voicePeerIsInRoom(state, peerID, roomID) {
+		return
+	}
+	for key in room.keys {
+		if key.peerID != peerID {
+			MainRouterState_voiceSendKey(pm, state, peerID, roomID, key)
+		}
+	}
+}
+
+@(private = "file")
+MainRouterState_voiceSendKey :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	recipientPeerID: u32,
+	roomID: int,
+	key: VoiceStoredKey,
+) {
+	MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		recipientPeerID,
+		.ServerVoiceKey,
+		common.ServerVoiceKeyPayload {
+			roomId = roomID,
+			senderId = key.userID,
+			epoch = key.epoch,
+			voiceSessionId = key.voiceSessionID,
+			generation = key.generation,
+			createdAt = key.createdAt,
+			envelope = key.envelope,
+		},
+	)
+}
+
+// A member log entry of roomID was applied (ServerRoomLog fan-out): the epoch a voice key must
+// name is now version, and keys of older epochs go.
+MainRouterState_voiceLogAdvanced :: proc(state: ^MainRouterState, roomID, version: int) {
+	room, ok := &state.voiceRooms[roomID]
+	if !ok || version <= room.logVersion {
+		return
+	}
+	room.logVersion = version
+	VoiceRoomState_dropStaleKeys(room)
+}
+
+// The router's check of a voice key (pure but for the server key): a positive room, epoch and
+// sender, 1..SEALED_ENVELOPE_MAX_BYTES of a valid VoiceKey envelope without a wrap for the
+// sender, signed by senderIdentityPublicKey over every field of the voice key AAD.
+MainRouterState_checkVoiceKey :: proc(
+	state: ^MainRouterState,
+	req: common.ClientVoiceKeyPayload,
+	senderUserID: int,
+	senderIdentityPublicKey: common.IdentityPublicKeyBytes,
+) -> bool {
+	if req.roomId <= 0 ||
+	   req.epoch <= 0 ||
+	   len(req.envelope) == 0 ||
+	   len(req.envelope) > common.SEALED_ENVELOPE_MAX_BYTES {
+		return false
+	}
+	envelope, decodeErr := common.decodeSealedEnvelope(req.envelope)
+	if decodeErr != .None {
+		return false
+	}
+	fields := common.VoiceKeyAADFields {
+		serverIdentityPublicKey = state.serverIdentityPublicKey,
+		roomID                  = req.roomId,
+		epoch                   = req.epoch,
+		senderUserID            = senderUserID,
+		voiceSessionID          = req.voiceSessionId,
+		generation              = req.generation,
+		createdAtUnix           = req.createdAt,
+	}
+	return common.verifyVoiceKeyEnvelope(envelope, fields, senderIdentityPublicKey) == .None
+}
+
+// ClientVoiceKey: accepted only from a session in roomId's voice, for an encrypted room, at the
+// room's current log version, and when the envelope passes MainRouterState_checkVoiceKey. It
+// replaces the session's stored key and goes to every other session in the room's voice.
+MainRouterState_handleClientVoiceKey :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientVoiceKeyPayload
+	// Fixed-size byte fields decode through CBOR's temporary allocator, so it is the heap here.
+	err := cbor.unmarshal(payload, &req, temp_allocator = context.allocator)
+	defer common.ClientVoiceKeyPayload_deinit(&req)
+	if err != nil {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.VOICE_KEY_INVALID_MESSAGE)
+		return
+	}
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated voice request")
+		return
+	}
+	room, roomOK := &state.voiceRooms[req.roomId]
+	if !roomOK ||
+	   !room.encrypted ||
+	   !MainRouterState_voicePeerIsInRoom(state, peerID, req.roomId) ||
+	   req.epoch > room.logVersion {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.VOICE_KEY_INVALID_MESSAGE)
+		return
+	}
+	if req.epoch < room.logVersion {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.VOICE_KEY_OUT_OF_DATE_MESSAGE)
+		return
+	}
+	if !MainRouterState_checkVoiceKey(
+		state,
+		req,
+		session.authenticatedUserID,
+		session.clientIdentityPublicKey,
+	) {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.VOICE_KEY_INVALID_MESSAGE)
+		return
+	}
+	stored := VoiceStoredKey {
+		peerID         = peerID,
+		userID         = session.authenticatedUserID,
+		epoch          = req.epoch,
+		voiceSessionID = req.voiceSessionId,
+		generation     = req.generation,
+		createdAt      = req.createdAt,
+		envelope       = req.envelope,
+	}
+	// The stored key takes the decoded envelope.
+	req.envelope = nil
+	replaced := false
+	for &key in room.keys {
+		if key.peerID == peerID {
+			delete(key.envelope)
+			key = stored
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		append(&room.keys, stored)
+	}
+	for participant in room.participants {
+		if participant.peerID != peerID {
+			MainRouterState_voiceSendKey(pm, state, participant.peerID, req.roomId, stored)
+		}
+	}
+}
+
+// ClientRequestVoiceKey: passed to senderId's voice session in the room as
+// ServerVoiceKeyRequest, at most once per requester and speaker every
+// VOICE_KEY_REQUEST_INTERVAL_SECONDS. Anything else is dropped without an answer.
+MainRouterState_handleClientRequestVoiceKey :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientRequestVoiceKeyPayload
+	if cbor.unmarshal(payload, &req) != nil {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid voice key request")
+		return
+	}
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		return
+	}
+	room, roomOK := &state.voiceRooms[req.roomId]
+	if !roomOK ||
+	   !room.encrypted ||
+	   req.senderId == session.authenticatedUserID ||
+	   !MainRouterState_voicePeerIsInRoom(state, peerID, req.roomId) {
+		return
+	}
+	speakerPeerID: u32
+	for participant in room.participants {
+		if participant.userID == req.senderId {
+			speakerPeerID = participant.peerID
+		}
+	}
+	if speakerPeerID == 0 {
+		return
+	}
+	now := time.tick_now()
+	interval := common.VOICE_KEY_REQUEST_INTERVAL_SECONDS * time.Second
+	for &stamp in room.requestStamps {
+		if stamp.requesterPeerID == peerID && stamp.senderUserID == req.senderId {
+			if time.tick_diff(stamp.at, now) < interval {
+				return
+			}
+			stamp.at = now
+			MainRouterState_voiceSendKeyRequest(pm, state, speakerPeerID, req.roomId, session)
+			return
+		}
+	}
+	append(
+		&room.requestStamps,
+		VoiceKeyRequestStamp{requesterPeerID = peerID, senderUserID = req.senderId, at = now},
+	)
+	MainRouterState_voiceSendKeyRequest(pm, state, speakerPeerID, req.roomId, session)
+}
+
+@(private = "file")
+MainRouterState_voiceSendKeyRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	speakerPeerID: u32,
+	roomID: int,
+	requester: RouterPeerSession,
+) {
+	MainRouterState_sendPeerMessage(
+		pm,
+		state,
+		speakerPeerID,
+		.ServerVoiceKeyRequest,
+		common.ServerVoiceKeyRequestPayload {
+			roomId = roomID,
+			requesterId = requester.authenticatedUserID,
+		},
+	)
 }

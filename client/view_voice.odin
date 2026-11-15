@@ -69,6 +69,9 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 		marks = "deafened"
 	} else if participant.muted {
 		marks = "muted"
+	} else if len(participant.keyNote) > 0 {
+		// Protocol 21: an encrypted room's participant this client cannot hear yet.
+		marks = participant.keyNote == VOICE_E2EE_CLOCK_NOTE ? "clock" : "no key"
 	}
 	if len(marks) > 0 {
 		width := ui.textSize(ui.textGet(ctx, 0, .Regular, marks)).x
@@ -85,6 +88,9 @@ viewVoiceParticipantRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow
 		status = fmt.tprintf("%s, deafened", status)
 	} else if participant.muted {
 		status = fmt.tprintf("%s, muted", status)
+	}
+	if len(participant.keyNote) > 0 {
+		status = fmt.tprintf("%s. %s", status, participant.keyNote)
 	}
 	id := ui.idOf("voice-participant", serverID, row.roomID, participant.userID)
 	ui.tooltip(ctx, id, rect, status)

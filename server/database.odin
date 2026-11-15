@@ -402,10 +402,12 @@ databaseExecuteListRoomsForUser :: proc(
 }
 
 // The room's type and members: one row per member, or one row with a NULL member for a room
-// without members, and no row for a room that does not exist. The last column is the room's
-// encrypted flag (protocol 18).
+// without members, and no row for a room that does not exist. The last columns are the room's
+// encrypted flag (protocol 18) and its member log version (protocol 21: the epoch voice keys
+// must name).
 DATABASE_LIST_ROOM_MEMBERS_SQL ::
-	"SELECT r.room_type::text, rm.user_id::text, r.encrypted::text FROM rooms r " +
+	"SELECT r.room_type::text, rm.user_id::text, r.encrypted::text, r.log_version::text " +
+	"FROM rooms r " +
 	"LEFT JOIN room_members rm ON rm.room_id = r.id WHERE r.id = $1"
 
 databaseExecuteListRoomMemberUserIDs :: proc(
@@ -432,6 +434,7 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 			members.roomFound = true
 			members.roomType = databaseGetRoomType(result, row, 0)
 			members.encrypted = databaseGetBool(result, row, 2)
+			members.logVersion, _ = databaseGetInt(result, row, 3)
 		}
 		if userID, ok := databaseGetInt(result, row, 1); ok {
 			append(&members.userIDs, userID)

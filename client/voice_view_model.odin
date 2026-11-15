@@ -21,6 +21,9 @@ VoiceParticipantRow :: struct {
 	speaking: bool,
 	muted:    bool,
 	deafened: bool,
+	// Protocol 21, the joined encrypted room only: why this participant cannot be heard
+	// ("Waiting for <name>'s voice key", "Clock out of sync"); "" when its key is held.
+	keyNote:  string,
 }
 
 // Everything on screen that the voice engines change without an event: the level meter
@@ -108,12 +111,16 @@ buildVoiceParticipantRows :: proc(
 	}
 	_, speech.selfTransmitting = VoiceEngine_inputLevel(state.voice.engine)
 	speech.selfTransmitting &&= !state.voice.muted
-	return voiceParticipantRows(
+	rows := voiceParticipantRows(
 		participants,
 		State_selfUserID(state, serverID),
 		&speech,
 		allocator,
 	)
+	for &row in rows {
+		row.keyNote = State_voiceE2EEParticipantNote(state, serverID, roomID, row.userID, allocator)
+	}
+	return rows
 }
 
 // Who is speaking in the joined room: the engine's speakers, and this client's own gate.
@@ -255,6 +262,9 @@ VoiceBarView :: struct {
 	showLevel:    bool,
 	levelDB:      f32,
 	speaking:     bool,
+	// Protocol 21: voice in this room is end-to-end encrypted (a lock and
+	// VOICE_E2EE_ENCRYPTED_NOTE).
+	encrypted:    bool,
 }
 
 VOICE_UNAVAILABLE_FALLBACK_TEXT :: "Voice unavailable"
@@ -316,6 +326,11 @@ buildVoiceBarView :: proc(
 	if view.kind == .Joining || view.kind == .Rejoining {
 		// A failed send of a mute or deafen change, or a failed re-join attempt.
 		view.note = voice.lastError
+	}
+	if voice.encrypted && view.kind != .Notice && view.kind != .Unavailable && view.kind != .Hidden {
+		view.encrypted = true
+		lock := "🔒 " + VOICE_E2EE_ENCRYPTED_NOTE
+		view.note = len(view.note) > 0 ? fmt.aprintf("%s · %s", lock, view.note, allocator = allocator) : lock
 	}
 	return
 }

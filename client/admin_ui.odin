@@ -309,18 +309,14 @@ roomTypeShown :: proc(roomType: common.RoomType) -> common.RoomType {
 }
 
 // Whether the room takes chat (has a composer) and voice (offers Join voice).
-// Protocol 18: an encrypted room takes neither plaintext chat nor voice until sender chains
-// (E4b) and encrypted voice (E6) exist; the server refuses both too.
 // An encrypted room takes sealed messages since protocol 19 (room_chains.odin decides whether
-// this account can send there); voice in one waits for E6.
+// this account can send there) and end-to-end encrypted voice since protocol 21
+// (voice_e2ee.odin decides whether this profile can join it now).
 State_roomAllowsChat :: proc(state: ^State, serverID, roomID: int) -> bool {
 	return common.roomTypeAllowsChat(roomTypeShown(State_roomType(state, serverID, roomID)))
 }
 
 State_roomAllowsVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
-	if State_roomIsEncrypted(state, serverID, roomID) {
-		return false
-	}
 	return common.roomTypeAllowsVoice(roomTypeShown(State_roomType(state, serverID, roomID)))
 }
 

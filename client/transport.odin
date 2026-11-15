@@ -91,6 +91,11 @@ ClientTransportRuntimeEventKind :: enum {
 	RoomKeyEnvelopeReceived,
 	RoomKeysReceived,
 	RoomKeyRequested,
+	// Encrypted voice (protocol 21, voice_e2ee.odin). VoiceKeyReceived carries ServerVoiceKey in
+	// voiceKey (its envelope owned); VoiceKeyRequested is ServerVoiceKeyRequest: roomID and the
+	// requester in peerUserID.
+	VoiceKeyReceived,
+	VoiceKeyRequested,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -166,6 +171,8 @@ ClientTransportRuntimeEvent :: struct {
 	roomKeyEnvelopes:  [dynamic]common.RoomKeyEnvelope,
 	roomKeyEpoch:      int,
 	roomKeyChainID:    common.ChainID,
+	// Protocol 21.
+	voiceKey:          common.ServerVoiceKeyPayload,
 }
 
 ClientServerTransport :: struct {
@@ -323,6 +330,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 		common.RoomKeyEnvelope_deinit(&envelope)
 	}
 	delete(event.roomKeyEnvelopes)
+	common.ServerVoiceKeyPayload_deinit(&event.voiceKey)
 	delete(event.room.name)
 	delete(event.room.description)
 	delete(event.nickname)
@@ -1311,6 +1319,50 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				roomKeyChainID = payload.chainId,
 				peerUserID = payload.requesterId,
 				senderID = payload.senderId,
+			},
+			true
+
+	// Protocol 21: voice keys in encrypted rooms (voice_e2ee.odin).
+	case .ServerVoiceKey:
+		payload: common.ServerVoiceKeyPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.roomId <= 0 ||
+		   payload.senderId <= 0 ||
+		   payload.epoch <= 0 ||
+		   len(payload.envelope) == 0 ||
+		   len(payload.envelope) > common.SEALED_ENVELOPE_MAX_BYTES {
+			common.ServerVoiceKeyPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid voice key payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .VoiceKeyReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				senderID = payload.senderId,
+				voiceKey = payload,
+			},
+			true
+
+	case .ServerVoiceKeyRequest:
+		payload: common.ServerVoiceKeyRequestPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.roomId <= 0 ||
+		   payload.requesterId <= 0 {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid voice key request payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .VoiceKeyRequested,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				peerUserID = payload.requesterId,
 			},
 			true
 
