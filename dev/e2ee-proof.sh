@@ -50,7 +50,15 @@ set -euo pipefail
 #               chain with no wrap for rb, and rb cannot read the room any more.
 #  16. inserted:(step 5, first half) rc is added to room_members by SQL: she fetches the history
 #               but holds no chain and opens nothing, and ra refuses her key request.
-#  17. secrets: no client ever printed its encryption private key, and no client wrote the
+#  17. full:    (protocol 20, step 8, Full history) ra creates a Full history Member invite
+#               room with rb; both send. ra is offline while rb (restarted, so in a new chain)
+#               sends again: a chain ra never held. ra invites rc and forwards the two chains
+#               she holds; rc reads all three messages, rb's newest chain re-sealed by rb on
+#               request (ra answers that she does not hold it). Then, with rb offline, ra
+#               invites re: rc, not its sender, forwards rb's newest chain on request. SQL:
+#               forward envelopes exist only in the Full history room (none in step 14's From
+#               join room, where nothing older opened for rc).
+#  18. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -649,8 +657,114 @@ for marker in "$chat_one" "$chat_three" "$after_removal"; do
 		fail "rc, inserted by SQL, opened $marker"
 	fi
 done
+
+echo "==> [e2ee] full: a Full history room forwards older chains to new members"
+full_bob_one="e2ee-room-marker-full-bob-one-$run_tag"
+full_alice="e2ee-room-marker-full-alice-$run_tag"
+full_bob_two="e2ee-room-marker-full-bob-two-$run_tag"
+# key_line CLIENT ROOM_ID FIELDS START: a room_key_request (or with KIND, another event) line.
+key_line() {
+	expect_event "$1" "^\\{\"event\":\"room_key_request\",\"serverID\":[0-9]+,\"roomID\":$2,$3" "$4" \
+		"client $1 never reported a key request in room $2 like $3"
+}
+start=$(lines ra2)
+expect_ok ra2 room-create "text,member-invite,full,encrypted,managers=none" "full-$run_tag"
+created=$(expect_event ra2 "^\\{\"event\":\"room_created\",.*\"name\":\"full-$run_tag\"" \
+	"$start" "ra never got room_created for the Full history room")
+full_id=$(field "$created" roomID)
+room_log_line ra2 "$full_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+bstart=$(lines rb2)
+expect_ok ra2 room-add "$full_id" "$rb_id"
+room_log_line rb2 "$full_id" '"status":"verified","logVersion":2,' "$bstart" >/dev/null
+# rb and then ra send in epoch 2; each opens the other's message, so ra holds rb's first chain.
+astart=$(lines ra2)
+bstart=$(lines rb2)
+expect_ok rb2 send "$full_id" "$full_bob_one"
+room_message ra2 "$full_id" "$full_bob_one" "$astart" >/dev/null
+room_message rb2 "$full_id" "$full_bob_one" "$bstart" >/dev/null
+bstart=$(lines rb2)
+expect_ok ra2 send "$full_id" "$full_alice"
+room_message rb2 "$full_id" "$full_alice" "$bstart" >/dev/null
+# ra goes offline; rb restarts (a new run, so a new chain) and sends: ra never holds that one.
 stop_client ra2
 stop_client rb2
+start_client rb3 "$room_bob" rb
+expect_connected rb3
+expect_ok rb3 wait room_list 5000
+bstart=$(lines rb3)
+expect_ok rb3 send "$full_id" "$full_bob_two"
+room_message rb3 "$full_id" "$full_bob_two" "$bstart" >/dev/null
+chains=$(run_sql "SELECT count(DISTINCT chain_id) FROM chat_messages
+	WHERE room_id = $full_id AND sender_user_id = $rb_id")
+[[ "$chains" == 2 ]] || fail "expected rb's messages in two chains, got $chains"
+start_client ra3 "$room_alice" ra
+expect_connected ra3
+expect_ok ra3 wait room_list 5000
+astart=$(lines ra3)
+expect_ok ra3 room-log "$full_id"
+room_log_line ra3 "$full_id" '"status":"verified","logVersion":2,' "$astart" >/dev/null
+expect_ok ra3 room-keys "$full_id"
+held=$(grep -o '"senderID"' <<<"$last_result" | wc -l)
+[[ "$held" == 2 ]] || fail "expected ra to hold exactly two chains of the room: $last_result"
+
+echo "==> [e2ee] full: ra invites rc and forwards the chains she holds"
+fetch_keys ra3 "$rc_id" >/dev/null
+astart=$(lines ra3)
+cstart=$(lines rc)
+expect_ok ra3 room-add "$full_id" "$rc_id"
+room_log_line rc "$full_id" '"status":"verified","logVersion":3,' "$cstart" >/dev/null
+own=$(key_line ra3 "$full_id" "\"epoch\":2,\"senderID\":$ra_id,.*\"requesterID\":$rc_id,\"outcome\":\"stored\"" \
+	"$astart")
+[[ "$own" == *'"forwarderID":0}' ]] || fail "ra's own chain was not re-sealed as a SenderKey: $own"
+forwarded=$(key_line ra3 "$full_id" "\"epoch\":2,\"senderID\":$rb_id,.*\"requesterID\":$rc_id,\"outcome\":\"stored\"" \
+	"$astart")
+[[ "$forwarded" == *"\"forwarderID\":$ra_id}" ]] || fail "rb's chain was not forwarded by ra: $forwarded"
+cstart=$(lines rc)
+expect_ok rc history "$full_id"
+for marker in "$full_bob_one" "$full_alice" "$full_bob_two"; do
+	pattern="^\\{\"event\":\"room_(history|opened)\",.*\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$marker\""
+	expect_event rc "$pattern" "$cstart" "rc did not read $marker from before she joined" \
+		>/dev/null
+done
+# rb's newest chain came from rb on request; ra was asked too and does not hold it.
+key_line rb3 "$full_id" ".*\"requesterID\":$rc_id,\"outcome\":\"stored\",.*\"forwarderID\":0}" \
+	"$bstart" >/dev/null
+key_line ra3 "$full_id" ".*\"senderID\":$rb_id,.*\"requesterID\":$rc_id,\"outcome\":\"not_held\"" \
+	"$astart" >/dev/null
+
+echo "==> [e2ee] full: with rb offline, rc forwards rb's chain to re on request"
+stop_client rb3
+fetch_keys ra3 "$re_id" >/dev/null
+astart=$(lines ra3)
+cstart=$(lines rc)
+estart=$(lines re)
+expect_ok ra3 room-add "$full_id" "$re_id"
+room_log_line re "$full_id" '"status":"verified","logVersion":4,' "$estart" >/dev/null
+key_line ra3 "$full_id" "\"epoch\":2,\"senderID\":$rb_id,.*\"requesterID\":$re_id,\"outcome\":\"stored\"" \
+	"$astart" >/dev/null
+estart=$(lines re)
+expect_ok re history "$full_id"
+for marker in "$full_bob_one" "$full_alice" "$full_bob_two"; do
+	pattern="^\\{\"event\":\"room_(history|opened)\",.*\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$marker\""
+	expect_event re "$pattern" "$estart" "re did not read $marker from before he joined" \
+		>/dev/null
+done
+by_carol=$(key_line rc "$full_id" ".*\"senderID\":$rb_id,.*\"requesterID\":$re_id,\"outcome\":\"stored\"" \
+	"$cstart")
+[[ "$by_carol" == *"\"forwarderID\":$rc_id}" ]] || fail "rc did not forward rb's chain: $by_carol"
+
+echo "==> [e2ee] full: forwards exist only in the Full history room"
+forwards=$(run_sql "SELECT count(*) FILTER (WHERE room_id = $full_id) || '/' || count(*) || '/' ||
+	count(*) FILTER (WHERE room_id = $invite_id)
+	FROM room_key_envelopes WHERE forwarder_user_id IS NOT NULL")
+[[ "$forwards" =~ ^([0-9]+)/([0-9]+)/0$ && "${BASH_REMATCH[1]}" == "${BASH_REMATCH[2]}" &&
+	"${BASH_REMATCH[1]}" -ge 3 ]] ||
+	fail "expected at least 3 forwards, all in the Full history room, got $forwards"
+history_check=$(run_sql "SELECT history_visibility FROM rooms WHERE id = $invite_id")
+[[ "$history_check" == 1 ]] || fail "the From join room is not From join: $history_check"
+stop_client ra3
 
 for client in re rc; do
 	stop_client "$client"

@@ -93,6 +93,8 @@ SQL_TESTS+=,server.testRoomLogFullRoomAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomLogMigrationUpgradesVersion6AgainstPostgreSQL
 SQL_TESTS+=,server.testRoomSenderChainStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomSenderChainsMigrationUpgradesVersion7AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomKeyForwardStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRoomKeyForwardsMigrationUpgradesVersion8AgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

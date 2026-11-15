@@ -17,6 +17,12 @@ import "core:encoding/cbor"
 //   chain stored) is relayed as ServerRoomKeyRequest to every session of the chain's sender.
 //   One that does not is dropped without an answer: the requester keeps waiting, which is all
 //   it could do with a refusal.
+// - Full history (protocol 20, design 6.6): a ClientRoomKeyEnvelope whose senderId names
+//   another account is a RoomKeyForward of that account's chain, signed by the session under
+//   makeRoomKeyForwardAAD, with exactly one wrap (the recipient the AAD names); the database
+//   stores it only in a Full history room for a stored chain, and drops it silently when the
+//   recipient already holds the chain. In a Full history room a key request goes to every
+//   session of every other member, so whoever holds the chain can forward it.
 //
 // Fixed-size byte fields decode through CBOR's temporary allocator, so it is the heap here.
 
@@ -43,12 +49,24 @@ MainRouterState_handleClientRoomKeyEnvelope :: proc(
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated room request")
 		return
 	}
-	recipients, valid := MainRouterState_checkRoomKeyEnvelope(
-		state,
-		req,
-		session.authenticatedUserID,
-		session.clientIdentityPublicKey,
-	)
+	forward := req.senderId != 0 && req.senderId != session.authenticatedUserID
+	recipients: [dynamic]int
+	valid: bool
+	if forward {
+		recipients, valid = MainRouterState_checkRoomKeyForward(
+			state,
+			req,
+			session.authenticatedUserID,
+			session.clientIdentityPublicKey,
+		)
+	} else {
+		recipients, valid = MainRouterState_checkRoomKeyEnvelope(
+			state,
+			req,
+			session.authenticatedUserID,
+			session.clientIdentityPublicKey,
+		)
+	}
 	if !valid {
 		MainRouterState_sendProtocolError(
 			pm,
@@ -65,6 +83,10 @@ MainRouterState_handleClientRoomKeyEnvelope :: proc(
 		chainId          = req.chainId,
 		envelope         = req.envelope,
 		recipientUserIDs = recipients,
+	}
+	if forward {
+		request.senderId = req.senderId
+		request.forwarderId = session.authenticatedUserID
 	}
 	// The request takes the decoded envelope; the database side frees it.
 	req.envelope = nil
@@ -116,6 +138,50 @@ MainRouterState_checkRoomKeyEnvelope :: proc(
 	for index in 0 ..< envelope.wrapCount {
 		append(&recipients, common.SealedEnvelope_wrap(envelope, index).recipientUserID)
 	}
+	return recipients, true
+}
+
+// The router's check of a forward (protocol 20, pure but for the server key): a positive room,
+// epoch and chain sender, 1..SEALED_ENVELOPE_MAX_BYTES of a valid RoomKeyForward envelope with
+// one wrap, and a signature by forwarderIdentityPublicKey over this server, the room, the epoch,
+// the chain's sender, the chain, forwarderUserID and the wrap's recipient. Returns that
+// recipient (owned) when it is valid.
+MainRouterState_checkRoomKeyForward :: proc(
+	state: ^MainRouterState,
+	req: common.ClientRoomKeyEnvelopePayload,
+	forwarderUserID: int,
+	forwarderIdentityPublicKey: common.IdentityPublicKeyBytes,
+) -> (
+	recipients: [dynamic]int,
+	valid: bool,
+) {
+	if req.roomId <= 0 ||
+	   req.epoch <= 0 ||
+	   req.senderId <= 0 ||
+	   req.senderId == forwarderUserID ||
+	   len(req.envelope) == 0 ||
+	   len(req.envelope) > common.SEALED_ENVELOPE_MAX_BYTES {
+		return nil, false
+	}
+	envelope, decodeErr := common.decodeSealedEnvelope(req.envelope)
+	if decodeErr != .None || envelope.kind != .RoomKeyForward || envelope.wrapCount != 1 {
+		return nil, false
+	}
+	recipientUserID := common.SealedEnvelope_wrap(envelope, 0).recipientUserID
+	fields := common.RoomKeyForwardAADFields {
+		serverIdentityPublicKey = state.serverIdentityPublicKey,
+		roomID                  = req.roomId,
+		epoch                   = req.epoch,
+		senderUserID            = req.senderId,
+		chainID                 = req.chainId,
+		forwarderUserID         = forwarderUserID,
+		recipientUserID         = recipientUserID,
+	}
+	if common.verifyRoomKeyForwardEnvelope(envelope, fields, forwarderIdentityPublicKey) != .None {
+		return nil, false
+	}
+	recipients = make([dynamic]int, 0, 1)
+	append(&recipients, recipientUserID)
 	return recipients, true
 }
 
@@ -206,7 +272,9 @@ MainRouterState_roomKeyEnvelopeRefusalMessage :: proc(
 		return common.ROOM_KEY_OUT_OF_DATE_MESSAGE
 	case .WrongRecipients:
 		return common.ROOM_KEY_ENVELOPE_INVALID_MESSAGE
-	case .Stored:
+	case .NotFullHistory:
+		return common.ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE
+	case .Stored, .AlreadyHeld:
 	}
 	return ""
 }
@@ -219,6 +287,10 @@ MainRouterState_handleStoreRoomKeyEnvelopeResult :: proc(
 ) {
 	result, resultOK := response.result.(common.DatabaseStoreRoomKeyEnvelopeResult)
 	if MainRouterState_databaseFailed(pm, state, request.peerID, response, resultOK) {
+		return
+	}
+	if result.outcome == .AlreadyHeld {
+		// Another member's forward came first (design 6.6): nothing to store or answer.
 		return
 	}
 	if result.outcome != .Stored {
@@ -294,10 +366,21 @@ MainRouterState_handleRoomKeyRequestCheckResult :: proc(
 		epoch       = result.request.epoch,
 		chainId     = result.request.chainId,
 		requesterId = result.request.requesterId,
+		senderId    = result.request.senderId,
 	}
 	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated &&
-		   recipientSession.authenticatedUserID == result.request.senderId {
+		if !recipientSession.isAuthenticated {
+			continue
+		}
+		// From join: only the chain's sender. Full history: every member but the requester.
+		asked := recipientSession.authenticatedUserID == result.request.senderId
+		if result.fullHistory {
+			asked = MainRouterState_hasRecipientUserID(
+				result.memberUserIDs[:],
+				recipientSession.authenticatedUserID,
+			)
+		}
+		if asked {
 			MainRouterState_sendPeerMessage(
 				pm,
 				state,

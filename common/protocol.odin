@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 19
+protocolVersion: ProtocolVersion = 20
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -829,15 +829,27 @@ ROOM_LOG_DAMAGED_MESSAGE :: "This room's member list is damaged on the server"
 // already stores (a re-seal answering ClientRequestRoomKey). It delivers each stored envelope
 // to the sessions of the accounts its wraps name, and ClientFetchRoomKeys returns only the
 // envelopes with a wrap for the requester, so nothing of another room or recipient leaks.
+//
+// Full history (protocol 20, e2ee-design.md 6.6): in an encrypted room whose history
+// visibility is Full, a member may forward a chain someone else sent (a RoomKeyForward
+// envelope: senderId names the chain's sender, one wrap for one current member, signed by the
+// forwarding session under makeRoomKeyForwardAAD) for a chain the server already stores, in any
+// epoch. A forward is refused in From join rooms (ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE) and
+// dropped without an answer when the recipient already has a wrap for that chain. Stored
+// forwards carry forwarderId and are fetched and delivered like re-seals. In those rooms
+// ClientRequestRoomKey goes to every online member, not only the chain's sender.
 
-// ClientRoomKeyEnvelope: one SenderKey envelope for (roomId, epoch, the sender, chainId).
-// Refused with ROOM_KEY_ENVELOPE_INVALID_MESSAGE, ROOM_KEY_OUT_OF_DATE_MESSAGE or "Not a room
-// member".
+// ClientRoomKeyEnvelope: one SenderKey envelope for (roomId, epoch, the sender, chainId), the
+// sender being the session's account. Protocol 20: with senderId set (another account), a
+// RoomKeyForward envelope of senderId's chain that the session's account forwards. Refused with
+// ROOM_KEY_ENVELOPE_INVALID_MESSAGE, ROOM_KEY_OUT_OF_DATE_MESSAGE,
+// ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE or "Not a room member".
 ClientRoomKeyEnvelopePayload :: struct {
 	roomId:   int,
 	epoch:    int,
 	chainId:  ChainID,
 	envelope: []u8,
+	senderId: int, // Protocol 20: the chain's sender for a RoomKeyForward; 0 for a SenderKey
 }
 
 ClientRoomKeyEnvelopePayload_deinit :: proc(payload: ^ClientRoomKeyEnvelopePayload) {
@@ -845,15 +857,17 @@ ClientRoomKeyEnvelopePayload_deinit :: proc(payload: ^ClientRoomKeyEnvelopePaylo
 	payload.envelope = nil
 }
 
-// One stored envelope. id is the server's row ID, the fetch cursor. envelope is owned once
-// decoded.
+// One stored envelope. id is the server's row ID, the fetch cursor. senderId is the chain's
+// sender. forwarderId (protocol 20) is 0 for a SenderKey envelope, which senderId sealed, and
+// the forwarding account for a RoomKeyForward envelope. envelope is owned once decoded.
 RoomKeyEnvelope :: struct {
-	id:       int,
-	roomId:   int,
-	epoch:    int,
-	senderId: int,
-	chainId:  ChainID,
-	envelope: []u8,
+	id:          int,
+	roomId:      int,
+	epoch:       int,
+	senderId:    int,
+	chainId:     ChainID,
+	envelope:    []u8,
+	forwarderId: int,
 }
 
 RoomKeyEnvelope_deinit :: proc(envelope: ^RoomKeyEnvelope) {
@@ -899,10 +913,12 @@ ServerRoomKeysPayload_deinit :: proc(payload: ^ServerRoomKeysPayload) {
 }
 
 // ClientRequestRoomKey: the requester met a message of senderId's chain chainId in epoch and
-// holds no key for it. The server checks that both accounts are members of the encrypted room
-// and that it stores an envelope for that chain, then relays the request to every session of
-// senderId as ServerRoomKeyRequest; nothing is answered to the requester. The sender's client
-// decides whether to re-seal (the requester must be a member of that epoch in its verified log).
+// holds no key for it. The server checks that the requester is a member of the encrypted room
+// and that it stores an envelope for that chain. In a From join room it relays the request to
+// every session of senderId (who must be a member too) as ServerRoomKeyRequest; in a Full
+// history room (protocol 20) to every session of every other member, so whoever holds the chain
+// can forward it. Nothing is answered to the requester. Each client decides whether to answer
+// from its verified log (room_chains.odin).
 ClientRequestRoomKeyPayload :: struct {
 	roomId:   int,
 	epoch:    int,
@@ -915,6 +931,7 @@ ServerRoomKeyRequestPayload :: struct {
 	epoch:       int,
 	chainId:     ChainID,
 	requesterId: int,
+	senderId:    int, // Protocol 20: the chain's sender (the recipient is not always it)
 }
 
 ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
@@ -923,6 +940,8 @@ ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
 ROOM_KEY_OUT_OF_DATE_MESSAGE :: "Room key is out of date"
 SEALED_ROOM_MESSAGE_INVALID_MESSAGE :: "Invalid encrypted room message"
 ROOM_MESSAGE_DUPLICATE_MESSAGE :: "Duplicate room message"
+// Protocol 20: a RoomKeyForward envelope in a room whose history is not Full.
+ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE :: "This room does not share its history with new members"
 ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
 ROOM_KEY_REQUEST_INVALID_MESSAGE :: "Invalid room key request"
 // A sealed message to a room that is not encrypted.
@@ -1570,7 +1589,8 @@ DatabasePostRoomChatMessageRequest :: struct {
 }
 
 // Protocol 19: one SenderKey envelope (owned) the router checked, with the user IDs its wraps
-// name (owned).
+// name (owned). Protocol 20: forwarderId is the session's account for a RoomKeyForward
+// envelope of senderId's chain (one wrap), 0 for a SenderKey envelope sealed by senderId.
 DatabaseStoreRoomKeyEnvelopeRequest :: struct {
 	senderId:         int,
 	roomId:           int,
@@ -1578,6 +1598,7 @@ DatabaseStoreRoomKeyEnvelopeRequest :: struct {
 	chainId:          ChainID,
 	envelope:         []u8,
 	recipientUserIDs: [dynamic]int,
+	forwarderId:      int,
 }
 
 // Protocol 19: a page of the envelopes with a wrap for userId.
@@ -1588,7 +1609,8 @@ DatabaseFetchRoomKeysRequest :: struct {
 	afterId:    int,
 }
 
-// Protocol 19: whether requesterId may ask senderId to re-seal a stored chain.
+// Protocol 19: whether requesterId may ask for a stored chain of senderId (protocol 20: and who
+// is asked).
 DatabaseRoomKeyRequestCheckRequest :: struct {
 	requesterId: int,
 	roomId:      int,
@@ -2031,6 +2053,9 @@ RoomKeyEnvelopeOutcome :: enum u8 {
 	NotEncrypted,
 	StaleEpoch, // epoch is not the log version, and no envelope of the chain is stored
 	WrongRecipients, // A wrap names an account that is not a member
+	// Protocol 20, forwards only.
+	NotFullHistory, // A RoomKeyForward in a room whose history is not Full
+	AlreadyHeld, // The recipient already has a wrap for the chain; dropped without an answer
 }
 
 // stored (owned) and recipientUserIDs (owned) are set when outcome is Stored.
@@ -2049,11 +2074,16 @@ DatabaseFetchRoomKeysResult :: struct {
 	hasMore:   bool,
 }
 
-// allowed: the room is encrypted, both accounts are members, and an envelope of the chain is
-// stored. The request's fields come back so the router needs no pending state.
+// allowed: the room is encrypted, the requester is a member, an envelope of the chain is
+// stored, and (From join) the sender is a member. fullHistory (protocol 20): the room's history
+// is Full, and memberUserIDs (owned) are the members to ask, the requester excluded; otherwise
+// only the sender is asked. The request's fields come back so the router needs no pending
+// state.
 DatabaseRoomKeyRequestCheckResult :: struct {
-	allowed: bool,
-	request: DatabaseRoomKeyRequestCheckRequest,
+	allowed:       bool,
+	request:       DatabaseRoomKeyRequestCheckRequest,
+	fullHistory:   bool,
+	memberUserIDs: [dynamic]int,
 }
 
 ProtocolErrorResponse :: struct {

@@ -5,66 +5,98 @@ import "core:strings"
 import "shared:pg"
 
 // Sender chains in encrypted rooms (protocol 19, migration 8, e2ee-design.md 6.4): storing and
-// fetching SenderKey envelopes, and the check behind a key request. The router has already
-// checked an envelope's structure and its signature against the sender's identity key
-// (router_room_keys.odin); every rule that depends on the room's state is one statement here,
-// so a membership or log change between the check and the store cannot slip through.
+// fetching SenderKey envelopes, and the check behind a key request. Protocol 20 (migration 9,
+// design 6.6): RoomKeyForward envelopes in Full history rooms, stored next to them with their
+// forwarder, and key requests that every member of a Full history room is asked. The router
+// has already checked an envelope's structure and its signature against the sender's (or
+// forwarder's) identity key (router_room_keys.odin); every rule that depends on the room's
+// state is one statement here, so a membership or log change between the check and the store
+// cannot slip through.
 //
 // Nothing here allocates from the temporary allocator.
 
-// $1 room, $2 sender, $3 epoch, $4 chain ID (hex), $5 the wraps' user IDs (an array literal),
-// $6 the envelope (hex). Stores the envelope only when the room is encrypted, the sender is a
-// member, every wrap names a member, and the epoch is the room's log version or, for a re-seal
-// answering a key request, an older epoch whose chain is already stored. One row: whether the
-// room exists, its flag, the sender's membership, its log version, whether the chain is known,
-// how many wraps name non-members, and the stored row's ID.
+// $1 room, $2 the chain's sender, $3 epoch, $4 chain ID (hex), $5 the wraps' user IDs (an array
+// literal), $6 the envelope (hex), $7 the forwarder (0 for a SenderKey envelope, which $2
+// sealed).
+//
+// A SenderKey envelope is stored only when the room is encrypted, the sender is a member, every
+// wrap names a member, and the epoch is the room's log version or, for a re-seal answering a
+// key request, an older epoch whose chain is already stored. A RoomKeyForward (protocol 20)
+// needs the forwarder to be a member, every wrap a member, the room's history Full, an epoch
+// whose chain (sender, chain ID) is already stored, and no stored envelope of that chain with a
+// wrap for the recipient (the first forward wins; later ones are dropped). One row: whether the
+// room exists, its flag, the storing account's membership, its log version, whether the chain
+// is known, how many wraps name non-members, the stored row's ID, the room's history
+// visibility, and whether a recipient already holds the chain.
 DATABASE_STORE_ROOM_KEY_ENVELOPE_SQL ::
-	"WITH room AS (SELECT encrypted, log_version FROM rooms WHERE id = $1::bigint), " +
+	"WITH room AS (SELECT encrypted, log_version, history_visibility FROM rooms " +
+	"WHERE id = $1::bigint), " +
 	"member AS (SELECT 1 FROM room_members WHERE room_id = $1::bigint " +
-	"AND user_id = $2::bigint), " +
+	"AND user_id = CASE WHEN $7::bigint > 0 THEN $7::bigint ELSE $2::bigint END), " +
 	"known AS (SELECT 1 FROM room_key_envelopes WHERE room_id = $1::bigint " +
 	"AND sender_user_id = $2::bigint AND epoch = $3::bigint " +
 	"AND chain_id = decode($4::text, 'hex') LIMIT 1), " +
+	"held AS (SELECT 1 FROM room_key_envelopes WHERE $7::bigint > 0 AND room_id = $1::bigint " +
+	"AND sender_user_id = $2::bigint AND epoch = $3::bigint " +
+	"AND chain_id = decode($4::text, 'hex') AND recipient_user_ids && $5::bigint[] LIMIT 1), " +
 	"outsiders AS (SELECT count(*) AS n FROM unnest($5::bigint[]) AS r(user_id) " +
 	"WHERE NOT EXISTS (SELECT 1 FROM room_members rm WHERE rm.room_id = $1::bigint " +
 	"AND rm.user_id = r.user_id)), " +
 	"ok AS (SELECT 1 FROM room WHERE encrypted AND EXISTS (SELECT 1 FROM member) " +
+	"AND (SELECT n FROM outsiders) = 0 AND (($7::bigint = 0 " +
 	"AND ($3::bigint = log_version OR ($3::bigint < log_version " +
-	"AND EXISTS (SELECT 1 FROM known))) AND (SELECT n FROM outsiders) = 0), " +
+	"AND EXISTS (SELECT 1 FROM known)))) OR ($7::bigint > 0 AND history_visibility = 2 " +
+	"AND $3::bigint <= log_version AND EXISTS (SELECT 1 FROM known) " +
+	"AND NOT EXISTS (SELECT 1 FROM held)))), " +
 	"stored AS (INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
-	"recipient_user_ids, envelope) SELECT $1::bigint, $3::bigint, $2::bigint, " +
-	"decode($4::text, 'hex'), $5::bigint[], decode($6::text, 'hex') " +
-	"WHERE EXISTS (SELECT 1 FROM ok) RETURNING id) " +
+	"recipient_user_ids, envelope, forwarder_user_id) SELECT $1::bigint, $3::bigint, " +
+	"$2::bigint, decode($4::text, 'hex'), $5::bigint[], decode($6::text, 'hex'), " +
+	"NULLIF($7::bigint, 0) WHERE EXISTS (SELECT 1 FROM ok) RETURNING id) " +
 	"SELECT EXISTS (SELECT 1 FROM room)::text, " +
 	"COALESCE((SELECT encrypted FROM room), false)::text, " +
 	"EXISTS (SELECT 1 FROM member)::text, " +
 	"COALESCE((SELECT log_version FROM room), 0)::text, " +
-	"EXISTS (SELECT 1 FROM known)::text, (SELECT n FROM outsiders)::text, s.id::text " +
+	"EXISTS (SELECT 1 FROM known)::text, (SELECT n FROM outsiders)::text, s.id::text, " +
+	"COALESCE((SELECT history_visibility FROM room), 0)::text, " +
+	"EXISTS (SELECT 1 FROM held)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // $1 the requester, $2 the room, $3 sinceEpoch, $4 afterId, $5 the page size plus one. Members
-// only; only envelopes with a wrap for the requester. One row with NULL envelope columns when
-// there is nothing to send.
+// only; only envelopes with a wrap for the requester, forwards (protocol 20) included with
+// their forwarder (0 for a SenderKey envelope). One row with NULL envelope columns when there
+// is nothing to send.
 DATABASE_FETCH_ROOM_KEYS_SQL ::
 	"WITH allowed AS (SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = $2::bigint " +
 	"AND user_id = $1::bigint) AS ok) " +
 	"SELECT a.ok::text, e.id::text, e.epoch::text, e.sender_user_id::text, " +
-	"encode(e.chain_id, 'hex'), encode(e.envelope, 'hex') FROM allowed a " +
-	"LEFT JOIN LATERAL (SELECT id, epoch, sender_user_id, chain_id, envelope " +
-	"FROM room_key_envelopes WHERE a.ok AND room_id = $2::bigint AND epoch >= $3::bigint " +
-	"AND id > $4::bigint AND $1::bigint = ANY (recipient_user_ids) " +
+	"encode(e.chain_id, 'hex'), encode(e.envelope, 'hex'), " +
+	"COALESCE(e.forwarder_user_id, 0)::text FROM allowed a " +
+	"LEFT JOIN LATERAL (SELECT id, epoch, sender_user_id, chain_id, envelope, " +
+	"forwarder_user_id FROM room_key_envelopes WHERE a.ok AND room_id = $2::bigint " +
+	"AND epoch >= $3::bigint AND id > $4::bigint AND $1::bigint = ANY (recipient_user_ids) " +
 	"ORDER BY id LIMIT $5::bigint) e ON true ORDER BY e.id"
 
 // $1 the requester, $2 the room, $3 the epoch, $4 the chain's sender, $5 the chain ID (hex).
+// One row: whether the request may go out (an encrypted room, the requester a member, the chain
+// stored, and, unless the room's history is Full, the sender a member), whether the history is
+// Full, and then the members to ask: every member but the requester, comma-separated.
 DATABASE_ROOM_KEY_REQUEST_CHECK_SQL ::
-	"SELECT (EXISTS (SELECT 1 FROM rooms WHERE id = $2::bigint AND encrypted) " +
+	"WITH room AS (SELECT history_visibility = 2 AS is_full FROM rooms " +
+	"WHERE id = $2::bigint AND encrypted), " +
+	"base AS (SELECT EXISTS (SELECT 1 FROM room) " +
 	"AND EXISTS (SELECT 1 FROM room_members WHERE room_id = $2::bigint " +
 	"AND user_id = $1::bigint) " +
-	"AND EXISTS (SELECT 1 FROM room_members WHERE room_id = $2::bigint " +
-	"AND user_id = $4::bigint) " +
 	"AND EXISTS (SELECT 1 FROM room_key_envelopes WHERE room_id = $2::bigint " +
 	"AND sender_user_id = $4::bigint AND epoch = $3::bigint " +
-	"AND chain_id = decode($5::text, 'hex')))::text"
+	"AND chain_id = decode($5::text, 'hex')) AS ok), " +
+	"fh AS (SELECT COALESCE((SELECT is_full FROM room), false) AS yes) " +
+	"SELECT ((SELECT ok FROM base) AND ((SELECT yes FROM fh) " +
+	"OR EXISTS (SELECT 1 FROM room_members WHERE room_id = $2::bigint " +
+	"AND user_id = $4::bigint)))::text, " +
+	"(SELECT yes FROM fh)::text, " +
+	"CASE WHEN (SELECT ok FROM base) AND (SELECT yes FROM fh) THEN " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM room_members " +
+	"WHERE room_id = $2::bigint AND user_id <> $1::bigint), '') ELSE '' END"
 
 databaseExecuteStoreRoomKeyEnvelope :: proc(
 	conn: pg.Conn,
@@ -87,6 +119,8 @@ databaseExecuteStoreRoomKeyEnvelope :: proc(
 	defer delete(envelopeHex)
 	envelopeParam, _ := strings.clone_to_cstring(envelopeHex)
 	defer delete(envelopeParam)
+	forwarderParam := databaseIntParam(max(request.forwarderId, 0))
+	defer delete(forwarderParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)senderIDParam,
@@ -94,6 +128,7 @@ databaseExecuteStoreRoomKeyEnvelope :: proc(
 		transmute([^]byte)chainParam,
 		transmute([^]byte)recipientsParam,
 		transmute([^]byte)envelopeParam,
+		transmute([^]byte)forwarderParam,
 	}
 	result := databaseExecParams(conn, DATABASE_STORE_ROOM_KEY_ENVELOPE_SQL, params[:])
 	if result == nil {
@@ -106,6 +141,9 @@ databaseExecuteStoreRoomKeyEnvelope :: proc(
 	outcome := common.RoomKeyEnvelopeOutcome.Stored
 	logVersion, _ := databaseGetInt(result, 0, 3)
 	outsiders, _ := databaseGetInt(result, 0, 5)
+	historyVisibility, _ := databaseGetInt(result, 0, 7)
+	known := databaseGetBool(result, 0, 4)
+	forward := request.forwarderId > 0
 	switch {
 	case !databaseGetBool(result, 0, 0):
 		outcome = .NotMember
@@ -115,7 +153,13 @@ databaseExecuteStoreRoomKeyEnvelope :: proc(
 		outcome = .NotMember
 	case outsiders > 0:
 		outcome = .WrongRecipients
-	case request.epoch != logVersion && !databaseGetBool(result, 0, 4):
+	case forward && historyVisibility != int(common.RoomHistoryVisibility.Full):
+		outcome = .NotFullHistory
+	case forward && (!known || request.epoch > logVersion):
+		outcome = .StaleEpoch
+	case forward && databaseGetBool(result, 0, 8):
+		outcome = .AlreadyHeld
+	case request.epoch != logVersion && !known:
 		outcome = .StaleEpoch
 	case request.epoch > logVersion:
 		outcome = .StaleEpoch
@@ -141,6 +185,7 @@ databaseExecuteStoreRoomKeyEnvelope :: proc(
 				senderId = request.senderId,
 				chainId = request.chainId,
 				envelope = envelope,
+				forwarderId = max(request.forwarderId, 0),
 			},
 			recipientUserIDs = recipients,
 		},
@@ -199,13 +244,19 @@ databaseExecuteFetchRoomKeys :: proc(
 		envelope := common.RoomKeyEnvelope {
 			roomId = request.roomId,
 		}
-		idOK, epochOK, senderOK: bool
+		idOK, epochOK, senderOK, forwarderOK: bool
 		envelope.id, idOK = databaseGetInt(result, row, 1)
 		envelope.epoch, epochOK = databaseGetInt(result, row, 2)
 		envelope.senderId, senderOK = databaseGetInt(result, row, 3)
 		chainOK := databaseGetHexBytes(result, row, 4, envelope.chainId[:])
 		envelope.envelope = databaseGetOwnedHexBytes(result, row, 5)
-		if !idOK || !epochOK || !senderOK || !chainOK || len(envelope.envelope) == 0 {
+		envelope.forwarderId, forwarderOK = databaseGetInt(result, row, 6)
+		if !idOK ||
+		   !epochOK ||
+		   !senderOK ||
+		   !forwarderOK ||
+		   !chainOK ||
+		   len(envelope.envelope) == 0 {
 			delete(envelope.envelope)
 			continue
 		}
@@ -246,10 +297,15 @@ databaseExecuteRoomKeyRequestCheck :: proc(
 	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
 		return databaseResultError(&result)
 	}
-	return databaseSuccess(
-		common.DatabaseRoomKeyRequestCheckResult {
-			allowed = databaseGetBool(result, 0, 0),
-			request = request,
-		},
-	)
+	answer := common.DatabaseRoomKeyRequestCheckResult {
+		allowed     = databaseGetBool(result, 0, 0),
+		request     = request,
+		fullHistory = databaseGetBool(result, 0, 1),
+	}
+	if answer.allowed && answer.fullHistory {
+		members := databaseGetText(result, 0, 2)
+		defer delete(members)
+		answer.memberUserIDs = databaseParseIDList(members)
+	}
+	return databaseSuccess(answer)
 }

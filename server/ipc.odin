@@ -426,10 +426,11 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(envelope.envelope)
 		}
 		delete(r.envelopes)
+	case common.DatabaseRoomKeyRequestCheckResult:
+		delete(r.memberUserIDs)
 	case common.DatabaseUserServerAdminResult,
 	     common.DatabaseMarkReadResult,
-	     common.DatabasePublishEncryptionKeyResult,
-	     common.DatabaseRoomKeyRequestCheckResult:
+	     common.DatabasePublishEncryptionKeyResult:
 	case nil:
 	}
 }

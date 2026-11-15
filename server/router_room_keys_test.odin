@@ -288,6 +288,51 @@ testRoomChainsRouterSealedMessageIsCheckedAndFannedOutByteForByte :: proc(t: ^te
 	}
 }
 
+// A RoomKeyForward envelope (protocol 20) signed by forwarderKey under the forward AAD for
+// (room, epoch, senderID's chain, forwarderID, aadRecipient), with a wrap for each of
+// recipients; the caller frees it.
+@(private = "file")
+routerRoomKeysTestForward :: proc(
+	test: ^RouterRoomKeysTest,
+	forwarderKey: common.IdentityPrivateKeyBytes,
+	roomID, epoch, senderID: int,
+	chainID: common.ChainID,
+	forwarderID, aadRecipient: int,
+	recipients: []int,
+	kind := common.EnvelopeKind.RoomKeyForward,
+) -> []u8 {
+	wraps := make([]common.EnvelopeRecipient, len(recipients))
+	defer delete(wraps)
+	for userID, index in recipients {
+		keyPair, ok := common.generateEncryptionKeyPair()
+		assert(ok, "expected a recipient key")
+		wraps[index] = {userID, keyPair.publicKey}
+	}
+	aad := common.makeRoomKeyForwardAAD(
+		common.RoomKeyForwardAADFields {
+			serverIdentityPublicKey = test.h.state.serverIdentityPublicKey,
+			roomID = roomID,
+			epoch = epoch,
+			senderUserID = senderID,
+			chainID = chainID,
+			forwarderUserID = forwarderID,
+			recipientUserID = aadRecipient,
+		},
+	)
+	plaintext: [common.SENDER_KEY_DISTRIBUTION_SIZE]u8
+	_, encodeErr := common.encodeSenderKeyDistribution(
+		{roomID = roomID, epoch = epoch, chainID = chainID},
+		plaintext[:],
+	)
+	assert(encodeErr == .None, "expected the forward plaintext to encode")
+	buffer: [common.SEALED_ENVELOPE_MAX_BYTES]u8
+	n, err := common.sealEnvelope(kind, aad[:], plaintext[:], wraps, forwarderKey, buffer[:])
+	assert(err == .None, fmt.tprintf("expected the forward to seal, got %v", err))
+	envelope := make([]u8, n)
+	copy(envelope, buffer[:n])
+	return envelope
+}
+
 @(test)
 testRoomChainsRouterKeyEnvelopeGoesToItsWrapsOnly :: proc(t: ^testing.T) {
 	_ = t
@@ -616,7 +661,8 @@ testRoomChainsRouterFetchAndKeyRequests :: proc(t: ^testing.T) {
 			relayed.roomId == 9 &&
 			relayed.epoch == 2 &&
 			relayed.chainId == chainID &&
-			relayed.requesterId == 43,
+			relayed.requesterId == 43 &&
+			relayed.senderId == 42,
 			fmt.tprintf("expected bob's request as asked, got %v", relayed),
 		)
 	}
@@ -660,4 +706,243 @@ testRoomChainsRouterFetchAndKeyRequests :: proc(t: ^testing.T) {
 	)
 	routerTestExpectProtocolError(h, test.peers[:], common.ROOM_KEY_REQUEST_INVALID_MESSAGE)
 	routerTestExpectNoDatabaseQuery(h, "expected a request to oneself to stay local")
+}
+
+// Protocol 20 (design 6.6): bob forwards alice's chain to carol. The router checks the forward
+// against bob's session key and the forward AAD, the database decides the room's rules, the
+// stored forward reaches carol alone, a duplicate is dropped silently, and a Full history
+// room's key request reaches every member the check names.
+@(test)
+testRoomChainsRouterForwardsAndFullHistoryRequests :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	test: RouterRoomKeysTest
+	routerRoomKeysTestInit(&test)
+	defer routerRoomKeysTestDeinit(&test)
+	h := &test.h
+	chainID := common.ChainID(routerRoomKeysTestFill(60))
+
+	forward := routerRoomKeysTestForward(&test, test.keys[1], 9, 2, 42, chainID, 43, 44, {44})
+	defer delete(forward)
+	routerTestSendSealed(
+		h,
+		&test.transports[1],
+		2,
+		.ClientRoomKeyEnvelope,
+		common.ClientRoomKeyEnvelopePayload {
+			roomId = 9,
+			epoch = 2,
+			chainId = chainID,
+			envelope = forward,
+			senderId = 42,
+		},
+	)
+	query := routerPollDatabaseQuery(h)
+	request, requestOK := query.request.(common.DatabaseStoreRoomKeyEnvelopeRequest)
+	assert(
+		requestOK &&
+		request.senderId == 42 &&
+		request.forwarderId == 43 &&
+		request.roomId == 9 &&
+		request.epoch == 2 &&
+		request.chainId == chainID &&
+		string(request.envelope) == string(forward) &&
+		len(request.recipientUserIDs) == 1 &&
+		request.recipientUserIDs[0] == 44,
+		fmt.tprintf("expected bob's forward of alice's chain to carol, got %v", request),
+	)
+	IPC__database_query_request_deinit(query.request)
+	stored := make([]u8, len(forward))
+	copy(stored, forward)
+	recipients := make([dynamic]int)
+	append(&recipients, 44)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseStoreRoomKeyEnvelopeResult {
+				outcome = .Stored,
+				stored = {
+					id = 7,
+					roomId = 9,
+					epoch = 2,
+					senderId = 42,
+					chainId = chainID,
+					envelope = stored,
+					forwarderId = 43,
+				},
+				recipientUserIDs = recipients,
+			},
+		},
+	)
+	peerID, packet := routerTestReceive(h, test.peers[:])
+	{
+		defer delete(packet.payload)
+		assert(peerID == 3 && packet.messageType == .ServerRoomKeyEnvelope, "expected carol's")
+		payload: common.ServerRoomKeyEnvelopePayload
+		assert(
+			cbor.unmarshal(packet.payload, &payload, temp_allocator = context.allocator) == nil,
+			"expected the forward to decode",
+		)
+		defer common.ServerRoomKeyEnvelopePayload_deinit(&payload)
+		got := payload.envelope
+		assert(
+			got.id == 7 &&
+			got.senderId == 42 &&
+			got.forwarderId == 43 &&
+			string(got.envelope) == string(forward),
+			fmt.tprintf("expected the forward exactly as sent, with its forwarder, got %v", got),
+		)
+	}
+	routerTestExpectNoNetworkMessage(h, "expected the forward for carol only")
+
+	// The database's verdicts: a duplicate is dropped without a word, a From join room refuses.
+	verdicts := [?]struct {
+		outcome:  common.RoomKeyEnvelopeOutcome,
+		expected: string,
+	} {
+		{.AlreadyHeld, ""},
+		{.NotFullHistory, common.ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE},
+		{.StaleEpoch, common.ROOM_KEY_OUT_OF_DATE_MESSAGE},
+	}
+	for verdict in verdicts {
+		routerTestSendSealed(
+			h,
+			&test.transports[1],
+			2,
+			.ClientRoomKeyEnvelope,
+			common.ClientRoomKeyEnvelopePayload {
+				roomId = 9,
+				epoch = 2,
+				chainId = chainID,
+				envelope = forward,
+				senderId = 42,
+			},
+		)
+		verdictQuery := routerPollDatabaseQuery(h)
+		IPC__database_query_request_deinit(verdictQuery.request)
+		MainRouterState_handleDatabaseResult(
+			&h.pm,
+			&h.state,
+			verdictQuery.request_id,
+			common.DatabaseQueryResponse {
+				success = true,
+				result = common.DatabaseStoreRoomKeyEnvelopeResult{outcome = verdict.outcome},
+			},
+		)
+		if len(verdict.expected) > 0 {
+			routerTestExpectProtocolError(h, test.peers[:], verdict.expected)
+		}
+		routerTestExpectNoNetworkMessage(h, "expected a forward not stored to reach nobody")
+	}
+
+	// Refused before the database: carol's signature claimed by bob, a forward naming another
+	// chain sender, recipient, epoch or chain than it was sealed for, two wraps, a SenderKey
+	// envelope sent as a forward, the forward sent as bob's own SenderKey envelope, and bob
+	// "forwarding" with himself as the sender.
+	byCarol := routerRoomKeysTestForward(&test, test.keys[2], 9, 2, 42, chainID, 43, 44, {44})
+	defer delete(byCarol)
+	otherRecipient := routerRoomKeysTestForward(
+		&test,
+		test.keys[1],
+		9,
+		2,
+		42,
+		chainID,
+		43,
+		42,
+		{44},
+	)
+	defer delete(otherRecipient)
+	twoWraps := routerRoomKeysTestForward(
+		&test,
+		test.keys[1],
+		9,
+		2,
+		42,
+		chainID,
+		43,
+		44,
+		{44, 42},
+	)
+	defer delete(twoWraps)
+	senderKey := routerRoomKeysTestEnvelope(&test, test.keys[1], 9, 2, 43, chainID, {44})
+	defer delete(senderKey)
+	otherChain := common.ChainID(routerRoomKeysTestFill(61))
+	cases := [?]common.ClientRoomKeyEnvelopePayload {
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = byCarol, senderId = 42},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = forward, senderId = 44},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = otherRecipient, senderId = 42},
+		{roomId = 9, epoch = 3, chainId = chainID, envelope = forward, senderId = 42},
+		{roomId = 9, epoch = 2, chainId = otherChain, envelope = forward, senderId = 42},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = twoWraps, senderId = 42},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = senderKey, senderId = 42},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = forward},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = forward, senderId = 43},
+		{roomId = 9, epoch = 2, chainId = chainID, envelope = forward, senderId = -1},
+	}
+	for refused, index in cases {
+		routerTestSendSealed(h, &test.transports[1], 2, .ClientRoomKeyEnvelope, refused)
+		routerTestExpectProtocolError(h, test.peers[:], common.ROOM_KEY_ENVELOPE_INVALID_MESSAGE)
+		routerTestExpectNoDatabaseQuery(
+			h,
+			fmt.tprintf("expected invalid forward %d to stay local", index),
+		)
+	}
+
+	// carol asks for alice's chain in a Full history room: alice and bob are asked, not carol.
+	routerTestSendSealed(
+		h,
+		&test.transports[2],
+		3,
+		.ClientRequestRoomKey,
+		common.ClientRequestRoomKeyPayload {
+			roomId = 9,
+			epoch = 2,
+			senderId = 42,
+			chainId = chainID,
+		},
+	)
+	checkQuery := routerPollDatabaseQuery(h)
+	check, checkOK := checkQuery.request.(common.DatabaseRoomKeyRequestCheckRequest)
+	assert(checkOK && check.requesterId == 44, "expected carol's request checked")
+	members := make([dynamic]int)
+	append(&members, 42, 43)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		checkQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRoomKeyRequestCheckResult {
+				allowed = true,
+				request = check,
+				fullHistory = true,
+				memberUserIDs = members,
+			},
+		},
+	)
+	asked := map[u32]bool{}
+	defer delete(asked)
+	for _ in 0 ..< 2 {
+		requestPeer, requestPacket := routerTestReceive(h, test.peers[:])
+		defer delete(requestPacket.payload)
+		assert(requestPacket.messageType == .ServerRoomKeyRequest, "expected a key request")
+		relayed: common.ServerRoomKeyRequestPayload
+		assert(
+			cbor.unmarshal(requestPacket.payload, &relayed, temp_allocator = context.allocator) ==
+			nil,
+			"expected the request to decode",
+		)
+		assert(
+			relayed.requesterId == 44 && relayed.senderId == 42 && relayed.chainId == chainID,
+			fmt.tprintf("expected carol's request for alice's chain, got %v", relayed),
+		)
+		asked[requestPeer] = true
+	}
+	assert(asked[1] && asked[2] && !asked[3], "expected alice and bob asked, not carol")
+	routerTestExpectNoNetworkMessage(h, "expected one request per member session")
 }

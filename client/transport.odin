@@ -85,8 +85,9 @@ ClientTransportRuntimeEventKind :: enum {
 	// Sender chains (protocol 19, room_chains.odin). RoomKeyEnvelopeReceived is a live
 	// ServerRoomKeyEnvelope and RoomKeysReceived one page of ServerRoomKeys (roomID, hasOlder
 	// when more follow); both carry the envelopes in roomKeyEnvelopes (owned). RoomKeyRequested
-	// is ServerRoomKeyRequest: roomID, roomKeyEpoch, roomKeyChainID and the requester in
-	// peerUserID. RoomChatReceived carries a sealed message's clientMessageID and sealed (owned).
+	// is ServerRoomKeyRequest: roomID, roomKeyEpoch, roomKeyChainID, the requester in
+	// peerUserID and the chain's sender in senderID (protocol 20). RoomChatReceived carries a
+	// sealed message's clientMessageID and sealed (owned).
 	RoomKeyEnvelopeReceived,
 	RoomKeysReceived,
 	RoomKeyRequested,
@@ -1309,6 +1310,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				roomKeyEpoch = payload.epoch,
 				roomKeyChainID = payload.chainId,
 				peerUserID = payload.requesterId,
+				senderID = payload.senderId,
 			},
 			true
 

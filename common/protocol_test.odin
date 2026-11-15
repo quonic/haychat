@@ -433,12 +433,14 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// ServerRoomLog, RoomSummary.encrypted and logVersion, ClientCreateRoomPayload.encrypted,
 	// ClientEditRoomPayload.encrypted); 19 added sender chains in encrypted rooms (sealed and
 	// clientMessageId on chat messages, ClientRoomKeyEnvelope, ServerRoomKeyEnvelope,
-	// ClientFetchRoomKeys, ServerRoomKeys, ClientRequestRoomKey, ServerRoomKeyRequest), so peers
-	// on 18 or older cannot talk to this build.
+	// ClientFetchRoomKeys, ServerRoomKeys, ClientRequestRoomKey, ServerRoomKeyRequest); 20 added
+	// Full history in encrypted rooms (RoomKeyForward envelopes: ClientRoomKeyEnvelope.senderId,
+	// RoomKeyEnvelope.forwarderId, ServerRoomKeyRequest.senderId, and key requests relayed to
+	// every member), so peers on 19 or older cannot talk to this build.
 	assert(
-		protocolVersion == 19,
+		protocolVersion == 20,
 		fmt.tprintf(
-			"expected protocol version 19 for room sender chains, got %d",
+			"expected protocol version 20 for Full history in encrypted rooms, got %d",
 			protocolVersion,
 		),
 	)
@@ -486,6 +488,7 @@ testRoomChainPayloadsCarryBytesUnchanged :: proc(t: ^testing.T) {
 				senderId = 4,
 				chainId = chainID,
 				envelope = sealed,
+				forwarderId = 6,
 			},
 		)
 		data, err := cbor.marshal(original)
@@ -500,6 +503,7 @@ testRoomChainPayloadsCarryBytesUnchanged :: proc(t: ^testing.T) {
 			got.id == 11 && got.epoch == 2 && got.senderId == 4 && got.chainId == chainID,
 			"expected the envelope's fields unchanged",
 		)
+		assert(got.forwarderId == 6, "expected the forwarder unchanged (protocol 20)")
 		assert(string(got.envelope) == string(sealed), "expected envelope bytes unchanged")
 		assert(decoded.hasMore, "expected hasMore unchanged")
 	}

@@ -17,13 +17,20 @@ import "shared:pg"
 // inside the sealed bytes (the router checked them), so made-up bytes stand in for them.
 
 @(private = "file")
-roomKeysTestRoom :: proc(conn: pg.Conn, name: string, encrypted: bool, members: []int) -> int {
+roomKeysTestRoom :: proc(
+	conn: pg.Conn,
+	name: string,
+	encrypted: bool,
+	members: []int,
+	historyVisibility := 2,
+) -> int {
 	value := databaseAdminTestValue(
 		conn,
 		fmt.tprintf(
 			"INSERT INTO rooms (name, access, history_visibility, encrypted, log_version) " +
-			"VALUES ('%s', 3, 2, %v, %d) RETURNING id::text",
+			"VALUES ('%s', 3, %d, %v, %d) RETURNING id::text",
 			name,
+			historyVisibility,
 			encrypted,
 			encrypted ? 2 : 0,
 		),
@@ -99,6 +106,7 @@ roomKeysTestStore :: proc(
 	chainID: common.ChainID,
 	recipients: []int,
 	envelope: []u8,
+	forwarderID := 0,
 ) -> (
 	outcome: common.RoomKeyEnvelopeOutcome,
 	storedID: int,
@@ -114,6 +122,7 @@ roomKeysTestStore :: proc(
 		chainId          = chainID,
 		envelope         = owned,
 		recipientUserIDs = ids,
+		forwarderId      = forwarderID,
 	}
 	defer IPC__database_query_request_deinit(request)
 	response := databaseExecuteRequest(conn, request)
@@ -123,14 +132,16 @@ roomKeysTestStore :: proc(
 	if result.outcome == .Stored {
 		assert(
 			string(result.stored.envelope) == string(envelope) &&
-			len(result.recipientUserIDs) == len(recipients),
-			"expected the stored envelope and its recipients back",
+			len(result.recipientUserIDs) == len(recipients) &&
+			result.stored.forwarderId == forwarderID,
+			"expected the stored envelope, its recipients and its forwarder back",
 		)
 	}
 	return result.outcome, result.stored.id
 }
 
-// The IDs of the envelopes userID fetches, "id:epoch:sender,…", or "refused".
+// The IDs of the envelopes userID fetches, "id:epoch:sender,…" (":fFORWARDER" after a forward),
+// or "refused".
 @(private = "file")
 roomKeysTestFetch :: proc(conn: pg.Conn, userID, roomID: int, sinceEpoch := 0) -> string {
 	response := databaseExecuteRequest(
@@ -153,6 +164,9 @@ roomKeysTestFetch :: proc(conn: pg.Conn, userID, roomID: int, sinceEpoch := 0) -
 			strings.write_byte(&builder, ',')
 		}
 		fmt.sbprintf(&builder, "%d:%d:%d", envelope.id, envelope.epoch, envelope.senderId)
+		if envelope.forwarderId > 0 {
+			fmt.sbprintf(&builder, ":f%d", envelope.forwarderId)
+		}
 	}
 	return strings.to_string(builder)
 }
@@ -177,6 +191,41 @@ roomKeysTestRequestAllowed :: proc(
 	result, ok := response.result.(common.DatabaseRoomKeyRequestCheckResult)
 	assert(response.success && ok, fmt.tprintf("expected the check to run: %s", response.message))
 	return result.allowed
+}
+
+// The full check result: whether it may go out, whether the room has Full history, and the
+// members asked ("id,id", temp).
+@(private = "file")
+roomKeysTestRequestCheck :: proc(
+	conn: pg.Conn,
+	requesterID, roomID, epoch, senderID: int,
+	chainID: common.ChainID,
+) -> (
+	allowed: bool,
+	fullHistory: bool,
+	members: string,
+) {
+	response := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomKeyRequestCheckRequest {
+			requesterId = requesterID,
+			roomId = roomID,
+			epoch = epoch,
+			senderId = senderID,
+			chainId = chainID,
+		},
+	)
+	defer IPC__database_query_response_deinit(response)
+	result, ok := response.result.(common.DatabaseRoomKeyRequestCheckResult)
+	assert(response.success && ok, fmt.tprintf("expected the check to run: %s", response.message))
+	builder := strings.builder_make(context.temp_allocator)
+	for userID, index in result.memberUserIDs {
+		if index > 0 {
+			strings.write_byte(&builder, ',')
+		}
+		fmt.sbprintf(&builder, "%d", userID)
+	}
+	return result.allowed, result.fullHistory, strings.to_string(builder)
 }
 
 @(test)
@@ -491,5 +540,248 @@ testRoomSenderChainsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		!strings.contains(migration.sql, "DROP TABLE") &&
 		!strings.contains(migration.sql, "DROP COLUMN"),
 		"expected migration 8 to drop no table or column",
+	)
+}
+
+// Protocol 20 (migration 9, design 6.6): forwards are stored only in Full history encrypted
+// rooms, from members to members, for a chain already stored, once per recipient; the fetch
+// returns them with their forwarder; a key request in a Full history room asks every member.
+@(test)
+testRoomKeyForwardStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen("room_key_forwards")
+	defer databaseAdminTestClose(conn)
+	alice := databaseAdminTestUser(conn, "fwd-alice")
+	bob := databaseAdminTestUser(conn, "fwd-bob")
+	carol := databaseAdminTestUser(conn, "fwd-carol")
+	dave := databaseAdminTestUser(conn, "fwd-dave")
+	erin := databaseAdminTestUser(conn, "fwd-erin")
+	full := roomKeysTestRoom(conn, "fwd-full", true, {alice, bob})
+	fromJoin := roomKeysTestRoom(conn, "fwd-from-join", true, {alice, bob}, 1)
+	plain := roomKeysTestRoom(conn, "fwd-plain", false, {alice, bob})
+	chain := common.ChainID(roomKeysTestFill(70))
+	envelope := []u8{4, 5, 6}
+	for room in ([]int{full, fromJoin}) {
+		outcome, _ := roomKeysTestStore(conn, room, alice, 2, chain, {alice, bob}, envelope)
+		assert(outcome == .Stored, fmt.tprintf("expected alice's chain stored, got %v", outcome))
+	}
+	// carol and dave join at epoch 3; erin never does.
+	for room in ([]int{full, fromJoin}) {
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf("UPDATE rooms SET log_version = 3 WHERE id = %d RETURNING id::text", room),
+		)
+		for userID in ([]int{carol, dave}) {
+			databaseAdminTestValue(
+				conn,
+				fmt.tprintf(
+					"INSERT INTO room_members (room_id, user_id) VALUES (%d, %d) " +
+					"RETURNING user_id::text",
+					room,
+					userID,
+				),
+			)
+		}
+	}
+
+	// bob forwards alice's epoch 2 chain to carol: stored with bob as forwarder.
+	forward := []u8{7, 7, 7}
+	outcome, forwardID := roomKeysTestStore(conn, full, alice, 2, chain, {carol}, forward, bob)
+	assert(outcome == .Stored && forwardID > 0, fmt.tprintf("expected stored, got %v", outcome))
+	row := databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT sender_user_id || ':' || forwarder_user_id || ':' || " +
+			"array_to_string(recipient_user_ids, ',') || ':' || encode(envelope, 'hex') " +
+			"FROM room_key_envelopes WHERE id = %d",
+			forwardID,
+		),
+	)
+	expectedRow := fmt.tprintf("%d:%d:%d:070707", alice, bob, carol)
+	assert(row == expectedRow, fmt.tprintf("expected the forward row %q, got %q", expectedRow, row))
+	// The first forward wins: dave's later one, and bob's again, are dropped.
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, forward, dave)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected dave's forward dropped, got %v", outcome))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, forward, bob)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected a repeat dropped, got %v", outcome))
+	// bob already holds the chain from alice's distribution: no forward to him either.
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {bob}, forward, dave)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected bob's wrap to count, got %v", outcome))
+	// Any member may forward what it holds to a member without it: carol passes it to dave.
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {dave}, forward, carol)
+	assert(outcome == .Stored, fmt.tprintf("expected carol's forward to dave, got %v", outcome))
+
+	// Refusals: a From join room, a non-member forwarder or recipient, an unknown chain, an
+	// epoch past the log, and an unencrypted room.
+	outcome, _ = roomKeysTestStore(conn, fromJoin, alice, 2, chain, {carol}, forward, bob)
+	assert(outcome == .NotFullHistory, fmt.tprintf("expected From join refused, got %v", outcome))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, forward, erin)
+	assert(outcome == .NotMember, fmt.tprintf("expected erin refused, got %v", outcome))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {erin}, forward, bob)
+	assert(outcome == .WrongRecipients, fmt.tprintf("expected a wrap for erin refused, got %v",
+		outcome))
+	otherChain := common.ChainID(roomKeysTestFill(71))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, otherChain, {carol}, forward, bob)
+	assert(outcome == .StaleEpoch, fmt.tprintf("expected an unknown chain refused, got %v",
+		outcome))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 4, chain, {carol}, forward, bob)
+	assert(outcome == .StaleEpoch, fmt.tprintf("expected epoch 4 refused, got %v", outcome))
+	outcome, _ = roomKeysTestStore(conn, plain, alice, 2, chain, {carol}, forward, bob)
+	assert(outcome == .NotEncrypted, fmt.tprintf("expected the plain room refused, got %v",
+		outcome))
+	// Forwards are only rows of the Full history room.
+	counts := databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT count(*) FILTER (WHERE room_id = %d) || '/' || count(*) " +
+			"FROM room_key_envelopes WHERE forwarder_user_id IS NOT NULL " +
+			"AND room_id IN (%d, %d, %d)",
+			full,
+			full,
+			fromJoin,
+			plain,
+		),
+	)
+	assert(counts == "2/2", fmt.tprintf("expected 2 forwards, both in the Full room: %q", counts))
+
+	// carol fetches the forward with its forwarder; bob still sees only the distribution.
+	got := roomKeysTestFetch(conn, carol, full)
+	expected := fmt.tprintf("%d:2:%d:f%d", forwardID, alice, bob)
+	assert(got == expected, fmt.tprintf("expected carol's %q, got %q", expected, got))
+	got = roomKeysTestFetch(conn, bob, full)
+	assert(!strings.contains(got, ":f"), fmt.tprintf("expected no forward for bob, got %q", got))
+
+	// Key requests: in the Full room every member but the requester is asked, even after the
+	// sender left; in the From join room only the sender, who must still be a member.
+	allowed, fullHistory, members := roomKeysTestRequestCheck(conn, carol, full, 2, alice, chain)
+	expectedMembers := fmt.tprintf("%d,%d,%d", alice, bob, dave)
+	assert(
+		allowed && fullHistory && members == expectedMembers,
+		fmt.tprintf("expected %q asked in the Full room, got %v %v %q",
+			expectedMembers, allowed, fullHistory, members),
+	)
+	allowed, fullHistory, members = roomKeysTestRequestCheck(
+		conn,
+		carol,
+		fromJoin,
+		2,
+		alice,
+		chain,
+	)
+	assert(allowed && !fullHistory && members == "", "expected only the sender in From join")
+	for room in ([]int{full, fromJoin}) {
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"DELETE FROM room_members WHERE room_id = %d AND user_id = %d " +
+				"RETURNING user_id::text",
+				room,
+				alice,
+			),
+		)
+	}
+	allowed, fullHistory, members = roomKeysTestRequestCheck(conn, carol, full, 2, alice, chain)
+	expectedMembers = fmt.tprintf("%d,%d", bob, dave)
+	assert(
+		allowed && fullHistory && members == expectedMembers,
+		fmt.tprintf("expected the others asked after alice left, got %q", members),
+	)
+	allowed, _, _ = roomKeysTestRequestCheck(conn, carol, fromJoin, 2, alice, chain)
+	assert(!allowed, "expected a From join request refused once the sender left")
+	allowed, _, members = roomKeysTestRequestCheck(conn, erin, full, 2, alice, chain)
+	assert(!allowed && members == "", "expected erin, not a member, refused")
+}
+
+@(test)
+testRoomKeyForwardsMigrationUpgradesVersion8AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen("room_keys_v8")
+	defer databaseMigrationTestClose(conn, schema)
+
+	// A database a version 8 server migrated and used, with one stored distribution.
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:8])
+	databaseDefaultRoomTestExec(conn, "fill version 8 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+	databaseDefaultRoomTestExec(
+		conn,
+		"an encrypted room with an envelope",
+		"UPDATE rooms SET access = 3, history_visibility = 2, encrypted = true, " +
+		"log_version = 1 WHERE id = 2; " +
+		"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+		"recipient_user_ids, envelope) VALUES (2, 1, 1, " +
+		"'\\x00112233445566778899aabbccddeeff', '{1,2}', '\\x01')",
+	)
+	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:9])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 8, version = 9},
+		fmt.tprintf("expected only migration 9 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:9])
+	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	assert(
+		after == before,
+		fmt.tprintf("expected every row intact:\nbefore %q\nafter  %q", before, after),
+	)
+	kept := databaseMigrationTestValue(
+		conn,
+		"SELECT count(*)::text FROM room_key_envelopes WHERE forwarder_user_id IS NULL",
+	)
+	assert(kept == "1", fmt.tprintf("expected the old envelope kept as a SenderKey, got %q", kept))
+	// The check holds: a forwarder is positive and not the sender, with one recipient.
+	probes := [?]string {
+		"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+		"recipient_user_ids, envelope, forwarder_user_id) VALUES (2, 1, 1, " +
+		"'\\x00112233445566778899aabbccddeeff', '{2}', '\\x01', 1)",
+		"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+		"recipient_user_ids, envelope, forwarder_user_id) VALUES (2, 1, 1, " +
+		"'\\x00112233445566778899aabbccddeeff', '{2,3}', '\\x01', 2)",
+		"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+		"recipient_user_ids, envelope, forwarder_user_id) VALUES (2, 1, 1, " +
+		"'\\x00112233445566778899aabbccddeeff', '{2}', '\\x01', 0)",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the check to refuse %q", probe))
+	}
+	accepted := databaseMigrationTestValue(
+		conn,
+		"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+		"recipient_user_ids, envelope, forwarder_user_id) VALUES (2, 1, 1, " +
+		"'\\x00112233445566778899aabbccddeeff', '{3}', '\\x01', 2) RETURNING 'stored'",
+	)
+	assert(accepted == "stored", "expected a forward with one recipient accepted")
+}
+
+@(test)
+testRoomKeyForwardsMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[8]
+	assert(
+		migration.version == 9 && migration.name == "room key forwards",
+		fmt.tprintf("expected migration 9 to be the room key forwards, got %v", migration),
+	)
+	assert(
+		strings.contains(migration.sql, "ADD COLUMN forwarder_user_id BIGINT NULL") &&
+		strings.contains(migration.sql, "room_key_envelopes_forward_check"),
+		"expected migration 9 to add the forwarder column and its check",
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN"),
+		"expected migration 9 to drop no table or column",
 	)
 }

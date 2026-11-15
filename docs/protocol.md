@@ -24,7 +24,9 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   clients mark it "Unencrypted". Since protocol 19 every message in an encrypted room is
   end-to-end encrypted with its sender's chain key, which only the members the room's signed
   member list names receive ([below](#sender-chains-in-encrypted-rooms-protocol-19)); the
-  server stores sealed bytes only. Unencrypted rooms (every Public room, and invite rooms
+  server stores sealed bytes only; since protocol 20 members of a Full history encrypted room
+  hand the older keys to a new member ([below](#full-history-in-encrypted-rooms-protocol-20)).
+  Unencrypted rooms (every Public room, and invite rooms
   created without **Encrypt this room**) are not end-to-end encrypted: the server decrypts
   their messages and stores them unencrypted in its PostgreSQL database, so the server and its
   operator can read them, and direct messages from before protocol 17. Voice is relayed and
@@ -55,6 +57,7 @@ version below therefore needs clients and servers rebuilt together.
 | 17 | Encrypted direct messages (end-to-end encryption, part 2): `ClientSealedDirectMessage`/`ServerSealedDirectMessage` (an envelope the sender sealed for itself and the recipient, carried byte for byte), the envelope, client message ID and signature fields of `StoredDirectMessage` and `DirectConversationSummary`, and the signed plaintext fallback (`ClientDirectMessage` now needs `clientMessageId` and `signature`; unsigned messages are refused), with schema migration 6 |
 | 18 | Encrypted rooms and their signed member log (end-to-end encryption, part 3a): `ClientAppendRoomLog`, `ClientFetchRoomLog`, `ServerRoomLog`, `RoomSummary.encrypted`/`logVersion`, `ClientCreateRoomPayload.encrypted` and `ClientEditRoomPayload.encrypted`, with schema migration 7 (`rooms.encrypted`, `rooms.log_version`, `room_log_entries`, `room_log_managers`). Encrypted rooms take no message and no voice yet |
 | 19 | Sender chains in encrypted rooms (end-to-end encryption, part 3b): sealed room messages (`ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `clientMessageId` and `sealed`), `ClientRoomKeyEnvelope`/`ServerRoomKeyEnvelope`, `ClientFetchRoomKeys`/`ServerRoomKeys`, `ClientRequestRoomKey`/`ServerRoomKeyRequest`, with schema migration 8 (sealed `chat_messages` columns, `room_key_envelopes`). Plaintext in an encrypted room is refused |
+| 20 | Full history in encrypted rooms (end-to-end encryption, part 4): `RoomKeyForward` envelopes (`ClientRoomKeyEnvelopePayload.senderId` names the chain's sender, `RoomKeyEnvelope.forwarderId` the forwarding account), `ServerRoomKeyRequest.senderId`, and key requests relayed to every member of a Full history room, with schema migration 9 (`room_key_envelopes.forwarder_user_id`) |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -186,9 +189,8 @@ readable in one. Voice joins are refused ("voice is not available in encrypted r
 ## Sender chains in encrypted rooms (protocol 19)
 
 The third part of end-to-end encryption, second half ([plan/e2ee-design.md](plan/e2ee-design.md),
-sections 6.3 to 6.6): the messages of encrypted rooms. Full history for new members (6.6,
-forwarding older chains) is a later part; a Full history encrypted room behaves like a From
-join one for now.
+sections 6.3 to 6.6): the messages of encrypted rooms. Full history for new members came with
+protocol 20 ([below](#full-history-in-encrypted-rooms-protocol-20)).
 
 - **Chains.** Each member that sends in an epoch (the member log's version) has a sender chain:
   a random 32-byte chain key and a 16-byte chain ID. Message `i` is sealed with the key derived
@@ -231,13 +233,51 @@ join one for now.
   into `room_members` behind the log gives that account the history's sealed bytes but no key
   to open them.
 
+## Full history in encrypted rooms (protocol 20)
+
+The fourth part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design.md), section
+6.6). In an encrypted room created with **Full history**, a new member reads the messages from
+before they joined; members' clients hand them the older chains. A From join encrypted room
+never does any of this.
+
+- **Who decides.** Every client decides from the history setting its *verified* member log
+  names (the `Create` entry fixes it), never from the server's room list. The server enforces
+  its own copy (`rooms.history_visibility`) on top.
+- **Forwards.** A member hands a chain it holds (its own or another member's) to one other
+  member as a `RoomKeyForward` envelope: the same plaintext as a distribution (the chain key at
+  the index the forwarder holds it from), exactly one wrap for the recipient's pinned encryption
+  key, signed by the forwarder, under its own AAD (`"haychat-room-key-forward-v1"`, this server,
+  the room, the epoch, the chain's original sender, the chain ID, the forwarder and the
+  recipient). A member re-seals its own chain as an ordinary `SenderKey` envelope instead. It is
+  sent as `ClientRoomKeyEnvelope` with `senderId` set to the chain's sender; the server checks
+  the structure and the forwarder's signature, then stores it only in a Full history encrypted
+  room, from a member to a member, for a chain it already stores (any epoch), and drops it
+  without an answer when the recipient already has a wrap for that chain, so the first copy
+  wins. A forward elsewhere is refused with "This room does not share its history with new
+  members". Stored forwards carry `forwarderId` in `ServerRoomKeyEnvelope` and
+  `ServerRoomKeys`, and a lost key store fetches them again like any envelope.
+- **When.** The client that signs an `Add` forwards every chain it holds from before the
+  addition right after the server confirms it, one envelope per chain. For the rest (the
+  inviter may have joined later itself, or be a manager who is not a member and holds
+  nothing), the newcomer asks: in a Full history room the server relays `ClientRequestRoomKey`
+  to every online member, not only the chain's sender (`ServerRoomKeyRequest.senderId` names
+  the chain), and any member whose verified log shows the requester as a current member and
+  the sender as a member of that epoch answers with what it holds. The requests go out again
+  when another member of the room comes online. A chain that no online member holds stays
+  "Waiting for this message's key".
+- **Checks on the newcomer's side.** A forward is accepted only in a Full history room, from a
+  forwarder who was a member at the same time as the recipient, for a chain whose sender was a
+  member of its epoch, and only when its signature verifies against the forwarder's pin (or the
+  identity the log names). Messages are still verified against their real senders' keys, so a
+  forwarder can give access to history but never forge a message in it.
+
 ## End-to-end encryption primitives
 
 `common/e2ee.odin` holds the building blocks of the end-to-end encryption design
 ([plan/e2ee-design.md](plan/e2ee-design.md)). Protocol 16 uses the encryption key bundle and
 safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback,
-protocol 18 the member log, and protocol 19 the sender chains, their distributions and sealed
-room messages.
+protocol 18 the member log, protocol 19 the sender chains, their distributions and sealed
+room messages, and protocol 20 the forwarded chains of Full history rooms.
 
 - **What is there.** The signed encryption key bundle (X25519 key, signed by the identity key),
   sealed envelopes (one random message key wrapped per recipient, the body sealed with

@@ -55,8 +55,8 @@ import "core:unicode/utf8"
 //   wrapKey_R = HKDF-SHA256(ikm = ss_R, salt = ephemeralKey || R.encryptionPublicKey,
 //                           info = "haychat-e2ee-wrap-v1" || kind (1) || AAD), 32 bytes
 //
-//   The AAD is not carried; both sides rebuild it (makeDirectMessageAAD, makeRoomKeyAAD) and it
-//   is at most E2EE_AAD_MAX_BYTES.
+//   The AAD is not carried; both sides rebuild it (makeDirectMessageAAD, makeRoomKeyAAD,
+//   makeRoomKeyForwardAAD) and it is at most E2EE_AAD_MAX_BYTES.
 //
 // SealedDirectMessagePlaintext (design 4.4): CBOR map {"content": text}, content 1..
 //   CHAT_MESSAGE_MAX_BYTES bytes of UTF-8. encodeSealedDirectMessagePlaintext writes the one
@@ -73,6 +73,13 @@ import "core:unicode/utf8"
 //   17  16  chainId
 //   33  4   startIndex u32 (< SENDER_CHAIN_MAX_MESSAGES): the index chainKey belongs to
 //   37  32  chainKey
+//
+//   The same plaintext travels in a RoomKeyForward envelope (design 6.6, Full history rooms):
+//   one member forwards a chain it holds, its own or another member's, to one newcomer. The
+//   envelope has exactly one wrap, for the recipient, is signed by the forwarder, and is sealed
+//   under makeRoomKeyForwardAAD, which names the chain's original sender, the forwarder and the
+//   recipient. Messages of the chain are still signed by the original sender, so a forwarder
+//   can give access to a chain but never forge a message in it.
 //
 // SealedRoomMessage, version 1 (design 6.5). At most SEALED_ROOM_MESSAGE_MAX_BYTES in total.
 //
@@ -156,6 +163,8 @@ ENVELOPE_WRAP_INFO :: "haychat-e2ee-wrap-v1"
 DIRECT_MESSAGE_AAD_DOMAIN :: "haychat-dm-v1"
 PLAINTEXT_DIRECT_MESSAGE_DOMAIN :: "haychat-dm-plain-v1"
 ROOM_KEY_AAD_DOMAIN :: "haychat-room-key-v1"
+// Its own label (E0's note): no AAD label is a prefix of another.
+ROOM_KEY_FORWARD_AAD_DOMAIN :: "haychat-room-key-forward-v1"
 ROOM_MESSAGE_AAD_DOMAIN :: "haychat-room-v1"
 ROOM_MESSAGE_SIGNATURE_DOMAIN :: "haychat-room-message-v1"
 ROOM_LOG_SIGNATURE_DOMAIN :: "haychat-room-log-v1"
@@ -202,6 +211,9 @@ E2EEError :: enum u8 {
 	BadPadding,
 	BadPlaintext, // the opened plaintext is not the expected structure
 	MismatchedKeyDistribution, // a SenderKey plaintext names another room, epoch or chain
+	// Appended (protocol 20): a RoomKeyForward's forwarder is not positive or is the chain's
+	// sender (who re-seals its own chain as a SenderKey envelope).
+	BadForwarderUserID,
 }
 
 EnvelopeKind :: enum u8 {
@@ -438,6 +450,40 @@ makeRoomKeyAAD :: proc(fields: RoomKeyAADFields) -> RoomKeyAAD {
 	e2eeWriteInt(&writer, fields.epoch)
 	e2eeWriteInt(&writer, fields.senderUserID)
 	e2eeWriteBytes(&writer, fields.chainID[:])
+	return aad
+}
+
+ROOM_KEY_FORWARD_AAD_SIZE :: len(ROOM_KEY_FORWARD_AAD_DOMAIN) + AUTH_IDENTITY_PUBLIC_KEY_SIZE +
+	8 + 8 + 8 + CHAIN_ID_SIZE + 8 + 8
+RoomKeyForwardAAD :: [ROOM_KEY_FORWARD_AAD_SIZE]u8
+
+// The fields of a RoomKeyForward envelope's AAD (design 6.6): which chain (room, epoch, its
+// original sender, chain ID), who forwards it, and to whom.
+RoomKeyForwardAADFields :: struct {
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	roomID:                  int,
+	epoch:                   int,
+	senderUserID:            int, // the chain's original sender, who signs its messages
+	chainID:                 ChainID,
+	forwarderUserID:         int, // the member who seals and signs the forward
+	recipientUserID:         int, // the newcomer, the envelope's only wrap
+}
+
+// "haychat-room-key-forward-v1" || serverIdentityPublicKey (32) || roomId (i64) || epoch (i64)
+// || senderUserId (i64) || chainId (16) || forwarderUserId (i64) || recipientUserId (i64):
+// 115 bytes.
+makeRoomKeyForwardAAD :: proc(fields: RoomKeyForwardAADFields) -> RoomKeyForwardAAD {
+	fields := fields
+	aad: RoomKeyForwardAAD
+	writer := e2eeWriter(aad[:])
+	e2eeWriteString(&writer, ROOM_KEY_FORWARD_AAD_DOMAIN)
+	e2eeWriteBytes(&writer, fields.serverIdentityPublicKey[:])
+	e2eeWriteInt(&writer, fields.roomID)
+	e2eeWriteInt(&writer, fields.epoch)
+	e2eeWriteInt(&writer, fields.senderUserID)
+	e2eeWriteBytes(&writer, fields.chainID[:])
+	e2eeWriteInt(&writer, fields.forwarderUserID)
+	e2eeWriteInt(&writer, fields.recipientUserID)
 	return aad
 }
 
@@ -1427,6 +1473,111 @@ openSenderKeyDistribution :: proc(
 		aad[:],
 		senderIdentityPublicKey,
 		ownUserID,
+		ownKeyPair,
+		buffer[:],
+	) or_return
+	distribution, err = decodeSenderKeyDistribution(opened)
+	if err != .None {
+		return {}, .BadPlaintext
+	}
+	if distribution.roomID != aadFields.roomID ||
+	   distribution.epoch != aadFields.epoch ||
+	   distribution.chainID != aadFields.chainID {
+		crypto.zero_explicit(&distribution, size_of(distribution))
+		return {}, .MismatchedKeyDistribution
+	}
+	return distribution, .None
+}
+
+// ---------------------------------------------------------------------------------------------
+// Forwarded chains (design 6.6, Full history rooms).
+
+// Seals a chain the forwarder holds (startIndex and the chain key there, as the forwarder
+// received it) to one recipient as a RoomKeyForward envelope, signed by the forwarder. The
+// plaintext is the SenderKeyDistribution layout and names the AAD's room, epoch and chain.
+// The forwarder is never the chain's sender: a sender re-seals its own chain as SenderKey.
+sealRoomKeyForward :: proc(
+	aadFields: RoomKeyForwardAADFields,
+	startIndex: u32,
+	chainKey: ChainKey,
+	recipientEncryptionPublicKey: EncryptionPublicKeyBytes,
+	forwarderIdentityPrivateKey: IdentityPrivateKeyBytes,
+	dst: []u8,
+) -> (
+	n: int,
+	err: E2EEError,
+) {
+	checkRoomKeyForwardFields(aadFields) or_return
+	plaintext: [SENDER_KEY_DISTRIBUTION_SIZE]u8
+	defer crypto.zero_explicit(&plaintext, size_of(plaintext))
+	encodeSenderKeyDistribution(
+		SenderKeyDistribution {
+			roomID = aadFields.roomID,
+			epoch = aadFields.epoch,
+			chainID = aadFields.chainID,
+			startIndex = startIndex,
+			chainKey = chainKey,
+		},
+		plaintext[:],
+	) or_return
+	aad := makeRoomKeyForwardAAD(aadFields)
+	recipients := [1]EnvelopeRecipient {
+		{userID = aadFields.recipientUserID, encryptionPublicKey = recipientEncryptionPublicKey},
+	}
+	return sealEnvelope(
+		.RoomKeyForward,
+		aad[:],
+		plaintext[:],
+		recipients[:],
+		forwarderIdentityPrivateKey,
+		dst,
+	)
+}
+
+// Checks a decoded RoomKeyForward envelope without opening it, as the server does: the kind,
+// exactly one wrap and that it names aadFields.recipientUserID, the fields, and the signature
+// against the forwarder's identity key over the forward AAD.
+verifyRoomKeyForwardEnvelope :: proc(
+	envelope: SealedEnvelope,
+	aadFields: RoomKeyForwardAADFields,
+	forwarderIdentityPublicKey: IdentityPublicKeyBytes,
+) -> E2EEError {
+	checkRoomKeyForwardFields(aadFields) or_return
+	aad := makeRoomKeyForwardAAD(aadFields)
+	verifySealedEnvelopeSignature(envelope, aad[:], forwarderIdentityPublicKey) or_return
+	if envelope.kind != .RoomKeyForward {
+		return .WrongKind
+	}
+	if envelope.wrapCount != 1 ||
+	   envelopeWrapUserID(envelope.wraps, 0) != aadFields.recipientUserID {
+		return .WrongRecipients
+	}
+	return .None
+}
+
+// Opens a RoomKeyForward envelope for aadFields.recipientUserID (this profile) with its key
+// pair. Order: structure, the signature against the forwarder's pinned identity key, the kind,
+// the single wrap, the body, and that the plaintext names the AAD's room, epoch and chain. The
+// caller also checks, in its verified log, that the room has Full history, that the original
+// sender was a member of the epoch, and that the forwarder may forward to it.
+openRoomKeyForward :: proc(
+	data: []u8,
+	aadFields: RoomKeyForwardAADFields,
+	forwarderIdentityPublicKey: IdentityPublicKeyBytes,
+	ownKeyPair: EncryptionKeyPair,
+) -> (
+	distribution: SenderKeyDistribution,
+	err: E2EEError,
+) {
+	envelope := decodeSealedEnvelope(data) or_return
+	verifyRoomKeyForwardEnvelope(envelope, aadFields, forwarderIdentityPublicKey) or_return
+	aad := makeRoomKeyForwardAAD(aadFields)
+	buffer: [SEALED_ENVELOPE_MAX_BYTES]u8
+	defer crypto.zero_explicit(&buffer, size_of(buffer))
+	opened := openVerifiedEnvelope(
+		envelope,
+		aad[:],
+		aadFields.recipientUserID,
 		ownKeyPair,
 		buffer[:],
 	) or_return
@@ -2444,6 +2595,29 @@ checkSenderKeyDistribution :: proc(distribution: SenderKeyDistribution) -> E2EEE
 	}
 	if distribution.startIndex >= SENDER_CHAIN_MAX_MESSAGES {
 		return .BadIndex
+	}
+	return .None
+}
+
+@(private = "file")
+checkRoomKeyForwardFields :: proc(fields: RoomKeyForwardAADFields) -> E2EEError {
+	if fields.roomID <= 0 {
+		return .BadRoomID
+	}
+	if fields.epoch <= 0 {
+		return .BadEpoch
+	}
+	if fields.senderUserID <= 0 {
+		return .BadSenderUserID
+	}
+	if fields.forwarderUserID <= 0 || fields.forwarderUserID == fields.senderUserID {
+		return .BadForwarderUserID
+	}
+	if fields.recipientUserID <= 0 {
+		return .BadRecipientUserID
+	}
+	if fields.recipientUserID == fields.forwarderUserID {
+		return .DuplicateRecipient
 	}
 	return .None
 }

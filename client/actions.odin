@@ -576,6 +576,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.serverID,
 			event.roomID,
 			event.roomKeyEpoch,
+			event.senderID,
 			event.peerUserID,
 			event.roomKeyChainID,
 		)
@@ -632,7 +633,12 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .DirectConversationsReceived:
 		State_receiveDirectConversations(state, event.serverID, &event.conversations)
 	case .UserPresenceChanged:
+		userID, online := event.user.id, event.user.isOnline
 		State_userPresenceChanged(state, event.serverID, &event.user)
+		if online {
+			// A member who may hold chains this session waits for (Full history rooms).
+			State_roomChainsPeerOnline(state, event.serverID, userID)
+		}
 	case .ReadMarkerReceived:
 		State_receiveReadMarker(state, event.serverID, event.readMarker)
 	case .VoiceParticipants:

@@ -9,7 +9,8 @@ import "core:time"
 
 // Sender chains in encrypted rooms (protocol 19, e2ee-design.md 6.3-6.6, 7.2, 7.3): sealed room
 // messages, the SenderKey distributions that carry each chain to the room's members, fetching
-// them again, and key requests.
+// them again, and key requests. Protocol 20 (design 6.6): Full history rooms forward older
+// chains to new members as RoomKeyForward envelopes.
 //
 // Rules:
 //
@@ -41,9 +42,22 @@ import "core:time"
 //   then asks the sender (ClientRequestRoomKey). Every other failure is final, shown ("This
 //   message could not be decrypted"), and never retried with other keys. A later message with
 //   the same sender and client message ID, or the same chain index, is a replay.
-// - A key request is answered only by the chain's sender, only for its own chain, and only when
-//   the requester was a member of that epoch in the verified log: From join rooms never give
-//   anyone a chain from before they joined. (Full history forwarding is E5.)
+// - From join rooms: a key request is answered only by the chain's sender, only for its own
+//   chain, and only when the requester was a member of that epoch in the verified log, so
+//   nobody gets a chain from before they joined. Forwards are never sent, and never accepted.
+// - Full history rooms (the VERIFIED log's historyVisibility decides, never the server's
+//   flag): the member who signs an Add forwards every chain it holds from before the addition
+//   to the newcomer right after the Add verifies (State_roomChainsForwardHistory), one
+//   envelope per chain; and any member answers a key request (the server relays it to every
+//   member) for any chain it holds, when the requester is a current member of its verified log.
+//   Its own chain goes as a SenderKey re-seal, anyone else's as a RoomKeyForward (one wrap, the
+//   requester's pinned key, which must be the identity the log names). The server keeps the
+//   first copy per chain and recipient. A forward is accepted only in a Full history room,
+//   from a forwarder who was a member at the same time as this account, for a chain whose
+//   sender was a member of its epoch, signed by the forwarder (its pin, else the log's
+//   identity). Messages still verify against their real senders, so a forwarder can give
+//   access but never forge. A chain no online member holds keeps waiting; the requests go out
+//   again when a member of the room comes online.
 // - Plaintext is never logged, and wiped from memory when it is freed.
 
 ROOM_WAITING_FOR_KEY_FORMAT :: "Waiting for this message's key from %s"
@@ -116,8 +130,11 @@ RoomChainRef :: struct {
 	chainID:      common.ChainID,
 }
 
+// A chain to seal to one requester: an answer to a key request, or (Full history) one chain
+// the inviter forwards to a newcomer. senderUserID is the chain's sender.
 RoomChainAnswer :: struct {
 	epoch:           int,
+	senderUserID:    int,
 	chainID:         common.ChainID,
 	requesterUserID: int,
 }
@@ -263,6 +280,9 @@ RoomChainKeyOutcome :: enum u8 {
 	NotMember, // The sender was not a member of the epoch
 	Failed, // Did not open (error)
 	Refused, // A key request that is not answered
+	// Protocol 20.
+	NotAllowed, // A forward in a room without Full history, or from a forwarder who may not
+	NotHeld, // A key request (Full history) for a chain this profile does not hold
 }
 
 RoomChainNote :: struct {
@@ -275,6 +295,8 @@ RoomChainNote :: struct {
 	peerID:    int, // Answered: the requester
 	outcome:   RoomChainKeyOutcome,
 	error:     common.E2EEError,
+	// Key: the envelope's forwarder; Answered: this account when it forwarded (0: SenderKey).
+	forwarderID: int,
 }
 
 @(private = "file")
@@ -297,7 +319,9 @@ RoomChainRequest :: struct {
 	kind:            RoomChainRequestKind,
 	roomID:          int,
 	epoch:           int,
-	senderUserID:    int, // RequestKey: the chain's sender
+	// RequestKey: the chain's sender. KeyEnvelope: the chain's sender of a RoomKeyForward (0
+	// for this account's own SenderKey envelope).
+	senderUserID:    int,
 	afterID:         int, // FetchKeys
 	clientMessageID: common.ClientMessageID, // SealedMessage
 	chainID:         common.ChainID, // KeyEnvelope, RequestKey
@@ -336,6 +360,7 @@ ClientServerTransport_sendRoomChainRequest :: proc(
 				epoch = request.epoch,
 				chainId = request.chainID,
 				envelope = request.bytes,
+				senderId = request.senderUserID,
 			},
 		)
 	case .FetchKeys:
@@ -847,15 +872,31 @@ State_roomChainsTakeEnvelope :: proc(
 	); found {
 		return .Duplicate, .None
 	}
+	forward := envelope.forwarderId != 0
+	if forward &&
+	   (log.state.historyVisibility != .Full ||
+			   envelope.forwarderId <= 0 ||
+			   envelope.forwarderId == envelope.senderId ||
+			   !roomLogMembershipsOverlap(
+				   log.memberships[:],
+				   envelope.forwarderId,
+				   keys.ownUserID,
+			   )) {
+		// From join rooms never take forwards; in Full history rooms only from someone who was
+		// a member while this account was.
+		return .NotAllowed, .None
+	}
 	if !roomLogMembershipsInclude(log.memberships[:], envelope.senderId, envelope.epoch) {
 		return .NotMember, .None
 	}
-	senderIdentity, identityOK := State_roomChainIdentityFor(
+	// Signed by the chain's sender, or (a forward) by the forwarder.
+	signerID := forward ? envelope.forwarderId : envelope.senderId
+	signerIdentity, identityOK := State_roomChainIdentityFor(
 		state,
 		serverID,
 		roomID,
 		keys,
-		envelope.senderId,
+		signerID,
 	)
 	if !identityOK {
 		return .NotMember, .None
@@ -863,19 +904,38 @@ State_roomChainsTakeEnvelope :: proc(
 	if !keys.hasOwnKeyPair {
 		return .Failed, .NoWrapForRecipient
 	}
-	distribution, err := common.openSenderKeyDistribution(
-		envelope.envelope,
-		common.RoomKeyAADFields {
-			serverIdentityPublicKey = keys.serverIdentityPublicKey,
-			roomID = roomID,
-			epoch = envelope.epoch,
-			senderUserID = envelope.senderId,
-			chainID = envelope.chainId,
-		},
-		senderIdentity,
-		keys.ownUserID,
-		keys.ownKeyPair,
-	)
+	distribution: common.SenderKeyDistribution
+	err: common.E2EEError
+	if forward {
+		distribution, err = common.openRoomKeyForward(
+			envelope.envelope,
+			common.RoomKeyForwardAADFields {
+				serverIdentityPublicKey = keys.serverIdentityPublicKey,
+				roomID = roomID,
+				epoch = envelope.epoch,
+				senderUserID = envelope.senderId,
+				chainID = envelope.chainId,
+				forwarderUserID = envelope.forwarderId,
+				recipientUserID = keys.ownUserID,
+			},
+			signerIdentity,
+			keys.ownKeyPair,
+		)
+	} else {
+		distribution, err = common.openSenderKeyDistribution(
+			envelope.envelope,
+			common.RoomKeyAADFields {
+				serverIdentityPublicKey = keys.serverIdentityPublicKey,
+				roomID = roomID,
+				epoch = envelope.epoch,
+				senderUserID = envelope.senderId,
+				chainID = envelope.chainId,
+			},
+			signerIdentity,
+			keys.ownUserID,
+			keys.ownKeyPair,
+		)
+	}
 	defer crypto.zero_explicit(&distribution, size_of(distribution))
 	if err == .NoWrapForRecipient {
 		return .NotForMe, .None
@@ -946,7 +1006,8 @@ State_roomChainsTakeEnvelopes :: proc(
 	for &envelope in envelopes {
 		roomID := envelope.roomId
 		ref := RoomChainRef{envelope.epoch, envelope.senderId, envelope.chainId}
-		if envelope.senderId == keys.ownUserID {
+		forwarderID := envelope.forwarderId
+		if envelope.senderId == keys.ownUserID && forwarderID == 0 {
 			// The server's echo of this session's distribution: the chain may be used.
 			if room := State_findRoomChains(state, serverID, roomID);
 			   room != nil &&
@@ -968,6 +1029,7 @@ State_roomChainsTakeEnvelopes :: proc(
 				ref = ref,
 				outcome = outcome,
 				error = openErr,
+				forwarderID = forwarderID,
 			},
 		)
 		if !slice.contains(rooms[:], roomID) {
@@ -1003,12 +1065,13 @@ State_roomChainsLogChanged :: proc(state: ^State, serverID, roomID: int) {
 
 // ── Answering key requests ───────────────────────────────────────
 
-// ServerRoomKeyRequest: requesterUserID met a message of this account's chain chainID in
-// epoch without its key. Re-sealed (to the requester only) when that chain is this account's
-// and the verified log shows the requester as a member of that epoch.
+// ServerRoomKeyRequest: requesterUserID met a message of senderUserID's chain chainID in epoch
+// without its key. From join rooms: re-sealed (to the requester only) when that chain is this
+// account's and the verified log shows the requester as a member of that epoch. Full history
+// rooms (protocol 20): any chain this profile holds, to a current member (State_roomChainsAnswer).
 State_receiveRoomKeyRequest :: proc(
 	state: ^State,
-	serverID, roomID, epoch, requesterUserID: int,
+	serverID, roomID, epoch, senderUserID, requesterUserID: int,
 	chainID: common.ChainID,
 ) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
@@ -1018,10 +1081,97 @@ State_receiveRoomKeyRequest :: proc(
 		state,
 		serverID,
 		roomID,
-		RoomChainAnswer{epoch = epoch, chainID = chainID, requesterUserID = requesterUserID},
+		RoomChainAnswer {
+			epoch = epoch,
+			senderUserID = senderUserID,
+			chainID = chainID,
+			requesterUserID = requesterUserID,
+		},
 	)
 }
 
+// Full history (design 6.6): this account signed the Add of newcomerUserID, which made
+// joinedEpoch. Every chain this profile holds from before it is sealed to the newcomer, one
+// envelope per chain (its own as SenderKey, the others as RoomKeyForward). Nothing happens in a
+// From join room, or when the newcomer is no longer a member.
+State_roomChainsForwardHistory :: proc(
+	state: ^State,
+	serverID, roomID, newcomerUserID, joinedEpoch: int,
+) {
+	log := State_findRoomLog(state, serverID, roomID)
+	if log == nil ||
+	   log.status != .Verified ||
+	   log.state.historyVisibility != .Full ||
+	   !common.RoomLogState_isMember(log.state, newcomerUserID) ||
+	   newcomerUserID == State_selfUserID(state, serverID) {
+		return
+	}
+	store := State_roomChainStore(state, serverID)
+	if store == nil {
+		return
+	}
+	refs := make([dynamic]RoomChainRef, 0, 8)
+	defer delete(refs)
+	for chain in store.roomChains {
+		if chain.roomID == roomID && chain.epoch < joinedEpoch {
+			append(&refs, RoomChainRef{chain.epoch, chain.senderUserID, chain.chainID})
+		}
+	}
+	slice.sort_by(refs[:], proc(a, b: RoomChainRef) -> bool {
+		if a.epoch != b.epoch {
+			return a.epoch < b.epoch
+		}
+		return a.senderUserID < b.senderUserID
+	})
+	for ref in refs {
+		State_roomChainsAnswer(
+			state,
+			serverID,
+			roomID,
+			RoomChainAnswer {
+				epoch = ref.epoch,
+				senderUserID = ref.senderUserID,
+				chainID = ref.chainID,
+				requesterUserID = newcomerUserID,
+			},
+		)
+	}
+}
+
+// A member of serverID's Full history rooms came online (presence): the chains this session
+// still waits for are asked for again, since that member may hold them.
+State_roomChainsPeerOnline :: proc(state: ^State, serverID, userID: int) {
+	if userID <= 0 || userID == State_selfUserID(state, serverID) {
+		return
+	}
+	rooms := make([dynamic]int, 0, 4)
+	defer delete(rooms)
+	for &chains in state.roomChains {
+		if chains.serverID != serverID {
+			continue
+		}
+		for &room in chains.rooms {
+			if len(room.requested) == 0 {
+				continue
+			}
+			log := State_findRoomLog(state, serverID, room.roomID)
+			if log == nil ||
+			   log.status != .Verified ||
+			   log.state.historyVisibility != .Full ||
+			   !common.RoomLogState_isMember(log.state, userID) {
+				continue
+			}
+			clear(&room.requested)
+			append(&rooms, room.roomID)
+		}
+	}
+	for roomID in rooms {
+		State_roomChainsFollowUp(state, serverID, roomID)
+	}
+}
+
+// Seals answer's chain to its requester, or records why not. See the top of this file for
+// who may get what.
 @(private = "file")
 State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: RoomChainAnswer) {
 	selfUserID := State_selfUserID(state, serverID)
@@ -1029,7 +1179,7 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 		kind = .Answered,
 		serverID = serverID,
 		roomID = roomID,
-		ref = {answer.epoch, selfUserID, answer.chainID},
+		ref = {answer.epoch, answer.senderUserID, answer.chainID},
 		peerID = answer.requesterUserID,
 		outcome = .Refused,
 	}
@@ -1045,15 +1195,42 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 	   log == nil ||
 	   log.status != .Verified ||
 	   answer.requesterUserID == selfUserID ||
-	   !roomLogMembershipsInclude(log.memberships[:], answer.requesterUserID, answer.epoch) {
+	   answer.senderUserID <= 0 {
 		State_roomChainNote(state, note)
 		return
 	}
-	chain, found := KeyStore_roomChain(store, roomID, answer.epoch, selfUserID, answer.chainID)
+	own := answer.senderUserID == selfUserID
+	allowed := false
+	if log.state.historyVisibility == .Full {
+		// Any chain whose sender was a member of its epoch, to any current member.
+		allowed =
+			common.RoomLogState_isMember(log.state, answer.requesterUserID) &&
+			roomLogMembershipsInclude(log.memberships[:], answer.senderUserID, answer.epoch)
+	} else {
+		// From join: only this account's own chain, to a member of that epoch.
+		allowed =
+			own &&
+			roomLogMembershipsInclude(log.memberships[:], answer.requesterUserID, answer.epoch)
+	}
+	if !allowed {
+		State_roomChainNote(state, note)
+		return
+	}
+	held, found := KeyStore_roomChain(
+		store,
+		roomID,
+		answer.epoch,
+		answer.senderUserID,
+		answer.chainID,
+	)
 	if !found {
+		note.outcome = .NotHeld
 		State_roomChainNote(state, note)
 		return
 	}
+	startIndex := held.startIndex
+	chainKey := held.chainKey
+	defer crypto.zero_explicit(&chainKey, size_of(chainKey))
 	info := State_e2eePeerKeyInfo(state, serverID, answer.requesterUserID)
 	if !info.canEncrypt {
 		if info.blockReason == .Pending {
@@ -1066,6 +1243,13 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 		State_roomChainNote(state, note)
 		return
 	}
+	// The pin must be the identity the verified log names for the requester.
+	log = State_findRoomLog(state, serverID, roomID)
+	if logIdentity, named := log.state.identities[answer.requesterUserID];
+	   !named || logIdentity != info.identityPublicKey {
+		State_roomChainNote(state, note)
+		return
+	}
 	identityPrivateKey, privateOK := common.identityPrivateKeyFromHex(state.config.private_key)
 	defer crypto.zero_explicit(&identityPrivateKey, size_of(identityPrivateKey))
 	e2ee, storeOK := State_e2eeEnsureStore(state, serverID)
@@ -1073,22 +1257,47 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 		State_roomChainNote(state, note)
 		return
 	}
-	recipients := [1]common.EnvelopeRecipient{{answer.requesterUserID, info.encryptionPublicKey}}
 	buffer: [common.SEALED_ENVELOPE_MAX_BYTES]u8
-	n, err := common.sealSenderKeyDistribution(
-		common.RoomKeyAADFields {
-			serverIdentityPublicKey = e2ee.store.serverPublicKey,
-			roomID = roomID,
-			epoch = answer.epoch,
-			senderUserID = selfUserID,
-			chainID = answer.chainID,
-		},
-		chain.startIndex,
-		chain.chainKey,
-		recipients[:],
-		identityPrivateKey,
-		buffer[:],
-	)
+	n: int
+	err: common.E2EEError
+	if own {
+		recipients := [1]common.EnvelopeRecipient {
+			{answer.requesterUserID, info.encryptionPublicKey},
+		}
+		n, err = common.sealSenderKeyDistribution(
+			common.RoomKeyAADFields {
+				serverIdentityPublicKey = e2ee.store.serverPublicKey,
+				roomID = roomID,
+				epoch = answer.epoch,
+				senderUserID = selfUserID,
+				chainID = answer.chainID,
+			},
+			startIndex,
+			chainKey,
+			recipients[:],
+			identityPrivateKey,
+			buffer[:],
+		)
+	} else {
+		n, err = common.sealRoomKeyForward(
+			common.RoomKeyForwardAADFields {
+				serverIdentityPublicKey = e2ee.store.serverPublicKey,
+				roomID = roomID,
+				epoch = answer.epoch,
+				senderUserID = answer.senderUserID,
+				chainID = answer.chainID,
+				forwarderUserID = selfUserID,
+				recipientUserID = answer.requesterUserID,
+			},
+			startIndex,
+			chainKey,
+			info.encryptionPublicKey,
+			identityPrivateKey,
+			buffer[:],
+		)
+		note.forwarderID = selfUserID
+	}
+	defer crypto.zero_explicit(&buffer, size_of(buffer))
 	if err != .None {
 		note.error = err
 		State_roomChainNote(state, note)
@@ -1101,6 +1310,7 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 			kind = .KeyEnvelope,
 			roomID = roomID,
 			epoch = answer.epoch,
+			senderUserID = own ? 0 : answer.senderUserID,
 			chainID = answer.chainID,
 			bytes = buffer[:n],
 		},

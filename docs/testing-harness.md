@@ -490,6 +490,12 @@ chain's distribution (`room_queue` with `state` `sent`). Room messages are print
 client opened them, with `encrypted`, `decryptError`, `epoch` and `protection`; one that waits
 for its key is printed when it opens (`room_chat` for a live one, `room_opened` for history).
 `room_key` and `room_key_request` show what happened to key envelopes and key requests, and
+(protocol 20, Full history rooms) carry `forwarderID`: on `room_key` the account that forwarded
+a `RoomKeyForward` envelope, on `room_key_request` this account when it forwarded one, 0 for a
+`SenderKey` envelope. `room_key_request` lines also print each chain an inviter forwards after
+its `room-add`, and `outcome` `not_held` when this profile does not hold the chain asked for;
+`room_key` has `not_allowed` for a forward the client refused (a From join room, or a
+forwarder who was never a member at the same time). And
 `room-keys ROOM_ID [fetch]` lists the chains a profile holds (never a key). `voice-join` is
 refused ("voice is not available in encrypted rooms yet").
 
@@ -500,7 +506,12 @@ non-member gets neither keys nor history, that a restart of the sender starts a 
 stored message at its own chain position), that no message text is in `chat_messages`, that a
 deleted key store is rebuilt from the server, that an account invited to a From join room reads
 only what follows, that a removed member gets no key for what follows, and that an account
-inserted into `room_members` by SQL opens nothing.
+inserted into `room_members` by SQL opens nothing. For Full history (protocol 20) ra and rb
+send in a Full history room, rb sends again from a new run while ra is offline (a chain ra
+never holds), ra invites rc and forwards the two chains she holds, rc reads all three messages
+(rb's newest chain re-sealed by rb on request, ra answering `not_held`), then with rb offline ra
+invites re and rc forwards rb's chain to re on request; SQL finds forward envelopes only in the
+Full history room.
 
 ## Read State
 

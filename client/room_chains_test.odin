@@ -10,8 +10,10 @@ import "core:testing"
 // 6.3-6.6, 12.3): alice and bob share an encrypted room whose log both verified; alice's first
 // message waits for her chain's distribution, bob opens it from the distribution, a stale
 // epoch sends again with a new chain, a missing chain is fetched and then requested, the sender
-// answers only members of that epoch, and every failure is final. The bridge records what each
-// state sent; the test plays the server.
+// answers only members of that epoch, and every failure is final. Protocol 20 (Full history,
+// design 6.6): the inviter forwards what it holds, other members answer key requests, a
+// forward is checked against the forwarder and the log, and From join rooms never forward.
+// The bridge records what each state sent; the test plays the server.
 
 ROOM_CHAIN_TEST_SERVER :: 975
 ROOM_CHAIN_TEST_ALICE :: 51
@@ -180,7 +182,11 @@ roomChainTestName :: proc(userID: int) -> string {
 }
 
 @(private = "file")
-roomChainTestListRoom :: proc(state: ^State, logVersion: int) {
+roomChainTestListRoom :: proc(
+	state: ^State,
+	logVersion: int,
+	history := common.RoomHistoryVisibility.FromJoin,
+) {
 	event := ClientTransportRuntimeEvent {
 		kind     = .RoomListReceived,
 		serverID = ROOM_CHAIN_TEST_SERVER,
@@ -193,7 +199,7 @@ roomChainTestListRoom :: proc(state: ^State, logVersion: int) {
 			description = strings.clone(""),
 			roomType = .ChatAndVoice,
 			access = .AdminInvite,
-			historyVisibility = .FromJoin,
+			historyVisibility = history,
 			encrypted = true,
 			logVersion = logVersion,
 		},
@@ -226,6 +232,7 @@ roomChainTestLog :: proc(
 	alice: ^State,
 	adds: []^State,
 	addIDs: []int,
+	history := common.RoomLogHistoryVisibility.FromJoin,
 ) -> [][]u8 {
 	privateKey, _ := common.identityPrivateKeyFromHex(alice.config.private_key)
 	alicePublic, _ := common.identityPublicKeyFromHex(alice.config.public_key)
@@ -246,7 +253,7 @@ roomChainTestLog :: proc(
 			entry.targetIdentityKey = alicePublic
 			entry.settings = {
 				access            = .AdminInvite,
-				historyVisibility = .FromJoin,
+				historyVisibility = history,
 				creatorJoins      = true,
 				managers          = managers[:],
 			}
@@ -308,7 +315,8 @@ roomChainTestPairDeinit :: proc(pair: ^RoomChainTestPair) {
 	State_deinit(&pair.bob)
 }
 
-// The server's ServerRoomKeyEnvelope of sent (a KeyEnvelope request) to state.
+// The server's ServerRoomKeyEnvelope of sent (a KeyEnvelope request) to state. A forward
+// (senderUserID set) is stored with the sending session as its forwarder.
 @(private = "file")
 roomChainTestDeliverEnvelope :: proc(state: ^State, sent: RoomChainTestSent, id: int) {
 	event := ClientTransportRuntimeEvent {
@@ -324,9 +332,10 @@ roomChainTestDeliverEnvelope :: proc(state: ^State, sent: RoomChainTestSent, id:
 			id = id,
 			roomId = sent.request.roomID,
 			epoch = sent.request.epoch,
-			senderId = sent.userID,
+			senderId = sent.request.senderUserID > 0 ? sent.request.senderUserID : sent.userID,
 			chainId = sent.request.chainID,
 			envelope = envelope,
+			forwarderId = sent.request.senderUserID > 0 ? sent.userID : 0,
 		},
 	)
 	roomChainTestApply(state, &event)
@@ -632,6 +641,7 @@ testRoomChainsMissingKeyIsFetchedThenRequestedAndAnsweredForMembersOnly :: proc(
 		roomKeyEpoch   = 2,
 		roomKeyChainID = distribution.request.chainID,
 		peerUserID     = ROOM_CHAIN_TEST_BOB,
+		senderID       = ROOM_CHAIN_TEST_ALICE,
 	}
 	roomChainTestApply(alice, &asked)
 	answer := roomChainTestLast(.KeyEnvelope)
@@ -662,6 +672,7 @@ testRoomChainsMissingKeyIsFetchedThenRequestedAndAnsweredForMembersOnly :: proc(
 		roomKeyEpoch   = 2,
 		roomKeyChainID = distribution.request.chainID,
 		peerUserID     = ROOM_CHAIN_TEST_CAROL,
+		senderID       = ROOM_CHAIN_TEST_ALICE,
 	}
 	roomChainTestApply(alice, &outsider)
 	assert(
@@ -798,4 +809,521 @@ testServerTimestampsParseToUnixSeconds :: proc(t: ^testing.T) {
 				seconds, ok),
 		)
 	}
+}
+
+// ── Full history (protocol 20, design 6.6) ───────────────────────
+
+ROOM_CHAIN_TEST_DAVE :: 54
+
+// alice, bob and carol, pinned to each other. The log (signed by alice) creates the room with
+// history, adds bob (epoch 2) and carol (epoch 3); alice and bob verified it up to epoch 2 and
+// both hold alice's chain (alpha, "alice before carol") and bob's (beta, "bob before carol").
+@(private = "file")
+RoomChainTestTrio :: struct {
+	serverKey: common.IdentityPublicKeyBytes,
+	history:   common.RoomHistoryVisibility,
+	alice:     State,
+	bob:       State,
+	carol:     State,
+	log:       [][]u8,
+	alpha:     RoomChainTestSent,
+	beta:      RoomChainTestSent,
+	fromAlice: RoomChainTestSent,
+	fromBob:   RoomChainTestSent,
+}
+
+@(private = "file")
+roomChainTestTrio :: proc(history: common.RoomHistoryVisibility) -> (trio: RoomChainTestTrio) {
+	_, trio.serverKey, _ = common.generateIdentityKeyPair()
+	trio.history = history
+	trio.alice = roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_ALICE)
+	trio.bob = roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_BOB)
+	trio.carol = roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_CAROL)
+	aliceBundle := roomChainTestBundle(&trio.alice, ROOM_CHAIN_TEST_ALICE)
+	bobBundle := roomChainTestBundle(&trio.bob, ROOM_CHAIN_TEST_BOB)
+	carolBundle := roomChainTestBundle(&trio.carol, ROOM_CHAIN_TEST_CAROL)
+	roomChainTestPin(&trio.alice, bobBundle, carolBundle)
+	roomChainTestPin(&trio.bob, aliceBundle, carolBundle)
+	roomChainTestPin(&trio.carol, aliceBundle, bobBundle)
+	adds := [2]^State{&trio.bob, &trio.carol}
+	trio.log = roomChainTestLog(
+		trio.serverKey,
+		&trio.alice,
+		adds[:],
+		{ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL},
+		common.RoomLogHistoryVisibility(u8(history)),
+	)
+	for state in ([]^State{&trio.alice, &trio.bob}) {
+		roomChainTestListRoom(state, 2, history)
+		roomChainTestDeliverLog(state, 0, 2, ..trio.log[:2])
+	}
+	roomChainTestSend(&trio.alice, "alice before carol")
+	trio.alpha = roomChainTestLast(.KeyEnvelope)
+	roomChainTestDeliverEnvelope(&trio.alice, trio.alpha, 1)
+	roomChainTestDeliverEnvelope(&trio.bob, trio.alpha, 1)
+	trio.fromAlice = roomChainTestLast(.SealedMessage)
+	roomChainTestSend(&trio.bob, "bob before carol")
+	trio.beta = roomChainTestLast(.KeyEnvelope)
+	roomChainTestDeliverEnvelope(&trio.bob, trio.beta, 2)
+	roomChainTestDeliverEnvelope(&trio.alice, trio.beta, 2)
+	trio.fromBob = roomChainTestLast(.SealedMessage)
+	assert(
+		trio.alpha.userID == ROOM_CHAIN_TEST_ALICE && trio.beta.userID == ROOM_CHAIN_TEST_BOB,
+		"expected one distribution from each",
+	)
+	assert(
+		KeyStore_roomChainCount(trio.alice.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 2,
+		"expected alice to hold both chains",
+	)
+	return
+}
+
+@(private = "file")
+roomChainTestTrioDeinit :: proc(trio: ^RoomChainTestTrio) {
+	State_deinit(&trio.alice)
+	State_deinit(&trio.bob)
+	State_deinit(&trio.carol)
+}
+
+// carol verifies the whole log, her own addition included.
+@(private = "file")
+roomChainTestCarolJoins :: proc(trio: ^RoomChainTestTrio) {
+	roomChainTestListRoom(&trio.carol, 3, trio.history)
+	roomChainTestDeliverLog(&trio.carol, 0, 3, ..trio.log)
+	assert(
+		State_roomLogEpoch(&trio.carol, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM) == 3,
+		"expected carol to verify the log at epoch 3",
+	)
+}
+
+// A RoomKeyForward of (epoch, senderID's chain chainID from startIndex at chainKey) signed by
+// signer and sent by forwarderID's session, sealed to recipient (borrowed until the next clear).
+@(private = "file")
+roomChainTestForge :: proc(
+	serverKey: common.IdentityPublicKeyBytes,
+	signer: ^State,
+	forwarderID, epoch, senderID: int,
+	chainID: common.ChainID,
+	startIndex: u32,
+	chainKey: common.ChainKey,
+	recipient: ^State,
+	recipientID: int,
+) -> RoomChainTestSent {
+	privateKey, _ := common.identityPrivateKeyFromHex(signer.config.private_key)
+	bundle := roomChainTestBundle(recipient, recipientID)
+	buffer: [common.SEALED_ENVELOPE_MAX_BYTES]u8
+	n, err := common.sealRoomKeyForward(
+		common.RoomKeyForwardAADFields {
+			serverIdentityPublicKey = serverKey,
+			roomID = ROOM_CHAIN_TEST_ROOM,
+			epoch = epoch,
+			senderUserID = senderID,
+			chainID = chainID,
+			forwarderUserID = forwarderID,
+			recipientUserID = recipientID,
+		},
+		startIndex,
+		chainKey,
+		bundle.encryptionPublicKey,
+		privateKey,
+		buffer[:],
+	)
+	assert(err == .None, fmt.tprintf("expected the forged forward to seal, got %v", err))
+	bytes := make([]u8, n, context.temp_allocator)
+	copy(bytes, buffer[:n])
+	return RoomChainTestSent {
+		request = {
+			kind = .KeyEnvelope,
+			roomID = ROOM_CHAIN_TEST_ROOM,
+			epoch = epoch,
+			senderUserID = senderID,
+			chainID = chainID,
+			bytes = bytes,
+		},
+		userID = forwarderID,
+	}
+}
+
+// The last note of kind in state (nil when none).
+@(private = "file")
+roomChainTestLastNote :: proc(state: ^State, kind: RoomChainNoteKind) -> ^RoomChainNote {
+	for index := len(state.roomChainNotes) - 1; index >= 0; index -= 1 {
+		if state.roomChainNotes[index].kind == kind {
+			return &state.roomChainNotes[index]
+		}
+	}
+	return nil
+}
+
+@(private = "file")
+roomChainTestAsk :: proc(
+	state: ^State,
+	senderID, requesterID: int,
+	chainID: common.ChainID,
+	epoch := 2,
+) {
+	asked := ClientTransportRuntimeEvent {
+		kind           = .RoomKeyRequested,
+		serverID       = ROOM_CHAIN_TEST_SERVER,
+		roomID         = ROOM_CHAIN_TEST_ROOM,
+		roomKeyEpoch   = epoch,
+		roomKeyChainID = chainID,
+		peerUserID     = requesterID,
+		senderID       = senderID,
+	}
+	roomChainTestApply(state, &asked)
+}
+
+@(test)
+testRoomChainsFullHistoryInviterForwardsWhatItHolds :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	alice, bob, carol := &trio.alice, &trio.bob, &trio.carol
+
+	// alice's Add of carol verifies: she seals both chains to carol, her own as a SenderKey
+	// re-seal and bob's as a RoomKeyForward, each with carol's wrap only.
+	before := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestDeliverLog(alice, 2, 3, trio.log[2])
+	forwards := roomChainTestOfKind(.KeyEnvelope)[before:]
+	assert(len(forwards) == 2, fmt.tprintf("expected two chains forwarded, got %d", len(forwards)))
+	own, _ := common.decodeSealedEnvelope(forwards[0].request.bytes)
+	other, _ := common.decodeSealedEnvelope(forwards[1].request.bytes)
+	assert(
+		forwards[0].userID == ROOM_CHAIN_TEST_ALICE &&
+		forwards[0].request.senderUserID == 0 &&
+		forwards[0].request.chainID == trio.alpha.request.chainID &&
+		forwards[0].request.epoch == 2 &&
+		own.kind == .SenderKey &&
+		own.wrapCount == 1 &&
+		common.SealedEnvelope_wrap(own, 0).recipientUserID == ROOM_CHAIN_TEST_CAROL,
+		"expected alice's own chain re-sealed to carol as a SenderKey envelope",
+	)
+	assert(
+		forwards[1].userID == ROOM_CHAIN_TEST_ALICE &&
+		forwards[1].request.senderUserID == ROOM_CHAIN_TEST_BOB &&
+		forwards[1].request.chainID == trio.beta.request.chainID &&
+		other.kind == .RoomKeyForward &&
+		other.wrapCount == 1 &&
+		common.SealedEnvelope_wrap(other, 0).recipientUserID == ROOM_CHAIN_TEST_CAROL,
+		"expected bob's chain forwarded to carol as a RoomKeyForward",
+	)
+	note := roomChainTestLastNote(alice, .Answered)
+	assert(
+		note != nil &&
+		note.outcome == .Stored &&
+		note.peerID == ROOM_CHAIN_TEST_CAROL &&
+		note.forwarderID == ROOM_CHAIN_TEST_ALICE &&
+		note.ref.senderUserID == ROOM_CHAIN_TEST_BOB,
+		"expected alice's note of the forward",
+	)
+
+	// bob verifies the same Add but did not sign it: he forwards nothing.
+	before = len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestDeliverLog(bob, 2, 3, trio.log[2])
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == before, "expected bob to forward nothing")
+
+	// carol takes both and reads the older messages, each verified against its real sender.
+	roomChainTestCarolJoins(&trio)
+	roomChainTestDeliverEnvelope(carol, forwards[0], 10)
+	roomChainTestDeliverEnvelope(carol, forwards[1], 11)
+	key := roomChainTestLastNote(carol, .Key)
+	assert(
+		key != nil && key.outcome == .Stored && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected carol to store the forward from alice",
+	)
+	assert(
+		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 2,
+		"expected carol to hold both older chains",
+	)
+	roomChainTestDeliverMessage(carol, trio.fromAlice, 500)
+	roomChainTestDeliverMessage(carol, trio.fromBob, 501)
+	for expected in ([]struct {
+			id:   int,
+			text: string,
+		}{{500, "alice before carol"}, {501, "bob before carol"}}) {
+		entry := roomChainTestEntry(carol, expected.id)
+		assert(
+			entry != nil &&
+			entry.security.protection == .Encrypted &&
+			entry.content == expected.text,
+			fmt.tprintf("expected carol to open %q, got %v", expected.text, entry.security),
+		)
+	}
+	// bob's message presented as alice's still fails: the forwarder gave access, not authorship.
+	asAlice := trio.fromBob
+	asAlice.userID = ROOM_CHAIN_TEST_ALICE
+	roomChainTestDeliverMessage(carol, asAlice, 502)
+	assert(
+		roomChainTestEntry(carol, 502).security.protection != .Encrypted,
+		"expected a message moved to another sender to stay closed",
+	)
+}
+
+@(test)
+testRoomChainsFullHistoryAnyMemberAnswersKeyRequests :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	carol := &trio.carol
+
+	// alice after a restart: the same profile and chains, the whole log replayed (so no
+	// forwards of her own Add, which an earlier run sent).
+	again := roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_ALICE)
+	defer State_deinit(&again)
+	Config_deinit(&again.config)
+	again.config = Config_clone(trio.alice.config)
+	e2ee, _ := State_e2eeEnsureStore(&again, ROOM_CHAIN_TEST_SERVER)
+	for chain in trio.alice.e2ee[0].store.roomChains {
+		KeyStore_addRoomChain(&e2ee.store, chain)
+	}
+	roomChainTestPin(
+		&again,
+		roomChainTestBundle(&trio.bob, ROOM_CHAIN_TEST_BOB),
+		roomChainTestBundle(carol, ROOM_CHAIN_TEST_CAROL),
+	)
+	roomChainTestListRoom(&again, 3, .Full)
+	before := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestDeliverLog(&again, 0, 3, ..trio.log)
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == before, "expected no forward on a replay")
+
+	// carol meets bob's message without its key: she fetches, finds nothing, and asks.
+	roomChainTestCarolJoins(&trio)
+	roomChainTestDeliverMessage(carol, trio.fromBob, 600)
+	waiting := roomChainTestEntry(carol, 600)
+	assert(
+		waiting.security.protection == .Pending && waiting.security.wait == .Key,
+		"expected bob's message waiting for its key",
+	)
+	page := ClientTransportRuntimeEvent {
+		kind     = .RoomKeysReceived,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		roomID   = ROOM_CHAIN_TEST_ROOM,
+	}
+	roomChainTestApply(carol, &page)
+	requests := len(roomChainTestOfKind(.RequestKey))
+	request := roomChainTestLast(.RequestKey)
+	assert(
+		request.userID == ROOM_CHAIN_TEST_CAROL &&
+		request.request.senderUserID == ROOM_CHAIN_TEST_BOB &&
+		request.request.chainID == trio.beta.request.chainID,
+		"expected carol to ask for bob's chain",
+	)
+	// A member comes online: the request goes out again, since that member may hold it.
+	presence := ClientTransportRuntimeEvent {
+		kind     = .UserPresenceChanged,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		user     = {id = ROOM_CHAIN_TEST_ALICE, nickname = strings.clone("alice"), isOnline = true},
+	}
+	roomChainTestApply(carol, &presence)
+	assert(
+		len(roomChainTestOfKind(.RequestKey)) == requests + 1,
+		"expected the request again when alice came online",
+	)
+	// Someone who is not a member coming online asks nothing again.
+	outsider := ClientTransportRuntimeEvent {
+		kind     = .UserPresenceChanged,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		user     = {id = ROOM_CHAIN_TEST_DAVE, nickname = strings.clone("dave"), isOnline = true},
+	}
+	roomChainTestApply(carol, &outsider)
+	assert(len(roomChainTestOfKind(.RequestKey)) == requests + 1, "expected no request for dave")
+
+	// alice, not the sender, answers with a RoomKeyForward of bob's chain to carol.
+	roomChainTestAsk(&again, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, trio.beta.request.chainID)
+	answer := roomChainTestLast(.KeyEnvelope)
+	decoded, _ := common.decodeSealedEnvelope(answer.request.bytes)
+	assert(
+		answer.userID == ROOM_CHAIN_TEST_ALICE &&
+		answer.request.senderUserID == ROOM_CHAIN_TEST_BOB &&
+		decoded.kind == .RoomKeyForward &&
+		decoded.wrapCount == 1,
+		"expected alice to forward bob's chain",
+	)
+	roomChainTestDeliverEnvelope(carol, answer, 20)
+	opened := roomChainTestEntry(carol, 600)
+	assert(
+		opened.security.protection == .Encrypted && opened.content == "bob before carol",
+		"expected bob's message to open with alice's forward",
+	)
+	// Asked again (bob also answered, or the request came twice): nothing more is sent.
+	sent := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestAsk(&again, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, trio.beta.request.chainID)
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == sent, "expected one answer per chain")
+	// A second copy reaching carol (bob's answer) is a duplicate, and changes nothing.
+	roomChainTestDeliverEnvelope(carol, answer, 21)
+	assert(roomChainTestLastNote(carol, .Key).outcome == .Duplicate, "expected a duplicate")
+
+	// A chain alice does not hold, and a requester who is not a member, get nothing.
+	unknown := common.ChainID{}
+	unknown[0] = 0xee
+	roomChainTestAsk(&again, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, unknown)
+	assert(roomChainTestLastNote(&again, .Answered).outcome == .NotHeld, "expected not held")
+	roomChainTestAsk(&again, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_DAVE, trio.beta.request.chainID)
+	assert(roomChainTestLastNote(&again, .Answered).outcome == .Refused, "expected dave refused")
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == sent, "expected no envelope for either")
+}
+
+@(test)
+testRoomChainsFullHistoryForwardsAreChecked :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	carol := &trio.carol
+	roomChainTestCarolJoins(&trio)
+	roomChainTestDeliverMessage(carol, trio.fromBob, 700)
+	held, _ := KeyStore_roomChain(
+		&trio.alice.e2ee[0].store,
+		ROOM_CHAIN_TEST_ROOM,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+	)
+	betaKey, betaStart := held.chainKey, held.startIndex
+
+	// Signed by bob but presented as alice's forward: the signature is checked against alice.
+	byBob := roomChainTestForge(
+		trio.serverKey,
+		&trio.bob,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		betaStart,
+		betaKey,
+		carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, byBob, 30)
+	note := roomChainTestLastNote(carol, .Key)
+	assert(
+		note.outcome == .Failed && note.error == .BadSignature,
+		fmt.tprintf("expected a bad signature, got %v %v", note.outcome, note.error),
+	)
+	// From dave, who was never a member: not allowed, whatever he signed.
+	dave := roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_DAVE)
+	defer State_deinit(&dave)
+	byDave := roomChainTestForge(
+		trio.serverKey,
+		&dave,
+		ROOM_CHAIN_TEST_DAVE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		betaStart,
+		betaKey,
+		carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, byDave, 31)
+	assert(roomChainTestLastNote(carol, .Key).outcome == .NotAllowed, "expected dave refused")
+	// A chain of carol's own in epoch 2, when she was not a member: its sender fails the log.
+	carolsChain := trio.beta.request.chainID
+	carolsChain[0] ~= 0x55
+	notMember := roomChainTestForge(
+		trio.serverKey,
+		&trio.alice,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_CAROL,
+		carolsChain,
+		0,
+		betaKey,
+		carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, notMember, 32)
+	assert(
+		roomChainTestLastNote(carol, .Key).outcome == .NotMember,
+		"expected a chain whose sender was not a member of its epoch refused",
+	)
+	assert(
+		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 0,
+		"expected carol to hold nothing yet",
+	)
+	assert(
+		roomChainTestEntry(carol, 700).security.protection == .Pending,
+		"expected bob's message still waiting",
+	)
+	// The genuine forward from alice opens it.
+	genuine := roomChainTestForge(
+		trio.serverKey,
+		&trio.alice,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		betaStart,
+		betaKey,
+		carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, genuine, 33)
+	assert(
+		roomChainTestEntry(carol, 700).content == "bob before carol",
+		"expected the genuine forward to open bob's message",
+	)
+}
+
+@(test)
+testRoomChainsFromJoinNeverForwards :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.FromJoin)
+	defer roomChainTestTrioDeinit(&trio)
+	alice, carol := &trio.alice, &trio.carol
+
+	// alice signs carol's Add in a From join room: nothing older goes to carol.
+	before := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestDeliverLog(alice, 2, 3, trio.log[2])
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == before, "expected no forward in From join")
+	// Nor on request: not bob's chain, and not her own from before carol joined.
+	roomChainTestAsk(alice, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, trio.beta.request.chainID)
+	assert(roomChainTestLastNote(alice, .Answered).outcome == .Refused, "expected refused")
+	roomChainTestAsk(
+		alice,
+		ROOM_CHAIN_TEST_ALICE,
+		ROOM_CHAIN_TEST_CAROL,
+		trio.alpha.request.chainID,
+	)
+	assert(roomChainTestLastNote(alice, .Answered).outcome == .Refused, "expected refused")
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == before, "expected no envelope at all")
+
+	// A forward reaching carol anyway (a client that broke the rule) is not taken.
+	roomChainTestCarolJoins(&trio)
+	held, _ := KeyStore_roomChain(
+		&alice.e2ee[0].store,
+		ROOM_CHAIN_TEST_ROOM,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+	)
+	forged := roomChainTestForge(
+		trio.serverKey,
+		alice,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		held.startIndex,
+		held.chainKey,
+		carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, forged, 40)
+	assert(
+		roomChainTestLastNote(carol, .Key).outcome == .NotAllowed,
+		"expected a forward in a From join room refused",
+	)
+	assert(
+		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 0,
+		"expected carol to hold no older chain",
+	)
 }
