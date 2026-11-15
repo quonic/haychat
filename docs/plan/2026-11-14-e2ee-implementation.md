@@ -21,7 +21,7 @@ One PR per package, from its own worktree and branch. The order follows the desi
 | E2 Encrypted direct messages | `e2ee-direct-messages` | 4.5, 4.6, 7.2–7.4 for direct messages, 12.4 steps 1, 2, 6 (DMs), 7 | E1 |
 | E4 Encrypted rooms | `e2ee-rooms` (may split E4a `e2ee-room-log`, E4b `e2ee-room-chains`) | 6.1–6.7 except Full history forwarding, 12.4 steps 3–6, 8 (From join), 9 | E2, E3 |
 | E5 Full history in encrypted rooms | `e2ee-full-history` | 6.6 (Full history), 12.4 step 8 (Full history) | E4 |
-| E6 Voice in encrypted rooms | – | 8 | E4; needs its own design note first (not this round) |
+| E6 Voice in encrypted rooms | `e2ee-voice` | 8, superseded by `e2ee-voice-design.md` | E4; merged as #65 |
 
 E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs alongside E3.
 
@@ -144,8 +144,14 @@ messages in encrypted invite rooms are end-to-end encrypted; public rooms stay u
 Follow-ups:
 
 - **E6 voice in encrypted rooms**: designed in [e2ee-voice-design.md](e2ee-voice-design.md) and
-  built as protocol 21 (branch `e2ee-voice`); voice in encrypted rooms is end-to-end encrypted.
-  Constant-bitrate quality still needs a manual `dev/voice-manual-test.sh` run before release.
+  merged as #65 (ea1ec3c, protocol 21, no migration); voice in encrypted rooms is end-to-end
+  encrypted. Constant-bitrate quality still needs a manual `dev/voice-manual-test.sh` run
+  before release.
+- **Voice log version race.** When a member log append lands while a room's first voice join
+  is still in its database check, the router skips the append (no voice room yet) and the join
+  result seeds the older log version, so every voice key at the new epoch is refused as
+  "Invalid voice key" until the next append. Fix: re-read the log version before refusing a
+  later epoch, or keep the last appended version per room outside the voice state.
 - **Bogus forwards.** The server keeps only the first forward per chain and recipient, so a
   member can send a forward with a wrong chain key ahead of the real one and block that chain
   for the newcomer (its sender can still re-seal it). A chain-key commitment in the original
