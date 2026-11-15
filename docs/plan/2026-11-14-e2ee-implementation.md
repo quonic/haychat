@@ -67,6 +67,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | E1 Account keys | #60 | dfe6759 | 16 | 5 |
 | E2 Encrypted direct messages | #61 | c262e91 | 17 | 6 |
 | E4a Encrypted rooms: member log | #62 | d908114 | 18 | 7 |
+| E4b Encrypted rooms: sender chains | #63 | dd5c3ec | 19 | 8 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -114,3 +115,13 @@ entry's actor must be the sender; `ClientAddRoomMember`/`ClientLeaveRoom` are re
 encrypted rooms; an admin's `ClientRemoveRoomMember` becomes an unsigned `Remove` written by
 the server; plaintext chat and voice in encrypted rooms are refused; key store format 3.
 Known limitation: two clients on one profile directory overwrite each other's key store.
+
+E4b's decisions are listed in #63. The main ones: sealed room messages ride on the existing
+chat payloads (`clientMessageId`, `sealed`); signatures on sealed messages and key envelopes
+are checked in the router against the session's identity key; the sending side of a chain is
+never stored, so every client run starts new chains, and the server refuses a reused
+`(sender, chain_id, chain_index)`; `ServerRoomKeys` answers a fetch in pages of 32 and only
+with envelopes that wrap the requester; a key request is answered only by the chain's sender
+and only for a member of that epoch; members without a usable pin get no wrap and can ask
+later; key store format 4 (`room_chains`, a cache). Follow-up: a failed SQL test assertion
+made the test runner hang instead of exit; `dev/live-proof.sh` needs a timeout.
