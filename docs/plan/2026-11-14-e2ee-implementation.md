@@ -65,6 +65,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | E0 Primitives | #58 | da6c708 | – | – |
 | E3 Room access modes | #59 | 076cbe3 | 15 | 4 |
 | E1 Account keys | #60 | dfe6759 | 16 | 5 |
+| E2 Encrypted direct messages | #61 | c262e91 | 17 | 6 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -89,3 +90,16 @@ users are pinned on demand (opening a DM, the Verify dialog, the harness), never
 list alone; a headless profile saves its generated encryption key on first run; `saveConfig`
 now writes atomically. E2 builds on `State_e2eePeerKeyInfo` and must encrypt to and verify
 against the pinned keys it returns.
+
+E2's decisions are listed in #61. The main ones: the database worker verifies a sealed DM
+(it holds the recipient's identity key) and the insert requires that same key; unsigned
+plaintext DMs are refused; an all-zero client message ID or signature means none (rows from
+before protocol 17), and summaries carry `lastSignature`; a message from an unpinned sender
+waits for a key fetch; only messages that opened count for replay detection, and the later
+copy is shown as undecryptable; queued messages are never sent as plaintext; the key store
+is format 2. Known limitation: the server could insert unsigned rows that look like
+pre-upgrade messages ("Not encrypted"), but cannot forge encrypted or signed ones.
+
+E4 is split in two, run one after the other: E4a `e2ee-room-log` (encrypted rooms, the
+member log with managers, and refusing plaintext chat in encrypted rooms) and E4b
+`e2ee-room-chains` (sender chains, distribution, key requests, sealed room messages, epochs).
