@@ -297,7 +297,7 @@ testUserMenusForConversationsMembersSendersAndVoice :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Send message,Copy name",
+		"Send message,Copy name,Verify encryption…",
 		"a member without a conversation",
 	)
 	effect := State_runContextMenuAction(&state, .CopyName, now)
@@ -308,7 +308,7 @@ testUserMenusForConversationsMembersSendersAndVoice :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Send message,Mark as read,Copy name",
+		"Send message,Mark as read,Copy name,Verify encryption…",
 		"an unread conversation",
 	)
 	_ = State_runContextMenuAction(&state, .MarkRead, now)
@@ -600,7 +600,7 @@ testAdminEntriesInUserMenusFollowTheRole :: proc(t: ^testing.T) {
 	defer State_deinit(&state)
 	contextMenuTestAdminDirectory(&state, 961)
 
-	USER :: "Send message,Copy name"
+	USER :: "Send message,Copy name,Verify encryption…"
 	State_openContextMenu(&state, MemberMenuTarget{961, CONTEXT_MENU_TEST_PEER}, {10, 10})
 	contextMenuTestExpect(
 		t,
@@ -636,7 +636,8 @@ testAdminEntriesInUserMenusFollowTheRole :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Send message,Mark as read (off),Copy name,|Rename…,Make admin,Kick…!,Ban…!",
+		"Send message,Mark as read (off),Copy name,Verify encryption…,|Rename…,Make admin," +
+		"Kick…!,Ban…!",
 		"a conversation for an admin",
 	)
 	contextMenuTestVoice(&state, 961, 1, CONTEXT_MENU_TEST_PEER)
@@ -655,7 +656,7 @@ testAdminEntriesInUserMenusFollowTheRole :: proc(t: ^testing.T) {
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Send message,Mark as read (off),Copy name",
+		"Send message,Mark as read (off),Copy name,Verify encryption…",
 		"a member for a member",
 	)
 }

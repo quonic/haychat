@@ -725,7 +725,8 @@ testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL :: proc(t: ^testing.T) 
 	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	markersBefore := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_MARKERS_SQL)
 
-	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	// Only as far as version 4; migration 5 is tested in database_encryption_keys_test.odin.
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:4])
 	assert(
 		outcome == DatabaseMigrationOutcome{previousVersion = 3, version = 4},
 		fmt.tprintf("expected only migration 4 to run, got %v", outcome),
@@ -734,7 +735,7 @@ testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL :: proc(t: ^testing.T) 
 		databaseMigrationTestRecorded(conn) == "1:baseline,2:read markers,3:admin,4:room access",
 		"expected version 4 recorded",
 	)
-	databaseMigrationTestValidationPasses(conn)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:4])
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	assert(
 		after == before,

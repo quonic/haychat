@@ -14,6 +14,7 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 
 	serverID := state.selected_server_id
 	peerUserID := view.peerUserID
+	viewE2EEKeyBanner(state, ctx, &area, serverID, peerUserID)
 	if draft := State_selectedDirectDraft(state); draft != nil {
 		placeholder := fmt.tprintf(
 			"Message %s (Enter to send, Shift+Enter for newline)",

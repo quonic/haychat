@@ -85,7 +85,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount","roomType","access","historyVisibility"}]`, see [Read State](#read-state); `roomType` is 1 text, 2 voice, 3 both; `access` 1 Public, 2 Member invite, 3 Admin invite; `historyVisibility` 1 From join, 2 Full, always 2 for a Public room). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
-| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
+| `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","identityPublicKey","hasEncryptionKey","keyState","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one; the key fields are explained under [Encryption Keys](#encryption-keys)). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
@@ -102,6 +102,9 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-remove ROOM_ID USER_ID` | Admins: removes the account from the room, in every mode. The answer is `room_member_result` with `added` false; the account (whose client drops the room), the remaining members and you get `room_membership` with `joined` false. Removing someone who is not a member changes nothing. Anyone else gets `protocol_error "Admin permission required"`. |
 | `room-leave ROOM_ID` | Leaves a non-public room you are a member of; the answer is `room_membership` with `joined` false and your `userID` (also to the room's other members), and the room leaves your `rooms`. Refusals: `You cannot leave a public room`, `Not a room member`. |
 | `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. |
+| `user-keys USER_ID` | Asks the server for the account's encryption key bundle (protocol 16). The result is `serverID`, `userID` and `requested` (false when a fetch for it was already on its way); the answer, checked and pinned, arrives as a `user_keys` event. Not for yourself. See [Encryption Keys](#encryption-keys). |
+| `verify USER_ID` | Mark as verified, after comparing `safetyNumber` with the other side's: the result has the `user_keys` fields with `keyState` `verified`. In `key_changed` it trusts the key the server now offers and marks it verified, like the GUI dialog. `ok:false` ("refused in key state ...") without a pin, or while the key is missing or invalid. |
+| `trust-key USER_ID` | Trust the new key: in `key_changed`, pins the key the server now offers, unverified (`ok:false` in any other state, or before the new bundle arrived). |
 | `read room\|dm ID [MESSAGE_ID]` | Marks room ID, or the direct conversation with user ID, read up to MESSAGE_ID; without it, up to the newest message loaded for that conversation (an `ok:false` result when nothing is loaded: fetch it with `history` or `dm-history` first). `ok` means the request went out (`serverID`, `kind`, `conversationID`, `messageID`). When the marker moved, every session of your account, this one included, gets a `read_marker` event; a read that moves nothing (the marker is already there) gets no answer. Not a member, or no such user, is a `protocol_error` (`Not a room member`, `Unknown user`). |
 | `voice-join ROOM_ID` | Joins the room's voice on the selected server (leaving any other first). `ok` (`serverID`, `roomID`, `status` `joining`) means the request went out; the join completes with `voice_participants` carrying `"recipientJoined":true`, then `voice_status` `joined` once the engine runs. A refusal arrives as `voice_join_rejected`. See [Voice](#voice). |
 | `voice-leave` | Leaves voice and stops the engine (`serverID` and `roomID` it left, 0 when it was not in voice, and the `status` after it). A file sink is closed, complete, at this point. |
@@ -150,8 +153,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
 | `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}]}` |
-| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"isAdmin":false,"isBanned":false}]}` |
-| `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"isAdmin":true,"isBanned":false}}` (an admin changed an account's role, ban, or name; the full directory entry) |
+| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"identityPublicKey":"3bac...","hasEncryptionKey":true,"keyState":"unverified","isAdmin":false,"isBanned":false}]}` (`keyState` as before the list was applied; see [Encryption Keys](#encryption-keys)) |
+| `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"identityPublicKey":"d14b...","hasEncryptionKey":true,"keyState":"verified","isAdmin":true,"isBanned":false}}` (an admin changed an account's role, ban, or name; the full directory entry) |
+| `user_keys` | `{"event":"user_keys","serverID":1,"userID":4,"nickname":"bob","keyState":"unverified","canEncrypt":true,"verified":false,"hasPin":true,"identityPublicKey":"d14b...","encryptionPublicKey":"8a6d...","createdAt":1731600000,"safetyNumber":"68114 90353 ...","notice":"","message":""}` (what the client concluded about an account's key after a `ServerUserKeys` or `ServerUserKeyChanged`; see [Encryption Keys](#encryption-keys)) |
 | `account_updated` | `{"event":"account_updated","serverID":1,"isAdmin":true,"nickname":"bob","nicknameLocked":false}` (an admin changed this account's role or name while it is connected) |
 | `admin_result` | `{"event":"admin_result","serverID":1,"action":"role","userID":4,"message":"bob is an admin"}` (your admin request succeeded; `action` is `role`, `rename`, `kick`, or `ban`, an unban included) |
 | `session_ended` | `{"event":"session_ended","serverID":1,"kind":"kicked","message":"An admin removed you from this server (reason: calm down). Press Retry to connect again.","reason":"calm down","retryable":false}` (an admin kicked or banned this account; the connection stays stopped until `reconnect`) |
@@ -390,6 +394,39 @@ A having a whole 20 ms frame to B writing it to its file sink: encoding, sealing
 relay, ENet on loopback, the inbound queue and the jitter buffer. Mouth-to-ear adds 20 ms of
 framing and the audio devices' buffers. The test logs p50, p95 and the maximum and fails if
 p95 reaches 300 ms; on loopback it measures about 65 ms at p50 and 69 ms at p95 (target 150 ms).
+
+## Encryption Keys
+
+Protocol 16 gives every profile an encryption key and lets clients pin each other's keys
+(e2ee-design.md section 3). Messages are not encrypted yet; these commands exercise the keys.
+
+- **The profile's key.** `config.json` in `--config-dir` holds the encryption key next to the
+  identity key ([client configuration](client-configuration.md#keys)). The harness creates both
+  on the first run of a profile and saves them at once, so a profile run twice keeps the same
+  keys; every session publishes the bundle after signing in.
+- **The key store.** Pins are written to `DIR/haychat/keys/<server fingerprint>.json` like the
+  GUI writes them ([key store](client-configuration.md#key-store)), so a profile run twice keeps
+  its pins and its verified marks.
+- **`keyState`.** `unknown` (no pin, nothing heard yet), `not_set_up` (no pin and the server has
+  no key: the account has not set up encryption yet), `unverified` (pinned on first use),
+  `verified`, `key_changed` (the server names another identity key than the pin; `canEncrypt`
+  false until `verify` or `trust-key`), `not_provided` (pinned, but the server has no key for
+  it now), `invalid_key` (the server sent a key whose signature does not verify, or one older
+  than the pin; the pin stays).
+- **`user_keys` fields.** `identityPublicKey` and `encryptionPublicKey` are the **pinned** keys
+  in hex (empty without a pin), never the server's. `safetyNumber` is the number to compare (12
+  groups of 5 digits, the same on both sides; in `key_changed` it is the new key's). `notice` is
+  `set_up_again` after a newer encryption key under the same identity key (the pin was updated
+  and is no longer verified). `message` is the sentence the GUI shows, empty when all is well.
+- **When they arrive.** A `user_keys` event follows every account in a `ServerUserKeys` (the
+  answer to `user-keys`, to opening a conversation, and to the fetch of every pinned account a
+  new session makes) and every `ServerUserKeyChanged` (an account published a key it did not
+  have before). This account itself is never pinned or reported.
+
+`./dev.sh live --e2ee` runs `dev/e2ee-proof.sh` (also part of `--all`): alice and bob pin each
+other and see the same safety number, alice verifies bob, bob restarts with the same key and is
+still verified, then SQL hands out a third account's key as bob's, which alice sees as
+`key_changed` until `trust-key`; no client may print its encryption private key.
 
 ## Read State
 
@@ -747,9 +784,12 @@ Admin section's rooms list. Then the access modes (protocol 15): she creates an 
 room from the form (`room-access 3`), invites bob from his member menu (**Invite to room…** →
 **Invite to #room**, "Added bob to #room." under the composer), and opens the room's Members
 page from its channel menu, which offers **Leave room**; bob must get `room_membership` for it
-and list it with `"access":3`. alice takes thirty screenshots on the way (`01-…` to `29-…` and
-`06b-server-settings.bmp`); the script prints the paths of the 29 numbered `NN-*.bmp` ones and
-checks that all 29 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+and list it with `"access":3`. Last, the encryption keys (protocol 16): she opens bob's **Verify
+encryption…** dialog from his member menu, waits for "Not verified yet." (his key arrived and
+the safety number is drawn), clicks **Mark as verified** (`verify-mark 1 BOB`) and closes it
+(`verify-close 1 BOB`); her key store file must then hold bob verified. alice takes 32
+screenshots on the way (`01-…` to `31-…` and `06b-server-settings.bmp`); the script prints the
+paths of the 31 numbered `NN-*.bmp` ones and checks that all 31 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
 otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

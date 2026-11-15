@@ -72,6 +72,10 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerRoomMembers, 158},
 	{.ClientAdminListRooms, 159},
 	{.ServerAdminRooms, 160},
+	{.ClientPublishEncryptionKey, 161},
+	{.ClientFetchUserKeys, 162},
+	{.ServerUserKeys, 163},
+	{.ServerUserKeyChanged, 164},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -405,22 +409,175 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsFifteenForRoomAccessModes :: proc(t: ^testing.T) {
+testProtocolVersionIsSixteenForAccountEncryptionKeys :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
 	// ServerVoiceParticipants.recipientJoined; 13 added ClientJoinVoice.rejoin and deviceId for
 	// one voice session per user; 14 added the admin actions, ServerAuthSuccess.nickname and
 	// nicknameLocked, UserSummary.isAdmin and isBanned, and room types; 15 added room access
-	// modes, history visibility, member fetches, leaving, and the admin room list, so peers on
-	// 14 or older cannot talk to this build.
+	// modes, history visibility, member fetches, leaving, and the admin room list; 16 added
+	// the account encryption keys (ClientPublishEncryptionKey, ClientFetchUserKeys,
+	// ServerUserKeys, ServerUserKeyChanged) and UserSummary.identityPublicKey and
+	// hasEncryptionKey, so peers on 15 or older cannot talk to this build.
 	assert(
-		protocolVersion == 15,
+		protocolVersion == 16,
 		fmt.tprintf(
-			"expected protocol version 15 for room access modes, got %d",
+			"expected protocol version 16 for account encryption keys, got %d",
 			protocolVersion,
 		),
 	)
+}
+
+// A bundle with every byte distinct, so a field moved into another one shows.
+@(private = "file")
+protocolTestBundle :: proc(userID: int) -> UserKeyBundle {
+	bundle := UserKeyBundle {
+		userId    = userID,
+		createdAt = 1_731_600_000 + u64(userID),
+	}
+	for index in 0 ..< len(bundle.identityPublicKey) {
+		bundle.identityPublicKey[index] = u8(index + userID)
+		bundle.encryptionPublicKey[index] = u8(100 + index + userID)
+	}
+	for index in 0 ..< len(bundle.signature) {
+		bundle.signature[index] = u8(200 + index + userID)
+	}
+	return bundle
+}
+
+// The protocol 16 payloads survive CBOR, with their keys as fixed-size byte strings.
+@(test)
+testEncryptionKeyPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	bundle := protocolTestBundle(7)
+	{
+		original := ClientPublishEncryptionKeyPayload {
+			encryptionPublicKey = bundle.encryptionPublicKey,
+			createdAt           = bundle.createdAt,
+			signature           = bundle.signature,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientPublishEncryptionKeyPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientPublishEncryptionKeyPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected publish decoding")
+		assert(decoded == original, fmt.tprintf("expected %v, got %v", original, decoded))
+		// 32 and 64 bytes as byte strings, not arrays of numbers.
+		assert(
+			len(encoded) < 32 + 64 + 64,
+			fmt.tprintf("expected the keys as byte strings, got %d bytes", len(encoded)),
+		)
+	}
+	{
+		ids := make([dynamic]int, 0, 3)
+		defer delete(ids)
+		append(&ids, 3, 1, 2)
+		encoded, err := cbor.marshal(ClientFetchUserKeysPayload{userIds = ids})
+		assert(err == nil, "expected ClientFetchUserKeysPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientFetchUserKeysPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected fetch decoding")
+		defer ClientFetchUserKeysPayload_deinit(&decoded)
+		assert(
+			len(decoded.userIds) == 3 &&
+			decoded.userIds[0] == 3 &&
+			decoded.userIds[1] == 1 &&
+			decoded.userIds[2] == 2,
+			fmt.tprintf("expected the IDs in order, got %v", decoded.userIds),
+		)
+	}
+	{
+		keys := make([dynamic]UserKeyBundle, 0, 2)
+		defer delete(keys)
+		append(&keys, bundle, protocolTestBundle(9))
+		missing := make([dynamic]int, 0, 1)
+		defer delete(missing)
+		append(&missing, 11)
+		encoded, err := cbor.marshal(ServerUserKeysPayload{keys = keys, missingUserIds = missing})
+		assert(err == nil, "expected ServerUserKeysPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerUserKeysPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected user keys decoding")
+		defer ServerUserKeysPayload_deinit(&decoded)
+		assert(
+			len(decoded.keys) == 2 &&
+			decoded.keys[0] == keys[0] &&
+			decoded.keys[1] == keys[1] &&
+			len(decoded.missingUserIds) == 1 &&
+			decoded.missingUserIds[0] == 11,
+			fmt.tprintf("expected both bundles and 11 missing, got %v", decoded),
+		)
+	}
+	{
+		encoded, err := cbor.marshal(ServerUserKeyChangedPayload{bundle = bundle})
+		assert(err == nil, "expected ServerUserKeyChangedPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerUserKeyChangedPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected key changed decoding")
+		assert(decoded.bundle == bundle, fmt.tprintf("expected %v, got %v", bundle, decoded))
+	}
+	{
+		original := UserSummary {
+			id                = 5,
+			nickname          = "keys",
+			isOnline          = true,
+			identityPublicKey = bundle.identityPublicKey,
+			hasEncryptionKey  = true,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected UserSummary encoding to succeed")
+		defer delete(encoded)
+		decoded: UserSummary
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected UserSummary decoding")
+		defer delete(decoded.nickname)
+		assert(
+			decoded.id == 5 &&
+			decoded.nickname == "keys" &&
+			decoded.identityPublicKey == original.identityPublicKey &&
+			decoded.hasEncryptionKey,
+			fmt.tprintf("expected the key fields to survive, got %v", decoded),
+		)
+	}
+	// The bundle converts to the verifier's shape field for field.
+	converted := UserKeyBundle_toEncryptionKeyBundle(bundle)
+	assert(
+		converted.identityPublicKey == bundle.identityPublicKey &&
+		converted.encryptionPublicKey == bundle.encryptionPublicKey &&
+		converted.createdAt == bundle.createdAt &&
+		converted.signature == bundle.signature,
+		"expected the conversion to keep every field",
+	)
+}
+
+@(test)
+testUserKeysFetchListRules :: proc(t: ^testing.T) {
+	_ = t
+	full: [USER_KEYS_FETCH_MAX + 1]int
+	for index in 0 ..< len(full) {
+		full[index] = index + 1
+	}
+	Case :: struct {
+		ids:   []int,
+		valid: bool,
+	}
+	cases := [?]Case {
+		{nil, false},
+		{[]int{1}, true},
+		{[]int{1, 2, 3}, true},
+		{full[:USER_KEYS_FETCH_MAX], true},
+		{full[:], false},
+		{[]int{1, 2, 1}, false},
+		{[]int{0}, false},
+		{[]int{4, -2}, false},
+	}
+	for testCase, index in cases {
+		assert(
+			userKeysFetchIsValid(testCase.ids) == testCase.valid,
+			fmt.tprintf("expected case %d (%d IDs) valid=%v", index, len(testCase.ids),
+				testCase.valid),
+		)
+	}
 }
 
 // The join's new fields survive CBOR, and an older join without them decodes with rejoin false

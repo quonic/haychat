@@ -248,6 +248,9 @@ HeadlessEventKind :: enum {
 	RoomMembers,
 	AdminRooms,
 	RoomMemberResult,
+	// Account encryption keys (protocol 16): one per account a ServerUserKeys or
+	// ServerUserKeyChanged told this client about, after it was applied.
+	UserKeys,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -282,6 +285,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RoomMembers    = "room_members",
 	.AdminRooms     = "admin_rooms",
 	.RoomMemberResult = "room_member_result",
+	.UserKeys       = "user_keys",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -309,11 +313,103 @@ HeadlessConnectedJSON :: struct {
 }
 
 // ServerUserUpdated: an admin changed an account's role, ban, or name (protocol 14). user is
-// the account's full directory entry {"id","nickname","isOnline","isAdmin","isBanned"}.
+// the account's full directory entry (HeadlessDirectoryUserJSON).
 HeadlessUserUpdatedJSON :: struct {
 	event:    string,
 	serverID: int,
-	user:     common.UserSummary,
+	user:     HeadlessDirectoryUserJSON,
+}
+
+// One directory entry in user_list and user_updated. identityPublicKey is the server's
+// identity key for the account in hex ("" for none) and hasEncryptionKey whether it published
+// a bundle (protocol 16). keyState is this client's state for the account's key when the line
+// was printed, before the event was applied (e2eeKeyStateName: unknown, not_set_up,
+// unverified, verified, key_changed, not_provided, invalid_key); user_keys reports changes.
+HeadlessDirectoryUserJSON :: struct {
+	id:                int,
+	nickname:          string,
+	isOnline:          bool,
+	identityPublicKey: string,
+	hasEncryptionKey:  bool,
+	keyState:          string,
+	isAdmin:           bool,
+	isBanned:          bool,
+}
+
+// data in lowercase hex, allocated with allocator.
+headlessHex :: proc(data: []u8, allocator := context.allocator) -> string {
+	context.allocator = allocator
+	return common.encodeBytesToHex(data)
+}
+
+// The directory entry's JSON shape. identityPublicKey is allocated with allocator.
+headlessDirectoryUser :: proc(
+	user: common.UserSummary,
+	state: ^State,
+	serverID: int,
+	allocator := context.allocator,
+) -> HeadlessDirectoryUserJSON {
+	keyState := E2EEKeyState.Unknown
+	if state != nil {
+		keyState = State_e2eePeerKeyInfo(state, serverID, user.id).state
+	}
+	identity := user.identityPublicKey
+	identityHex := ""
+	if identity != {} {
+		identityHex = headlessHex(identity[:], allocator)
+	}
+	return HeadlessDirectoryUserJSON {
+		id = user.id,
+		nickname = user.nickname,
+		isOnline = user.isOnline,
+		identityPublicKey = identityHex,
+		hasEncryptionKey = user.hasEncryptionKey,
+		keyState = e2eeKeyStateName(keyState),
+		isAdmin = user.isAdmin,
+		isBanned = user.isBanned,
+	}
+}
+
+// user_keys: what this client now knows about an account's key (e2ee_state.odin), after a
+// ServerUserKeys or ServerUserKeyChanged was applied, and the answer to `verify` and
+// `trust-key`. identityPublicKey and encryptionPublicKey are the PINNED keys in hex ("" without
+// a pin), never the server's; safetyNumber is "" without a key to compare (in key_changed it is
+// the new key's, which `verify` would trust). notice is "set_up_again" after a new encryption
+// key under the same identity key, else "". message is the sentence the GUI shows, or "".
+HeadlessUserKeysJSON :: struct {
+	event:               string,
+	serverID:            int,
+	userID:              int,
+	nickname:            string,
+	keyState:            string,
+	canEncrypt:          bool,
+	verified:            bool,
+	hasPin:              bool,
+	identityPublicKey:   string,
+	encryptionPublicKey: string,
+	createdAt:           u64,
+	safetyNumber:        string,
+	notice:              string,
+	message:             string,
+}
+
+// The answer to `verify` and `trust-key`: the same fields after ok and cmd.
+HeadlessUserKeysResultJSON :: struct {
+	ok:                  bool,
+	cmd:                 string,
+	serverID:            int,
+	userID:              int,
+	nickname:            string,
+	keyState:            string,
+	canEncrypt:          bool,
+	verified:            bool,
+	hasPin:              bool,
+	identityPublicKey:   string,
+	encryptionPublicKey: string,
+	createdAt:           u64,
+	safetyNumber:        string,
+	notice:              string,
+	message:             string,
 }
 
 // ServerAccountUpdated: an admin changed this account's role or name while it is connected.
@@ -527,11 +623,10 @@ HeadlessDirectHistoryJSON :: struct {
 	messages:   []HeadlessDirectHistoryMessageJSON,
 }
 
-// common.UserSummary already marshals as {"id","nickname","isOnline"}.
 HeadlessUserListJSON :: struct {
 	event:    string,
 	serverID: int,
-	users:    []common.UserSummary,
+	users:    []HeadlessDirectoryUserJSON,
 }
 
 // unreadCount and lastReadMessageId are the read state (protocol 11): from the server's list,
@@ -633,6 +728,8 @@ HeadlessRenderInfo :: struct {
 	attempt:     int, // For .Connecting
 	displayName: string, // Names the user in a NameUnavailable explanation
 	now:         time.Tick, // Reference for retryInMS
+	// For each account's keyState in user_list and user_updated; nil prints "unknown".
+	state:       ^State,
 }
 
 // Milliseconds from now until at, never negative; 0 when at is unset.
@@ -671,6 +768,9 @@ headlessRenderRuntimeEvent :: proc(
 	}
 	switch event.kind {
 	case .None:
+		return "", {}, false
+	case .UserKeysReceived, .UserKeyChanged:
+		// Printed as user_keys after State applied them (headlessHandleRuntimeEvent).
 		return "", {}, false
 	case .RoomChatReceived:
 		kind = .RoomChat
@@ -917,11 +1017,20 @@ headlessRenderRuntimeEvent :: proc(
 		)
 	case .UserListReceived:
 		kind = .UserList
+		users := make([]HeadlessDirectoryUserJSON, len(event.users), context.temp_allocator)
+		for user, index in event.users {
+			users[index] = headlessDirectoryUser(
+				user,
+				info.state,
+				event.serverID,
+				context.temp_allocator,
+			)
+		}
 		line = headlessMarshal(
 			HeadlessUserListJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
-				users = event.users[:],
+				users = users,
 			},
 			allocator,
 		)
@@ -994,7 +1103,12 @@ headlessRenderRuntimeEvent :: proc(
 			HeadlessUserUpdatedJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
-				user = event.user,
+				user = headlessDirectoryUser(
+					event.user,
+					info.state,
+					event.serverID,
+					context.temp_allocator,
+				),
 			},
 			allocator,
 		)
@@ -1122,6 +1236,10 @@ HeadlessUserJSON :: struct {
 	isOnline:          bool,
 	lastReadMessageId: int,
 	unreadCount:       int,
+	// Protocol 16: as in HeadlessDirectoryUserJSON, keyState as of now.
+	identityPublicKey: string,
+	hasEncryptionKey:  bool,
+	keyState:          string,
 	isAdmin:           bool,
 	isBanned:          bool,
 }
@@ -1319,6 +1437,14 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: bans an account and ends its sessions", headlessCommandAdminBan},
 	{"admin-unban", 1, 0, .None, "admin-unban USER_ID", "admins: lifts a ban",
 		headlessCommandAdminUnban},
+	{"user-keys", 1, 0, .None, "user-keys USER_ID",
+		"fetches an account's encryption key bundle; the answer is a user_keys event",
+		headlessCommandUserKeys},
+	{"verify", 1, 0, .None, "verify USER_ID",
+		"marks an account's key verified (compare safetyNumber first); trusts a changed key",
+		headlessCommandVerify},
+	{"trust-key", 1, 0, .None, "trust-key USER_ID",
+		"pins an account's changed key, unverified (Trust the new key)", headlessCommandTrustKey},
 	{"read", 2, 1, .None, "read room|dm ID [MESSAGE_ID]",
 		"marks a room or conversation read (default: up to its newest loaded message)",
 		headlessCommandRead},
@@ -1460,6 +1586,8 @@ HeadlessHarness :: struct {
 	// What voice_status and voice_speaking last reported (headless_voice.odin).
 	voice:           HeadlessVoiceTracker,
 	running:         bool,
+	// Where the key stores go (keystore.odin); empty keeps them in memory (tests). Borrowed.
+	keyStoreDir:     string,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
@@ -1496,6 +1624,7 @@ headlessRecordEvent :: proc(harness: ^HeadlessHarness, kind: HeadlessEventKind) 
 headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTransportRuntimeEvent) {
 	info := HeadlessRenderInfo {
 		displayName = harness.state.config.display_name,
+		state       = &harness.state,
 	}
 	// A server with a display name of its own signs in with that one.
 	if server, ok := State_serverConfig(&harness.state, event.serverID); ok {
@@ -1515,8 +1644,162 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		headlessRecordEvent(harness, kind)
 	}
 	State_applyRuntimeEvent(&harness.state, event)
+	// Key events are reported from State after they were applied: what matters is what the
+	// client concluded (pinned, changed, refused), not what the server sent.
+	#partial switch event.kind {
+	case .UserKeysReceived:
+		for bundle in event.userKeys {
+			headlessWriteUserKeysEvent(harness, event.serverID, bundle.userId)
+		}
+		for userID in event.missingUserIDs {
+			headlessWriteUserKeysEvent(harness, event.serverID, userID)
+		}
+	case .UserKeyChanged:
+		headlessWriteUserKeysEvent(harness, event.serverID, event.userKey.userId)
+	}
 	// Applying a voice event can start or stop the engine; report that right after it.
 	headlessPollVoice(harness)
+}
+
+// The user_keys shape for userID on serverID, from State. Strings in the temp allocator.
+headlessUserKeys :: proc(harness: ^HeadlessHarness, serverID, userID: int) -> HeadlessUserKeysJSON {
+	state := &harness.state
+	info := State_e2eePeerKeyInfo(state, serverID, userID)
+	name := State_e2eeUserName(state, serverID, userID)
+	safetyNumber, _ := State_e2eeSafetyNumber(state, serverID, userID)
+	value := HeadlessUserKeysJSON {
+		serverID     = serverID,
+		userID       = userID,
+		nickname     = name,
+		keyState     = e2eeKeyStateName(info.state),
+		canEncrypt   = info.canEncrypt,
+		verified     = info.verified,
+		hasPin       = info.hasPin,
+		createdAt    = info.createdAt,
+		safetyNumber = safetyNumber,
+		notice       = info.notice == .KeySetUpAgain ? "set_up_again" : "",
+		message      = e2eeKeyStateText(info, name),
+	}
+	if info.hasPin {
+		identity := info.identityPublicKey
+		encryption := info.encryptionPublicKey
+		value.identityPublicKey = headlessHex(identity[:], context.temp_allocator)
+		value.encryptionPublicKey = headlessHex(encryption[:], context.temp_allocator)
+	}
+	return value
+}
+
+headlessWriteUserKeysEvent :: proc(harness: ^HeadlessHarness, serverID, userID: int) {
+	if userID <= 0 || userID == State_selfUserID(&harness.state, serverID) {
+		return
+	}
+	value := headlessUserKeys(harness, serverID, userID)
+	value.event = HEADLESS_EVENT_NAMES[.UserKeys]
+	headlessWriteJSON(harness, value)
+	headlessRecordEvent(harness, .UserKeys)
+}
+
+// user-keys USER_ID: asks the server for the account's bundle; the answer is a user_keys event.
+headlessCommandUserKeys :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	userID, ok := headlessParseNumber(command.args[0])
+	state := &harness.state
+	serverID := state.selected_server_id
+	if !ok || userID <= 0 || userID == State_selfUserID(state, serverID) {
+		headlessWriteError(harness, command.name, "usage: user-keys USER_ID (not yourself)")
+		return
+	}
+	if !State_isServerConnected(state, serverID) {
+		headlessWriteError(harness, command.name, NOT_CONNECTED_MESSAGE)
+		return
+	}
+	ids := [1]int{userID}
+	requested := State_e2eeRequestUserKeys(state, serverID, ids[:]) > 0
+	headlessWriteJSON(
+		harness,
+		HeadlessUserKeysRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			userID = userID,
+			requested = requested,
+		},
+	)
+}
+
+// requested is false when a fetch for the account was already on its way; its user_keys event
+// still comes.
+HeadlessUserKeysRequestJSON :: struct {
+	ok:        bool,
+	cmd:       string,
+	serverID:  int,
+	userID:    int,
+	requested: bool,
+}
+
+// verify USER_ID: Mark as verified, after comparing the safety number (the reply carries it).
+// In key_changed it trusts the new key and marks it verified, like the dialog.
+headlessCommandVerify :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	headlessKeyAction(harness, command, true)
+}
+
+// trust-key USER_ID: Trust the new key in key_changed, unverified.
+headlessCommandTrustKey :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	headlessKeyAction(harness, command, false)
+}
+
+@(private = "file")
+headlessKeyAction :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	verify: bool,
+) {
+	userID, ok := headlessParseNumber(command.args[0])
+	state := &harness.state
+	serverID := state.selected_server_id
+	if !ok || userID <= 0 || userID == State_selfUserID(state, serverID) {
+		headlessWriteError(
+			harness,
+			command.name,
+			fmt.tprintf("usage: %s USER_ID (not yourself)", command.name),
+		)
+		return
+	}
+	done := verify ? State_e2eeMarkVerified(state, serverID, userID) : State_e2eeTrustNewKey(
+		state,
+		serverID,
+		userID,
+	)
+	if !done {
+		info := State_e2eePeerKeyInfo(state, serverID, userID)
+		reason := fmt.tprintf(
+			"refused in key state %s%s",
+			e2eeKeyStateName(info.state),
+			info.state == .KeyChanged && !info.hasOfferedKey ? "; waiting for the new key" : "",
+		)
+		headlessWriteError(harness, command.name, reason)
+		return
+	}
+	value := headlessUserKeys(harness, serverID, userID)
+	headlessWriteJSON(
+		harness,
+		HeadlessUserKeysResultJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = value.serverID,
+			userID = value.userID,
+			nickname = value.nickname,
+			keyState = value.keyState,
+			canEncrypt = value.canEncrypt,
+			verified = value.verified,
+			hasPin = value.hasPin,
+			identityPublicKey = value.identityPublicKey,
+			encryptionPublicKey = value.encryptionPublicKey,
+			createdAt = value.createdAt,
+			safetyNumber = value.safetyNumber,
+			notice = value.notice,
+			message = value.message,
+		},
+	)
 }
 
 headlessDrainEvents :: proc(harness: ^HeadlessHarness) {
@@ -1580,6 +1863,11 @@ headlessConnectAndWait :: proc(
 ) -> bool {
 	harness.state = State_initFromConfig(config)
 	state := &harness.state
+	// The key store is written like the GUI writes it (keystore.odin), so a profile run twice
+	// keeps its pins.
+	if len(harness.keyStoreDir) > 0 {
+		state.keyStoreDir = strings.clone(harness.keyStoreDir)
+	}
 	// No audio device unless a script asks for one (voice-source and voice-sink device): a
 	// harness client in voice records nothing and plays nothing, and never initialises SDL.
 	State_setVoiceEngineTemplate(
@@ -1842,6 +2130,10 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			isAdmin  = user.isAdmin,
 			isBanned = user.isBanned,
 		}
+		directory := headlessDirectoryUser(user, state, serverID, context.temp_allocator)
+		users[index].identityPublicKey = directory.identityPublicKey
+		users[index].hasEncryptionKey = directory.hasEncryptionKey
+		users[index].keyState = directory.keyState
 		if summary := State_directSummary(state, serverID, user.id); summary != nil {
 			users[index].lastReadMessageId = summary.lastReadMessageId
 			users[index].unreadCount = summary.unreadCount
@@ -2633,10 +2925,13 @@ headlessMain :: proc(args: []string) -> int {
 		return HEADLESS_EXIT_ERROR
 	}
 
+	keyStoreDir := keyStoreDefaultDir()
+	defer delete(keyStoreDir)
 	harness := HeadlessHarness {
-		out      = os.to_writer(jsonOut),
-		commands = HEADLESS_COMMANDS[:],
-		running  = true,
+		out         = os.to_writer(jsonOut),
+		commands    = HEADLESS_COMMANDS[:],
+		running     = true,
+		keyStoreDir = keyStoreDir,
 	}
 	defer HeadlessHarness_deinit(&harness)
 	connectTimeout := time.Duration(options.connectTimeoutMS) * time.Millisecond

@@ -495,6 +495,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_roomEditorProtocolError(state, serverID, message)
 	State_roomMembersProtocolError(state, serverID)
 	State_adminProtocolError(state, serverID, message)
+	State_e2eeProtocolError(state, serverID)
 	State_setChatStatus(state, message)
 }
 
@@ -559,6 +560,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		)
 	case .UserListReceived:
 		State_receiveUserList(state, event.serverID, &event.users)
+		State_e2eeDirectoryReceived(state, event.serverID)
 	case .DirectConversationsReceived:
 		State_receiveDirectConversations(state, event.serverID, &event.conversations)
 	case .UserPresenceChanged:
@@ -578,7 +580,10 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .VoiceLeft:
 		State_voiceLeft(state, event.serverID, event.roomID, &event.message)
 	case .UserUpdated:
+		// The entry carries the account's identity key and bundle flag (protocol 15).
+		summary := event.user
 		State_userUpdated(state, event.serverID, &event.user)
+		State_e2eeCheckDirectoryEntry(state, event.serverID, summary)
 	case .AccountUpdated:
 		State_accountUpdated(state, event)
 	case .AdminActionResult:
@@ -605,6 +610,15 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.joined,
 			event.changed,
 		)
+	case .UserKeysReceived:
+		State_e2eeReceiveUserKeys(
+			state,
+			event.serverID,
+			event.userKeys[:],
+			event.missingUserIDs[:],
+		)
+	case .UserKeyChanged:
+		State_e2eeUserKeyChanged(state, event.serverID, event.userKey)
 	case .None:
 	}
 }

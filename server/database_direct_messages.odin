@@ -67,7 +67,10 @@ DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 DATABASE_LIST_USERS_SQL ::
 	"SELECT u.id::text, u.nickname, EXISTS (SELECT 1 FROM user_server_roles usr " +
 	"JOIN server_roles sr ON sr.id = usr.role_id WHERE usr.user_id = u.id " +
-	"AND sr.name = 'admin')::text, (u.banned_at IS NOT NULL)::text FROM users u " +
+	"AND sr.name = 'admin')::text, (u.banned_at IS NOT NULL)::text, " +
+	"COALESCE(encode(u.public_key, 'hex'), ''), " +
+	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
+	"WHERE k.user_id = u.id))::text FROM users u " +
 	"ORDER BY lower(u.nickname), u.id"
 
 databaseExecutePostDirectMessage :: proc(
@@ -266,6 +269,8 @@ databaseExecuteListUsers :: proc(conn: pg.Conn) -> common.DatabaseQueryResponse 
 				nickname = databaseGetText(result, row, 1),
 				isAdmin = databaseGetBool(result, row, 2),
 				isBanned = databaseGetBool(result, row, 3),
+				identityPublicKey = databaseGetIdentityPublicKey(result, row, 4),
+				hasEncryptionKey = databaseGetBool(result, row, 5),
 			},
 		)
 	}

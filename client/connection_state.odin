@@ -148,6 +148,7 @@ State_saveConfig :: proc(state: ^State) {
 @(private = "file")
 State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: bool) {
 	State_resetDirectRequests(state, serverID, reloadHistory)
+	State_e2eeConnectionReset(state, serverID)
 	State_resetReadMarkerSends(state, serverID)
 	State_roomEditorConnectionReset(state, serverID)
 	State_roomMembersConnectionReset(state, serverID)
@@ -204,6 +205,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_resetPendingRequests(state, event.serverID, true)
 	State_requestRoomList(state, event.serverID)
 	State_requestDirectStateAfterConnect(state, event.serverID)
+	State_e2eeConnected(state, event.serverID)
 	State_voiceConnected(state, event.serverID)
 }
 

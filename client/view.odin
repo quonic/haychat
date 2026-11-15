@@ -21,6 +21,8 @@ PANEL_PADDING :: 8
 viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	// Last, on top of whichever screen is drawn, after it recorded its right-clicks.
 	defer viewContextMenu(state, ctx)
+	// Under the context menu, above everything else.
+	defer viewVerifyDialog(state, ctx)
 	// The Voice settings section holds the device lists and the microphone test only while
 	// it is on screen.
 	voicePanelVisible :=
@@ -527,11 +529,15 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		if unread {
 			viewSidebarUnreadBadge(ctx, &content, row.unreadCount)
 		}
+		viewKeyIndicator(ctx, &content, row.keyState)
 		color := row.selected || unread || row.isOnline ? ctx.theme.fg : ctx.theme.fgMuted
 		ui.label(ctx, content, row.label, color, unread ? .Bold : .Regular)
 		status := row.isOnline ? "Online" : "Offline"
 		if unread {
 			status = fmt.tprintf("%s, %d unread", status, row.unreadCount)
+		}
+		if keyTooltip := e2eeKeyIndicatorTooltip(row.keyState); len(keyTooltip) > 0 {
+			status = fmt.tprintf("%s. %s", status, keyTooltip)
 		}
 		ui.tooltip(ctx, id, rect, status)
 		return clicked

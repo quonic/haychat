@@ -1,11 +1,13 @@
 package client
 
 import "../common"
+import "core:crypto"
 import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:strings"
+import "core:time"
 
 XDG_CONFIG_HOME: string = "" // Global variable to store the XDG config home directory path, initialized to an empty string
 APP_DATA: string = "" // Global variable to store the APPDATA directory path on Windows, initialized to an empty string
@@ -37,6 +39,16 @@ Config :: struct {
 	// missing or malformed value with a new one, so deleting the key resets it. A copied profile
 	// directory keeps the same ID; reset it in the copy so the two count as different devices.
 	device_id:              string `json:"device_id,omitempty"`,
+	// This profile's end-to-end encryption key (e2ee-design.md 2.2, 9.3): an X25519 key pair in
+	// hex, the identity key's signature over the bundle, and the bundle's creation time (Unix
+	// seconds). Like private_key, encryption_private_key is a secret and config.json stays 0600.
+	// loadConfig (ensureEncryptionKey) generates a new key when any of them is missing, does not
+	// parse, does not match its private key, or does not verify against the identity key; peers
+	// then see a new encryption key. One key for every server.
+	encryption_private_key:    string `json:"encryption_private_key,omitempty"`,
+	encryption_public_key:     string `json:"encryption_public_key,omitempty"`,
+	encryption_key_signature:  string `json:"encryption_key_signature,omitempty"`,
+	encryption_key_created_at: u64 `json:"encryption_key_created_at,omitempty"`,
 }
 
 Server :: struct {
@@ -128,6 +140,9 @@ loadConfig :: proc() -> (config: Config) {
 	if ensureDeviceID(&config) {
 		shouldPersist = true
 	}
+	if ensureEncryptionKey(&config) {
+		shouldPersist = true
+	}
 
 	if shouldPersist {
 		saveConfig(config)
@@ -148,18 +163,36 @@ saveConfig :: proc(config: Config) {
 	}
 	defer delete(jsonData)
 
-	// The config holds the client's private identity key, so only the user may read it.
+	// The config holds the client's private identity and encryption keys, so only the user may
+	// read it.
 	configPath := getConfigPath()
 	defer delete(configPath)
-	write_err := os.write_entire_file_from_bytes(configPath, jsonData, os.perm(0o600))
-	if write_err == nil {
-		write_err = os.change_mode(configPath, os.perm(0o600))
-	}
+	write_err := writeFileAtomically(configPath, jsonData)
 	if write_err != nil {
 		fmt.println("[Error] Failed to write config file: ", write_err)
 		return
 	}
 	fmt.println("[Info] Config saved successfully to: ", configPath)
+}
+
+// Writes data to path so that a reader sees either the old file or the new one, never a part:
+// it goes to path + ".tmp" (mode 0600, only the user may read it) and is renamed over path.
+// A failed write leaves path as it was.
+writeFileAtomically :: proc(path: string, data: []u8) -> os.Error {
+	tempPath := strings.concatenate({path, ".tmp"})
+	defer delete(tempPath)
+	err := os.write_entire_file_from_bytes(tempPath, data, os.perm(0o600))
+	if err == nil {
+		// The mode only applies to a new file; an old temporary file keeps its own.
+		err = os.change_mode(tempPath, os.perm(0o600))
+	}
+	if err == nil {
+		err = os.rename(tempPath, path)
+	}
+	if err != nil {
+		os.remove(tempPath)
+	}
+	return err
 }
 
 ensureConfigDirExists :: proc() -> bool {
@@ -299,6 +332,99 @@ ensureDeviceID :: proc(config: ^Config) -> bool {
 	}
 	delete(config.device_id)
 	config.device_id = common.voiceDeviceIDToHex(id)
+	return true
+}
+
+// The profile's encryption key pair and its signed bundle, when the config holds a valid one
+// (ensureEncryptionKey made sure of it at load). The caller wipes keyPair after use.
+Config_encryptionKey :: proc(
+	config: Config,
+) -> (
+	keyPair: common.EncryptionKeyPair,
+	bundle: common.EncryptionKeyBundle,
+	ok: bool,
+) {
+	identityPrivateKey, identityOK := common.identityPrivateKeyFromHex(config.private_key)
+	defer crypto.zero_explicit(&identityPrivateKey, size_of(identityPrivateKey))
+	if !identityOK {
+		return
+	}
+	identityPublicKey, publicOK := common.identityPublicKeyFromHex(config.public_key)
+	derivedPublicKey, derivedOK := common.identityPublicKeyFromPrivateKey(identityPrivateKey)
+	if !publicOK || !derivedOK || derivedPublicKey != identityPublicKey {
+		return
+	}
+	privateKey: common.EncryptionPrivateKeyBytes
+	defer crypto.zero_explicit(&privateKey, size_of(privateKey))
+	publicKey: common.EncryptionPublicKeyBytes
+	signature: common.SignatureBytes
+	if !common.decodeHexIntoBuffer(config.encryption_private_key, privateKey[:]) ||
+	   !common.decodeHexIntoBuffer(config.encryption_public_key, publicKey[:]) ||
+	   !common.decodeHexIntoBuffer(config.encryption_key_signature, signature[:]) ||
+	   config.encryption_key_created_at == 0 {
+		return
+	}
+	derived := common.encryptionKeyPairFromPrivateKey(privateKey)
+	if derived.publicKey != publicKey {
+		common.EncryptionKeyPair_wipe(&derived)
+		return
+	}
+	candidate := common.EncryptionKeyBundle {
+		identityPublicKey   = identityPublicKey,
+		encryptionPublicKey = publicKey,
+		createdAt           = config.encryption_key_created_at,
+		signature           = signature,
+	}
+	if !common.verifyEncryptionKeyBundle(candidate) {
+		common.EncryptionKeyPair_wipe(&derived)
+		return
+	}
+	return derived, candidate, true
+}
+
+// Gives the config an encryption key unless it holds a valid one for its identity key (see
+// Config.encryption_private_key). Run after ensureIdentityKeys. Returns true when it changed
+// and should be saved. Never prints a key.
+ensureEncryptionKey :: proc(config: ^Config) -> bool {
+	if keyPair, _, ok := Config_encryptionKey(config^); ok {
+		common.EncryptionKeyPair_wipe(&keyPair)
+		return false
+	}
+	identityPrivateKey, identityOK := common.identityPrivateKeyFromHex(config.private_key)
+	defer crypto.zero_explicit(&identityPrivateKey, size_of(identityPrivateKey))
+	if !identityOK {
+		return false
+	}
+	keyPair, keyOK := common.generateEncryptionKeyPair()
+	defer common.EncryptionKeyPair_wipe(&keyPair)
+	if !keyOK {
+		fmt.println("[Error] Failed to generate an encryption key")
+		return false
+	}
+	createdAt := u64(max(time.time_to_unix(time.now()), 1))
+	bundle, signOK := common.signEncryptionKeyBundle(
+		identityPrivateKey,
+		keyPair.publicKey,
+		createdAt,
+	)
+	if !signOK {
+		fmt.println("[Error] Failed to sign the encryption key")
+		return false
+	}
+	hadKey := len(config.encryption_public_key) > 0
+	delete(config.encryption_private_key)
+	delete(config.encryption_public_key)
+	delete(config.encryption_key_signature)
+	config.encryption_private_key = common.encodeBytesToHex(keyPair.privateKey[:])
+	config.encryption_public_key = common.encodeBytesToHex(keyPair.publicKey[:])
+	config.encryption_key_signature = common.encodeBytesToHex(bundle.signature[:])
+	config.encryption_key_created_at = createdAt
+	if hadKey {
+		fmt.println(
+			"[Warning] The encryption key in the config was not valid; made a new one. " +
+			"Other users will see that this profile set up encryption again.",
+		)
+	}
 	return true
 }
 
@@ -479,6 +605,10 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_output_volume = config.voice_output_volume,
 		voice_bitrate = config.voice_bitrate,
 		device_id = strings.clone(config.device_id),
+		encryption_private_key = strings.clone(config.encryption_private_key),
+		encryption_public_key = strings.clone(config.encryption_public_key),
+		encryption_key_signature = strings.clone(config.encryption_key_signature),
+		encryption_key_created_at = config.encryption_key_created_at,
 	}
 	for server in config.servers {
 		append(&clone.servers, Server_clone(server))
@@ -499,6 +629,9 @@ Config_deinit :: proc(config: ^Config) {
 	delete(config.voice_mode)
 	delete(config.voice_ptt_key)
 	delete(config.device_id)
+	delete(config.encryption_private_key)
+	delete(config.encryption_public_key)
+	delete(config.encryption_key_signature)
 	config^ = {}
 }
 

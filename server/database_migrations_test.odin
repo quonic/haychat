@@ -265,6 +265,22 @@ databaseMigrationTestValidationPasses :: proc(conn: pg.Conn) {
 	)
 }
 
+// Like databaseMigrationTestValidationPasses, for a schema migrated only as far as migrations.
+databaseMigrationTestValidationPassesFor :: proc(conn: pg.Conn, migrations: []DatabaseMigration) {
+	query := databaseSchemaValidationQuery(migrations)
+	defer delete(query)
+	validationErr := databaseSchemaValidationError(conn, query)
+	defer delete(validationErr)
+	assert(
+		len(validationErr) == 0,
+		fmt.tprintf(
+			"expected the version %d schema to validate, got %q",
+			len(migrations),
+			validationErr,
+		),
+	)
+}
+
 // Every row of every baseline table, with every column, so any lost or changed row shows.
 DATABASE_MIGRATION_TEST_FINGERPRINT_SQL ::
 	"SELECT concat_ws(' | ', " +

@@ -92,6 +92,14 @@ State :: struct {
 	voicePanel:                     VoiceSettingsPanel,
 	// The open right-click menu's target (context_menu.odin), drawn by viewContextMenu.
 	contextMenu:                    ContextMenuState,
+	// Account encryption keys per server (e2ee_state.odin): the key store and what this
+	// session learned about each peer's key.
+	e2ee:                           [dynamic]ServerE2EEState,
+	// Where key stores are written (keystore.odin); empty keeps them in memory, which is what
+	// states built by tests do. init and the headless harness set it.
+	keyStoreDir:                    string,
+	// The Verify encryption… dialog (e2ee_view_model.odin).
+	verifyDialog:                   VerifyDialogState,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -129,6 +137,8 @@ State_initFromConfig :: proc(config: Config) -> (init_state: State) {
 	// loadConfig gives every profile a device ID; a config built in code (tests, tools) gets one
 	// for this run only, so every voice join can carry a valid one.
 	ensureDeviceID(&init_state.config)
+	// Likewise an encryption key, when the config has an identity key to sign it with.
+	ensureEncryptionKey(&init_state.config)
 	init_state.serverTransports = ClientTransportCatalog_init(&init_state.config)
 	for index in 0 ..< len(init_state.serverTransports) {
 		transport := &init_state.serverTransports[index]
@@ -219,6 +229,7 @@ State_deinit :: proc(state: ^State) {
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)
 	ContextMenuState_deinit(&state.contextMenu)
+	State_e2eeDeinit(state)
 	state^ = {}
 }
 
@@ -234,6 +245,7 @@ init :: proc(
 	defer Config_deinit(&config)
 	init_state = State_initFromConfig(config)
 	init_state.persistConfig = true
+	init_state.keyStoreDir = keyStoreDefaultDir()
 	// Connecting happens on the worker, so this returns at once and the window can show the
 	// connection status while it runs.
 	State_startNetwork(&init_state, onEventQueued, onEventQueuedData)

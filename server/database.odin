@@ -803,6 +803,10 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteMarkRead(conn, r)
 	case common.DatabaseAdminUserRequest:
 		return databaseExecuteAdminUser(conn, r)
+	case common.DatabasePublishEncryptionKeyRequest:
+		return databaseExecutePublishEncryptionKey(conn, r)
+	case common.DatabaseFetchUserKeysRequest:
+		return databaseExecuteFetchUserKeys(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

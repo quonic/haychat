@@ -353,6 +353,12 @@ State_openDirectConversation :: proc(state: ^State, serverID, peerUserID: int) {
 		State_requestDirectHistory(state, serverID, peerUserID, 0)
 	}
 	State_clearChatStatus(state)
+	// The peer's key state for the conversation's key banner (and E2's encryption): the first
+	// bundle seen is pinned, a later one is checked against the pin.
+	if State_e2eePeerKeyInfo(state, serverID, peerUserID).state == .Unknown {
+		ids := [1]int{peerUserID}
+		State_e2eeRequestUserKeys(state, serverID, ids[:])
+	}
 }
 
 // Returns the draft of the open conversation, or nil when none is open. The pointer is only

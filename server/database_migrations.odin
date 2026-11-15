@@ -288,6 +288,45 @@ DATABASE_ROOM_ACCESS_CHECKS ::
 	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
 	"AND conname = 'rooms_history_visibility_check'))"
 
+// Migration 5 (protocol 16, e2ee-design.md 9.2): each account's published encryption key
+// bundle (design 2.2, 3.1). One row per account; the identity key the bundle is signed by is
+// users.public_key, so it is not stored twice.
+//
+// - encryption_public_key: the X25519 public key, 32 bytes.
+// - created_at_unix: the bundle's createdAt (Unix seconds), part of the signed bytes.
+// - signature: the identity key's Ed25519 signature over the bundle, 64 bytes.
+// - updated_at: when the row last changed (a first publish or a replacement).
+//
+// A new table, so every existing row is untouched: accounts start without a bundle until their
+// client publishes one. Never edit it; append a migration instead.
+DATABASE_MIGRATION_5_USER_ENCRYPTION_KEYS_SQL ::
+	"CREATE TABLE user_encryption_keys (" +
+	"user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, " +
+	"encryption_public_key BYTEA NOT NULL, " +
+	"created_at_unix BIGINT NOT NULL, " +
+	"signature BYTEA NOT NULL, " +
+	"updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
+	"CONSTRAINT user_encryption_keys_key_size CHECK (octet_length(encryption_public_key) = 32), " +
+	"CONSTRAINT user_encryption_keys_signature_size CHECK (octet_length(signature) = 64), " +
+	"CONSTRAINT user_encryption_keys_created_at CHECK (created_at_unix >= 0));"
+
+// What migration 5 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_USER_ENCRYPTION_KEYS_CHECKS ::
+	"('user_encryption_keys table', to_regclass('user_encryption_keys') IS NOT NULL), " +
+	"('user_encryption_keys columns', (SELECT count(*) = 5 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'user_encryption_keys' " +
+	"AND column_name IN ('user_id', 'encryption_public_key', 'created_at_unix', 'signature', " +
+	"'updated_at'))), " +
+	"('user encryption keys primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('user_encryption_keys') AND contype = 'p')), " +
+	"('user encryption keys cascade', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('user_encryption_keys') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('user encryption keys size checks', (SELECT count(*) = 3 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('user_encryption_keys') AND contype = 'c' " +
+	"AND conname IN ('user_encryption_keys_key_size', 'user_encryption_keys_signature_size', " +
+	"'user_encryption_keys_created_at')))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -308,6 +347,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "room access",
 		sql = DATABASE_MIGRATION_4_ROOM_ACCESS_SQL,
 		checks = DATABASE_ROOM_ACCESS_CHECKS,
+	},
+	{
+		version = 5,
+		name = "user encryption keys",
+		sql = DATABASE_MIGRATION_5_USER_ENCRYPTION_KEYS_SQL,
+		checks = DATABASE_USER_ENCRYPTION_KEYS_CHECKS,
 	},
 }
 
@@ -415,6 +460,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ADMIN_CHECKS +
 	", " +
 	DATABASE_ROOM_ACCESS_CHECKS +
+	", " +
+	DATABASE_USER_ENCRYPTION_KEYS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

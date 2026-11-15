@@ -59,9 +59,10 @@ Usage: ./dev.sh <command> [args]
 
 Checks (each run uses fresh containers and a throwaway database):
   check                 compile checks and leak-checked test suites (./check.sh)
-  live [--all|--harness|--admin|--access|--voice|--ui|--sql|NAME...]
+  live [--all|--harness|--admin|--access|--e2ee|--voice|--ui|--sql|NAME...]
                         live server + client proof against a throwaway database; --admin
                         runs the two-client admin proof, --access the room access proof,
+                        --e2ee the encryption key proof,
                         --voice the two-process voice proof, --ui drives the real window
                         offscreen (screenshots: see below)
   ci                    check, then live: exactly what Forgejo CI runs
