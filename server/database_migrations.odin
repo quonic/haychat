@@ -327,6 +327,67 @@ DATABASE_USER_ENCRYPTION_KEYS_CHECKS ::
 	"AND conname IN ('user_encryption_keys_key_size', 'user_encryption_keys_signature_size', " +
 	"'user_encryption_keys_created_at')))"
 
+// Migration 6 (protocol 17, e2ee-design.md 4.5, 4.6, 9.2): encrypted direct messages and the
+// signed plaintext fallback.
+//
+// - content may be empty: an encrypted message stores its envelope and an empty content. The
+//   baseline's unnamed check on content's length is dropped (found by its definition, since
+//   its name depends on how the table was created) and replaced by
+//   direct_messages_content_or_envelope: exactly one of a 1..4000 character content or a
+//   1..8192 byte envelope (common.SEALED_ENVELOPE_MAX_BYTES).
+// - client_message_id: the sender's 16-byte ID for the message, bound into the envelope's AAD
+//   or the fallback's signature. NULL for messages from before protocol 17; every message
+//   stored since has one, and direct_messages_sender_client_message_id makes it unique per
+//   sender, so a replayed message is refused.
+// - envelope: the sealed envelope, byte for byte as the sender sent it.
+// - signature: the sender's Ed25519 signature over a plaintext fallback message (64 bytes);
+//   NULL for encrypted messages and for messages from before protocol 17.
+//
+// Every existing row is plaintext without an ID or a signature, which every new check
+// accepts, so no row changes. Never edit it; append a migration instead.
+DATABASE_MIGRATION_6_ENCRYPTED_DIRECT_MESSAGES_SQL ::
+	"DO $$ DECLARE constraint_name text; BEGIN " +
+	"FOR constraint_name IN SELECT conname FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_messages') AND contype = 'c' " +
+	"AND pg_get_constraintdef(oid) LIKE '%char_length(content)%' LOOP " +
+	"EXECUTE format('ALTER TABLE direct_messages DROP CONSTRAINT %I', constraint_name); " +
+	"END LOOP; END $$; " +
+	"ALTER TABLE direct_messages ADD COLUMN client_message_id BYTEA NULL, " +
+	"ADD COLUMN envelope BYTEA NULL, ADD COLUMN signature BYTEA NULL; " +
+	"ALTER TABLE direct_messages ADD CONSTRAINT direct_messages_content_or_envelope CHECK (" +
+	"(envelope IS NULL AND char_length(content) BETWEEN 1 AND 4000) OR " +
+	"(envelope IS NOT NULL AND content = '' AND octet_length(envelope) BETWEEN 1 AND 8192)), " +
+	"ADD CONSTRAINT direct_messages_envelope_size " +
+	"CHECK (octet_length(envelope) <= 8192), " +
+	"ADD CONSTRAINT direct_messages_client_message_id_size " +
+	"CHECK (octet_length(client_message_id) = 16), " +
+	"ADD CONSTRAINT direct_messages_signature_size CHECK (octet_length(signature) = 64), " +
+	"ADD CONSTRAINT direct_messages_envelope_has_id " +
+	"CHECK (envelope IS NULL OR client_message_id IS NOT NULL), " +
+	"ADD CONSTRAINT direct_messages_signature_on_plaintext CHECK (signature IS NULL OR " +
+	"(envelope IS NULL AND client_message_id IS NOT NULL)); " +
+	"CREATE UNIQUE INDEX direct_messages_sender_client_message_id " +
+	"ON direct_messages (sender_user_id, client_message_id) " +
+	"WHERE client_message_id IS NOT NULL;"
+
+// What migration 6 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS ::
+	"('direct_messages e2ee columns', (SELECT count(*) = 3 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'direct_messages' " +
+	"AND column_name IN ('client_message_id', 'envelope', 'signature') " +
+	"AND data_type = 'bytea' AND is_nullable = 'YES')), " +
+	"('direct messages e2ee checks', (SELECT count(*) = 6 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_messages') AND contype = 'c' " +
+	"AND conname IN ('direct_messages_content_or_envelope', 'direct_messages_envelope_size', " +
+	"'direct_messages_client_message_id_size', 'direct_messages_signature_size', " +
+	"'direct_messages_envelope_has_id', 'direct_messages_signature_on_plaintext'))), " +
+	"('direct messages content length check dropped', NOT EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_messages') AND contype = 'c' " +
+	"AND conname <> 'direct_messages_content_or_envelope' " +
+	"AND pg_get_constraintdef(oid) LIKE '%char_length(content)%')), " +
+	"('direct messages client message id index', " +
+	"to_regclass('direct_messages_sender_client_message_id') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -353,6 +414,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "user encryption keys",
 		sql = DATABASE_MIGRATION_5_USER_ENCRYPTION_KEYS_SQL,
 		checks = DATABASE_USER_ENCRYPTION_KEYS_CHECKS,
+	},
+	{
+		version = 6,
+		name = "encrypted direct messages",
+		sql = DATABASE_MIGRATION_6_ENCRYPTED_DIRECT_MESSAGES_SQL,
+		checks = DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS,
 	},
 }
 
@@ -462,6 +529,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ROOM_ACCESS_CHECKS +
 	", " +
 	DATABASE_USER_ENCRYPTION_KEYS_CHECKS +
+	", " +
+	DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

@@ -324,6 +324,7 @@ StoredDirectMessage_deinit :: proc(message: ^common.StoredDirectMessage) {
 	delete(message.recipientNickname)
 	delete(message.timestamp)
 	delete(message.content)
+	delete(message.envelope)
 	message^ = {}
 }
 
@@ -356,6 +357,7 @@ DirectConversationSummary_deinit :: proc(conversation: ^common.DirectConversatio
 	delete(conversation.peerNickname)
 	delete(conversation.lastTimestamp)
 	delete(conversation.lastContent)
+	delete(conversation.lastEnvelope)
 	conversation^ = {}
 }
 
@@ -860,17 +862,43 @@ ClientServerTransport_requestRoomHistory :: proc(
 	)
 }
 
+// One direct message ready to go out (direct_messages_e2ee.odin builds it): an encrypted one
+// carries its envelope, a plaintext fallback its content and signature. Borrowed for the send.
+DirectMessageSend :: struct {
+	recipientUserID: int,
+	clientMessageID: common.ClientMessageID,
+	envelope:        []u8,
+	content:         string,
+	signature:       common.SignatureBytes,
+}
+
 // Direct messages share the room chat channel and the not-connected handling of every other
-// runtime request.
+// runtime request. An envelope goes out as ClientSealedDirectMessage, anything else as the
+// signed ClientDirectMessage (protocol 17).
 ClientServerTransport_sendDirectMessage :: proc(
 	transport: ^ClientServerTransport,
-	recipientUserID: int,
-	content: string,
+	send: DirectMessageSend,
 ) -> bool {
+	if len(send.envelope) > 0 {
+		return ClientServerTransport_sendEncryptedRuntimeMessage(
+			transport,
+			.ClientSealedDirectMessage,
+			common.ClientSealedDirectMessagePayload {
+				recipientUserId = send.recipientUserID,
+				clientMessageId = send.clientMessageID,
+				envelope = send.envelope,
+			},
+		)
+	}
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
 		.ClientDirectMessage,
-		common.ClientDirectMessagePayload{recipientUserId = recipientUserID, content = content},
+		common.ClientDirectMessagePayload {
+			recipientUserId = send.recipientUserID,
+			content = send.content,
+			clientMessageId = send.clientMessageID,
+			signature = send.signature,
+		},
 	)
 }
 
@@ -1345,10 +1373,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	case .ServerDirectMessage:
 		payload: common.ServerDirectMessagePayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
-			delete(payload.senderNickname)
-			delete(payload.recipientNickname)
-			delete(payload.timestamp)
-			delete(payload.content)
+			common.ServerDirectMessagePayload_deinit(&payload)
 			return ClientServerTransport_invalidPayloadEvent(
 					transport,
 					"invalid direct message payload",
@@ -1366,6 +1391,36 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 					recipientNickname = payload.recipientNickname,
 					timestamp = payload.timestamp,
 					content = payload.content,
+					clientMessageId = payload.clientMessageId,
+					signature = payload.signature,
+				},
+			},
+			true
+
+	// Protocol 17: an encrypted direct message, the same event with the envelope and no
+	// content. State opens it (direct_messages_e2ee.odin).
+	case .ServerSealedDirectMessage:
+		payload: common.ServerSealedDirectMessagePayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || len(payload.envelope) == 0 {
+			common.ServerSealedDirectMessagePayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid encrypted direct message payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .DirectMessageReceived,
+				serverID = transport.serverID,
+				directMessage = common.StoredDirectMessage {
+					id = payload.id,
+					senderId = payload.senderId,
+					senderNickname = payload.senderNickname,
+					recipientId = payload.recipientId,
+					recipientNickname = payload.recipientNickname,
+					timestamp = payload.timestamp,
+					clientMessageId = payload.clientMessageId,
+					envelope = payload.envelope,
 				},
 			},
 			true

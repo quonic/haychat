@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 16
+protocolVersion: ProtocolVersion = 17
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -359,6 +359,11 @@ MessageType :: enum {
 	ClientFetchUserKeys, // ClientFetchUserKeysPayload: request accounts' bundles
 	ServerUserKeys, // ServerUserKeysPayload: response to ClientFetchUserKeys
 	ServerUserKeyChanged, // ServerUserKeyChangedPayload: an account published a new bundle
+	// Encrypted direct messages (protocol 17, e2ee-design.md 4.5), appended so no existing wire
+	// value moves. ClientDirectMessage and ServerDirectMessage carry the signed plaintext
+	// fallback (4.6).
+	ClientSealedDirectMessage, // ClientSealedDirectMessagePayload: an encrypted direct message
+	ServerSealedDirectMessage, // ServerSealedDirectMessagePayload: a stored encrypted one
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -659,19 +664,46 @@ ServerAdminRoomsPayload_deinit :: proc(payload: ^ServerAdminRoomsPayload) {
 	payload.rooms = nil
 }
 
-// Direct messages are per server, between any two accounts, and stored server side in plain
-// text (they are not end-to-end encrypted). Every string and dynamic array below is an owned
-// CBOR allocation once decoded; free it or transfer it, as with room chat.
+// Direct messages are per server, between any two accounts. Since protocol 17 (e2ee-design.md
+// 4.5, 4.6) a message is either end-to-end encrypted (an envelope of common/e2ee.odin's binary
+// layout, carried as a CBOR byte string and stored byte for byte) or a signed plaintext
+// fallback the server can read; messages from before protocol 17 are plaintext without a
+// signature. Every string, byte string and dynamic array below is an owned CBOR allocation once
+// decoded; free it or transfer it, as with room chat. Fixed-size byte fields (client message
+// IDs, signatures) decode through CBOR's temporary allocator.
 
-// ClientDirectMessage. The server rejects an empty or oversized message, a message to the
-// sender's own account, and a recipient that does not exist, with ServerProtocolError.
+// ClientDirectMessage: the signed plaintext fallback (design 4.6). signature is
+// signPlaintextDirectMessage over the server's identity key, both user IDs, clientMessageId and
+// content. The server rejects an empty or oversized message, a zero clientMessageId, a missing
+// or wrong signature (DIRECT_MESSAGE_SIGNATURE_INVALID_MESSAGE), a clientMessageId the sender
+// used before (DIRECT_MESSAGE_DUPLICATE_MESSAGE), a message to the sender's own account, and a
+// recipient that does not exist, with ServerProtocolError.
 ClientDirectMessagePayload :: struct {
 	recipientUserId: int,
 	content:         string, // 1..CHAT_MESSAGE_MAX_BYTES bytes of UTF-8
+	clientMessageId: ClientMessageID, // 16 random bytes, never all zero
+	signature:       SignatureBytes,
+}
+
+// ClientSealedDirectMessage (protocol 17): an encrypted direct message. envelope is a
+// sealDirectMessage envelope (at most SEALED_ENVELOPE_MAX_BYTES) whose AAD names this server,
+// the sender, the recipient, both identity keys and clientMessageId. The server checks it with
+// verifyDirectMessageEnvelope against the identity keys it knows and refuses anything else with
+// SEALED_DIRECT_MESSAGE_INVALID_MESSAGE; duplicates, self-addressed messages and unknown
+// recipients are refused as for ClientDirectMessage.
+ClientSealedDirectMessagePayload :: struct {
+	recipientUserId: int,
+	clientMessageId: ClientMessageID,
+	envelope:        []u8,
 }
 
 // One persisted direct message. Nicknames are the accounts' current nicknames, joined from
 // users when the message is stored or read. timestamp is PostgreSQL timestamptz text.
+//
+// Protocol 17: an encrypted message has its envelope and an empty content; a plaintext one has
+// content, no envelope, and the sender's signature (all zeros for a message from before
+// protocol 17, which has none). clientMessageId is the sender's ID for the message (all zeros
+// before protocol 17).
 StoredDirectMessage :: struct {
 	id:                int, // Stable, increasing, and the history pagination cursor
 	senderId:          int,
@@ -680,12 +712,16 @@ StoredDirectMessage :: struct {
 	recipientNickname: string,
 	timestamp:         string,
 	content:           string,
+	clientMessageId:   ClientMessageID,
+	envelope:          []u8,
+	signature:         SignatureBytes,
 }
 
-// ServerDirectMessage: sent once the message is stored, to every authenticated session of
-// both the sender and the recipient. The sender sees its own message only through this echo,
-// so a client should not append a sent message locally. The conversation's peer is
-// recipientId when senderId is the viewer's own ID, otherwise senderId.
+// ServerDirectMessage: a stored plaintext message, sent to every authenticated session of
+// both the sender and the recipient. The sender sees its own message only through this echo
+// (or ServerSealedDirectMessage for an encrypted one), so a client should not append a sent
+// message locally. The conversation's peer is recipientId when senderId is the viewer's own
+// ID, otherwise senderId. clientMessageId and signature as in StoredDirectMessage.
 ServerDirectMessagePayload :: struct {
 	id:                int,
 	senderId:          int,
@@ -694,6 +730,53 @@ ServerDirectMessagePayload :: struct {
 	recipientNickname: string,
 	timestamp:         string,
 	content:           string,
+	clientMessageId:   ClientMessageID,
+	signature:         SignatureBytes,
+}
+
+// ServerSealedDirectMessage (protocol 17): a stored encrypted message, fanned out like
+// ServerDirectMessage. envelope is exactly what the sender sent.
+ServerSealedDirectMessagePayload :: struct {
+	id:                int,
+	senderId:          int,
+	senderNickname:    string,
+	recipientId:       int,
+	recipientNickname: string,
+	timestamp:         string,
+	clientMessageId:   ClientMessageID,
+	envelope:          []u8,
+}
+
+// Refusals of a direct message (protocol 17), as ServerProtocolError messages.
+DIRECT_MESSAGE_SIGNATURE_INVALID_MESSAGE :: "Invalid direct message signature"
+SEALED_DIRECT_MESSAGE_INVALID_MESSAGE :: "Invalid encrypted direct message"
+DIRECT_MESSAGE_DUPLICATE_MESSAGE :: "Duplicate direct message"
+
+ServerDirectMessagePayload_deinit :: proc(payload: ^ServerDirectMessagePayload) {
+	delete(payload.senderNickname)
+	delete(payload.recipientNickname)
+	delete(payload.timestamp)
+	delete(payload.content)
+	payload^ = {}
+}
+
+ServerSealedDirectMessagePayload_deinit :: proc(payload: ^ServerSealedDirectMessagePayload) {
+	delete(payload.senderNickname)
+	delete(payload.recipientNickname)
+	delete(payload.timestamp)
+	delete(payload.envelope)
+	payload^ = {}
+}
+
+ClientSealedDirectMessagePayload_deinit :: proc(payload: ^ClientSealedDirectMessagePayload) {
+	delete(payload.envelope)
+	payload.envelope = nil
+}
+
+// Whether a client message ID is set. The all-zero ID means "none" (messages from before
+// protocol 17), so a sender never uses it.
+clientMessageIDIsSet :: proc(id: ClientMessageID) -> bool {
+	return id != ClientMessageID{}
 }
 
 // ClientFetchDirectHistory. Paginated exactly like room history: beforeMessageID 0 asks for
@@ -749,6 +832,12 @@ DirectConversationSummary :: struct {
 	lastSenderId:  int, // Either the requester's ID or peerUserId
 	lastTimestamp: string,
 	lastContent:   string,
+	// Protocol 17: the latest message's client message ID, envelope (owned; empty for a
+	// plaintext message, whose lastContent is set) and signature, as in StoredDirectMessage,
+	// so the client can open or verify the preview.
+	lastClientMessageId: ClientMessageID,
+	lastEnvelope:        []u8,
+	lastSignature:       SignatureBytes,
 	// Read state (protocol 11): the newest message ID the requester marked read in this
 	// conversation (0 when never), and the peer's messages after it, capped at
 	// UNREAD_COUNT_CAP. Without a marker every message from the peer is unread.
@@ -1263,10 +1352,23 @@ DatabaseAdminRoomListRequest :: struct {
 
 // Checks that the recipient exists and is not the sender, stores the message, and reads both
 // nicknames in one statement, so the check and the insert cannot race.
+//
+// Protocol 17: a plaintext message (content, owned) carries the signature the router already
+// verified; an encrypted one has an empty content and its envelope (owned). For an envelope the
+// database worker reads the recipient's identity key, checks the envelope with
+// verifyDirectMessageEnvelope (serverIdentityPublicKey, both user IDs, senderIdentityPublicKey
+// (the session's), that key and clientMessageId), and stores it only while the recipient still
+// has that key, in the same statement as the insert. A clientMessageId the sender used before
+// stores nothing (DirectMessagePostOutcome.Duplicate).
 DatabasePostDirectMessageRequest :: struct {
-	senderId:    int,
-	recipientId: int,
-	content:     string,
+	senderId:                int,
+	recipientId:             int,
+	content:                 string,
+	clientMessageId:         ClientMessageID,
+	signature:               SignatureBytes,
+	envelope:                []u8,
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
 }
 
 // Returns a page of the conversation between userId and peerUserId, in both directions.
@@ -1436,11 +1538,18 @@ DatabaseAdminRoomListResult :: struct {
 	rooms:   [dynamic]AdminRoomSummary,
 }
 
-// When recipientExists is false nothing was stored and storedMessage is empty. It is false
-// for an unknown recipient and for a message addressed to the sender.
+// How a direct message post ended. Only Stored stored anything.
+DirectMessagePostOutcome :: enum u8 {
+	Stored,
+	UnknownRecipient, // No such account, or the sender itself
+	InvalidEnvelope, // The envelope does not verify against the accounts' identity keys
+	Duplicate, // The sender already stored a message with this clientMessageId
+}
+
+// storedMessage (owned) is set only when outcome is Stored.
 DatabasePostDirectMessageResult :: struct {
-	recipientExists: bool,
-	storedMessage:   StoredDirectMessage,
+	outcome:       DirectMessagePostOutcome,
+	storedMessage: StoredDirectMessage,
 }
 
 // When peerExists is false the peer account does not exist and messages is empty.

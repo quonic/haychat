@@ -110,6 +110,33 @@ routerTestExpectProtocolError :: proc(
 	)
 }
 
+// A signed plaintext fallback message from senderID (protocol 17), as a client sends it.
+routerTestPlainDirectMessage :: proc(
+	h: ^RouterTestHarness,
+	senderKey: common.IdentityPrivateKeyBytes,
+	senderID, recipientID: int,
+	content: string,
+	fill: u8 = 1,
+) -> common.ClientDirectMessagePayload {
+	clientMessageID: common.ClientMessageID
+	for index in 0 ..< len(clientMessageID) {
+		clientMessageID[index] = fill + u8(index)
+	}
+	signature, ok := common.signPlaintextDirectMessage(
+		{h.state.serverIdentityPublicKey, senderID, recipientID, clientMessageID},
+		content,
+		senderKey,
+	)
+	assert(ok || len(content) == 0 || len(content) > common.CHAT_MESSAGE_MAX_BYTES,
+		"expected signing to succeed")
+	return common.ClientDirectMessagePayload {
+		recipientUserId = recipientID,
+		content = content,
+		clientMessageId = clientMessageID,
+		signature = signature,
+	}
+}
+
 @(test)
 testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T) {
 	_ = t
@@ -131,7 +158,13 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 	h.state.connectedPeers[unauthenticatedPeerID] = true
 	MainRouterState_setPeerSession(&h.state, unauthenticatedPeerID, RouterPeerSession_init())
 
-	senderTransport := routerCompleteHandshake(&h, senderPeerID, 42)
+	senderKey: common.IdentityPrivateKeyBytes
+	senderTransport := routerCompleteHandshake(
+		&h,
+		senderPeerID,
+		42,
+		identityPrivateKeyOut = &senderKey,
+	)
 	peers := [?]RouterTestPeer {
 		{senderPeerID, &senderTransport},
 		{recipientPeerID, nil},
@@ -150,12 +183,13 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 	}
 	routerTestExpectNoNetworkMessage(&h, "expected only the presence notices so far")
 
+	sent := routerTestPlainDirectMessage(&h, senderKey, 42, 43, "psst")
 	routerTestSendSealed(
 		&h,
 		&senderTransport,
 		senderPeerID,
 		.ClientDirectMessage,
-		common.ClientDirectMessagePayload{recipientUserId = 43, content = "psst"},
+		sent,
 	)
 	postQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(postQuery.request)
@@ -164,7 +198,10 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 	assert(
 		postRequest.senderId == 42 &&
 		postRequest.recipientId == 43 &&
-		postRequest.content == "psst",
+		postRequest.content == "psst" &&
+		postRequest.clientMessageId == sent.clientMessageId &&
+		postRequest.signature == sent.signature &&
+		len(postRequest.envelope) == 0,
 		fmt.tprintf("expected the authenticated sender and the content, got %v", postRequest),
 	)
 
@@ -175,7 +212,7 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 		common.DatabaseQueryResponse {
 			success = true,
 			result = common.DatabasePostDirectMessageResult {
-				recipientExists = true,
+				outcome = .Stored,
 				storedMessage = {
 					id = 77,
 					senderId = 42,
@@ -184,6 +221,8 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 					recipientNickname = strings.clone("bob"),
 					timestamp = strings.clone("2026-11-05 10:00:00+00"),
 					content = strings.clone("psst"),
+					clientMessageId = sent.clientMessageId,
+					signature = sent.signature,
 				},
 			},
 		},
@@ -205,7 +244,8 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 		)
 		directPayload: common.ServerDirectMessagePayload
 		assert(
-			cbor.unmarshal(packet.payload, &directPayload) == nil,
+			cbor.unmarshal(packet.payload, &directPayload, temp_allocator = context.allocator) ==
+			nil,
 			"expected direct message decode to succeed",
 		)
 		defer {
@@ -220,7 +260,9 @@ testMainRouterDirectMessageReachesEverySessionOfBothUsers :: proc(t: ^testing.T)
 			directPayload.recipientId == 43 &&
 			directPayload.senderNickname == "alice" &&
 			directPayload.recipientNickname == "bob" &&
-			directPayload.content == "psst",
+			directPayload.content == "psst" &&
+			directPayload.clientMessageId == sent.clientMessageId &&
+			directPayload.signature == sent.signature,
 			fmt.tprintf("expected the stored direct message fields, got %v", directPayload),
 		)
 		seen[peerID] = true
@@ -242,20 +284,27 @@ testMainRouterRejectsInvalidDirectMessages :: proc(t: ^testing.T) {
 	defer routerTestHarness_deinit(&h)
 
 	peerID := u32(1)
-	transport := routerCompleteHandshake(&h, peerID, 42)
+	senderKey: common.IdentityPrivateKeyBytes
+	transport := routerCompleteHandshake(&h, peerID, 42, identityPrivateKeyOut = &senderKey)
 	peers := [?]RouterTestPeer{{peerID, &transport}}
 
 	tooLong := strings.repeat("x", common.CHAT_MESSAGE_MAX_BYTES + 1)
 	defer delete(tooLong)
+	noID := routerTestPlainDirectMessage(&h, senderKey, 42, 43, "no id")
+	noID.clientMessageId = {}
 	invalidCases := [?]struct {
 		payload:  common.ClientDirectMessagePayload,
 		expected: string,
 	} {
-		{{recipientUserId = 42, content = "me"}, "Cannot send a direct message to yourself"},
-		{{recipientUserId = 0, content = "nobody"}, "Invalid direct message"},
-		{{recipientUserId = -3, content = "nobody"}, "Invalid direct message"},
-		{{recipientUserId = 43, content = ""}, "Invalid direct message"},
-		{{recipientUserId = 43, content = tooLong}, "Invalid direct message"},
+		{
+			routerTestPlainDirectMessage(&h, senderKey, 42, 42, "me"),
+			"Cannot send a direct message to yourself",
+		},
+		{routerTestPlainDirectMessage(&h, senderKey, 42, 0, "nobody"), "Invalid direct message"},
+		{routerTestPlainDirectMessage(&h, senderKey, 42, -3, "nobody"), "Invalid direct message"},
+		{routerTestPlainDirectMessage(&h, senderKey, 42, 43, ""), "Invalid direct message"},
+		{routerTestPlainDirectMessage(&h, senderKey, 42, 43, tooLong), "Invalid direct message"},
+		{noID, "Invalid direct message"},
 	}
 	for invalid in invalidCases {
 		routerTestSendSealed(&h, &transport, peerID, .ClientDirectMessage, invalid.payload)
@@ -269,7 +318,7 @@ testMainRouterRejectsInvalidDirectMessages :: proc(t: ^testing.T) {
 		&transport,
 		peerID,
 		.ClientDirectMessage,
-		common.ClientDirectMessagePayload{recipientUserId = 999, content = "hello?"},
+		routerTestPlainDirectMessage(&h, senderKey, 42, 999, "hello?"),
 	)
 	postQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(postQuery.request)
@@ -279,7 +328,7 @@ testMainRouterRejectsInvalidDirectMessages :: proc(t: ^testing.T) {
 		postQuery.request_id,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabasePostDirectMessageResult{recipientExists = false},
+			result = common.DatabasePostDirectMessageResult{outcome = .UnknownRecipient},
 		},
 	)
 	routerTestExpectProtocolError(&h, peers[:], "Unknown direct message recipient")
@@ -303,7 +352,11 @@ testMainRouterRejectsUnauthenticatedDirectMessageRequests :: proc(t: ^testing.T)
 	// still refuse a session that is not authenticated.
 	peerID := u32(1)
 	directBytes, directErr := cbor.marshal(
-		common.ClientDirectMessagePayload{recipientUserId = 43, content = "hi"},
+		common.ClientDirectMessagePayload {
+			recipientUserId = 43,
+			content = "hi",
+			clientMessageId = {1 = 1},
+		},
 	)
 	assert(directErr == nil, "expected direct message payload encoding to succeed")
 	defer delete(directBytes)
@@ -556,6 +609,7 @@ testMainRouterListsDirectConversations :: proc(t: ^testing.T) {
 			delete(conversation.peerNickname)
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
+			delete(conversation.lastEnvelope)
 		}
 		delete(listPayload.conversations)
 	}
@@ -866,7 +920,7 @@ testDirectMessageSQLChecksRecipientInOneStatement :: proc(t: ^testing.T) {
 	_ = t
 	assert(
 		strings.contains(DATABASE_POST_DIRECT_MESSAGE_SQL, "id <> $1") &&
-		strings.contains(DATABASE_POST_DIRECT_MESSAGE_SQL, "FROM recipient RETURNING"),
+		strings.contains(DATABASE_POST_DIRECT_MESSAGE_SQL, "FROM recipient ON CONFLICT"),
 		"expected the post statement to insert only for an existing recipient other than self",
 	)
 	assert(

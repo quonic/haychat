@@ -77,6 +77,8 @@ SQL_TESTS+=,server.testRoomAccessFromJoinHistoryAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL
 SQL_TESTS+=,server.testUserEncryptionKeyStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testUserEncryptionKeysMigrationUpgradesVersion4AgainstPostgreSQL
+SQL_TESTS+=,server.testEncryptedDirectMessageStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testEncryptedDirectMessagesMigrationUpgradesVersion5AgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

@@ -15,12 +15,17 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   carries CBOR packets and keeps a strict sequence counter; the voice channel (ENet channel 2)
   carries binary voice datagrams with a 64-packet replay window, and each datagram's kind byte
   is bound into its authentication tag.
-- **Not end-to-end.** The server decrypts every message and stores it unencrypted in its
-  PostgreSQL database, so the server and its operator can read room chat and direct messages.
-  Voice is relayed and never stored or logged. Invite-only rooms (protocol 15) limit which
-  accounts the server lets read a room; they do not hide it from the server. Protocol 16 gives
-  every account an encryption key and lets clients pin and verify each other's keys
-  ([below](#account-encryption-keys-protocol-16)), but no message is encrypted with them yet.
+- **End-to-end only for direct messages.** Since protocol 17 a direct message is end-to-end
+  encrypted whenever both sides can: the sender's client seals it to the recipient's pinned
+  key, and the server stores and forwards an envelope it cannot open
+  ([below](#encrypted-direct-messages-protocol-17)). When the recipient cannot receive
+  encrypted messages, sending is refused unless the user turns on **Send without encryption**
+  for that conversation; such a message is signed but the server can read it, and both
+  clients mark it "Unencrypted". Room chat is not end-to-end encrypted yet: the server decrypts
+  it and stores it unencrypted in its PostgreSQL database, so the server and its operator can
+  read it, and direct messages from before protocol 17. Voice is relayed and never stored or
+  logged. Invite-only rooms (protocol 15) limit which accounts the server lets read a room;
+  they do not hide it from the server. The server always sees who writes to whom and when.
 
 No TLS certificate is involved: the pinned identity key takes its place.
 
@@ -42,6 +47,7 @@ version below therefore needs clients and servers rebuilt together.
 | 13 | One voice session per account: every voice join carries the profile's device ID and whether it is the automatic re-join after a reconnect; a join without a device ID is refused |
 | 14 | Admin actions on accounts (role, rename with name lock, kick, ban and unban) and room types (text, voice, or both), with schema migration 3 |
 | 16 | Account encryption keys (end-to-end encryption, part 1): `ClientPublishEncryptionKey` (each profile's X25519 key, signed by its identity key, sent once per session), `ClientFetchUserKeys`/`ServerUserKeys` (at most 64 accounts per request; accounts without a key are listed as missing), `ServerUserKeyChanged` (an account stored a new key), and `UserSummary.identityPublicKey`/`hasEncryptionKey`, with schema migration 5 (`user_encryption_keys`). No message is encrypted yet |
+| 17 | Encrypted direct messages (end-to-end encryption, part 2): `ClientSealedDirectMessage`/`ServerSealedDirectMessage` (an envelope the sender sealed for itself and the recipient, carried byte for byte), the envelope, client message ID and signature fields of `StoredDirectMessage` and `DirectConversationSummary`, and the signed plaintext fallback (`ClientDirectMessage` now needs `clientMessageId` and `signature`; unsigned messages are refused), with schema migration 6 |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -50,8 +56,8 @@ The behaviour behind these versions is described in [rooms-and-accounts.md](room
 ## Account encryption keys (protocol 16)
 
 The first part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design.md), sections
-2 and 3). Messages are still not encrypted, and everything under "Not end-to-end" above still
-holds.
+2 and 3). Protocol 17 encrypts direct messages with these keys
+([below](#encrypted-direct-messages-protocol-17)).
 
 - **Publishing.** Every profile has one X25519 encryption key in its `config.json`, signed by its
   identity key ([client configuration](client-configuration.md#keys)). After
@@ -74,11 +80,59 @@ holds.
   and on every server) from **Verify encryption…** in the account's menu; see the
   [user guide](user-guide.md#encryption-keys).
 
+## Encrypted direct messages (protocol 17)
+
+The second part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design.md), sections
+4.5, 4.6 and 7). Room chat is still not encrypted.
+
+- **Sealing.** The sender's client encrypts a message whenever it has a pinned, unchanged key
+  for the peer. It picks 16 random bytes as the message's client message ID and seals the
+  text with `sealDirectMessage` (`common/e2ee.odin`): one random message key, wrapped for the
+  sender's and the recipient's encryption keys, the body padded to 256-byte steps, and the
+  envelope signed by the sender's identity key. The envelope's AAD binds the server's identity
+  key, both user IDs, both pinned identity keys and the client message ID, so it opens in no
+  other conversation and on no other server. While the peer's key is still being fetched the
+  message waits ("Setting up encryption…") and goes out as soon as the key arrives.
+- **The server.** `ClientSealedDirectMessage` carries the recipient, the client message ID and
+  the envelope (at most 8192 bytes). The server checks its structure, then verifies its
+  signature (`verifyDirectMessageEnvelope`) against the session's identity key and the
+  recipient's identity key from its database, and stores it byte for byte with an empty
+  content, only while the recipient still has that key. It refuses an envelope that does not
+  verify ("Invalid encrypted direct message") and a client message ID the sender used before
+  ("Duplicate direct message"). The stored message goes to every session of both users as
+  `ServerSealedDirectMessage`; history pages and the conversation list carry the envelope, and
+  the sender reads its own messages through its own wrap.
+- **Opening.** A client opens an envelope only with the pinned identity key of its sender (its
+  own for its own messages) and its own encryption key. One that does not open shows "This
+  message could not be decrypted" and is never retried with another key. One whose sender is
+  not pinned yet waits for the fetch the client starts. A second message from the same sender
+  with the same client message ID (a replay by the server) is shown the same way. The newest
+  message of each conversation is opened for the conversation list's preview.
+- **No downgrade.** After the first encrypted message either way, the key store marks the
+  conversation encrypted ([key store](client-configuration.md#key-store)); a plaintext message
+  goes out only through the switch below, there or anywhere else.
+- **The plaintext fallback.** When encryption to the peer is not possible (the peer has not set
+  up encryption, their key changed, or the server no longer provides a key the client pinned)
+  the composer is replaced by a banner saying why, with **Send without encryption**, off by
+  default. With it on, `ClientDirectMessage` carries the text, a client message ID and the
+  sender's signature (`signPlaintextDirectMessage`: the server's identity key, both user IDs,
+  the client message ID and the text); the server verifies it against the session's identity
+  key and refuses a message without a valid one ("Invalid direct message signature"). Both
+  clients check it against the sender's pin. Badges: a lock on encrypted messages,
+  "Unencrypted" on signed plaintext, "Unencrypted, sender not verified" when the signature
+  does not verify, and "Not encrypted" on messages from before protocol 17, which carry no
+  signature. See the [user guide](user-guide.md#encrypted-direct-messages).
+- **What the server still learns.** Who writes to whom, when, and each message's length in
+  256-byte steps. It can also withhold or delete messages, and it can insert an unsigned
+  message that looks like one from before protocol 17 ("Not encrypted"); it cannot read,
+  change or forge an encrypted or signed one.
+
 ## End-to-end encryption primitives
 
 `common/e2ee.odin` holds the building blocks of the end-to-end encryption design
 ([plan/e2ee-design.md](plan/e2ee-design.md)). Protocol 16 uses the encryption key bundle and
-safety numbers; the envelopes, sender chains and member log are not on the wire yet.
+safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback; the
+sender chains and the member log are not on the wire yet.
 
 - **What is there.** The signed encryption key bundle (X25519 key, signed by the identity key),
   sealed envelopes (one random message key wrapped per recipient, the body sealed with

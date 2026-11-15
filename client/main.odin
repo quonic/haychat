@@ -100,6 +100,10 @@ State :: struct {
 	keyStoreDir:                    string,
 	// The Verify encryption… dialog (e2ee_view_model.odin).
 	verifyDialog:                   VerifyDialogState,
+	// Encrypted direct messages (direct_messages_e2ee.odin): changes the headless harness
+	// prints after the event that caused them, recorded only while recordDirectNotes is set.
+	recordDirectNotes:              bool,
+	directNotes:                    [dynamic]DirectNote,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -230,6 +234,7 @@ State_deinit :: proc(state: ^State) {
 	VoiceSettingsPanel_deinit(&state.voicePanel)
 	ContextMenuState_deinit(&state.contextMenu)
 	State_e2eeDeinit(state)
+	delete(state.directNotes)
 	state^ = {}
 }
 

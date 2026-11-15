@@ -41,6 +41,13 @@ set -euo pipefail
 #   9. encryption keys (protocol 16): alice opens bob's Verify encryption… dialog from his
 #      member menu, waits for his key (the safety number and "Not verified yet."), clicks Mark
 #      as verified and closes the dialog. Her key store file must then hold bob verified.
+#  10. encrypted direct messages (protocol 17): bob's message in step 2 and alice's reply are
+#      end-to-end encrypted, so alice's pane shows the lock badge (step 2). dave, a headless
+#      account whose key bundle SQL removed, cannot be encrypted to: alice opens his
+#      conversation, sees the banner saying why instead of a composer, turns on "Send without
+#      encryption", accepts the first-time confirmation, sees the red "Unencrypted: the server
+#      can read this" label, and sends with "Send unencrypted"; her message shows the
+#      "Unencrypted" badge and dave receives it unencrypted with a valid signature.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -114,6 +121,17 @@ admin_room="ui-room-$run_tag"
 unread_message="ui smoke unread from bob $run_tag"
 ban_reason="ui smoke ban $run_tag"
 access_room="ui-invite-$run_tag"
+nickname_dave="ui-dave-$run_tag"
+plain_message="ui smoke unencrypted to dave $run_tag"
+
+# run_sql SQL: runs statements against the server's database, like make_admin.
+run_sql() {
+	command -v psql >/dev/null 2>&1 || fail "the UI smoke test needs psql on PATH"
+	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -t -A -v ON_ERROR_STOP=1 \
+		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
+		-c "$1" || fail "SQL failed: $1"
+}
 
 echo "==> [ui] starting headless bob"
 start_client bob "$nickname_bob"
@@ -132,6 +150,29 @@ start_client alice-setup "$nickname_alice" alice
 expect_connected alice-setup
 stop_client alice-setup
 make_admin "$nickname_alice"
+
+# dave stays signed in for the whole run with his key bundle removed behind the server's back:
+# his client published it once per session, so nobody can fetch it until he signs in again.
+echo "==> [ui] starting headless dave, whose encryption key the server no longer has"
+start_client dave "$nickname_dave"
+if ! dave_connected=$(wait_for_line dave '{"event":"connected",' 0); then
+	fail "dave could not connect"
+fi
+[[ "$dave_connected" =~ \"userID\":([0-9]+), ]] || fail "dave's connected event has no userID"
+user_dave=${BASH_REMATCH[1]}
+expect_ok dave wait room_list 5000
+for ((attempt = 0; attempt < 50; attempt++)); do
+	[[ $(run_sql "SELECT count(*) FROM user_encryption_keys WHERE user_id = $user_dave") == 1 ]] &&
+		break
+	sleep 0.1
+done
+run_sql "DELETE FROM user_encryption_keys WHERE user_id = $user_dave" >/dev/null
+expect_ok dave users
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_alice\", ]] ||
+	fail "dave's users do not list $nickname_alice"
+user_alice_for_dave=${BASH_REMATCH[1]}
+# dave pins alice, so he can check her signature.
+expect_ok dave user-keys "$user_alice_for_dave"
 
 # alice's profile is fresh, so its only server gets ID 1; the DM composer's widget ID is
 # idOf("dm-input", serverID, peerUserID).
@@ -153,6 +194,8 @@ screenshot $screenshot_dir/04-dm-received.bmp
 click "$nickname_bob"
 wait-text "$dm_message" 10000
 assert-text "$dm_message"
+# bob's message is end-to-end encrypted (protocol 17): it carries the lock badge.
+wait-text "🔒" 5000
 screenshot $screenshot_dir/05-dm-open.bmp
 click-id dm-input 1 $user_bob
 type "$reply_message"
@@ -328,6 +371,22 @@ wait-text "Verified. The keys match what you compared." 5000
 screenshot $screenshot_dir/31-verified.bmp
 click-id verify-close 1 $user_bob
 wait-gone "Verify encryption with $nickname_bob" 5000
+# Encrypted direct messages (protocol 17): dave has no key on the server, so his conversation
+# shows why instead of a composer, with the Send without encryption switch.
+click "$nickname_dave"
+wait-text "$nickname_dave has not set up encryption yet, so messages to $nickname_dave cannot be encrypted." 10000
+screenshot $screenshot_dir/32-fallback-banner.bmp
+click-id dm-fallback-switch 1 $user_dave
+wait-text "Turn on" 5000
+screenshot $screenshot_dir/33-fallback-confirm.bmp
+click "Turn on"
+wait-text "Unencrypted: the server can read this" 5000
+click-id dm-input 1 $user_dave
+type "$plain_message"
+click "Send unencrypted"
+wait-text "$plain_message" 10000
+wait-text "Unencrypted" 5000
+screenshot $screenshot_dir/34-fallback-sent.bmp
 quit
 EOF
 
@@ -473,8 +532,16 @@ key_stores=("$work_dir"/profile-alice/haychat/keys/*.json)
 tr -d ' \n' <"${key_stores[0]}" | grep -Eq "\"user_id\":$user_bob,[^}]*\"verified\":true" ||
 	fail "[e2ee] alice's key store does not hold bob verified"
 
+echo "==> [ui] alice sent dave an unencrypted, signed message through the fallback switch"
+plain_pattern="^\\{\"event\":\"direct_message\",.*\"encrypted\":false,\"signed\":true,"
+plain_pattern+=".*\"content\":\"$plain_message\"\\}$"
+plain_line=$(wait_for_match dave "$plain_pattern") ||
+	fail "[e2ee] dave did not receive alice's signed plaintext message"
+echo "    dave< $plain_line"
+
 stop_client alice-watch
 stop_client bob
+stop_client dave
 
 echo "==> [ui] screenshots written:"
 written=0
@@ -483,5 +550,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 31 ]] || fail "expected 31 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 34 ]] || fail "expected 34 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

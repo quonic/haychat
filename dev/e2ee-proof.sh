@@ -14,7 +14,20 @@ set -euo pipefail
 #   3. swap:    mallory signs in and publishes; then SQL moves mallory's identity key and bundle
 #               onto bob's account behind the server's back. alice's next fetch shows bob's key
 #               changed (sending blocked), and trust-key pins the new key, unverified.
-#   4. secrets: no client ever printed its encryption private key.
+#   4. dm:      (protocol 17, design 12.4 step 1) carol and dan exchange encrypted direct
+#               messages both ways (carol's first one waits for dan's key, then goes out
+#               encrypted); both see them opened, and carol's history, after a restart of her
+#               client, still opens.
+#   5. sql:     (step 2) no message text appears in direct_messages: every row between carol
+#               and dan has an envelope, an empty content, and no marker text in the envelope.
+#   6. rebuild: (step 6) dan's key store is deleted and his client restarted: his history waits
+#               for carol's key, which he pins again, and his old messages open again.
+#   7. dave:    (step 7) dave's bundle is removed behind the server's back (he published one when
+#               he signed in, and stays signed in so his client does not publish again): carol's
+#               `dm` to him is refused, and `dm-plain` reaches him with encrypted false and a
+#               valid signature on both sides; SQL finds that text, as it should.
+#   8. secrets: no client ever printed its encryption private key, and no client wrote the
+#               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
 # coreutils and psql (through the HAYCHAT_DATABASE_* variables).
@@ -187,8 +200,124 @@ expect_ok a trust-key "$bob_id"
 [[ $(field "$last_result" identityPublicKey) == "$mallory_identity" ]] ||
 	fail "trust-key pinned another key than the one offered"
 
-echo "==> [e2ee] secrets: no client printed its encryption private key"
-for profile in a b m; do
+echo "==> [e2ee] dm: carol and dan exchange encrypted direct messages both ways"
+carol="e2c-$run_tag"
+dan="e2d-$run_tag"
+dave="e2v-$run_tag"
+marker_one="e2ee-marker-one-$run_tag"
+marker_two="e2ee-marker-two-$run_tag"
+plain_text="e2ee-plain-to-dave-$run_tag"
+start_client c "$carol"
+expect_connected c
+start_client d "$dan"
+expect_connected d
+expect_ok c wait room_list 5000
+expect_ok d wait room_list 5000
+carol_id=$(user_id d "$carol")
+dan_id=$(user_id c "$dan")
+# carol never fetched dan's key: her message waits for it, then goes out encrypted.
+start=$(lines c)
+expect_ok c dm "$dan_id" "$marker_one"
+[[ "$last_result" == *'"queued":true'* || "$last_result" == *'"encrypted":true'* ]] ||
+	fail "carol's dm was neither encrypted nor queued: $last_result"
+expect_event c "^\\{\"event\":\"direct_queue\",.*\"peerUserID\":$dan_id,\"state\":\"sent\"" \
+	"$start" "carol's queued message never went out" >/dev/null
+encrypted_pattern() {
+	printf '%s' "^\\{\"event\":\"direct_message\",.*\"encrypted\":true,\"signed\":true,"
+	printf '%s' "\"decryptError\":\"\",\"protection\":\"encrypted\",\"content\":\"$1\"\\}$"
+}
+expect_event c "$(encrypted_pattern "$marker_one")" "$start" \
+	"carol did not see her own message opened" >/dev/null
+expect_event d "$(encrypted_pattern "$marker_one")" 0 \
+	"dan did not open carol's message" >/dev/null
+start=$(lines c)
+expect_ok d dm "$carol_id" "$marker_two"
+[[ "$last_result" == *'"encrypted":true'* ]] || fail "dan's reply was not encrypted: $last_result"
+expect_event c "$(encrypted_pattern "$marker_two")" "$start" \
+	"carol did not open dan's reply" >/dev/null
+
+echo "==> [e2ee] dm: carol's history opens after a restart of her client"
+stop_client c
+start_client c2 "$carol" c
+expect_connected c2
+expect_ok c2 wait room_list 5000
+start=$(lines c2)
+expect_ok c2 dm-history "$dan_id"
+history=$(expect_event c2 "^\\{\"event\":\"direct_history\",.*\"peerUserID\":$dan_id," "$start" \
+	"carol got no history page after her restart")
+for marker in "$marker_one" "$marker_two"; do
+	[[ "$history" == *"\"protection\":\"encrypted\",\"content\":\"$marker\""* ]] ||
+		fail "carol's history after a restart does not open $marker: $history"
+done
+
+echo "==> [e2ee] sql: no message text in direct_messages"
+rows=$(run_sql "SELECT count(*) || '/' ||
+	count(*) FILTER (WHERE envelope IS NOT NULL AND content = '') || '/' ||
+	count(*) FILTER (WHERE position(convert_to('e2ee-marker', 'UTF8') in envelope) > 0
+		OR position('e2ee-marker' in content) > 0)
+	FROM direct_messages WHERE sender_user_id IN ($carol_id, $dan_id)
+	AND recipient_user_id IN ($carol_id, $dan_id)")
+[[ "$rows" == "2/2/0" ]] ||
+	fail "expected 2 encrypted rows with empty content and no marker text, got $rows"
+
+echo "==> [e2ee] rebuild: dan loses his key store; his old messages open again"
+stop_client d
+rm -f -- "$work_dir"/profile-d/haychat/keys/*.json
+start_client d2 "$dan" d
+expect_connected d2
+expect_ok d2 wait room_list 5000
+start=$(lines d2)
+expect_ok d2 dm-history "$carol_id"
+expect_event d2 "^\\{\"event\":\"direct_history\",.*\"peerUserID\":$carol_id," "$start" \
+	"dan got no history page after losing his key store" >/dev/null
+for marker in "$marker_one" "$marker_two"; do
+	pattern="^\\{\"event\":\"direct_(history|opened)\",.*\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$marker\""
+	expect_event d2 "$pattern" "$start" "dan's history did not open $marker again" >/dev/null
+done
+
+echo "==> [e2ee] dave: no key, so dm is refused and dm-plain arrives signed"
+start_client v "$dave"
+expect_connected v
+expect_ok v wait room_list 5000
+dave_id=$(user_id c2 "$dave")
+for ((attempt = 0; attempt < 50; attempt++)); do
+	[[ $(run_sql "SELECT count(*) FROM user_encryption_keys WHERE user_id = $dave_id") == 1 ]] &&
+		break
+	sleep 0.1
+done
+run_sql "DELETE FROM user_encryption_keys WHERE user_id = $dave_id" >/dev/null
+dave_keys=$(fetch_keys c2 "$dave_id")
+[[ $(field "$dave_keys" keyState) == not_set_up ]] ||
+	fail "carol does not see dave without a key: $dave_keys"
+reply=$(client_command c2 dm "$dave_id" "should not go out")
+[[ "$reply" == '{"ok":false,'*"has not set up encryption yet"* ]] ||
+	fail "carol's encrypted dm to dave was not refused: $reply"
+fetch_keys v "$carol_id" >/dev/null
+start=$(lines c2)
+vstart=$(lines v)
+expect_ok c2 dm-plain "$dave_id" "$plain_text"
+[[ "$last_result" == *'"encrypted":false,"queued":false'* ]] ||
+	fail "carol's dm-plain did not go out unencrypted: $last_result"
+plain_pattern="^\\{\"event\":\"direct_message\",.*\"encrypted\":false,\"signed\":true,"
+plain_pattern+="\"decryptError\":\"\",\"protection\":\"signed\",\"content\":\"$plain_text\"\\}$"
+expect_event c2 "$plain_pattern" "$start" "carol's own fallback message is not signed" >/dev/null
+expect_event v "$plain_pattern" "$vstart" "dave did not receive a signed plaintext" >/dev/null
+stored=$(run_sql "SELECT count(*) FROM direct_messages WHERE sender_user_id = $carol_id
+	AND recipient_user_id = $dave_id AND content = '$plain_text' AND envelope IS NULL
+	AND octet_length(signature) = 64 AND octet_length(client_message_id) = 16")
+[[ "$stored" == 1 ]] || fail "SQL does not find the fallback message's text and signature"
+stop_client v
+stop_client c2
+stop_client d2
+
+echo "==> [e2ee] secrets: no client printed its encryption private key or a plaintext log"
+for marker in "$marker_one" "$marker_two"; do
+	if grep -rqF -- "$marker" "$work_dir"/*.err; then
+		fail "a client logged the text of an encrypted message"
+	fi
+done
+for profile in a b m c d; do
 	secret=$(config_value "$profile" encryption_private_key)
 	[[ ${#secret} -eq 64 ]] || fail "profile $profile has no encryption private key"
 	if grep -rqF -- "$secret" "$work_dir"/*.out "$work_dir"/*.err; then

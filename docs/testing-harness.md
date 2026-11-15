@@ -87,7 +87,8 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
 | `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","identityPublicKey","hasEncryptionKey","keyState","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one; the key fields are explained under [Encryption Keys](#encryption-keys)). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
-| `dm USER_ID TEXT...` | Sends the rest of the line as a direct message to that account, through the same action as the GUI's direct-message composer. `ok` means the transport accepted it; the stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid direct message`). |
+| `dm USER_ID TEXT...` | Sends the rest of the line as an end-to-end encrypted direct message to that account, through the same action as the GUI's direct-message composer (protocol 17). The result carries `encrypted` (it went out encrypted) and `queued` (the account's key is still being fetched: the message waits and a `direct_queue` event says when it went out, or that it went back into the draft). It is refused, with the reason, when encryption to the account is not possible (no key, a changed key, or a key the server no longer provides); use `dm-plain` then. The stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid encrypted direct message`, `Duplicate direct message`). |
+| `dm-plain USER_ID TEXT...` | The plaintext fallback: turns on the conversation's **Send without encryption** switch through the GUI's action (accepting the first-time confirmation), sends a signed plaintext message, and turns the switch off again. Refused while encryption to the account is possible or its key is still being checked. See [Encrypted Direct Messages](#encrypted-direct-messages). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
 | `room-create TYPE[,OPTION...] NAME [DESCRIPTION...]` | Admins: asks the server for a new room of type TYPE (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. Comma-separated options after the type (protocol 15): the access mode `public` (the default), `member-invite` or `admin-invite`; the history `from-join` (the default) or `full` (ignored for a Public room, which always has full history); and `no-join` to create an invite room you are not a member of. For example `room-create both,admin-invite,full,no-join ops`. The result echoes `serverID`, `roomID` (0), `name`, `description`, `roomType` (1 text, 2 voice, 3 both), `access`, `historyVisibility` and `creatorJoins` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room unless you did not join it), and its members (every connected client for a Public room, only you for an invite room you joined) get `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
 | `room-edit ROOM_ID TYPE[,ACCESS] NAME [DESCRIPTION...]` | Admins: sets the room's type and, with `public`, `member-invite` or `admin-invite` after it, its access mode (without one it keeps the mode the client knows; the history cannot change), renames it, and replaces its description (an empty one without DESCRIPTION). Making a room Public adds every account, and each gets `room_membership` with `joined` true. Every member, you included, gets `room_edited`. Making a room `text` first removes everyone from its voice (`voice_left` "voice is disabled in this room"). A voice-only room refuses `send` (`protocol_error "Chat is disabled in this room"`), a text-only room refuses `voice-join` (`voice_join_rejected` "voice is disabled in this room"). |
@@ -151,15 +152,17 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":true}` (the answer to your own `room-create`; `isMember` false for an invite room created with `no-join`) |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
-| `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}` |
-| `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","content":"hi"}]}` |
+| `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","encrypted":true,"signed":true,"decryptError":"","protection":"encrypted","content":"hi"}` (printed after the client opened it; see [Encrypted Direct Messages](#encrypted-direct-messages)) |
+| `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","encrypted":true,"signed":true,"decryptError":"","protection":"encrypted","content":"hi"}]}` |
+| `direct_opened` | Same shape as `direct_message`: a message from a history page that waited for its sender's key (`protection` `pending` in `direct_history`) and is now opened or settled |
+| `direct_queue` | `{"event":"direct_queue","serverID":1,"peerUserID":4,"state":"sent","count":1,"reason":""}` (messages `dm` queued for a key went out encrypted; `state` `refused` when they went back into the draft, with the reason) |
 | `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"identityPublicKey":"3bac...","hasEncryptionKey":true,"keyState":"unverified","isAdmin":false,"isBanned":false}]}` (`keyState` as before the list was applied; see [Encryption Keys](#encryption-keys)) |
 | `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"identityPublicKey":"d14b...","hasEncryptionKey":true,"keyState":"verified","isAdmin":true,"isBanned":false}}` (an admin changed an account's role, ban, or name; the full directory entry) |
 | `user_keys` | `{"event":"user_keys","serverID":1,"userID":4,"nickname":"bob","keyState":"unverified","canEncrypt":true,"verified":false,"hasPin":true,"identityPublicKey":"d14b...","encryptionPublicKey":"8a6d...","createdAt":1731600000,"safetyNumber":"68114 90353 ...","notice":"","message":""}` (what the client concluded about an account's key after a `ServerUserKeys` or `ServerUserKeyChanged`; see [Encryption Keys](#encryption-keys)) |
 | `account_updated` | `{"event":"account_updated","serverID":1,"isAdmin":true,"nickname":"bob","nicknameLocked":false}` (an admin changed this account's role or name while it is connected) |
 | `admin_result` | `{"event":"admin_result","serverID":1,"action":"role","userID":4,"message":"bob is an admin"}` (your admin request succeeded; `action` is `role`, `rename`, `kick`, or `ban`, an unban included) |
 | `session_ended` | `{"event":"session_ended","serverID":1,"kind":"kicked","message":"An admin removed you from this server (reason: calm down). Press Retry to connect again.","reason":"calm down","retryable":false}` (an admin kicked or banned this account; the connection stays stopped until `reconnect`) |
-| `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` |
+| `conversations` | `{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,"peerNickname":"bob","lastMessageID":7,"lastSenderID":3,"lastTimestamp":"...","encrypted":true,"signed":true,"decryptError":"","protection":"encrypted","conversationEncrypted":true,"lastContent":"hi","lastReadMessageId":0,"unreadCount":0}]}` (`lastContent` is the opened preview, the next four fields describe the newest message as in `direct_message`, and `conversationEncrypted` is the key store's no-downgrade flag) |
 | `presence` | `{"event":"presence","serverID":1,"userID":4,"nickname":"bob","isOnline":true}` |
 | `read_marker` | `{"event":"read_marker","serverID":1,"kind":"room","conversationID":1,"lastReadMessageId":12,"unreadCount":0}` (`kind` is `room` or `dm`; for `dm`, `conversationID` is the peer's user ID) |
 | `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"recipientJoined":true,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
@@ -398,7 +401,7 @@ p95 reaches 300 ms; on loopback it measures about 65 ms at p50 and 69 ms at p95 
 ## Encryption Keys
 
 Protocol 16 gives every profile an encryption key and lets clients pin each other's keys
-(e2ee-design.md section 3). Messages are not encrypted yet; these commands exercise the keys.
+(e2ee-design.md section 3); protocol 17 encrypts direct messages with them (below).
 
 - **The profile's key.** `config.json` in `--config-dir` holds the encryption key next to the
   identity key ([client configuration](client-configuration.md#keys)). The harness creates both
@@ -423,10 +426,38 @@ Protocol 16 gives every profile an encryption key and lets clients pin each othe
   new session makes) and every `ServerUserKeyChanged` (an account published a key it did not
   have before). This account itself is never pinned or reported.
 
+### Encrypted Direct Messages
+
+Protocol 17 (e2ee-design.md 4.5, 4.6). Direct message events are printed **after** the client
+opened them, from what it concluded, never from the raw envelope:
+
+- **`encrypted`** the message is an envelope; **`signed`** its signature verified against the
+  sender's pinned key (every opened envelope, and a valid plaintext fallback);
+  **`decryptError`** why an envelope could not be opened: `no_key` (the server has no key for
+  the sender and none was ever pinned), `own_key` (this profile has no valid encryption key),
+  `replayed` (another message from the same sender carries the same client message ID), or the
+  `E2EEError` from `common/e2ee.odin` (`BadSignature`, `NoWrapForRecipient`, …), else `""`.
+- **`protection`** `encrypted`; `signed` (plaintext sent through the fallback, the GUI's
+  "Unencrypted"); `unverified` (plaintext whose signature does not verify: "Unencrypted, sender
+  not verified"); `plain` (from before protocol 17, no signature: "Not encrypted"); `failed`
+  (`content` empty: "This message could not be decrypted"); `pending` (waiting for the sender's
+  key; `content` empty for an envelope).
+- **Waiting for a key.** A live message from someone this profile has not pinned yet waits while
+  the client fetches the key, and its `direct_message` is printed once it opened. A message in a
+  history page that waits is listed as `pending` and printed again as `direct_opened`.
+- **Sending.** `dm` encrypts like the GUI and is refused when encryption is not possible;
+  `dm-plain` is the fallback switch. The key store's `direct_conversations` remembers which
+  conversations were encrypted ([key store](client-configuration.md#key-store)).
+
 `./dev.sh live --e2ee` runs `dev/e2ee-proof.sh` (also part of `--all`): alice and bob pin each
 other and see the same safety number, alice verifies bob, bob restarts with the same key and is
 still verified, then SQL hands out a third account's key as bob's, which alice sees as
-`key_changed` until `trust-key`; no client may print its encryption private key.
+`key_changed` until `trust-key`. Then carol and dan exchange encrypted direct messages both ways
+(carol's first one is queued until dan's key arrives) and carol's history opens after a restart;
+SQL finds no message text in `direct_messages` (envelopes only, empty content); dan's key store is
+deleted and his old messages open again; and dave, whose key bundle SQL removed while he stays
+signed in, cannot get carol's `dm`, while her `dm-plain` reaches him unencrypted and signed and
+SQL finds its text. No client may print its encryption private key or log a message's text.
 
 ## Read State
 
@@ -787,9 +818,15 @@ page from its channel menu, which offers **Leave room**; bob must get `room_memb
 and list it with `"access":3`. Last, the encryption keys (protocol 16): she opens bob's **Verify
 encryption…** dialog from his member menu, waits for "Not verified yet." (his key arrived and
 the safety number is drawn), clicks **Mark as verified** (`verify-mark 1 BOB`) and closes it
-(`verify-close 1 BOB`); her key store file must then hold bob verified. alice takes 32
-screenshots on the way (`01-…` to `31-…` and `06b-server-settings.bmp`); the script prints the
-paths of the 31 numbered `NN-*.bmp` ones and checks that all 31 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+(`verify-close 1 BOB`); her key store file must then hold bob verified. Bob's direct message
+and her reply are end-to-end encrypted (protocol 17), so her pane shows the 🔒 badge; last she
+opens the conversation with headless dave, whose key bundle SQL removed, sees the banner saying
+he has not set up encryption, turns on **Send without encryption** (`dm-fallback-switch 1
+DAVE`), accepts the confirmation (**Turn on**), sees "Unencrypted: the server can read this",
+and sends with **Send unencrypted**: her message shows **Unencrypted**, and dave must receive it
+with `"encrypted":false,"signed":true`. alice takes 35 screenshots on the way (`01-…` to `34-…`
+and `06b-server-settings.bmp`); the script prints the paths of the 34 numbered `NN-*.bmp` ones
+and checks that all 34 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
 otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

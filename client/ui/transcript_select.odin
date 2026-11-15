@@ -13,6 +13,10 @@ TranscriptUnit :: struct {
 	color:     Color,
 	gapBefore: f32, // Logical points of space above this unit
 	copySep:   string, // Appended after this unit when a copied selection continues past it
+	// A short label drawn at the right of the unit's first line (for example an encryption
+	// badge). It is not part of the unit's text: never selected or copied. Empty for none.
+	badge:      string,
+	badgeColor: Color,
 }
 
 TranscriptPos :: struct {

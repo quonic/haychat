@@ -285,7 +285,7 @@ State_openRoomMembers :: proc(state: ^State, serverID, roomID: int) -> bool {
 	if serverID != state.selected_server_id {
 		State_switchToServer(state, serverID)
 	}
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	State_closeServerSettings(state)
 	State_resetRoomEditor(state, .Members, serverID, roomID)
 	State_requestRoomMembers(state)

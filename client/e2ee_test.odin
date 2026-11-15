@@ -189,7 +189,7 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 	assert(ok, "expected the store to encode")
 	defer delete(data)
 	assert(
-		strings.contains(string(data), `"format": 1`) &&
+		strings.contains(string(data), `"format": 2`) &&
 		strings.contains(string(data), `"users"`) &&
 		strings.contains(string(data), `"rooms"`) &&
 		strings.contains(string(data), `"direct_conversations"`),
@@ -207,11 +207,25 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 		len(parsed.directConversations) == 1 && parsed.directConversations[0].encrypted,
 		"expected the reserved sections to survive",
 	)
+	// A format 1 file (E1) loads as is and stays writable.
+	formatOne, _ := strings.replace(
+		string(data),
+		`"format": 2`,
+		`"format": 1`,
+		1,
+		context.temp_allocator,
+	)
+	older := keyStoreParse(transmute([]u8)formatOne, serverKey)
+	defer KeyStore_deinit(&older)
+	assert(
+		older.writable && KeyStore_conversationEncrypted(older, E2EE_TEST_BOB),
+		fmt.tprintf("expected a format 1 store to load writable, got %q", older.loadError),
+	)
 
 	// A store for another server key, a newer format, bad JSON, and a damaged entry are all
 	// used read-only and never written back.
 	text := string(data)
-	newer, _ := strings.replace(text, `"format": 1`, `"format": 2`, 1, context.temp_allocator)
+	newer, _ := strings.replace(text, `"format": 2`, `"format": 3`, 1, context.temp_allocator)
 	damaged, _ := strings.replace(
 		text,
 		`"user_id": 2`,

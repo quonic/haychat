@@ -529,7 +529,11 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		if unread {
 			viewSidebarUnreadBadge(ctx, &content, row.unreadCount)
 		}
-		viewKeyIndicator(ctx, &content, row.keyState)
+		if row.previewUnencrypted && row.keyState != .KeyChanged {
+			viewIndicatorText(ctx, &content, DIRECT_ROW_UNENCRYPTED, .Warning)
+		} else {
+			viewKeyIndicator(ctx, &content, row.keyState)
+		}
 		color := row.selected || unread || row.isOnline ? ctx.theme.fg : ctx.theme.fgMuted
 		ui.label(ctx, content, row.label, color, unread ? .Bold : .Regular)
 		status := row.isOnline ? "Online" : "Offline"
@@ -538,6 +542,9 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		}
 		if keyTooltip := e2eeKeyIndicatorTooltip(row.keyState); len(keyTooltip) > 0 {
 			status = fmt.tprintf("%s. %s", status, keyTooltip)
+		}
+		if row.previewUnencrypted {
+			status = fmt.tprintf("%s. %s", status, DIRECT_ROW_UNENCRYPTED_TOOLTIP)
 		}
 		ui.tooltip(ctx, id, rect, status)
 		return clicked
@@ -594,9 +601,11 @@ transcriptUnits :: proc(ctx: ^ui.Context, lines: []TranscriptLine) -> []ui.Trans
 				key = u64(line.messageID) * 2 + 1,
 				text = line.content,
 				font = .Regular,
-				color = ctx.theme.fg,
+				color = line.placeholder ? ctx.theme.fgMuted : ctx.theme.fg,
 				gapBefore = MESSAGE_LINE_GAP,
 				copySep = "\n",
+				badge = line.badge,
+				badgeColor = e2eeIndicatorColor(ctx, line.badgeTone),
 			},
 		)
 	}

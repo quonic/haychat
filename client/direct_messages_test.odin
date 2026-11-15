@@ -12,16 +12,37 @@ directMessageSendBridgeTestMutex: sync.Mutex
 directMessageSendBridgeTestRecipientID: int
 directMessageSendBridgeTestContent: string
 directMessageSendBridgeTestReturnValue: bool
+// The last send's envelope (owned copy) and signature fields, for the E2EE tests.
+directMessageSendBridgeTestEnvelope: [dynamic]u8
+directMessageSendBridgeTestSend: DirectMessageSend
+directMessageSendBridgeTestCount: int
 
 directMessageSendBridgeTestStub :: proc(
 	transport: ^ClientServerTransport,
-	recipientUserID: int,
-	content: string,
+	send: DirectMessageSend,
 ) -> bool {
-	directMessageSendBridgeTestRecipientID = recipientUserID
+	directMessageSendBridgeTestRecipientID = send.recipientUserID
 	delete(directMessageSendBridgeTestContent)
-	directMessageSendBridgeTestContent = strings.clone(content)
+	directMessageSendBridgeTestContent = strings.clone(send.content)
+	clear(&directMessageSendBridgeTestEnvelope)
+	append(&directMessageSendBridgeTestEnvelope, ..send.envelope)
+	directMessageSendBridgeTestSend = send
+	directMessageSendBridgeTestSend.envelope = nil
+	directMessageSendBridgeTestSend.content = ""
+	if directMessageSendBridgeTestReturnValue {
+		directMessageSendBridgeTestCount += 1
+	}
 	return directMessageSendBridgeTestReturnValue
+}
+
+directMessageSendBridgeTestReset :: proc() {
+	delete(directMessageSendBridgeTestContent)
+	directMessageSendBridgeTestContent = ""
+	delete(directMessageSendBridgeTestEnvelope)
+	directMessageSendBridgeTestEnvelope = nil
+	directMessageSendBridgeTestSend = {}
+	directMessageSendBridgeTestRecipientID = 0
+	directMessageSendBridgeTestCount = 0
 }
 
 testDirectServer :: proc(id: int) -> Server {
@@ -487,30 +508,27 @@ testSendDirectMessageWaitsForTheServerEcho :: proc(t: ^testing.T) {
 		directMessageSendBridgeTestContent = ""
 	}
 
+	// Protocol 17: the peer's key is not known yet, so the message waits for it (queued, the
+	// draft cleared) instead of going out; direct_messages_e2ee_test.odin covers the sends.
 	State_openDirectConversation(&state, server.id, 10)
 	testSetDraft(State_selectedDirectDraft(&state), "hello\tthere")
-	directMessageSendBridgeTestReturnValue = false
-	State_sendDirectMessage(&state)
-	testExpectString(
-		t,
-		string(State_selectedDirectDraft(&state)[:]),
-		"hello\tthere",
-		"the draft after a rejected send",
-	)
-	testing.expect(t, len(state.chat_status_message) > 0, "expected a rejected send's status")
-
 	directMessageSendBridgeTestReturnValue = true
 	State_sendDirectMessage(&state)
 	testing.expect(
 		t,
-		directMessageSendBridgeTestRecipientID == 10,
-		"expected the message to go to the open conversation's peer",
+		directMessageSendBridgeTestRecipientID == 0,
+		"expected nothing sent before the peer's key is known",
 	)
-	testExpectString(t, directMessageSendBridgeTestContent, "hello    there", "the sent text")
+	conversation := testDirectCache(&state, server.id, 10)
+	testing.expect(
+		t,
+		len(conversation.queued) == 1 && conversation.queued[0] == "hello    there",
+		"expected the message queued with its tabs normalised",
+	)
 	testing.expect(
 		t,
 		len(State_selectedDirectDraft(&state)) == 0,
-		"expected an accepted send to clear the draft",
+		"expected a queued send to clear the draft",
 	)
 	testing.expect(
 		t,
