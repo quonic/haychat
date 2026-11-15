@@ -67,22 +67,6 @@ Windows and Linux are supported; macOS is planned.
 The full index, including the testing harness, voice tests, and design plans, is in
 [docs/README.md](docs/README.md).
 
-## Known Limitations
-
-- Invite-only rooms limit which accounts the server lets read a room, but rooms are not
-  end-to-end encrypted.
-- Messages are encrypted in transit but not end-to-end; the server stores them in plain text.
-- Sign-up is open and bans are per account, so a banned person can return with a new identity
-  key. There is no account registration or way to move an account to another device.
-- Voice has no echo cancellation or noise suppression: use headphones.
-- Per-server settings (names, labels, per-user volumes and mutes) live in one client profile and
-  are not synced between devices.
-- Push-to-talk in other windows needs the GlobalShortcuts portal on Wayland; elsewhere on
-  Wayland it works only while the HayChat window has focus.
-- The admin account list has no search or paging.
-- The Windows client is cross-compiled for releases and type-checked in CI, but has not yet been
-  tested on a real Windows machine.
-
 ## License
 
 HayChat is licensed under the AGPLv3 License. See the [LICENSE](LICENSE) file for more
