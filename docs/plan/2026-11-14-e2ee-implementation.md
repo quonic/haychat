@@ -68,6 +68,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | E2 Encrypted direct messages | #61 | c262e91 | 17 | 6 |
 | E4a Encrypted rooms: member log | #62 | d908114 | 18 | 7 |
 | E4b Encrypted rooms: sender chains | #63 | dd5c3ec | 19 | 8 |
+| E5 Full history in encrypted rooms | #64 | 5bd876a | 20 | 9 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -125,3 +126,38 @@ with envelopes that wrap the requester; a key request is answered only by the ch
 and only for a member of that epoch; members without a usable pin get no wrap and can ask
 later; key store format 4 (`room_chains`, a cache). Follow-up: a failed SQL test assertion
 made the test runner hang instead of exit; `dev/live-proof.sh` needs a timeout.
+
+E5's decisions are listed in #64. The main ones: one `RoomKeyForward` envelope per chain, with
+exactly one wrap and an AAD (`haychat-room-key-forward-v1`) naming the chain's sender, the
+forwarder and the recipient; a member re-seals its own chain as SenderKey, never as a forward;
+a newcomer accepts a forward from anyone who was a member in the same epoch; the inviter
+forwards only when its `Add` is applied live, not on replay; in Full history rooms key
+requests go to every other member; answers need the requester's pin to match the log (also in
+From join rooms). #64 also added per-step timeouts to `dev/live-proof.sh`
+(`HAYCHAT_LIVE_STEP_TIMEOUT_SECS`).
+
+### Round done (2026-11-15)
+
+E0–E5 are merged: `main` is at protocol 20 and schema migration 9. Direct messages and
+messages in encrypted invite rooms are end-to-end encrypted; public rooms stay unencrypted.
+
+Follow-ups:
+
+- **E6 voice in encrypted rooms** needs its own design note (design section 8) before it is
+  built. Until then voice joins in encrypted rooms are refused.
+- **Bogus forwards.** The server keeps only the first forward per chain and recipient, so a
+  member can send a forward with a wrong chain key ahead of the real one and block that chain
+  for the newcomer (its sender can still re-seal it). A chain-key commitment in the original
+  distribution would let clients reject it and the server keep later copies.
+- **A wrap that cannot be opened** (the recipient set up encryption again after the
+  distribution) also blocks a later forward of that chain, for the same reason.
+- **Many small envelopes** in long Full history rooms: one per chain per newcomer. Bundling per
+  epoch needs a new plaintext layout.
+- **SQL test runner hang** after a failed assertion: still unexplained; the new step timeout
+  caps it at 20 minutes.
+- **Two clients on one profile directory** overwrite each other's key store (last save wins).
+- **Unsigned rows that look pre-upgrade** ("Not encrypted") can be inserted by a malicious
+  server in direct conversations; it cannot forge encrypted or signed messages.
+- The design's later steps (section 11): key backup, forward secrecy with a local message
+  cache, more than one device per account, message franking, MLS. An outside review of the
+  hand-built envelope (design 14) before a release.
