@@ -832,6 +832,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"user_list","serverID":1,"users":[{"id":4,"nickname":"bob","isOnline":false,` +
+		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
 		`"isAdmin":false,"isBanned":false}]}`,
 		"the user_list JSON",
 	)
@@ -903,8 +904,10 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"users","serverID":803,"loaded":true,"loading":false,"users":[` +
 		`{"id":3,"nickname":"alice","isOnline":true,"lastReadMessageId":0,"unreadCount":0,` +
+		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
 		`"isAdmin":false,"isBanned":false},` +
 		`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":0,` +
+		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
 		`"isAdmin":false,"isBanned":false}]}` +
 		"\n",
 		"the users result",

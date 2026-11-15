@@ -107,6 +107,8 @@ testApplyUserList :: proc(state: ^State, serverID: int, users: ..common.UserSumm
 				isOnline = user.isOnline,
 				isAdmin = user.isAdmin,
 				isBanned = user.isBanned,
+				identityPublicKey = user.identityPublicKey,
+				hasEncryptionKey = user.hasEncryptionKey,
 			},
 		)
 	}

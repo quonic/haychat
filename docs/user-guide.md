@@ -120,7 +120,7 @@ Enter picks, and Esc or a click outside closes it (that click does nothing else)
 | Where | Entries |
 | --- | --- |
 | Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name, Members… (invite rooms; every room for admins), Leave room… (invite rooms; "Click again to leave", then you leave); admins also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
-| Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name, Invite to room… (for someone else, when you may add people to a room: it lists those rooms) |
+| Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name, Verify encryption… (for someone else, see [Encryption keys](#encryption-keys)), Invite to room… (for someone else, when you may add people to a room: it lists those rooms) |
 | Voice participant in the channel list | Send message and Copy name, Invite to room… (as above), and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings) |
 | Message | Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer), and in rooms Send message to sender for other people's messages |
 | Server button in the rail | Server settings, Retry now (while not connected), Copy address, Remove server… (the entry turns into "Click again to remove"; the second click removes it) |
@@ -199,6 +199,40 @@ before that.
   configured key works as well.
 - Where none of these is available (a Wayland desktop without the portal, or an unmapped key),
   Settings → Voice says why, and push-to-talk works while the window has focus.
+
+## Encryption Keys
+
+HayChat is preparing end-to-end encryption. Messages are **not** encrypted end to end yet: the
+server can still read them (see [protocol.md](protocol.md)). What exists already is each
+profile's encryption key and the way you check other people's keys, so that encrypted messages
+can later reach only the people you mean.
+
+- **Your key.** The client makes an encryption key on first start, keeps it in `config.json`
+  next to your identity key, and gives it to every server you sign in to. You do nothing.
+- **Other people's keys.** The first time the client sees someone's key on a server (for
+  example when you open a conversation or their **Verify encryption…**), it remembers it
+  ("pins" it) in that server's [key store](client-configuration.md#key-store). The Members and
+  Direct Messages rows show what the client knows: **unverified** (pinned, not compared yet),
+  **verified**, **key changed**, or **key problem** (the server sent no key or a bad one for
+  someone it had one for). Hover a row for the full sentence.
+- **Verify encryption….** Right-click someone in Members or Direct Messages and pick **Verify
+  encryption…**. The dialog shows a safety number of 60 digits. Compare it with the number the
+  other person sees for you, in person or over a call you trust: it is the same on both sides,
+  and on every server where you both have an account. If it matches, click **Mark as verified**.
+  If it does not, do not mark it: someone in between is showing you a different key.
+- **"<name>'s key changed".** Accounts never change keys, so a different key means the server
+  (or whoever controls it) may be trying to read your messages, or its database was replaced.
+  The conversation shows a warning with **Verify** and **Trust the new key**, and encrypted
+  messages to that person will be blocked until you choose. Verify first: ask them, and compare
+  the new safety number. **Trust the new key** pins it without comparing.
+- **"<name> set up encryption again".** That person's client made a new encryption key, which
+  happens when its `config.json` lost the old one. It is signed by the same identity key, so the
+  client accepts it, but it is no longer marked verified: compare the safety number again.
+- **Losing `config.json`.** Your encryption key exists only in your `config.json`, next to your
+  identity key. If you lose the file you get a new identity, which every server treats as a new
+  account, and you will not be able to read your encrypted messages again. Keep a copy of the
+  file somewhere safe (it is a secret: never share it). Losing a key store file only means each
+  person is pinned again on first contact.
 
 ## Administration
 

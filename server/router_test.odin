@@ -227,9 +227,14 @@ routerCompleteHandshake :: proc(
 	voiceOpen: ^NetworkVoiceSessionOpen = nil,
 	accountNickname := "",
 	nicknameLocked := false,
+	// When set, receives the client's identity private key (tests that sign as the client).
+	identityPrivateKeyOut: ^common.IdentityPrivateKeyBytes = nil,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
+	if identityPrivateKeyOut != nil {
+		identityPrivateKeyOut^ = clientPrivateKey
+	}
 
 	clientEphemeralPrivateKey, clientEphemeralPublicKey, clientEphemeralOK :=
 		common.generateKeyExchangeKeyPair()

@@ -344,8 +344,10 @@ State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
 		ordered_remove(&state.server_room_caches, index)
 	}
-	// A different address or name is a different account, so its conversations go too.
+	// A different address or name is a different account, so its conversations go too, and
+	// its key store is loaded again (pins are per server key, keystore.odin).
 	State_removeServerDirectCache(state, serverID)
+	State_removeServerE2EE(state, serverID)
 }
 
 // A live transport can be kept across a settings change only if nothing it connects with

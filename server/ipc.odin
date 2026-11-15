@@ -302,6 +302,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseAdminUserRequest:
 		delete(r.nickname)
 		delete(r.reason)
+	case common.DatabaseFetchUserKeysRequest:
+		delete(r.userIds)
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
@@ -312,7 +314,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseDirectHistoryRequest,
 	     common.DatabaseDirectConversationListRequest,
 	     common.DatabaseUserDirectoryRequest,
-	     common.DatabaseMarkReadRequest:
+	     common.DatabaseMarkReadRequest,
+	     common.DatabasePublishEncryptionKeyRequest:
 	case nil:
 	}
 }
@@ -388,7 +391,12 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseAdminUserResult:
 		delete(r.user.nickname)
 		delete(r.previousNickname)
-	case common.DatabaseUserServerAdminResult, common.DatabaseMarkReadResult:
+	case common.DatabaseFetchUserKeysResult:
+		delete(r.keys)
+		delete(r.missingUserIds)
+	case common.DatabaseUserServerAdminResult,
+	     common.DatabaseMarkReadResult,
+	     common.DatabasePublishEncryptionKeyResult:
 	case nil:
 	}
 }

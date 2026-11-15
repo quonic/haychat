@@ -690,7 +690,8 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 				user = {id = 9, nickname = strings.clone("bob"), isOnline = true, isBanned = true},
 			},
 			`{"event":"user_updated","serverID":955,"user":{"id":9,"nickname":"bob",` +
-			`"isOnline":true,"isAdmin":false,"isBanned":true}}`,
+			`"isOnline":true,"identityPublicKey":"","hasEncryptionKey":false,` +
+			`"keyState":"unknown","isAdmin":false,"isBanned":true}}`,
 			.UserUpdated,
 		},
 		{

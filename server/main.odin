@@ -37,6 +37,9 @@ PendingDBRequestType :: enum {
 	// statement checks the requester and the room's mode, and the admin's room list.
 	RoomMemberAction,
 	AdminListRooms,
+	// Account encryption keys (router_encryption_keys.odin, protocol 16).
+	PublishEncryptionKey,
+	FetchUserKeys,
 }
 
 PendingDBRequest :: struct {
@@ -633,7 +636,9 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .ListDirectConversations,
 		     .ListUsers,
 		     .MarkRead,
-		     .AdminUserAction:
+		     .AdminUserAction,
+		     .PublishEncryptionKey,
+		     .FetchUserKeys:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
@@ -1247,6 +1252,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAdminKickUser(pm, state, peerID, packet.payload)
 	case .ClientAdminBanUser:
 		MainRouterState_handleClientAdminBanUser(pm, state, peerID, packet.payload)
+	case .ClientPublishEncryptionKey:
+		MainRouterState_handleClientPublishEncryptionKey(pm, state, peerID, packet.payload)
+	case .ClientFetchUserKeys:
+		MainRouterState_handleClientFetchUserKeys(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1804,6 +1813,10 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleMarkReadResult(pm, state, request, response)
 	case .AdminUserAction:
 		MainRouterState_handleAdminUserResult(pm, state, request, response)
+	case .PublishEncryptionKey:
+		MainRouterState_handlePublishEncryptionKeyResult(pm, state, request, response)
+	case .FetchUserKeys:
+		MainRouterState_handleFetchUserKeysResult(pm, state, request, response)
 	}
 }
 

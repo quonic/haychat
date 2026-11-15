@@ -28,8 +28,10 @@ import "shared:pg"
 // refused with not_admin, and the server always keeps an admin.
 //
 // Every statement returns one row: outcome, whether a row changed, and the target's ID,
-// nickname, nickname lock, admin flag, and ban flag after the action, and its nickname before
-// it. The target columns are NULL for unknown_user and not_admin of a missing target.
+// nickname, nickname lock, admin flag, and ban flag after the action, its nickname before it,
+// and (protocol 16) its identity key in hex ('' without one) and whether it has published an
+// encryption key bundle. The target columns are NULL for unknown_user and not_admin of a
+// missing target.
 
 @(private = "file")
 DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
@@ -37,6 +39,9 @@ DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
 	"JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS ok), " +
 	"target AS (SELECT u.id, u.nickname, u.nickname_locked, u.banned_at IS NOT NULL AS banned, " +
+	"COALESCE(encode(u.public_key, 'hex'), '') AS public_key_hex, " +
+	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
+	"WHERE k.user_id = u.id)) AS has_key, " +
 	"EXISTS (SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = u.id AND sr.name = 'admin') AS is_admin " +
 	"FROM users u WHERE u.id = $2::bigint), "
@@ -64,7 +69,9 @@ DATABASE_ADMIN_SET_ROLE_SQL ::
 	"SELECT d.outcome, (EXISTS (SELECT 1 FROM granted) OR EXISTS (SELECT 1 FROM revoked))::text, " +
 	"t.id::text, t.nickname, t.nickname_locked::text, " +
 	"(CASE WHEN d.outcome = 'applied' THEN $3::boolean ELSE t.is_admin END)::text, " +
-	"t.banned::text, t.nickname FROM decision d LEFT JOIN target t ON true"
+	"t.banned::text, t.nickname, " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is the new nickname, or '' to keep it; $4 is the new lock.
 DATABASE_ADMIN_RENAME_SQL ::
@@ -84,7 +91,9 @@ DATABASE_ADMIN_RENAME_SQL ::
 	"SELECT d.outcome, EXISTS (SELECT 1 FROM updated)::text, t.id::text, " +
 	"COALESCE((SELECT nickname FROM updated), t.nickname), " +
 	"COALESCE((SELECT nickname_locked FROM updated), t.nickname_locked)::text, " +
-	"t.is_admin::text, t.banned::text, t.nickname FROM decision d LEFT JOIN target t ON true"
+	"t.is_admin::text, t.banned::text, t.nickname, " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"FROM decision d LEFT JOIN target t ON true"
 
 // Changes nothing: the router ends the target's sessions when the guards pass.
 DATABASE_ADMIN_KICK_SQL ::
@@ -96,7 +105,9 @@ DATABASE_ADMIN_KICK_SQL ::
 	"WHEN (SELECT is_admin FROM target) THEN 'admin_target' " +
 	"ELSE 'applied' END AS outcome) " +
 	"SELECT d.outcome, 'false', t.id::text, t.nickname, t.nickname_locked::text, " +
-	"t.is_admin::text, t.banned::text, t.nickname FROM decision d LEFT JOIN target t ON true"
+	"t.is_admin::text, t.banned::text, t.nickname, " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is true to ban and false to unban; $4 is the reason, kept only while banned. Banning a
 // banned account again keeps banned_at and replaces the reason.
@@ -117,7 +128,8 @@ DATABASE_ADMIN_BAN_SQL ::
 	"RETURNING users.banned_at IS NOT NULL AS banned) " +
 	"SELECT d.outcome, EXISTS (SELECT 1 FROM updated)::text, t.id::text, t.nickname, " +
 	"t.nickname_locked::text, t.is_admin::text, " +
-	"COALESCE((SELECT banned FROM updated), t.banned)::text, t.nickname " +
+	"COALESCE((SELECT banned FROM updated), t.banned)::text, t.nickname, " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 databaseAdminOutcomeFromText :: proc(text: string) -> (common.DatabaseAdminOutcome, bool) {
@@ -220,7 +232,9 @@ databaseExecuteAdminUser :: proc(
 		nickname = databaseGetText(result, 0, 3),
 		isAdmin  = databaseGetBool(result, 0, 5),
 		isBanned = databaseGetBool(result, 0, 6),
+		hasEncryptionKey = databaseGetBool(result, 0, 9),
 	}
+	adminResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 8)
 	adminResult.nicknameLocked = databaseGetBool(result, 0, 4)
 	adminResult.previousNickname = databaseGetText(result, 0, 7)
 	return databaseSuccess(adminResult)

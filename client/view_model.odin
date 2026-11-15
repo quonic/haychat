@@ -118,6 +118,9 @@ SidebarRow :: struct {
 	// VoiceParticipant: id is the user ID, roomID the room the row sits under.
 	roomID:      int,
 	voice:       VoiceParticipantRow,
+	// Conversation and Member: this client's state for the account's encryption key
+	// (e2ee_state.odin), shown by e2eeKeyIndicator.
+	keyState:    E2EEKeyState,
 }
 
 // Fallback label for an account the client has no nickname for.
@@ -274,6 +277,7 @@ buildSidebarRows :: proc(
 				selected = state.selected_dm_peer_id == peerUserID,
 				isOnline = ServerDirectCache_peerIsOnline(cache, peerUserID),
 				unreadCount = conversation.unreadCount,
+				keyState = State_e2eePeerKeyInfo(state, serverID, peerUserID).state,
 			},
 		)
 		conversationCount += 1
@@ -294,6 +298,7 @@ buildSidebarRows :: proc(
 				label = userLabel(member.nickname, member.id, allocator),
 				selected = state.selected_dm_peer_id == member.id,
 				isOnline = member.isOnline,
+				keyState = State_e2eePeerKeyInfo(state, serverID, member.id).state,
 			},
 		)
 	}

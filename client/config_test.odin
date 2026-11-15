@@ -759,3 +759,159 @@ testServerSettingsConfigKeysAreValidated :: proc(t: ^testing.T) {
 	assert(!Server_setUserVoice(&full, 0, 0.5, false), "expected user ID 0 refused")
 	_ = t
 }
+
+// Rewrites configHome's config.json through edit.
+@(private = "file")
+configTestEditStored :: proc(configHome: string, edit: proc(config: ^Config)) {
+	path := configTestExpectedCurrentLinuxConfigPath(configHome)
+	data, readErr := os.read_entire_file_from_path(path, context.temp_allocator)
+	assert(readErr == nil, "expected the saved config to be readable")
+	stored: Config
+	defer Config_deinit(&stored)
+	assert(json.unmarshal(data, &stored) == nil, "expected the saved config to parse")
+	edit(&stored)
+	encoded, encodeErr := json.marshal(stored, allocator = context.temp_allocator)
+	assert(encodeErr == nil, "expected the edited config to encode")
+	assert(os.write_entire_file_from_bytes(path, encoded) == nil, "expected the config written")
+}
+
+// The encryption key (e2ee-design.md 2.2, 9.3) is generated once, signed by the identity key,
+// kept across a save and a load, and replaced when it is missing, damaged, does not match its
+// private key, or does not verify against the profile's identity key.
+@(test)
+testEncryptionKeyIsGeneratedOnceAndReplacedWhenInvalid :: proc(t: ^testing.T) {
+	when ODIN_OS != .Linux {
+		_ = t
+		return
+	}
+
+	sync.mutex_lock(&configTestMutex)
+	defer sync.mutex_unlock(&configTestMutex)
+	snapshot := configTestCaptureEnv()
+	defer configTestRestoreEnv(snapshot)
+	tempDir := configTestCreateTempDir("hc_client_encryption_key")
+	defer configTestRemovePathIfExists(tempDir)
+	configHome := configTestJoinPath({tempDir, "xdg"})
+	assert(os.make_directory(configHome) == nil, "expected the XDG directory created")
+	configTestSetEnv("HOME", tempDir)
+
+	first := configTestLoadFrom(configHome)
+	defer Config_deinit(&first)
+	keyPair, bundle, ok := Config_encryptionKey(first)
+	common.EncryptionKeyPair_wipe(&keyPair)
+	identity, _ := common.identityPublicKeyFromHex(first.public_key)
+	assert(
+		ok &&
+		bundle.identityPublicKey == identity &&
+		common.verifyEncryptionKeyBundle(bundle) &&
+		first.encryption_key_created_at > 0 &&
+		len(first.encryption_private_key) == 64 &&
+		len(first.encryption_public_key) == 64 &&
+		len(first.encryption_key_signature) == 128,
+		"expected a new profile to get a valid, signed encryption key",
+	)
+	// The file stays readable by the user only, and no temporary file is left behind.
+	path := configTestExpectedCurrentLinuxConfigPath(configHome)
+	info, statErr := os.stat(path, context.temp_allocator)
+	assert(statErr == nil, "expected the config to exist")
+	assert(
+		info.mode & os.perm(0o077) == {},
+		fmt.tprintf("expected config.json to be 0600, got %v", info.mode),
+	)
+	assert(!os.exists(fmt.tprintf("%s.tmp", path)), "expected no temporary file left")
+
+	second := configTestLoadFrom(configHome)
+	defer Config_deinit(&second)
+	assert(
+		second.encryption_private_key == first.encryption_private_key &&
+		second.encryption_public_key == first.encryption_public_key &&
+		second.encryption_key_signature == first.encryption_key_signature &&
+		second.encryption_key_created_at == first.encryption_key_created_at,
+		"expected the same encryption key after a load",
+	)
+
+	Case :: struct {
+		label: string,
+		edit:  proc(config: ^Config),
+	}
+	cases := [?]Case {
+		{"a missing key", proc(config: ^Config) {
+				delete(config.encryption_private_key)
+				config.encryption_private_key = ""
+			}},
+		{"a signature that does not verify", proc(config: ^Config) {
+				config.encryption_key_created_at += 1
+			}},
+		{"a public key that is not the private key's", proc(config: ^Config) {
+				delete(config.encryption_public_key)
+				config.encryption_public_key = strings.repeat("09", 32)
+			}},
+		{"bad hex", proc(config: ^Config) {
+				delete(config.encryption_key_signature)
+				config.encryption_key_signature = strings.clone("zz")
+			}},
+		// A key signed by another identity (a profile whose identity key was replaced).
+		{"a key for another identity", proc(config: ^Config) {
+				privateKey, publicKey, _ := common.generateIdentityKeyPair()
+				delete(config.private_key)
+				delete(config.public_key)
+				config.private_key = common.identityPrivateKeyToHex(privateKey)
+				config.public_key = common.identityPublicKeyToHex(publicKey)
+			}},
+	}
+	previous := strings.clone(first.encryption_public_key)
+	defer delete(previous)
+	for testCase in cases {
+		configTestEditStored(configHome, testCase.edit)
+		repaired := configTestLoadFrom(configHome)
+		defer Config_deinit(&repaired)
+		repairedPair, repairedBundle, repairedOK := Config_encryptionKey(repaired)
+		common.EncryptionKeyPair_wipe(&repairedPair)
+		repairedIdentity, _ := common.identityPublicKeyFromHex(repaired.public_key)
+		assert(
+			repairedOK &&
+			repairedBundle.identityPublicKey == repairedIdentity &&
+			repaired.encryption_public_key != previous,
+			fmt.tprintf("expected %s to be replaced by a new valid key", testCase.label),
+		)
+		// The replacement was saved: the next load keeps it.
+		again := configTestLoadFrom(configHome)
+		defer Config_deinit(&again)
+		assert(
+			again.encryption_public_key == repaired.encryption_public_key,
+			fmt.tprintf("expected the key that replaced %s to be saved", testCase.label),
+		)
+		delete(previous)
+		previous = strings.clone(repaired.encryption_public_key)
+	}
+}
+
+// A config without an identity key gets no encryption key, and Config_clone keeps the keys.
+@(test)
+testEncryptionKeyNeedsAnIdentityKeyAndIsCloned :: proc(t: ^testing.T) {
+	_ = t
+	empty: Config
+	assert(!ensureEncryptionKey(&empty), "expected no encryption key without an identity key")
+	_, _, emptyOK := Config_encryptionKey(empty)
+	assert(!emptyOK, "expected no valid encryption key without an identity key")
+
+	privateKey, publicKey, _ := common.generateIdentityKeyPair()
+	config := Config {
+		private_key = common.identityPrivateKeyToHex(privateKey),
+		public_key  = common.identityPublicKeyToHex(publicKey),
+	}
+	defer Config_deinit(&config)
+	assert(ensureEncryptionKey(&config), "expected a key to be made")
+	assert(!ensureEncryptionKey(&config), "expected a valid key to be kept")
+	clone := Config_clone(config)
+	defer Config_deinit(&clone)
+	assert(
+		clone.encryption_private_key == config.encryption_private_key &&
+		clone.encryption_public_key == config.encryption_public_key &&
+		clone.encryption_key_signature == config.encryption_key_signature &&
+		clone.encryption_key_created_at == config.encryption_key_created_at,
+		"expected the clone to keep the encryption key",
+	)
+	_, _, cloneOK := Config_encryptionKey(clone)
+	assert(cloneOK, "expected the cloned key to be valid")
+}

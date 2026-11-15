@@ -10,11 +10,12 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --voice | --ui | --sql |
-#                          test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --e2ee | --voice | --ui |
+#                          --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
-#                   harness smoke test, the admin proof, the room access proof, the two-process
+#                   harness smoke test, the admin proof, the room access proof, the encryption
+#                   key proof, the two-process
 #                   voice proof, the GUI automation smoke test, the server SQL proofs, and the
 #                   startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
@@ -26,6 +27,10 @@ set -euo pipefail
 #                   (dev/room-access-proof.sh): Admin invite, Member invite with From join and
 #                   Full history, leaving, removing, and a room the admin creates without
 #                   joining it and still manages
+#   --e2ee          only the encryption key proof between headless clients
+#                   (dev/e2ee-proof.sh): bundles published and pinned on first use, matching
+#                   safety numbers, a verified pin that survives a restart, and a key swapped
+#                   in the database that shows as a key change until it is trusted
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -70,11 +75,14 @@ SQL_TESTS+=,server.testAdminMigrationUpgradesVersion2AgainstPostgreSQL
 SQL_TESTS+=,server.testRoomAccessModeRulesAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomAccessFromJoinHistoryAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL
+SQL_TESTS+=,server.testUserEncryptionKeyStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testUserEncryptionKeysMigrationUpgradesVersion4AgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
 run_admin=false
 run_access=false
+run_e2ee=false
 run_voice=false
 run_ui=false
 run_sql=false
@@ -86,6 +94,7 @@ if [[ $# -gt 0 ]]; then
 			run_harness=true
 			run_admin=true
 			run_access=true
+			run_e2ee=true
 			run_voice=true
 			run_ui=true
 			run_sql=true
@@ -102,6 +111,10 @@ if [[ $# -gt 0 ]]; then
 		--access)
 			tests=()
 			run_access=true
+			;;
+		--e2ee)
+			tests=()
+			run_e2ee=true
 			;;
 		--voice)
 			tests=()
@@ -250,6 +263,12 @@ fi
 if [[ "$run_access" == true ]]; then
 	echo "==> [live] running dev/room-access-proof.sh"
 	dev/room-access-proof.sh 127.0.0.1:12345
+fi
+
+# After the GUI proof too: its key swap leaves one account without an identity key.
+if [[ "$run_e2ee" == true ]]; then
+	echo "==> [live] running dev/e2ee-proof.sh"
+	dev/e2ee-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

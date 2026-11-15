@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 15
+protocolVersion: ProtocolVersion = 16
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -353,6 +353,12 @@ MessageType :: enum {
 	ServerRoomMembers, // ServerRoomMembersPayload: answer to ClientFetchRoomMembers
 	ClientAdminListRooms, // ClientAdminListRoomsPayload: admins: every room, joined or not
 	ServerAdminRooms, // ServerAdminRoomsPayload: answer to ClientAdminListRooms
+	// Account encryption keys (protocol 16, e2ee-design.md 3.1-3.2), appended so no existing
+	// wire value moves.
+	ClientPublishEncryptionKey, // ClientPublishEncryptionKeyPayload: this profile's bundle
+	ClientFetchUserKeys, // ClientFetchUserKeysPayload: request accounts' bundles
+	ServerUserKeys, // ServerUserKeysPayload: response to ClientFetchUserKeys
+	ServerUserKeyChanged, // ServerUserKeyChangedPayload: an account published a new bundle
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -718,6 +724,13 @@ UserSummary :: struct {
 	// account sees them; banned accounts stay listed because history names them.
 	isAdmin:  bool,
 	isBanned: bool,
+	// Protocol 16 (e2ee-design.md 3.2): the account's identity key (users.public_key; all zeros
+	// for an account that has none, such as a seeded keyless account), and whether it has
+	// published an encryption key bundle. A client compares identityPublicKey with its pin and
+	// never trusts it on its own; bundles are fetched with ClientFetchUserKeys. ServerUserPresence
+	// carries neither, so a directory entry added from presence has zeros until the next list.
+	identityPublicKey: IdentityPublicKeyBytes,
+	hasEncryptionKey:  bool,
 }
 
 // ServerUserList: every account on the server, the requester included, ordered by nickname.
@@ -988,6 +1001,97 @@ ServerSessionEndedPayload :: struct {
 	reason: string,
 }
 
+// Account encryption keys (protocol 16, e2ee-design.md 2.2, 3.1-3.4). The bundle's signed bytes
+// are makeEncryptionKeyBundleSignedBytes in e2ee.odin; every key is a fixed-size CBOR byte
+// string.
+
+// ClientPublishEncryptionKey: this profile's encryption key bundle, sent once per session after
+// ServerAuthSuccess. The server verifies the signature against the session's identity key and
+// stores it in user_encryption_keys: an identical bundle is a no-op, a different valid one
+// replaces it and every authenticated session gets ServerUserKeyChanged. A bundle that does not
+// verify is refused with ServerProtocolError ENCRYPTION_KEY_INVALID_MESSAGE.
+ClientPublishEncryptionKeyPayload :: struct {
+	encryptionPublicKey: EncryptionPublicKeyBytes,
+	createdAt:           u64, // Unix seconds
+	signature:           SignatureBytes,
+}
+
+// ClientFetchUserKeys: 1..USER_KEYS_FETCH_MAX positive, distinct account IDs. userIds is owned
+// once decoded (ClientFetchUserKeysPayload_deinit). Anything else is refused with
+// ServerProtocolError USER_KEYS_INVALID_REQUEST_MESSAGE.
+ClientFetchUserKeysPayload :: struct {
+	userIds: [dynamic]int,
+}
+
+// One account's bundle. identityPublicKey is the account's identity key (users.public_key),
+// which the signature must verify against; the client also compares it with its pin.
+UserKeyBundle :: struct {
+	userId:              int,
+	identityPublicKey:   IdentityPublicKeyBytes,
+	encryptionPublicKey: EncryptionPublicKeyBytes,
+	createdAt:           u64,
+	signature:           SignatureBytes,
+}
+
+// ServerUserKeys: the bundles of the requested accounts that have one, and missingUserIds, the
+// requested accounts that have none (unknown accounts included), so the client can tell "not
+// set up yet" and "the server is not providing it" (design 4.6) from an answer that is still
+// on its way. Both arrays are owned once decoded (ServerUserKeysPayload_deinit).
+ServerUserKeysPayload :: struct {
+	keys:           [dynamic]UserKeyBundle,
+	missingUserIds: [dynamic]int,
+}
+
+// ServerUserKeyChanged: an account stored a bundle it did not have before (a first publish or
+// a replacement), to every authenticated session. No owned fields.
+ServerUserKeyChangedPayload :: struct {
+	bundle: UserKeyBundle,
+}
+
+ENCRYPTION_KEY_INVALID_MESSAGE :: "Invalid encryption key"
+USER_KEYS_INVALID_REQUEST_MESSAGE :: "Invalid user key request"
+
+ClientFetchUserKeysPayload_deinit :: proc(payload: ^ClientFetchUserKeysPayload) {
+	delete(payload.userIds)
+	payload.userIds = nil
+}
+
+ServerUserKeysPayload_deinit :: proc(payload: ^ServerUserKeysPayload) {
+	delete(payload.keys)
+	delete(payload.missingUserIds)
+	payload.keys = nil
+	payload.missingUserIds = nil
+}
+
+// The bundle as e2ee.odin's verifier takes it.
+UserKeyBundle_toEncryptionKeyBundle :: proc(bundle: UserKeyBundle) -> EncryptionKeyBundle {
+	return EncryptionKeyBundle {
+		identityPublicKey = bundle.identityPublicKey,
+		encryptionPublicKey = bundle.encryptionPublicKey,
+		createdAt = bundle.createdAt,
+		signature = bundle.signature,
+	}
+}
+
+// Whether userIds is a valid ClientFetchUserKeys list: 1..USER_KEYS_FETCH_MAX positive,
+// distinct IDs. Quadratic in at most 64 entries, so it allocates nothing.
+userKeysFetchIsValid :: proc(userIds: []int) -> bool {
+	if len(userIds) == 0 || len(userIds) > USER_KEYS_FETCH_MAX {
+		return false
+	}
+	for userID, index in userIds {
+		if userID <= 0 {
+			return false
+		}
+		for earlier in userIds[:index] {
+			if earlier == userID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 ServerAuthSuccessPayload_deinit :: proc(payload: ^ServerAuthSuccessPayload) {
 	delete(payload.message)
 	delete(payload.nickname)
@@ -1069,6 +1173,8 @@ DatabaseQueryRequest :: union {
 	DatabaseMarkReadRequest,
 	DatabaseAdminUserRequest,
 	DatabaseAdminRoomListRequest,
+	DatabasePublishEncryptionKeyRequest,
+	DatabaseFetchUserKeysRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -1203,6 +1309,20 @@ DatabaseAdminUserRequest :: struct {
 	reason:       string,
 }
 
+// Stores a bundle the router already verified against the session's identity key (protocol
+// 15). An identical stored bundle is left alone.
+DatabasePublishEncryptionKeyRequest :: struct {
+	userId:              int,
+	encryptionPublicKey: EncryptionPublicKeyBytes,
+	createdAt:           u64,
+	signature:           SignatureBytes,
+}
+
+// Reads the bundles of userIds (owned), at most USER_KEYS_FETCH_MAX of them.
+DatabaseFetchUserKeysRequest :: struct {
+	userIds: [dynamic]int,
+}
+
 // message holds the error text when success is false. All strings and arrays are owned.
 DatabaseQueryResponse :: struct {
 	success: bool,
@@ -1226,6 +1346,8 @@ DatabaseQueryResult :: union {
 	DatabaseAdminUserResult,
 	DatabaseRoomMemberActionResult,
 	DatabaseAdminRoomListResult,
+	DatabasePublishEncryptionKeyResult,
+	DatabaseFetchUserKeysResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -1369,6 +1491,22 @@ DatabaseAdminUserResult :: struct {
 	user:             UserSummary,
 	nicknameLocked:   bool,
 	previousNickname: string,
+}
+
+// stored is true when the row changed (a first publish or a replacement) and false when the
+// stored bundle was already identical; replaced says it was a replacement. bundle is the stored
+// bundle with the account's identity key, set when stored is true.
+DatabasePublishEncryptionKeyResult :: struct {
+	stored:   bool,
+	replaced: bool,
+	bundle:   UserKeyBundle,
+}
+
+// keys holds every requested account with a bundle and missingUserIds the others, unknown
+// accounts and accounts without an identity key included. Both arrays are owned.
+DatabaseFetchUserKeysResult :: struct {
+	keys:           [dynamic]UserKeyBundle,
+	missingUserIds: [dynamic]int,
 }
 
 ProtocolErrorResponse :: struct {

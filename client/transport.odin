@@ -73,6 +73,11 @@ ClientTransportRuntimeEventKind :: enum {
 	RoomMembersReceived,
 	AdminRoomsReceived,
 	RoomMemberResult,
+	// Account encryption keys (protocol 16, e2ee_state.odin). UserKeysReceived carries
+	// ServerUserKeys in userKeys and missingUserIDs (both owned); UserKeyChanged carries
+	// ServerUserKeyChanged's bundle in userKey (nothing owned).
+	UserKeysReceived,
+	UserKeyChanged,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -134,6 +139,10 @@ ClientTransportRuntimeEvent :: struct {
 	// creator is a member of the new room (protocol 15).
 	changed:           bool,
 	isMember:          bool,
+	// UserKeysReceived and UserKeyChanged (protocol 16).
+	userKeys:          [dynamic]common.UserKeyBundle,
+	missingUserIDs:    [dynamic]int,
+	userKey:           common.UserKeyBundle,
 }
 
 ClientServerTransport :: struct {
@@ -305,6 +314,8 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.detail)
 	delete(event.userIDs)
 	AdminRoomSummaries_deinit(&event.adminRooms)
+	delete(event.userKeys)
+	delete(event.missingUserIDs)
 	event^ = {}
 }
 
@@ -885,6 +896,41 @@ ClientServerTransport_requestUserList :: proc(transport: ^ClientServerTransport)
 		transport,
 		.ClientUserList,
 		common.ClientListUsersPayload{},
+	)
+}
+
+// Account encryption keys (protocol 16): this profile's bundle, once per session.
+ClientServerTransport_publishEncryptionKey :: proc(
+	transport: ^ClientServerTransport,
+	bundle: common.EncryptionKeyBundle,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientPublishEncryptionKey,
+		common.ClientPublishEncryptionKeyPayload {
+			encryptionPublicKey = bundle.encryptionPublicKey,
+			createdAt = bundle.createdAt,
+			signature = bundle.signature,
+		},
+	)
+}
+
+// Requests the bundles of userIDs: 1..USER_KEYS_FETCH_MAX distinct positive IDs. The server
+// answers with ServerUserKeys.
+ClientServerTransport_fetchUserKeys :: proc(
+	transport: ^ClientServerTransport,
+	userIDs: []int,
+) -> bool {
+	if !common.userKeysFetchIsValid(userIDs) {
+		return false
+	}
+	ids := make([dynamic]int, 0, len(userIDs))
+	defer delete(ids)
+	append(&ids, ..userIDs)
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientFetchUserKeys,
+		common.ClientFetchUserKeysPayload{userIds = ids},
 	)
 }
 
@@ -1524,6 +1570,40 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				adminAction = payload.action,
 				peerUserID = payload.userId,
 				message = payload.message,
+			},
+			true
+
+	case .ServerUserKeys:
+		payload: common.ServerUserKeysPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerUserKeysPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid user keys payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .UserKeysReceived,
+				serverID = transport.serverID,
+				userKeys = payload.keys,
+				missingUserIDs = payload.missingUserIds,
+			},
+			true
+
+	case .ServerUserKeyChanged:
+		payload: common.ServerUserKeyChangedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.bundle.userId <= 0 {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid user key change payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .UserKeyChanged,
+				serverID = transport.serverID,
+				userKey = payload.bundle,
 			},
 			true
 

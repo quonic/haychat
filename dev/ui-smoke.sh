@@ -38,6 +38,9 @@ set -euo pipefail
 #      can join: Admin invite), invites bob from his member menu (Invite to room… → Invite to
 #      #room), and opens the room's Members page from its channel menu, which offers Leave
 #      room; bob must receive room_membership for it and list it with access 3.
+#   9. encryption keys (protocol 16): alice opens bob's Verify encryption… dialog from his
+#      member menu, waits for his key (the safety number and "Not verified yet."), clicks Mark
+#      as verified and closes the dialog. Her key store file must then hold bob verified.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -313,6 +316,18 @@ wait-text "Members of #$access_room" 5000
 wait-text "Leave room" 5000
 screenshot $screenshot_dir/29-room-members.bmp
 click "Close"
+# Encryption keys (protocol 16): bob's Verify encryption… dialog from his member menu fetches
+# his bundle and shows the safety number; Mark as verified pins him verified.
+right-click-id dm-member 1 $user_bob
+click "Verify encryption…"
+wait-text "Verify encryption with $nickname_bob" 5000
+wait-text "Not verified yet." 10000
+screenshot $screenshot_dir/30-verify-dialog.bmp
+click-id verify-mark 1 $user_bob
+wait-text "Verified. The keys match what you compared." 5000
+screenshot $screenshot_dir/31-verified.bmp
+click-id verify-close 1 $user_bob
+wait-gone "Verify encryption with $nickname_bob" 5000
 quit
 EOF
 
@@ -452,6 +467,12 @@ expect_ok bob rooms
 [[ "$last_result" =~ \{\"id\":[0-9]+,\"name\":\"$access_room\",[^}]*\"access\":3, ]] ||
 	fail "[access] bob's rooms do not list $access_room as Admin invite: $last_result"
 
+echo "==> [ui] alice verified bob in the Verify encryption… dialog"
+key_stores=("$work_dir"/profile-alice/haychat/keys/*.json)
+[[ -f "${key_stores[0]}" ]] || fail "[e2ee] alice has no key store file"
+tr -d ' \n' <"${key_stores[0]}" | grep -Eq "\"user_id\":$user_bob,[^}]*\"verified\":true" ||
+	fail "[e2ee] alice's key store does not hold bob verified"
+
 stop_client alice-watch
 stop_client bob
 
@@ -462,5 +483,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 29 ]] || fail "expected 29 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 31 ]] || fail "expected 31 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

@@ -181,6 +181,7 @@ ContextMenuAction :: enum u8 {
 	ConfirmLeaveRoom,
 	InviteToRoom,
 	InviteToRoomPick, // One per room: ContextMenuEntry.roomID names it
+	VerifyEncryption,
 }
 
 // Item keys of the Invite to room… list: this plus the room ID, above every action's value.
@@ -524,6 +525,17 @@ contextMenuAppendUserEntries :: proc(
 		)
 	}
 	append(entries, ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true})
+	// The safety number dialog (e2ee-design.md 3.5); yourself has nothing to compare.
+	if !isSelf {
+		append(
+			entries,
+			ContextMenuEntry {
+				action = .VerifyEncryption,
+				label = "Verify encryption…",
+				enabled = true,
+			},
+		)
+	}
 	contextMenuAppendInviteEntry(state, entries, serverID, userID)
 }
 
@@ -924,6 +936,8 @@ State_runUserMenuAction :: proc(
 		State_setUserVoiceMuted(state, serverID, userID, true)
 	case .UnmuteForMe:
 		State_setUserVoiceMuted(state, serverID, userID, false)
+	case .VerifyEncryption:
+		State_openVerifyDialog(state, serverID, userID)
 	}
 	return
 }
