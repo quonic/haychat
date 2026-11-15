@@ -277,11 +277,9 @@ State_joinVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 		ClientVoiceState_setError(&state.voice, NOT_CONNECTED_MESSAGE)
 		return false
 	}
-	if State_voiceIsActive(state) || state.voice.wantVoiceRoomID != 0 {
-		State_leaveVoice(state)
-	}
 	// Protocol 21: an encrypted room's voice needs its verified member list and this profile's
-	// encryption key before anything goes out.
+	// encryption key before anything goes out. Checked first, so a refused join leaves the
+	// current voice session alone.
 	encrypted := State_roomIsEncrypted(state, serverID, roomID)
 	if encrypted {
 		if blocker := State_voiceE2EEJoinBlocker(state, serverID, roomID); len(blocker) > 0 {
@@ -291,6 +289,9 @@ State_joinVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 			ClientVoiceState_setError(&state.voice, blocker)
 			return false
 		}
+	}
+	if State_voiceIsActive(state) || state.voice.wantVoiceRoomID != 0 {
+		State_leaveVoice(state)
 	}
 	// Without libopus the engine can never start, so do not join the server's voice only to
 	// leave it again.
@@ -329,6 +330,7 @@ State_leaveVoice :: proc(state: ^State) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_setError(&state.voice, "")
 }
 
@@ -615,6 +617,7 @@ State_voiceJoinRejected :: proc(state: ^State, serverID, roomID: int, reason: ^s
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_takeError(&state.voice, reason)
 }
 
@@ -633,6 +636,7 @@ State_voiceLeft :: proc(state: ^State, serverID, roomID: int, reason: ^string) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_takeError(&state.voice, reason)
 }
 
@@ -671,6 +675,7 @@ State_voiceEndedByAdmin :: proc(state: ^State, serverID: int) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 }
 
 // A session on serverID was established: re-join the wanted room. The join is marked as
