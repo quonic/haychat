@@ -64,6 +64,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | --- | --- | --- | --- | --- |
 | E0 Primitives | #58 | da6c708 | – | – |
 | E3 Room access modes | #59 | 076cbe3 | 15 | 4 |
+| E1 Account keys | #60 | dfe6759 | 16 | 5 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -79,3 +80,12 @@ exists; removing or leaving also deletes the read marker; `ServerRoomMembershipC
 `userId` and goes to the room's members, so Members pages refresh live. Known limitation: the
 Admin section's room list does not refresh when another admin changes a room this admin is
 not in.
+
+E1's decisions are listed in #60. The main ones: `ServerUserKeys` also lists
+`missingUserIds`; `ServerUserKeyChanged` goes out on a first publish too, and clients apply a
+pushed bundle only to users they already pinned; a different encryption key that is not newer
+than the pin is refused (rollback); a fourth blocking state, InvalidKey, never changes the pin;
+users are pinned on demand (opening a DM, the Verify dialog, the harness), never from the user
+list alone; a headless profile saves its generated encryption key on first run; `saveConfig`
+now writes atomically. E2 builds on `State_e2eePeerKeyInfo` and must encrypt to and verify
+against the pinned keys it returns.
