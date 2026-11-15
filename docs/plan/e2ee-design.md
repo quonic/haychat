@@ -731,8 +731,11 @@ The server's relay already opens the per-hop datagram and reseals it per listene
 Joining voice in an encrypted room distributes the chain first if the joiner has not sent in this
 epoch. Per-frame signatures are too expensive; the AEAD tag under a key shared with the room
 authenticates "a member", not which one, and the relay's sender ID tells which, which matches what
-SFrame offers. Voice packet-loss handling is unchanged. This phase gets its own design note before
-it is built.
+SFrame offers. Voice packet-loss handling is unchanged.
+
+**Superseded by `docs/plan/e2ee-voice-design.md` (E6, 2026-11-15):** the voice key is a fresh
+random key in its own `VoiceKey` envelope instead of a derivation from `chainKey_0`, which Full
+history forwarding (E5) would have exposed to later members.
 
 ## 9. Wire and schema changes
 
