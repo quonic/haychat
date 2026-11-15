@@ -85,10 +85,11 @@ afterwards:
 
 An admin may make a Member invite or Admin invite room **encrypted** when creating it (protocol
 18, schema migration 7; the form checks **Encrypt this room** by default for invite rooms). A
-Public room cannot be encrypted, and the choice never changes afterwards. For now an encrypted
-room takes no messages and no voice ("Encrypted room messages arrive in a later update"): its
-end-to-end encrypted messages arrive with the next part of the encryption work, so nothing
-readable is ever stored in one.
+Public room cannot be encrypted, and the choice never changes afterwards. Since protocol 19
+(schema migration 8) its messages are end-to-end encrypted with each sender's chain key, which
+only the members its signed member list names receive (see
+[protocol.md](protocol.md#sender-chains-in-encrypted-rooms-protocol-19)); the server refuses
+plaintext there and never stores anything readable in one. It takes no voice yet.
 
 What an encrypted room adds is a **signed member list**. The server's `room_members` still
 decides who may send and read history, but the clients decide who the room's keys will go to,
@@ -98,7 +99,7 @@ an encrypted room:
 
 | Role | Who | What they can do |
 | --- | --- | --- |
-| **Member** | Whoever the log added and has not removed (at most 100) | Read and, later, write messages; leave; in a Member invite room, add people |
+| **Member** | Whoever the log added and has not removed (at most 100) | Read and write messages (each sealed to the members of the current epoch); leave; in a Member invite room, add people |
 | **Manager** | Named by the log: the admins the creator kept checked when creating the room (the creator always), and anyone a manager made a manager later | Add and remove members and managers, switch the room between Member invite and Admin invite (also needs the admin role). A manager who is not a member reads nothing |
 | **Admin** | Holds the server's admin role | Remove members (the server writes the removal into the log itself), rename, edit and delete the room. An admin who is not a manager cannot add anyone: "Only this room's managers can add members; ask <names>" |
 
@@ -119,6 +120,15 @@ an encrypted room:
   Members page and signs nothing more for that room.
 - Creating an encrypted room without joining it works as for any invite room: the admin
   manages it from the Admin section and its Members page.
+- **Epochs.** Every log entry starts a new epoch, and the server accepts a message only in the
+  current one ("Room key is out of date" otherwise; the client then sends it again with a new
+  chain). So a removed member gets no key for anything sent after the removal, and an added
+  member gets the chains of its first epoch on and none before (From join). Full history for
+  new members of encrypted rooms (forwarding older chains) is a later part; such rooms behave
+  like From join rooms for now.
+- **Keys from a database row.** A row added to `room_members` behind the log lets the server
+  serve that account the room's history and its envelopes, but the log does not name it, so no
+  envelope has a wrap for it and no member's client re-seals a chain to it: it opens nothing.
 
 **The default room.** On startup, a server whose `rooms` table is empty creates `#general`
 ("General discussion", room ID `1` on a new database), makes every existing account a member, and
@@ -192,10 +202,10 @@ newest message.
 
 ## Known Limitations
 
-- Rooms are not end-to-end encrypted yet: access modes decide whom the server lets read a room,
-  not who can technically read it (the server and its operator can read every unencrypted
-  room). Encrypted rooms have their signed member list but take no messages until the next
-  part of the encryption work.
+- Only encrypted rooms are end-to-end encrypted. For every other room, access modes decide whom
+  the server lets read it, not who can technically read it (the server and its operator can
+  read every unencrypted room). Encrypted rooms take no voice yet, and Full history encrypted
+  rooms show new members only what is sent after they joined.
 - Bans and account changes do not remove anyone from encrypted rooms' member lists by
   themselves; an admin removes them from each room.
 - The Admin section's room list does not refresh by itself when another admin changes a room
@@ -203,5 +213,5 @@ newest message.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
 - Account registration (`ClientRegister`) is not implemented.
-- Room messages are not end-to-end encrypted, and direct messages only when both sides can (see
-  [protocol.md](protocol.md)). The server sees who writes to whom and when.
+- Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
+  both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.

@@ -259,6 +259,13 @@ HeadlessEventKind :: enum {
 	DirectQueue,
 	// Encrypted rooms (protocol 18): a room's member log after the client applied what arrived.
 	RoomLog,
+	// Sender chains (protocol 19, headless_room_chains.odin): a history message that waited for
+	// its key or the log and is now opened (or settled), a key envelope handled, a key request
+	// answered or refused, and queued messages that went out or back into the draft.
+	RoomOpened,
+	RoomKey,
+	RoomKeyRequest,
+	RoomQueue,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -297,6 +304,10 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.DirectOpened   = "direct_opened",
 	.DirectQueue    = "direct_queue",
 	.RoomLog        = "room_log",
+	.RoomOpened     = "room_opened",
+	.RoomKey        = "room_key",
+	.RoomKeyRequest = "room_key_request",
+	.RoomQueue      = "room_queue",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -511,6 +522,9 @@ HeadlessMessageEventJSON :: struct {
 	message:  string,
 }
 
+// Protocol 19: encrypted is whether the message is sealed, protection what the client
+// concluded (plain, pending, encrypted, failed), decryptError why it failed (or waits: "log",
+// "no_key"), epoch its chain's epoch (0 for plaintext); content the opened text or empty.
 HeadlessRoomChatJSON :: struct {
 	event:          string,
 	serverID:       int,
@@ -519,6 +533,10 @@ HeadlessRoomChatJSON :: struct {
 	senderID:       int,
 	senderNickname: string,
 	timestamp:      string,
+	encrypted:      bool,
+	decryptError:   string,
+	epoch:          int,
+	protection:     string,
 	content:        string,
 }
 
@@ -533,6 +551,10 @@ HeadlessHistoryMessageJSON :: struct {
 	senderID:       int,
 	senderNickname: string,
 	timestamp:      string,
+	encrypted:      bool,
+	decryptError:   string,
+	epoch:          int,
+	protection:     string,
 	content:        string,
 }
 
@@ -980,8 +1002,19 @@ headlessRenderRuntimeEvent :: proc(
 	case .RoomLogReceived:
 		// Printed as room_log after State verified it (headlessWriteRoomLogNotes).
 		return "", {}, false
+	case .RoomKeyEnvelopeReceived, .RoomKeysReceived, .RoomKeyRequested:
+		// Printed as room_key and room_key_request after State handled them.
+		return "", {}, false
 	case .RoomChatReceived:
+		// The harness prints room messages after State opened them (headlessWriteRoomChat).
+		if info.state != nil {
+			return "", {}, false
+		}
 		kind = .RoomChat
+		fields := headlessRoomSecurity({protection = .Pending}, len(event.sealed) > 0)
+		if len(event.sealed) == 0 {
+			fields = headlessRoomSecurity({protection = .Plain}, false)
+		}
 		line = headlessMarshal(
 			HeadlessRoomChatJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
@@ -991,7 +1024,10 @@ headlessRenderRuntimeEvent :: proc(
 				senderID = event.senderID,
 				senderNickname = event.senderNickname,
 				timestamp = event.timestamp,
-				content = event.message,
+				encrypted = fields.encrypted,
+				decryptError = fields.decryptError,
+				protection = fields.protection,
+				content = len(event.sealed) > 0 ? "" : event.message,
 			},
 			allocator,
 		)
@@ -1006,17 +1042,14 @@ headlessRenderRuntimeEvent :: proc(
 			allocator,
 		)
 	case .RoomHistoryReceived:
+		if info.state != nil {
+			return "", {}, false
+		}
 		kind = .RoomHistory
 		messages := make([]HeadlessHistoryMessageJSON, len(event.messages), allocator)
 		defer delete(messages, allocator)
 		for message, index in event.messages {
-			messages[index] = {
-				id             = message.id,
-				senderID       = message.senderId,
-				senderNickname = message.senderNickname,
-				timestamp      = message.timestamp,
-				content        = message.content,
-			}
+			messages[index] = headlessRoomMessageFields(nil, event.serverID, message)
 		}
 		line = headlessMarshal(
 			HeadlessRoomHistoryJSON {
@@ -1383,11 +1416,15 @@ HeadlessServerResultJSON :: struct {
 	serverID: int,
 }
 
+// Protocol 19: encrypted for a room whose messages are sealed, queued while the sender chain is
+// being set up (the message goes out later; room_queue says so).
 HeadlessSendJSON :: struct {
-	ok:       bool,
-	cmd:      string,
-	serverID: int,
-	roomID:   int,
+	ok:        bool,
+	cmd:       string,
+	serverID:  int,
+	roomID:    int,
+	encrypted: bool,
+	queued:    bool,
 }
 
 // One account in `users`: the directory entry plus the read state of the direct conversation
@@ -1601,6 +1638,9 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"room-access", 2, 0, .None, "room-access ROOM_ID member-invite|admin-invite",
 		"manager admins: switches an encrypted room's mode with a signed SetAccess",
 		headlessCommandRoomAccess},
+	{"room-keys", 1, 1, .None, "room-keys ROOM_ID [fetch]",
+		"an encrypted room's sender chains this profile holds (no keys) and its sending state; fetch asks the server for them again",
+		headlessCommandRoomKeys},
 	{"room-log-entry", 3, 1, .None,
 		"room-log-entry ROOM_ID add|remove|add-manager|remove-manager|leave USER_ID [unsigned]",
 		"prints a signed (or unsigned) entry on the verified head as hex without sending it",
@@ -1777,6 +1817,9 @@ HeadlessHarness :: struct {
 	// Live direct messages (server ID, message ID) still waiting for their sender's key, to be
 	// printed as direct_message once they open.
 	owedDirectMessages: map[[2]int]bool,
+	// Live room messages (server ID, message ID) still waiting for a key or the log, printed as
+	// room_chat once they open.
+	owedRoomMessages: map[[2]int]bool,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
@@ -1785,6 +1828,8 @@ HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
 	harness.connectAttempts = nil
 	delete(harness.owedDirectMessages)
 	harness.owedDirectMessages = nil
+	delete(harness.owedRoomMessages)
+	harness.owedRoomMessages = nil
 }
 
 // Writes one line followed by a newline in a single write, so lines never interleave.
@@ -1845,6 +1890,10 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		headlessWriteDirectHistoryEvent(harness, event)
 	case .DirectConversationsReceived:
 		headlessWriteConversationsEvent(harness, event.serverID)
+	case .RoomChatReceived:
+		headlessWriteRoomChat(harness, event)
+	case .RoomHistoryReceived:
+		headlessWriteRoomHistory(harness, event)
 	case .UserKeysReceived:
 		for bundle in event.userKeys {
 			headlessWriteUserKeysEvent(harness, event.serverID, bundle.userId)
@@ -1857,6 +1906,7 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 	}
 	headlessWriteDirectNotes(harness)
 	headlessWriteRoomLogNotes(harness)
+	headlessWriteRoomChainNotes(harness)
 	// Applying a voice event can start or stop the engine; report that right after it.
 	headlessPollVoice(harness)
 }
@@ -2200,6 +2250,7 @@ headlessConnectAndWait :: proc(
 	state := &harness.state
 	state.recordDirectNotes = true
 	state.recordRoomLogNotes = true
+	state.recordRoomChainNotes = true
 	// The key store is written like the GUI writes it (keystore.odin), so a profile run twice
 	// keeps its pins.
 	if len(harness.keyStoreDir) > 0 {
@@ -2438,6 +2489,11 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 		headlessWriteError(harness, command.name, message)
 		return
 	}
+	encrypted := State_roomIsEncrypted(state, state.selected_server_id, roomID)
+	queued := false
+	if encrypted {
+		queued = len(State_roomChainRoom(state, state.selected_server_id, roomID).queued) > 0
+	}
 	headlessWriteJSON(
 		harness,
 		HeadlessSendJSON {
@@ -2445,6 +2501,8 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 			cmd = command.name,
 			serverID = state.selected_server_id,
 			roomID = roomID,
+			encrypted = encrypted,
+			queued = queued,
 		},
 	)
 }

@@ -84,7 +84,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `reconnect` | Connects the selected server again now: drops any session in progress, skips the remaining retry delay, and also restarts after a failure that stopped retrying. The outcome arrives as `connecting` and then `connected` or `connect_failed` events. |
 | `rooms` | The joined rooms from the cache: `loaded`, `loading`, `rooms` (`[{"id","name","description","lastReadMessageId","unreadCount","roomType","access","historyVisibility"}]`, see [Read State](#read-state); `roomType` is 1 text, 2 voice, 3 both; `access` 1 Public, 2 Member invite, 3 Admin invite; `historyVisibility` 1 From join, 2 Full, always 2 for a Public room). When the list is not loaded yet it is requested and arrives as a `room_list` event. |
 | `history ROOM_ID [BEFORE_MESSAGE_ID]` | Requests one page of history (newest first page with no cursor, older pages with the oldest loaded message ID). The page arrives as a `room_history` event. |
-| `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. |
+| `send ROOM_ID TEXT...` | Sends the rest of the line to the room, through the same action as the GUI composer. `ok` means the transport accepted it; the message itself comes back as a `room_chat` event, and a rejection as a `protocol_error` event. In an encrypted room (protocol 19) the text is sealed with this session's sender chain: the result says `"encrypted":true`, and `"queued":true` while the chain is being set up (the message goes out once the server stored its distribution; `room_queue` says so). |
 | `users` | The server's accounts from the cache, yourself included: `loaded`, `loading`, `users` (`[{"id","nickname","isOnline","lastReadMessageId","unreadCount","identityPublicKey","hasEncryptionKey","keyState","isAdmin","isBanned"}]`, ordered by nickname; `lastReadMessageId` and `unreadCount` are the read state of your conversation with that account, 0 without one; the key fields are explained under [Encryption Keys](#encryption-keys)). The list is fetched when the client connects and kept current by `presence` and `user_updated` events; when it is not loaded yet it is requested and arrives as a `user_list` event. |
 | `conversations` | Your direct conversations from the cache, most recent first: `loaded`, `loading`, `conversations` (same shape as the `conversations` event). Fetched at connect; a live `direct_message` moves its conversation to the top. Requested when not loaded yet. |
 | `dm USER_ID TEXT...` | Sends the rest of the line as an end-to-end encrypted direct message to that account, through the same action as the GUI's direct-message composer (protocol 17). The result carries `encrypted` (it went out encrypted) and `queued` (the account's key is still being fetched: the message waits and a `direct_queue` event says when it went out, or that it went back into the draft). It is refused, with the reason, when encryption to the account is not possible (no key, a changed key, or a key the server no longer provides); use `dm-plain` then. The stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid encrypted direct message`, `Duplicate direct message`). |
@@ -104,6 +104,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-leave ROOM_ID` | Leaves a non-public room you are a member of; the answer is `room_membership` with `joined` false and your `userID` (also to the room's other members), and the room leaves your `rooms`. Refusals: `You cannot leave a public room`, `Not a room member`. |
 | `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. |
 | `room-log ROOM_ID` | An encrypted room's member log as this client verified it (protocol 18): prints a `room_log` event at once, then its result (`serverID`, `roomID`), and fetches what the client lacks (the whole log the first time, else what follows its verified version), which prints another `room_log` once applied. A client whose log failed fetches nothing more. Non-members who are neither managers nor admins get `protocol_error "Not a room member"`. See [Encrypted Rooms](#encrypted-rooms). |
+| `room-keys ROOM_ID [fetch]` | Protocol 19: the sender chains of an encrypted room this profile holds (`chains`: epoch, sender, chain ID and start index, never a key), the log's `epoch`, and how sending stands (`sending`, `sendingEpoch`, `sendingChain`, `nextIndex`, `distribution` none/sent/stored, `queued`, `inFlight`, `keysFetched`). With `fetch` it first asks the server for the room's envelopes again (`room_key` events follow; a non-member gets `protocol_error` "Not a room member"). |
 | `room-manager ROOM_ID USER_ID on\|off` | Signs an AddManager or RemoveManager entry for an encrypted room. The account's key must be pinned (the change waits for a fetch otherwise). |
 | `room-access ROOM_ID member-invite\|admin-invite` | Signs a SetAccess entry (a manager who is also an admin). |
 | `room-log-entry ROOM_ID add\|remove\|add-manager\|remove-manager\|leave USER_ID [unsigned]` | Builds the next entry on this client's verified head, signed by this account or (`unsigned`) with no actor and no signature, and prints it as hex (`entry`, `version`) without sending it or checking the log's rules, so a proof can insert it behind the server's back. The target's key must be pinned or named by the log. |
@@ -145,8 +146,12 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false}` (`isAdmin`: the account holds the server's `admin` role; `nickname` is the account's name on the server, which an admin may have set and locked, `nicknameLocked`) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0,"roomType":3}]}` (`roomType`: 1 text, 2 voice, 3 both) |
-| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}` |
-| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","content":"hi"}]}` |
+| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}` (printed after the client opened it: in an encrypted room `encrypted` true, `epoch` the chain's, `protection` `encrypted` with the opened `content`, or `failed` with `decryptError` such as `BadSignature`, `not_sealed`, `not_member`, `replayed`; a live message that waits for its key or the log is printed once it opens) |
+| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}]}` (messages as for `room_chat`; one that waits shows `protection` `pending` with `decryptError` `no_key` or `log`) |
+| `room_opened` | Same shape as `room_chat`: a message from a history page that waited for its key or the member log and is now opened or settled |
+| `room_key` | `{"event":"room_key","serverID":1,"roomID":5,"epoch":2,"senderID":3,"chainID":"<hex>","requesterID":0,"outcome":"stored","error":""}` (a key envelope this client handled: `stored`, `duplicate`, `not_for_me` (no wrap for this account), `pending` (waits for the log), `not_member` (the sender was not a member of that epoch), `failed` with `error`) |
+| `room_key_request` | Same shape as `room_key`: another member asked for this account's chain (`requesterID`); `outcome` `stored` when it was re-sealed for them, `refused` when they were not a member of that epoch in the verified log |
+| `room_queue` | `{"event":"room_queue","serverID":1,"roomID":5,"state":"sent","count":1,"reason":""}` (messages `send` queued for the sender chain went out; `state` `refused` with `reason` when they went back into the draft) |
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true,"userID":4}` (`userID` joined or left the room: your own account, or another member of a room you are in, or the target of your own add or removal) |
 | `room_edited` | `{"event":"room_edited","serverID":1,"roomID":2,"name":"...","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":false}` (`isMember` is only set on `room_created`) |
 | `room_members` | `{"event":"room_members","serverID":1,"roomID":2,"userIDs":[3,4]}` (the answer to `room-members`) |
@@ -478,11 +483,24 @@ rules before sending, so the server's refusal shows (`protocol_error` "You may n
 change to the member list", "The member list changed on the server; try again", "This
 encrypted room is full", …); the GUI checks them first and says who to ask.
 
-`send` to an encrypted room is refused (`protocol_error` "Encrypted room messages arrive in a
-later update") and `voice-join` too ("voice is not available in encrypted rooms yet") until
-sender chains exist. `dev/e2ee-proof.sh` (`./dev.sh live --e2ee`) creates encrypted rooms,
-adds and removes members, inserts an unsigned and a non-manager's entry by SQL with
-`room-log-entry`, and checks that the clients refuse those logs.
+Since protocol 19 `send` to an encrypted room seals the message with this session's sender
+chain ([protocol.md](protocol.md#sender-chains-in-encrypted-rooms-protocol-19)): the first one
+in a session (and in each epoch) answers `"queued":true` and goes out once the server stored the
+chain's distribution (`room_queue` with `state` `sent`). Room messages are printed after the
+client opened them, with `encrypted`, `decryptError`, `epoch` and `protection`; one that waits
+for its key is printed when it opens (`room_chat` for a live one, `room_opened` for history).
+`room_key` and `room_key_request` show what happened to key envelopes and key requests, and
+`room-keys ROOM_ID [fetch]` lists the chains a profile holds (never a key). `voice-join` is
+refused ("voice is not available in encrypted rooms yet").
+
+`dev/e2ee-proof.sh` (`./dev.sh live --e2ee`) creates encrypted rooms, adds and removes members,
+inserts an unsigned and a non-manager's entry by SQL with `room-log-entry`, and checks that the
+clients refuse those logs. For sender chains it exchanges sealed messages, checks that a
+non-member gets neither keys nor history, that a restart of the sender starts a new chain (every
+stored message at its own chain position), that no message text is in `chat_messages`, that a
+deleted key store is rebuilt from the server, that an account invited to a From join room reads
+only what follows, that a removed member gets no key for what follows, and that an account
+inserted into `room_members` by SQL opens nothing.
 
 ## Read State
 
@@ -852,9 +870,11 @@ and sends with **Send unencrypted**: her message shows **Unencrypted**, and dave
 with `"encrypted":false,"signed":true`. Last, the encrypted rooms (protocol 18): she opens the
 room form, picks Admin invite, sees **Encrypt this room: on** with herself checked as a
 manager, and creates the room; its Members page opens with her as member and manager and the
-Managers section, and SQL must find the room encrypted at log version 1. alice takes 37
-screenshots on the way (`01-…` to `36-…` and `06b-server-settings.bmp`); the script prints the
-paths of the 36 numbered `NN-*.bmp` ones and checks that all 36 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+Managers section, and SQL must find the room encrypted at log version 1. Then (protocol 19) she
+sends a message in it: the header shows "🔒 # room", the message carries the 🔒 badge, and SQL
+must find one sealed row without its text. alice takes 38 screenshots on the way (`01-…` to
+`37-…` and `06b-server-settings.bmp`); the script prints the paths of the 37 numbered
+`NN-*.bmp` ones and checks that all 37 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
 otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

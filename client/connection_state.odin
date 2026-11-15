@@ -154,6 +154,7 @@ State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: 
 	State_roomMembersConnectionReset(state, serverID)
 	State_roomLogsConnectionReset(state, serverID)
 	State_roomLogPendingConnectionReset(state, serverID)
+	State_roomChainsConnectionReset(state, serverID)
 	State_adminConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
@@ -210,6 +211,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_e2eeConnected(state, event.serverID)
 	// After the key store is loaded: messages queued for a key fetch again (protocol 17).
 	State_directRequestQueuedKeys(state, event.serverID)
+	State_roomChainsConnected(state, event.serverID)
 	State_voiceConnected(state, event.serverID)
 }
 

@@ -43,6 +43,10 @@ PendingDBRequestType :: enum {
 	// Encrypted rooms' member logs (router_room_log.odin, protocol 18).
 	AppendRoomLog,
 	FetchRoomLog,
+	// Sender chains in encrypted rooms (router_room_keys.odin, protocol 19).
+	StoreRoomKeyEnvelope,
+	FetchRoomKeys,
+	RoomKeyRequestCheck,
 }
 
 PendingDBRequest :: struct {
@@ -645,8 +649,12 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .PublishEncryptionKey,
 		     .FetchUserKeys,
 		     .AppendRoomLog,
-		     .FetchRoomLog:
+		     .FetchRoomLog,
+		     .StoreRoomKeyEnvelope,
+		     .FetchRoomKeys:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
+		case .RoomKeyRequestCheck:
+		// Never answered (router_room_keys.odin).
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
 				pm,
@@ -930,6 +938,13 @@ MainRouterState_handleClientAuthRequest :: proc(
 // the room type in the same statement as membership and the insert.
 CHAT_DISABLED_MESSAGE :: "Chat is disabled in this room"
 
+// Protocol 19 (e2ee-design.md 6.5): a sealed message is checked here for what needs no database:
+// its shape, its structure (decodeSealedRoomMessage) and its signature against the session's
+// identity key, which is the account's users.public_key, with every AAD field known (this
+// server, the room, the session's account, the chain position and the client message ID). The
+// database statement then checks membership, that the room is encrypted and that the epoch is
+// its current log version, and stores the bytes unchanged. Fixed-size byte fields decode through
+// CBOR's temporary allocator, so it is the heap here.
 MainRouterState_handleClientChatMessage :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -937,10 +952,54 @@ MainRouterState_handleClientChatMessage :: proc(
 	payload: []u8,
 ) {
 	req: common.ClientChatMessagePayload
-	err := cbor.unmarshal(payload, &req)
-	defer delete(req.content)
+	err := cbor.unmarshal(payload, &req, temp_allocator = context.allocator)
+	defer common.ClientChatMessagePayload_deinit(&req)
 	if err != nil {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientChatMessage payload")
+		return
+	}
+
+	session, ok := MainRouterState_getPeerSession(state, peerID)
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated chat message")
+		return
+	}
+
+	if len(req.sealed) > 0 {
+		message, valid := MainRouterState_checkSealedRoomMessage(
+			state,
+			req,
+			session.authenticatedUserID,
+			session.clientIdentityPublicKey,
+		)
+		if !valid {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				peerID,
+				common.SEALED_ROOM_MESSAGE_INVALID_MESSAGE,
+			)
+			return
+		}
+		request := common.DatabasePostRoomChatMessageRequest {
+			roomId          = req.roomId,
+			senderId        = session.authenticatedUserID,
+			content         = strings.clone(""),
+			clientMessageId = req.clientMessageId,
+			sealed          = req.sealed,
+			epoch           = message.header.epoch,
+			chainId         = message.header.chainID,
+			chainIndex      = int(message.header.index),
+		}
+		// The request takes the decoded bytes; the database side frees them.
+		req.sealed = nil
+		MainRouterState_enqueueChannelDatabaseRequest(
+			pm,
+			state,
+			peerID,
+			request,
+			PendingDBRequest{requestType = .PostChatMessage, roomID = req.roomId},
+		)
 		return
 	}
 
@@ -948,12 +1007,6 @@ MainRouterState_handleClientChatMessage :: proc(
 	   len(req.content) == 0 ||
 	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room chat message")
-		return
-	}
-
-	session, ok := MainRouterState_getPeerSession(state, peerID)
-	if !ok || !session.isAuthenticated {
-		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated chat message")
 		return
 	}
 
@@ -968,6 +1021,42 @@ MainRouterState_handleClientChatMessage :: proc(
 		},
 		PendingDBRequest{requestType = .PostChatMessage, roomID = req.roomId},
 	)
+}
+
+// The router's check of a sealed room message (pure but for the server key): no content, a
+// set client message ID, at most SEALED_ROOM_MESSAGE_MAX_BYTES of valid structure, and a
+// signature by senderIdentityPublicKey over this server, the room, senderUserID, its chain
+// position and the client message ID. The result borrows req.sealed.
+MainRouterState_checkSealedRoomMessage :: proc(
+	state: ^MainRouterState,
+	req: common.ClientChatMessagePayload,
+	senderUserID: int,
+	senderIdentityPublicKey: common.IdentityPublicKeyBytes,
+) -> (
+	message: common.SealedRoomMessage,
+	valid: bool,
+) {
+	if req.roomId <= 0 ||
+	   len(req.content) != 0 ||
+	   !common.clientMessageIDIsSet(req.clientMessageId) ||
+	   len(req.sealed) > common.SEALED_ROOM_MESSAGE_MAX_BYTES {
+		return {}, false
+	}
+	decoded, decodeErr := common.decodeSealedRoomMessage(req.sealed)
+	if decodeErr != .None {
+		return {}, false
+	}
+	verifyErr := common.verifyRoomMessageSignature(
+		decoded,
+		common.RoomMessageContext {
+			serverIdentityPublicKey = state.serverIdentityPublicKey,
+			roomID = req.roomId,
+			senderUserID = senderUserID,
+			clientMessageID = req.clientMessageId,
+		},
+		senderIdentityPublicKey,
+	)
+	return decoded, verifyErr == .None
 }
 
 MainRouterState_handleClientListRooms :: proc(
@@ -1276,6 +1365,12 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAppendRoomLog(pm, state, peerID, packet.payload)
 	case .ClientFetchRoomLog:
 		MainRouterState_handleClientFetchRoomLog(pm, state, peerID, packet.payload)
+	case .ClientRoomKeyEnvelope:
+		MainRouterState_handleClientRoomKeyEnvelope(pm, state, peerID, packet.payload)
+	case .ClientFetchRoomKeys:
+		MainRouterState_handleClientFetchRoomKeys(pm, state, peerID, packet.payload)
+	case .ClientRequestRoomKey:
+		MainRouterState_handleClientRequestRoomKey(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1557,13 +1652,28 @@ MainRouterState_handleDatabaseResult :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, CHAT_DISABLED_MESSAGE)
 			return
 		}
+		refusal := ""
+		switch {
+		case posted.notEncrypted:
+			refusal = common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE
+		case posted.staleEpoch:
+			refusal = common.ROOM_KEY_OUT_OF_DATE_MESSAGE
+		case posted.duplicate:
+			refusal = common.ROOM_MESSAGE_DUPLICATE_MESSAGE
+		}
+		if len(refusal) > 0 {
+			MainRouterState_sendProtocolError(pm, state, request.peerID, refusal)
+			return
+		}
 		chatPayload := common.ServerChatMessagePayload {
-			id             = posted.storedMessage.id,
-			senderId       = posted.storedMessage.senderId,
-			senderNickname = posted.storedMessage.senderNickname,
-			roomId         = posted.storedMessage.roomId,
-			timestamp      = posted.storedMessage.timestamp,
-			content        = posted.storedMessage.content,
+			id              = posted.storedMessage.id,
+			senderId        = posted.storedMessage.senderId,
+			senderNickname  = posted.storedMessage.senderNickname,
+			roomId          = posted.storedMessage.roomId,
+			timestamp       = posted.storedMessage.timestamp,
+			content         = posted.storedMessage.content,
+			clientMessageId = posted.storedMessage.clientMessageId,
+			sealed          = posted.storedMessage.sealed,
 		}
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if recipientSession.isAuthenticated &&
@@ -1865,6 +1975,12 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleAppendRoomLogResult(pm, state, request, response)
 	case .FetchRoomLog:
 		MainRouterState_handleFetchRoomLogResult(pm, state, request, response)
+	case .StoreRoomKeyEnvelope:
+		MainRouterState_handleStoreRoomKeyEnvelopeResult(pm, state, request, response)
+	case .FetchRoomKeys:
+		MainRouterState_handleFetchRoomKeysResult(pm, state, request, response)
+	case .RoomKeyRequestCheck:
+		MainRouterState_handleRoomKeyRequestCheckResult(pm, state, request, response)
 	}
 }
 

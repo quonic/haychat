@@ -657,6 +657,10 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 		editText := view.canEditRoom ? "Edit room" : ""
 		editID := ui.idOf("edit-room", state.selected_server_id, room.id)
 		title := fmt.tprintf("# %s", room.name)
+		if view.encrypted {
+			// Protocol 19: messages here are end-to-end encrypted.
+			title = fmt.tprintf("🔒 # %s", room.name)
+		}
 		voiceAction := roomVoiceHeaderAction(state, state.selected_server_id, room.id)
 		voiceText := ""
 		switch voiceAction {

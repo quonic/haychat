@@ -140,7 +140,6 @@ databaseExecutePublishEncryptionKey :: proc(
 }
 
 // The bigint array literal for userIDs, "{1,2,3}". The caller frees it.
-@(private = "file")
 databaseIntArrayParam :: proc(userIDs: []int) -> cstring {
 	builder := strings.builder_make()
 	defer strings.builder_destroy(&builder)

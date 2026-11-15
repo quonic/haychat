@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:crypto"
 import "core:encoding/json"
 import "core:fmt"
 import "core:os"
@@ -14,25 +15,36 @@ import "core:strings"
 // atomically (writeFileAtomically). The fingerprint is the server's pinned key's, so a server
 // whose key changed and was trusted again gets a fresh store and its users are pinned again.
 //
-// Format 3, JSON (format 1 is the same without direct_conversations and rooms entries, format 2
-// without rooms entries; an older file loads as is and is written back as format 3, which an
-// older build reads only read-only, so it never drops what it does not know):
+// Format 4, JSON (format 1 is the same without direct_conversations, rooms and room_chains
+// entries, format 2 without rooms and room_chains, format 3 without room_chains; an older file
+// loads as is and is written back as format 4, which an older build reads only read-only, so
+// it never drops what it does not know):
 //
 //   {
-//     "format": 3,
+//     "format": 4,
 //     "server_public_key": "<hex identity key of the server>",
 //     "users": [{"user_id": 2, "identity_public_key": "<hex>", "encryption_public_key": "<hex>",
 //                "encryption_key_created_at": 1731600000, "verified": false,
 //                "first_seen": 1731600000}],
 //     "rooms": [{"room_id": 5, "log_version": 3, "log_head_hash": "<hex SHA-256>"}],
+//     "room_chains": [{"room_id": 5, "epoch": 3, "sender_user_id": 2, "chain_id": "<hex 16>",
+//                      "start_index": 0, "chain_key": "<hex 32>"}],
 //     "direct_conversations": [{"peer_user_id": 2, "encrypted": true}]
 //   }
+//
+// room_chains (E4b, design 6.3, 6.4) holds the sender chains this profile opened from verified
+// SenderKey distributions (its own included): the chain key at start_index, from which every
+// later message key of the chain is derived. It is a cache: the server keeps every envelope
+// sealed to its recipients, so a lost store is rebuilt by fetching them again
+// (ClientFetchRoomKeys). It is secret like the private keys in config.json; chain keys are
+// wiped from memory when the store is freed. The sending side of a chain is never stored:
+// every run starts new chains (room_chains.odin), so a message index is never used twice.
 //
 // rooms (E4a, design 6.2) holds, per encrypted room, the head of its member log this profile
 // last verified: the newest entry's version and hash. A log that rewrites that entry (a fork)
 // or ends before it (a rollback) is refused (room_log.odin). Heads only move forward and are
 // never removed, not even when the room is deleted, so a server that presents a deleted room's
-// ID again cannot start its log over. E4b adds chain keys per room here.
+// ID again cannot start its log over.
 //
 // direct_conversations (E2, design 4.5) lists the peers with whom an encrypted message was
 // sent or opened on this server. It only ever gains entries: once a conversation is encrypted
@@ -46,7 +58,7 @@ import "core:strings"
 //
 // The GUI and the headless harness both write it (State.keyStoreDir); tests keep it in memory.
 
-KEY_STORE_FORMAT :: 3
+KEY_STORE_FORMAT :: 4
 KEY_STORE_DIR_NAME :: "keys"
 
 // One pinned account (design 3.4): first seen with these keys, verified by comparing safety
@@ -84,6 +96,27 @@ KeyStoreRoom :: struct {
 	head:   common.RoomLogHead,
 }
 
+// One received sender chain (format 4): the key of chainID at startIndex, sealed by
+// senderUserID for roomID's epoch. Hex in the file.
+KeyStoreFileRoomChain :: struct {
+	room_id:        int,
+	epoch:          int,
+	sender_user_id: int,
+	chain_id:       string,
+	start_index:    u32,
+	chain_key:      string,
+}
+
+// The same in memory. chainKey is secret: KeyStore_deinit wipes it.
+KeyStoreRoomChain :: struct {
+	roomID:       int,
+	epoch:        int,
+	senderUserID: int,
+	chainID:      common.ChainID,
+	startIndex:   u32,
+	chainKey:     common.ChainKey,
+}
+
 // Whether a direct conversation has been encrypted (no downgrade, design 4.5).
 KeyStoreFileDirectConversation :: struct {
 	peer_user_id: int,
@@ -95,10 +128,17 @@ KeyStoreFile :: struct {
 	server_public_key:    string,
 	users:                [dynamic]KeyStoreFileUser,
 	rooms:                [dynamic]KeyStoreFileRoom,
+	room_chains:          [dynamic]KeyStoreFileRoomChain,
 	direct_conversations: [dynamic]KeyStoreFileDirectConversation,
 }
 
 KeyStoreFile_deinit :: proc(file: ^KeyStoreFile) {
+	for chain in file.room_chains {
+		delete(chain.chain_id)
+		wipeString(chain.chain_key)
+		delete(chain.chain_key)
+	}
+	delete(file.room_chains)
 	delete(file.server_public_key)
 	for user in file.users {
 		delete(user.identity_public_key)
@@ -125,10 +165,18 @@ KeyStore :: struct {
 	loadError:           string,
 	pins:                [dynamic]KeyPin,
 	rooms:               [dynamic]KeyStoreRoom,
+	roomChains:          [dynamic]KeyStoreRoomChain,
 	directConversations: [dynamic]KeyStoreFileDirectConversation,
 }
 
 KeyStore_deinit :: proc(store: ^KeyStore) {
+	if len(store.roomChains) > 0 {
+		crypto.zero_explicit(
+			raw_data(store.roomChains),
+			len(store.roomChains) * size_of(KeyStoreRoomChain),
+		)
+	}
+	delete(store.roomChains)
 	delete(store.path)
 	delete(store.loadError)
 	delete(store.pins)
@@ -190,6 +238,60 @@ KeyStore_setRoomHead :: proc(store: ^KeyStore, roomID: int, head: common.RoomLog
 	}
 	append(&store.rooms, KeyStoreRoom{roomID = roomID, head = head})
 	return true
+}
+
+// The chain senderUserID sealed for roomID's epoch under chainID, if this profile holds it.
+KeyStore_roomChain :: proc(
+	store: ^KeyStore,
+	roomID, epoch, senderUserID: int,
+	chainID: common.ChainID,
+) -> (
+	^KeyStoreRoomChain,
+	bool,
+) {
+	for &chain in store.roomChains {
+		if chain.roomID == roomID &&
+		   chain.epoch == epoch &&
+		   chain.senderUserID == senderUserID &&
+		   chain.chainID == chainID {
+			return &chain, true
+		}
+	}
+	return nil, false
+}
+
+// Keeps a chain opened from a verified distribution. The first one kept for a chain stays:
+// another distribution of the same chain changes nothing. Returns true when it was added (the
+// caller saves the store then).
+KeyStore_addRoomChain :: proc(store: ^KeyStore, chain: KeyStoreRoomChain) -> bool {
+	if chain.roomID <= 0 ||
+	   chain.epoch <= 0 ||
+	   chain.senderUserID <= 0 ||
+	   chain.startIndex >= common.SENDER_CHAIN_MAX_MESSAGES {
+		return false
+	}
+	if _, found := KeyStore_roomChain(
+		store,
+		chain.roomID,
+		chain.epoch,
+		chain.senderUserID,
+		chain.chainID,
+	); found {
+		return false
+	}
+	append(&store.roomChains, chain)
+	return true
+}
+
+// How many chains this profile holds for roomID (diagnostics).
+KeyStore_roomChainCount :: proc(store: KeyStore, roomID: int) -> int {
+	count := 0
+	for chain in store.roomChains {
+		if chain.roomID == roomID {
+			count += 1
+		}
+	}
+	return count
 }
 
 // Whether an encrypted message was sent to or opened from peerUserID on this server.
@@ -328,6 +430,21 @@ keyStoreParse :: proc(data: []u8, serverPublicKey: common.IdentityPublicKeyBytes
 		}
 		append(&store.rooms, entry)
 	}
+	for fileChain in file.room_chains {
+		chain := KeyStoreRoomChain {
+			roomID       = fileChain.room_id,
+			epoch        = fileChain.epoch,
+			senderUserID = fileChain.sender_user_id,
+			startIndex   = fileChain.start_index,
+		}
+		idOK := common.decodeHexIntoBuffer(fileChain.chain_id, chain.chainID[:])
+		keyOK := common.decodeHexIntoBuffer(fileChain.chain_key, chain.chainKey[:])
+		added := idOK && keyOK && KeyStore_addRoomChain(&store, chain)
+		crypto.zero_explicit(&chain, size_of(chain))
+		if !added {
+			KeyStore_refuseWrites(&store, "the key store file has an invalid room chain entry")
+		}
+	}
 	for conversation in file.direct_conversations {
 		if conversation.peer_user_id <= 0 {
 			KeyStore_refuseWrites(&store, "the key store file has an invalid conversation entry")
@@ -369,7 +486,10 @@ keyStoreLoad :: proc(path: string, serverPublicKey: common.IdentityPublicKeyByte
 		KeyStore_refuseWrites(&store, "the key store file could not be read")
 		return store
 	}
-	defer delete(data)
+	defer {
+		wipeBytes(data)
+		delete(data)
+	}
 	store := keyStoreParse(data, serverPublicKey)
 	store.path = path
 	if !store.writable {
@@ -386,6 +506,7 @@ keyStoreEncode :: proc(store: KeyStore) -> ([]u8, bool) {
 		server_public_key    = common.encodeBytesToHex(serverKey[:]),
 		users                = make([dynamic]KeyStoreFileUser, 0, len(store.pins)),
 		rooms                = make([dynamic]KeyStoreFileRoom, 0, len(store.rooms)),
+		room_chains          = make([dynamic]KeyStoreFileRoomChain, 0, len(store.roomChains)),
 		direct_conversations = make(
 			[dynamic]KeyStoreFileDirectConversation,
 			0,
@@ -419,6 +540,22 @@ keyStoreEncode :: proc(store: KeyStore) -> ([]u8, bool) {
 			},
 		)
 	}
+	for chain in store.roomChains {
+		chainID := chain.chainID
+		chainKey := chain.chainKey
+		append(
+			&file.room_chains,
+			KeyStoreFileRoomChain {
+				room_id = chain.roomID,
+				epoch = chain.epoch,
+				sender_user_id = chain.senderUserID,
+				chain_id = common.encodeBytesToHex(chainID[:]),
+				start_index = chain.startIndex,
+				chain_key = common.encodeBytesToHex(chainKey[:]),
+			},
+		)
+		crypto.zero_explicit(&chainKey, size_of(chainKey))
+	}
 	append(&file.direct_conversations, ..store.directConversations[:])
 	data, err := json.marshal(file, {pretty = true})
 	if err != nil {
@@ -440,7 +577,11 @@ KeyStore_save :: proc(store: ^KeyStore) -> (ok: bool, reason: string) {
 	if !encodeOK {
 		return false, "the key store could not be encoded"
 	}
-	defer delete(data)
+	// The file holds chain keys (format 4): wipe the bytes before they are freed.
+	defer {
+		wipeBytes(data)
+		delete(data)
+	}
 	if !keyStoreEnsureDir(store.path) {
 		return false, "the key store directory could not be created"
 	}

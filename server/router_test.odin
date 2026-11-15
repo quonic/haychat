@@ -760,9 +760,7 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 		chatPayload: common.ServerChatMessagePayload
 		chatPayloadErr := cbor.unmarshal(broadcastInnerPacket.payload, &chatPayload)
 		assert(chatPayloadErr == nil, "expected chat broadcast payload decode to succeed")
-		defer delete(chatPayload.senderNickname)
-		defer delete(chatPayload.timestamp)
-		defer delete(chatPayload.content)
+		defer common.ServerChatMessagePayload_deinit(&chatPayload)
 		assert(chatPayload.id == 17, "expected persisted chat message ID to be broadcast")
 		assert(
 			chatPayload.senderNickname == "router-tester",
@@ -1710,10 +1708,8 @@ testMainRouterRoomHistoryChecksMembershipInOneQuery :: proc(t: ^testing.T) {
 		"expected history payload decode to succeed",
 	)
 	defer {
-		for message in historyPayload.messages {
-			delete(message.senderNickname)
-			delete(message.timestamp)
-			delete(message.content)
+		for &message in historyPayload.messages {
+			common.StoredChatMessage_deinit(&message)
 		}
 		delete(historyPayload.messages)
 	}

@@ -442,21 +442,36 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 
 // One statement checks membership and the room type (a voice-only room takes no chat, protocol
 // 14), stores the message only for members of a room with chat, and lists the room's
-// recipients and the sender's nickname from the same snapshot. It always returns exactly one
-// row: membership, the message ID and time, recipients, nickname, whether chat is allowed, and
-// whether the room is encrypted (protocol 18): an encrypted room takes no plaintext message,
-// so nothing readable is ever stored in one.
+// recipients and the sender's nickname from the same snapshot.
+//
+// Protocol 19: a plaintext message ($4 '') is stored only in an unencrypted room and a sealed
+// one ($4 the SealedRoomMessage as hex) only in an encrypted room whose log version is the
+// message's epoch ($6), with its client message ID ($5), chain ID ($7) and index ($8). The
+// unique indexes on (sender, client message ID) and (sender, chain ID, index) make a reused
+// one store nothing (ON CONFLICT DO NOTHING). It always returns exactly one row: membership,
+// the message ID and time, recipients, nickname, whether chat is allowed, whether the room is
+// encrypted, and its log version.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
-	"room AS (SELECT room_type, encrypted FROM rooms WHERE id = $1), " +
-	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND NOT encrypted), " +
-	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content) " +
-	"SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
-	"RETURNING id, created_at) " +
+	"room AS (SELECT room_type, encrypted, log_version FROM rooms WHERE id = $1), " +
+	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND encrypted = ($4::text <> '') " +
+	"AND (NOT encrypted OR log_version = $6::bigint)), " +
+	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content, sealed, " +
+	"client_message_id, epoch, chain_id, chain_index) " +
+	"SELECT $1, $2, $3, " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE decode($4::text, 'hex') END, " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE decode($5::text, 'hex') END, " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE $6::bigint END, " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE decode($7::text, 'hex') END, " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE $8::integer END " +
+	"WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
+	"ON CONFLICT DO NOTHING RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $2), ''), " +
-	"EXISTS (SELECT 1 FROM chat), COALESCE((SELECT encrypted FROM room), false) " +
+	"COALESCE((SELECT room_type IN (1, 3) FROM room), false), " +
+	"COALESCE((SELECT encrypted FROM room), false), " +
+	"COALESCE((SELECT log_version FROM room), 0)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
@@ -469,10 +484,41 @@ databaseExecutePostRoomChatMessage :: proc(
 	defer delete(senderIDParam)
 	contentCString, _ := strings.clone_to_cstring(request.content)
 	defer delete(contentCString)
+	sealedHex := ""
+	clientMessageIDHex := ""
+	chainIDHex := ""
+	sealed := len(request.sealed) > 0
+	if sealed {
+		clientMessageID := request.clientMessageId
+		chainID := request.chainId
+		sealedHex = common.encodeBytesToHex(request.sealed)
+		clientMessageIDHex = common.encodeBytesToHex(clientMessageID[:])
+		chainIDHex = common.encodeBytesToHex(chainID[:])
+	}
+	defer if sealed {
+		delete(sealedHex)
+		delete(clientMessageIDHex)
+		delete(chainIDHex)
+	}
+	sealedParam, _ := strings.clone_to_cstring(sealedHex)
+	defer delete(sealedParam)
+	clientMessageIDParam, _ := strings.clone_to_cstring(clientMessageIDHex)
+	defer delete(clientMessageIDParam)
+	epochParam := databaseIntParam(request.epoch)
+	defer delete(epochParam)
+	chainIDParam, _ := strings.clone_to_cstring(chainIDHex)
+	defer delete(chainIDParam)
+	chainIndexParam := databaseIntParam(request.chainIndex)
+	defer delete(chainIndexParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)senderIDParam,
 		transmute([^]byte)contentCString,
+		transmute([^]byte)sealedParam,
+		transmute([^]byte)clientMessageIDParam,
+		transmute([^]byte)epochParam,
+		transmute([^]byte)chainIDParam,
+		transmute([^]byte)chainIndexParam,
 	}
 	result := databaseExecParams(conn, DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, params[:])
 	if result == nil {
@@ -486,14 +532,31 @@ databaseExecutePostRoomChatMessage :: proc(
 	if !databaseGetBool(result, 0, 0) {
 		return databaseSuccess(common.DatabasePostRoomChatMessageResult{isMember = false})
 	}
-	if databaseGetBool(result, 0, 6) {
+	if !databaseGetBool(result, 0, 5) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, chatDisabled = true},
+		)
+	}
+	encrypted := databaseGetBool(result, 0, 6)
+	if encrypted && !sealed {
 		return databaseSuccess(
 			common.DatabasePostRoomChatMessageResult{isMember = true, encryptedRoom = true},
 		)
 	}
-	if !databaseGetBool(result, 0, 5) {
+	if !encrypted && sealed {
 		return databaseSuccess(
-			common.DatabasePostRoomChatMessageResult{isMember = true, chatDisabled = true},
+			common.DatabasePostRoomChatMessageResult{isMember = true, notEncrypted = true},
+		)
+	}
+	if logVersion, _ := databaseGetInt(result, 0, 7); sealed && logVersion != request.epoch {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, staleEpoch = true},
+		)
+	}
+	if pg.get_is_null(result, 0, 1) {
+		// Every check passed and nothing was inserted: a unique index refused it.
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, duplicate = true},
 		)
 	}
 	messageID, messageIDOK := databaseGetInt(result, 0, 1)
@@ -502,6 +565,11 @@ databaseExecutePostRoomChatMessage :: proc(
 	}
 	recipientsText := databaseGetText(result, 0, 3)
 	defer delete(recipientsText)
+	storedSealed: []u8
+	if sealed {
+		storedSealed = make([]u8, len(request.sealed))
+		copy(storedSealed, request.sealed)
+	}
 	return databaseSuccess(
 		common.DatabasePostRoomChatMessageResult {
 			isMember = true,
@@ -512,6 +580,8 @@ databaseExecutePostRoomChatMessage :: proc(
 				roomId = request.roomId,
 				timestamp = databaseGetText(result, 0, 2),
 				content = strings.clone(request.content),
+				clientMessageId = request.clientMessageId,
+				sealed = storedSealed,
 			},
 			recipientUserIDs = databaseParseIDList(recipientsText),
 		},
@@ -538,12 +608,33 @@ DATABASE_GET_ROOM_HISTORY_SQL ::
 	"SELECT cm.id FROM chat_messages cm WHERE cm.room_id = $1 AND cm.created_at > m.since " +
 	"ORDER BY cm.created_at, cm.id LIMIT 1), 9223372036854775807) END AS id FROM member m) " +
 	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
-	"c.nickname FROM member m CROSS JOIN first_visible f LEFT JOIN LATERAL (" +
-	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname " +
+	"c.nickname, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
+	"COALESCE(encode(c.sealed, 'hex'), '') FROM member m CROSS JOIN first_visible f " +
+	"LEFT JOIN LATERAL (" +
+	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname, " +
+	"cm.client_message_id, cm.sealed " +
 	"FROM chat_messages cm JOIN users u ON u.id = cm.sender_user_id " +
 	"WHERE m.ok AND cm.room_id = $1 AND ($3::bigint = 0 OR cm.id < $3::bigint) " +
 	"AND cm.id >= f.id AND (m.since IS NULL OR cm.created_at > m.since) " +
 	"ORDER BY cm.id DESC LIMIT $4) c ON true ORDER BY c.id DESC"
+
+// A hex column as owned bytes, nil for NULL, '' or malformed hex.
+databaseGetOwnedHexBytes :: proc(result: pg.Result, row: i32, column: i32) -> []u8 {
+	if pg.get_is_null(result, row, column) {
+		return nil
+	}
+	text := databaseGetText(result, row, column)
+	defer delete(text)
+	if len(text) == 0 || len(text) % 2 != 0 {
+		return nil
+	}
+	bytes := make([]u8, len(text) / 2)
+	if !common.decodeHexIntoBuffer(text, bytes) {
+		delete(bytes)
+		return nil
+	}
+	return bytes
+}
 
 databaseExecuteGetRoomHistory :: proc(
 	conn: pg.Conn,
@@ -595,17 +686,20 @@ databaseExecuteGetRoomHistory :: proc(
 		if !messageIDOK || !senderIDOK {
 			continue
 		}
-		append(
-			&messages,
-			common.StoredChatMessage {
-				id = messageID,
-				senderId = senderID,
-				senderNickname = databaseGetText(result, row, 5),
-				roomId = request.roomId,
-				timestamp = databaseGetText(result, row, 3),
-				content = databaseGetText(result, row, 4),
-			},
-		)
+		message := common.StoredChatMessage {
+			id             = messageID,
+			senderId       = senderID,
+			senderNickname = databaseGetText(result, row, 5),
+			roomId         = request.roomId,
+			timestamp      = databaseGetText(result, row, 3),
+			content        = databaseGetText(result, row, 4),
+		}
+		// Protocol 19: a sealed message's client message ID and bytes; malformed reads as none.
+		if !databaseGetHexBytes(result, row, 6, message.clientMessageId[:]) {
+			message.clientMessageId = {}
+		}
+		message.sealed = databaseGetOwnedHexBytes(result, row, 7)
+		append(&messages, message)
 	}
 	return databaseSuccess(
 		common.DatabaseRoomHistoryResult {
@@ -862,6 +956,12 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteAppendRoomLog(conn, r)
 	case common.DatabaseFetchRoomLogRequest:
 		return databaseExecuteFetchRoomLog(conn, r)
+	case common.DatabaseStoreRoomKeyEnvelopeRequest:
+		return databaseExecuteStoreRoomKeyEnvelope(conn, r)
+	case common.DatabaseFetchRoomKeysRequest:
+		return databaseExecuteFetchRoomKeys(conn, r)
+	case common.DatabaseRoomKeyRequestCheckRequest:
+		return databaseExecuteRoomKeyRequestCheck(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

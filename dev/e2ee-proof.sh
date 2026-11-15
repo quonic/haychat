@@ -29,14 +29,28 @@ set -euo pipefail
 #   8. room:    (protocol 18, design 12.4 step 3) admin ra creates an encrypted Admin invite
 #               room (its Create entry signed by ra) and adds rb: both verify the member log
 #               with ra as manager and both as members. rc, not a member, cannot fetch its log
-#               or history, and a plaintext message to the room is refused and never stored.
+#               or history, and a message to the room is stored sealed, never readable.
 #   9. forged:  (step 5, second half) an unsigned Add of rc inserted into room_log_entries by
 #               SQL: ra's and rb's clients refuse the log with the member-list warning.
 #  10. managed: (step 9) ra creates a second encrypted room without joining it, adds rb and
 #               makes rb a manager; admin re, who is not a manager, is refused by the server
 #               when adding rc, removes rb through the server (rb sees "the server removed"),
 #               and an add signed by re and inserted by SQL is refused by ra's log check.
-#  11. secrets: no client ever printed its encryption private key, and no client wrote the
+#  11. chains:  (protocol 19, step 3) ra and rb exchange sealed messages in a new encrypted
+#               room: ra's first one waits for her chain's distribution; rc, not a member, is
+#               refused the room's keys and history. A restart of ra's client starts a new chain:
+#               every stored message has its own (sender, chain, index), ra's in two chains.
+#  12. sql:     (step 2 for rooms) every chat_messages row of the room is sealed with an empty
+#               content and no marker text, and its envelopes hold no marker either.
+#  13. rebuild: (step 6 for rooms) rb's key store is deleted and his client restarted: the
+#               room's history opens again from the envelopes the server keeps.
+#  14. join:    (step 8, From join) rb invites rc to a Member invite room: rc reads only what
+#               is sent after, and holds no chain from before.
+#  15. removal: (step 4) ra removes rb: rb shows the removal, ra's next message is sealed in a
+#               chain with no wrap for rb, and rb cannot read the room any more.
+#  16. inserted:(step 5, first half) rc is added to room_members by SQL: she fetches the history
+#               but holds no chain and opens nothing, and ra refuses her key request.
+#  17. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -357,6 +371,15 @@ room_log_line() {
 		"client $1 never reported room $2's log as $3"
 }
 
+# room_message CLIENT ROOM_ID MARKER START: waits for an opened room message (live room_chat or
+# room_opened, encrypted) carrying MARKER.
+room_message() {
+	local pattern="^\\{\"event\":\"room_(chat|opened)\",\"serverID\":[0-9]+,\"roomID\":$2,.*"
+	pattern+="\"encrypted\":true,\"decryptError\":\"\",\"epoch\":[0-9]+,\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$3\"\\}$"
+	expect_event "$1" "$pattern" "$4" "client $1 did not open room $2's message $3"
+}
+
 start=$(lines ra)
 expect_ok ra users >/dev/null
 expect_ok ra room-create "text,admin-invite,encrypted,managers=none" "secret-$run_tag"
@@ -393,9 +416,15 @@ expect_ok rc history "$room_id"
 expect_event rc '^\{"event":"protocol_error",.*"message":"Not a room member"' "$cstart" \
 	"rc was not refused the room's history" >/dev/null
 expect_ok ra users >/dev/null
-reply=$(client_command ra send "$room_id" "plaintext-in-encrypted-$run_tag")
-chat=$(run_sql "SELECT count(*) FROM chat_messages WHERE room_id = $room_id")
-[[ "$chat" == 0 ]] || fail "a plaintext message was stored in the encrypted room ($reply)"
+# Since protocol 19 a message to the room is sealed: whatever is stored is never readable.
+start=$(lines ra)
+expect_ok ra send "$room_id" "plaintext-in-encrypted-$run_tag"
+[[ "$last_result" == *'"encrypted":true'* ]] || fail "ra's room message was not encrypted"
+room_message ra "$room_id" "plaintext-in-encrypted-$run_tag" "$start" >/dev/null
+chat=$(run_sql "SELECT count(*) || '/' || count(*) FILTER (WHERE sealed IS NULL OR content <> ''
+	OR position(convert_to('plaintext-in-encrypted', 'UTF8') in sealed) > 0)
+	FROM chat_messages WHERE room_id = $room_id")
+[[ "$chat" == "1/0" ]] || fail "expected one sealed row and nothing readable, got $chat"
 
 echo "==> [e2ee] forged: an unsigned Add of rc inserted by SQL is refused by ra and rb"
 expect_ok ra room-log-entry "$room_id" add "$rc_id" unsigned
@@ -458,17 +487,182 @@ expect_ok ra room-log "$managed_id"
 refused=$(room_log_line ra "$managed_id" '"status":"failed",' "$start")
 [[ "$refused" == *'"logError":"NotAuthorized"'* ]] ||
 	fail "ra's log check did not refuse re's add: $refused"
-for client in ra re rb rc; do
+echo "==> [e2ee] chains: messages in an encrypted room are sealed and open for both members"
+chat_one="e2ee-room-marker-one-$run_tag"
+chat_two="e2ee-room-marker-two-$run_tag"
+chat_three="e2ee-room-marker-three-$run_tag"
+start=$(lines ra)
+expect_ok ra room-create "text,admin-invite,encrypted,managers=none" "chains-$run_tag"
+created=$(expect_event ra "^\\{\"event\":\"room_created\",.*\"name\":\"chains-$run_tag\"" \
+	"$start" "ra never got room_created for the chains room")
+chat_id=$(field "$created" roomID)
+room_log_line ra "$chat_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+bstart=$(lines rb)
+expect_ok ra room-add "$chat_id" "$rb_id"
+room_log_line ra "$chat_id" '"status":"verified","logVersion":2,' "$start" >/dev/null
+room_log_line rb "$chat_id" '"status":"verified","logVersion":2,' "$bstart" >/dev/null
+start=$(lines ra)
+bstart=$(lines rb)
+expect_ok ra send "$chat_id" "$chat_one"
+[[ "$last_result" == *'"encrypted":true,"queued":true}' ]] ||
+	fail "ra's first message did not wait for its chain: $last_result"
+expect_event ra "^\\{\"event\":\"room_queue\",.*\"roomID\":$chat_id,\"state\":\"sent\",\"count\":1" \
+	"$start" "ra's queued message never went out" >/dev/null
+room_message ra "$chat_id" "$chat_one" "$start" >/dev/null
+room_message rb "$chat_id" "$chat_one" "$bstart" >/dev/null
+start=$(lines ra)
+expect_ok rb send "$chat_id" "$chat_two"
+room_message ra "$chat_id" "$chat_two" "$start" >/dev/null
+expect_ok rb room-keys "$chat_id"
+[[ "$last_result" == *'"epoch":2,'*'"sending":true,"sendingEpoch":2,'*'"distribution":"stored"'* ]] ||
+	fail "rb's chain state is not a stored epoch 2 chain: $last_result"
+[[ "$last_result" != *chain_key* && "$last_result" != *startKey* ]] ||
+	fail "room-keys printed key material: $last_result"
+
+echo "==> [e2ee] chains: rc, not a member, gets neither history nor keys"
+cstart=$(lines rc)
+expect_ok rc room-keys "$chat_id" fetch
+expect_event rc '^\{"event":"protocol_error",.*"message":"Not a room member"' "$cstart" \
+	"rc was not refused the room's keys" >/dev/null
+cstart=$(lines rc)
+expect_ok rc history "$chat_id"
+expect_event rc '^\{"event":"protocol_error",.*"message":"Not a room member"' "$cstart" \
+	"rc was not refused the room's history" >/dev/null
+
+echo "==> [e2ee] chains: a restart of the sender starts a new chain, never reusing an index"
+stop_client ra
+start_client ra2 "$room_alice" ra
+expect_connected ra2
+expect_ok ra2 wait room_list 5000
+bstart=$(lines rb)
+astart=$(lines ra2)
+expect_ok ra2 send "$chat_id" "$chat_three"
+room_message ra2 "$chat_id" "$chat_three" "$astart" >/dev/null
+room_message rb "$chat_id" "$chat_three" "$bstart" >/dev/null
+positions=$(run_sql "SELECT count(*) || '/' ||
+	count(DISTINCT (sender_user_id, chain_id, chain_index)) || '/' ||
+	count(DISTINCT chain_id) FILTER (WHERE sender_user_id = $ra_id)
+	FROM chat_messages WHERE room_id = $chat_id")
+[[ "$positions" == "3/3/2" ]] ||
+	fail "expected 3 messages at 3 distinct chain positions, ra's in 2 chains, got $positions"
+
+echo "==> [e2ee] sql: no room message text in chat_messages"
+rows=$(run_sql "SELECT count(*) || '/' ||
+	count(*) FILTER (WHERE sealed IS NOT NULL AND content = '') || '/' ||
+	count(*) FILTER (WHERE position(convert_to('e2ee-room-marker', 'UTF8') in sealed) > 0
+		OR position('e2ee-room-marker' in content) > 0)
+	FROM chat_messages WHERE room_id = $chat_id")
+[[ "$rows" == "3/3/0" ]] ||
+	fail "expected 3 sealed rows with empty content and no marker text, got $rows"
+envelopes=$(run_sql "SELECT count(*) FROM room_key_envelopes WHERE room_id = $chat_id
+	AND position(convert_to('e2ee-room-marker', 'UTF8') in envelope) = 0")
+[[ "$envelopes" -ge 3 ]] || fail "expected at least 3 stored envelopes, got $envelopes"
+
+echo "==> [e2ee] rebuild: rb loses his key store; the room's messages open again"
+stop_client rb
+rm -f -- "$work_dir"/profile-rb/haychat/keys/*.json
+start_client rb2 "$room_bob" rb
+expect_connected rb2
+expect_ok rb2 wait room_list 5000
+bstart=$(lines rb2)
+expect_ok rb2 history "$chat_id"
+for marker in "$chat_one" "$chat_two" "$chat_three"; do
+	pattern="^\\{\"event\":\"room_(history|opened)\",.*\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$marker\""
+	expect_event rb2 "$pattern" "$bstart" "rb's history did not open $marker again" >/dev/null
+done
+
+echo "==> [e2ee] from join: rb invites rc to a Member invite room; rc reads only what follows"
+before_join="e2ee-room-marker-before-join-$run_tag"
+after_join="e2ee-room-marker-after-join-$run_tag"
+start=$(lines ra2)
+expect_ok ra2 room-create "text,member-invite,from-join,encrypted,managers=none" \
+	"invite-$run_tag"
+created=$(expect_event ra2 "^\\{\"event\":\"room_created\",.*\"name\":\"invite-$run_tag\"" \
+	"$start" "ra never got room_created for the invite room")
+invite_id=$(field "$created" roomID)
+room_log_line ra2 "$invite_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+bstart=$(lines rb2)
+fetch_keys ra2 "$rb_id" >/dev/null
+expect_ok ra2 room-add "$invite_id" "$rb_id"
+room_log_line rb2 "$invite_id" '"status":"verified","logVersion":2,' "$bstart" >/dev/null
+start=$(lines ra2)
+bstart=$(lines rb2)
+expect_ok ra2 send "$invite_id" "$before_join"
+room_message rb2 "$invite_id" "$before_join" "$bstart" >/dev/null
+fetch_keys rb2 "$rc_id" >/dev/null
+cstart=$(lines rc)
+bstart=$(lines rb2)
+expect_ok rb2 room-add "$invite_id" "$rc_id"
+room_log_line rb2 "$invite_id" '"status":"verified","logVersion":3,' "$bstart" >/dev/null
+room_log_line rc "$invite_id" '"status":"verified","logVersion":3,' "$cstart" >/dev/null
+cstart=$(lines rc)
+expect_ok rb2 send "$invite_id" "$after_join"
+room_message rc "$invite_id" "$after_join" "$cstart" >/dev/null
+cstart=$(lines rc)
+expect_ok rc history "$invite_id"
+history=$(expect_event rc "^\\{\"event\":\"room_history\",.*\"roomID\":$invite_id," "$cstart" \
+	"rc got no history page of the invite room")
+[[ "$history" != *"$before_join"* ]] || fail "rc read a message from before she joined"
+expect_ok rc room-keys "$invite_id"
+[[ "$last_result" != *'"epoch":2,"senderID"'* ]] ||
+	fail "rc holds a chain from before she joined: $last_result"
+
+echo "==> [e2ee] removal: ra removes rb; what follows has no key for rb"
+bstart=$(lines rb2)
+astart=$(lines ra2)
+expect_ok ra2 room-remove "$chat_id" "$rb_id"
+removed=$(room_log_line rb2 "$chat_id" '"status":"verified","logVersion":3,' "$bstart")
+[[ "$removed" == *"removed $room_bob"* ]] || fail "rb does not show his removal: $removed"
+room_log_line ra2 "$chat_id" '"status":"verified","logVersion":3,' "$astart" >/dev/null
+after_removal="e2ee-room-marker-after-removal-$run_tag"
+astart=$(lines ra2)
+expect_ok ra2 send "$chat_id" "$after_removal"
+room_message ra2 "$chat_id" "$after_removal" "$astart" >/dev/null
+wrapped=$(run_sql "SELECT count(*) FILTER (WHERE $rb_id = ANY (recipient_user_ids)) || '/' ||
+	count(*) FROM room_key_envelopes WHERE room_id = $chat_id AND epoch = 3")
+[[ "$wrapped" == 0/* && "$wrapped" != "0/0" ]] ||
+	fail "expected epoch 3 envelopes without a wrap for rb, got $wrapped"
+bstart=$(lines rb2)
+expect_ok rb2 history "$chat_id"
+expect_event rb2 '^\{"event":"protocol_error",.*"message":"Not a room member"' "$bstart" \
+	"rb could still read the room after his removal" >/dev/null
+if grep -qF -- "$after_removal" "$work_dir/rb2.out"; then
+	fail "rb saw a message sent after his removal"
+fi
+
+echo "==> [e2ee] inserted member: rc added to room_members by SQL reads nothing"
+run_sql "INSERT INTO room_members (room_id, user_id, joined_at)
+	VALUES ($chat_id, $rc_id, '2000-01-01')" >/dev/null
+cstart=$(lines rc)
+astart=$(lines ra2)
+expect_ok rc history "$chat_id"
+history=$(expect_event rc "^\\{\"event\":\"room_history\",.*\"roomID\":$chat_id," "$cstart" \
+	"rc, inserted by SQL, got no history page")
+[[ "$history" == *'"encrypted":true'* ]] || fail "rc's history has no sealed messages: $history"
+expect_event ra2 "^\\{\"event\":\"room_key_request\",.*\"roomID\":$chat_id,.*\"requesterID\":$rc_id,.*\"outcome\":\"refused\"" \
+	"$astart" "ra did not refuse rc's key request" >/dev/null
+expect_ok rc room-keys "$chat_id"
+[[ "$last_result" == *'"chains":[]'* ]] || fail "rc holds a chain of the room: $last_result"
+for marker in "$chat_one" "$chat_three" "$after_removal"; do
+	if grep -F -- "$marker" "$work_dir/rc.out" | grep -q '"protection":"encrypted"'; then
+		fail "rc, inserted by SQL, opened $marker"
+	fi
+done
+stop_client ra2
+stop_client rb2
+
+for client in re rc; do
 	stop_client "$client"
 done
 
 echo "==> [e2ee] secrets: no client printed its encryption private key or a plaintext log"
-for marker in "$marker_one" "$marker_two"; do
+for marker in "$marker_one" "$marker_two" "e2ee-room-marker"; do
 	if grep -rqF -- "$marker" "$work_dir"/*.err; then
 		fail "a client logged the text of an encrypted message"
 	fi
 done
-for profile in a b m c d; do
+for profile in a b m c d ra rb rc; do
 	secret=$(config_value "$profile" encryption_private_key)
 	[[ ${#secret} -eq 64 ]] || fail "profile $profile has no encryption private key"
 	if grep -rqF -- "$secret" "$work_dir"/*.out "$work_dir"/*.err; then

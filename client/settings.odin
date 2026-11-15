@@ -349,6 +349,7 @@ State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
 	State_removeServerDirectCache(state, serverID)
 	State_removeServerE2EE(state, serverID)
 	State_removeServerRoomLogs(state, serverID)
+	State_removeServerRoomChains(state, serverID)
 }
 
 // A live transport can be kept across a settings change only if nothing it connects with

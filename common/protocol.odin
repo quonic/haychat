@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 18
+protocolVersion: ProtocolVersion = 19
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -369,6 +369,15 @@ MessageType :: enum {
 	ClientAppendRoomLog, // ClientAppendRoomLogPayload: a signed member log entry
 	ClientFetchRoomLog, // ClientFetchRoomLogPayload: a room's member log after a version
 	ServerRoomLog, // ServerRoomLogPayload: log entries, the answer and the live fan-out
+	// Sender chains in encrypted rooms (protocol 19, e2ee-design.md 6.3-6.6), appended so no
+	// existing wire value moves. Sealed room messages ride on ClientChatMessage and
+	// ServerChatMessage (their sealed and clientMessageId fields).
+	ClientRoomKeyEnvelope, // ClientRoomKeyEnvelopePayload: a SenderKey envelope for one chain
+	ServerRoomKeyEnvelope, // ServerRoomKeyEnvelopePayload: a stored one, to its recipients
+	ClientFetchRoomKeys, // ClientFetchRoomKeysPayload: the stored envelopes with a wrap for me
+	ServerRoomKeys, // ServerRoomKeysPayload: answer to ClientFetchRoomKeys, one page
+	ClientRequestRoomKey, // ClientRequestRoomKeyPayload: ask a chain's sender to re-seal it
+	ServerRoomKeyRequest, // ServerRoomKeyRequestPayload: the request, relayed to the sender
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -484,18 +493,48 @@ Message :: struct {
 	content:   string,
 }
 
+// A room message. In an unencrypted room it is content (1..CHAT_MESSAGE_MAX_BYTES bytes) with
+// an all-zero clientMessageId and no sealed bytes. In an encrypted room (protocol 19,
+// e2ee-design.md 6.5) content is empty and sealed is a common/e2ee.odin SealedRoomMessage
+// (at most SEALED_ROOM_MESSAGE_MAX_BYTES), carried as a CBOR byte string and stored byte for
+// byte, whose AAD names this server, the room, the sender, its chain position and
+// clientMessageId (16 random bytes, never all zero). The server refuses a sealed message
+// whose epoch is not the room's current log version (ROOM_KEY_OUT_OF_DATE_MESSAGE), whose
+// signature does not verify against the sender's identity key, or whose clientMessageId or
+// chain index the sender used before (ROOM_MESSAGE_DUPLICATE_MESSAGE); plaintext in an
+// encrypted room and sealed bytes in an unencrypted one are refused too.
 ClientChatMessagePayload :: struct {
-	roomId:  int,
-	content: string,
+	roomId:          int,
+	content:         string,
+	clientMessageId: ClientMessageID,
+	sealed:          []u8,
+}
+
+ClientChatMessagePayload_deinit :: proc(payload: ^ClientChatMessagePayload) {
+	delete(payload.content)
+	delete(payload.sealed)
+	payload.content = ""
+	payload.sealed = nil
 }
 
 ServerChatMessagePayload :: struct {
-	id:             int,
-	senderId:       int,
-	senderNickname: string, // Sender's nickname when the message was stored or read
-	roomId:         int,
-	timestamp:      string,
-	content:        string,
+	id:              int,
+	senderId:        int,
+	senderNickname:  string, // Sender's nickname when the message was stored or read
+	roomId:          int,
+	timestamp:       string,
+	content:         string,
+	// Protocol 19: as in ClientChatMessagePayload; zeros and nil for a plaintext message.
+	clientMessageId: ClientMessageID,
+	sealed:          []u8,
+}
+
+ServerChatMessagePayload_deinit :: proc(payload: ^ServerChatMessagePayload) {
+	delete(payload.senderNickname)
+	delete(payload.timestamp)
+	delete(payload.content)
+	delete(payload.sealed)
+	payload^ = {}
 }
 
 // lastReadMessageId and unreadCount (protocol 11) are the requester's read state, filled only
@@ -539,12 +578,23 @@ ClientFetchRoomHistoryPayload :: struct {
 }
 
 StoredChatMessage :: struct {
-	id:             int,
-	senderId:       int,
-	senderNickname: string, // Joined from users; empty if the sender has no row
-	roomId:         int,
-	timestamp:      string,
-	content:        string,
+	id:              int,
+	senderId:        int,
+	senderNickname:  string, // Joined from users; empty if the sender has no row
+	roomId:          int,
+	timestamp:       string,
+	content:         string,
+	// Protocol 19: a sealed message has these and an empty content (ClientChatMessagePayload).
+	clientMessageId: ClientMessageID,
+	sealed:          []u8,
+}
+
+StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
+	delete(message.senderNickname)
+	delete(message.timestamp)
+	delete(message.content)
+	delete(message.sealed)
+	message^ = {}
 }
 
 ServerRoomHistoryPayload :: struct {
@@ -756,8 +806,8 @@ ENCRYPTED_ROOM_PUBLIC_MESSAGE :: "Public rooms cannot be encrypted"
 ENCRYPTED_ROOM_FLAG_MESSAGE :: "A room's encryption cannot change after it is created"
 ENCRYPTED_ROOM_ACCESS_MESSAGE :: "An encrypted room's access changes through its member list"
 ENCRYPTED_ROOM_FULL_MESSAGE :: "This encrypted room is full"
-// Until sender chains (E4b), nothing is ever stored as plaintext in an encrypted room.
-ENCRYPTED_ROOM_CHAT_MESSAGE :: "Encrypted room messages arrive in a later update"
+// A plaintext message to an encrypted room (protocol 19: only sealed messages are stored there).
+ENCRYPTED_ROOM_CHAT_MESSAGE :: "This room is encrypted: messages must be sealed"
 ENCRYPTED_ROOM_VOICE_MESSAGE :: "voice is not available in encrypted rooms yet"
 ROOM_LOG_REQUIRED_MESSAGE :: "This room is encrypted: its members change through its member list"
 ROOM_LOG_INVALID_MESSAGE :: "Invalid member list entry"
@@ -765,6 +815,118 @@ ROOM_LOG_CONFLICT_MESSAGE :: "The member list changed on the server; try again"
 ROOM_LOG_NOT_AUTHORIZED_MESSAGE :: "You may not make this change to the member list"
 ROOM_LOG_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
 ROOM_LOG_DAMAGED_MESSAGE :: "This room's member list is damaged on the server"
+
+// Sender chains in encrypted rooms (protocol 19, e2ee-design.md 6.3-6.6). Each member that
+// sends in an epoch (a member log version) seals its chain to every member of that epoch as
+// its verified log shows them: one common/e2ee.odin SealedEnvelope of kind SenderKey with a
+// wrap per member, signed by the sender, whose AAD (makeRoomKeyAAD) names this server, the
+// room, the epoch, the sender and the chain. Envelopes are carried as CBOR byte strings and
+// stored byte for byte, once per chain (and once more per answer to a key request).
+//
+// The server checks an envelope's structure, kind and signature against the sender's
+// identity key, that the sender is a member, that every wrap names a current member, and that
+// epoch is the room's current log version; an older epoch is accepted only for a chain it
+// already stores (a re-seal answering ClientRequestRoomKey). It delivers each stored envelope
+// to the sessions of the accounts its wraps name, and ClientFetchRoomKeys returns only the
+// envelopes with a wrap for the requester, so nothing of another room or recipient leaks.
+
+// ClientRoomKeyEnvelope: one SenderKey envelope for (roomId, epoch, the sender, chainId).
+// Refused with ROOM_KEY_ENVELOPE_INVALID_MESSAGE, ROOM_KEY_OUT_OF_DATE_MESSAGE or "Not a room
+// member".
+ClientRoomKeyEnvelopePayload :: struct {
+	roomId:   int,
+	epoch:    int,
+	chainId:  ChainID,
+	envelope: []u8,
+}
+
+ClientRoomKeyEnvelopePayload_deinit :: proc(payload: ^ClientRoomKeyEnvelopePayload) {
+	delete(payload.envelope)
+	payload.envelope = nil
+}
+
+// One stored envelope. id is the server's row ID, the fetch cursor. envelope is owned once
+// decoded.
+RoomKeyEnvelope :: struct {
+	id:       int,
+	roomId:   int,
+	epoch:    int,
+	senderId: int,
+	chainId:  ChainID,
+	envelope: []u8,
+}
+
+RoomKeyEnvelope_deinit :: proc(envelope: ^RoomKeyEnvelope) {
+	delete(envelope.envelope)
+	envelope.envelope = nil
+}
+
+// ServerRoomKeyEnvelope: a stored envelope, sent live to every session of the accounts its
+// wraps name (the sender's own included when it sealed a wrap for itself).
+ServerRoomKeyEnvelopePayload :: struct {
+	envelope: RoomKeyEnvelope,
+}
+
+ServerRoomKeyEnvelopePayload_deinit :: proc(payload: ^ServerRoomKeyEnvelopePayload) {
+	RoomKeyEnvelope_deinit(&payload.envelope)
+}
+
+// ClientFetchRoomKeys: the room's stored envelopes with a wrap for the requester, with epoch
+// at least sinceEpoch and ID above afterId (0 for the first page), oldest first, at most
+// ROOM_KEYS_FETCH_MAX_ENVELOPES. For members only ("Not a room member" otherwise, whether the
+// room exists or not).
+ClientFetchRoomKeysPayload :: struct {
+	roomId:     int,
+	sinceEpoch: int,
+	afterId:    int,
+}
+
+// ServerRoomKeys: one page; hasMore when more follow the last one (fetch again after its id).
+ServerRoomKeysPayload :: struct {
+	roomId:     int,
+	sinceEpoch: int,
+	afterId:    int,
+	envelopes:  [dynamic]RoomKeyEnvelope,
+	hasMore:    bool,
+}
+
+ServerRoomKeysPayload_deinit :: proc(payload: ^ServerRoomKeysPayload) {
+	for &envelope in payload.envelopes {
+		RoomKeyEnvelope_deinit(&envelope)
+	}
+	delete(payload.envelopes)
+	payload.envelopes = nil
+}
+
+// ClientRequestRoomKey: the requester met a message of senderId's chain chainId in epoch and
+// holds no key for it. The server checks that both accounts are members of the encrypted room
+// and that it stores an envelope for that chain, then relays the request to every session of
+// senderId as ServerRoomKeyRequest; nothing is answered to the requester. The sender's client
+// decides whether to re-seal (the requester must be a member of that epoch in its verified log).
+ClientRequestRoomKeyPayload :: struct {
+	roomId:   int,
+	epoch:    int,
+	senderId: int,
+	chainId:  ChainID,
+}
+
+ServerRoomKeyRequestPayload :: struct {
+	roomId:      int,
+	epoch:       int,
+	chainId:     ChainID,
+	requesterId: int,
+}
+
+ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
+
+// Refusals of sealed room messages and key envelopes (protocol 19), as ServerProtocolError.
+ROOM_KEY_OUT_OF_DATE_MESSAGE :: "Room key is out of date"
+SEALED_ROOM_MESSAGE_INVALID_MESSAGE :: "Invalid encrypted room message"
+ROOM_MESSAGE_DUPLICATE_MESSAGE :: "Duplicate room message"
+ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
+ROOM_KEY_REQUEST_INVALID_MESSAGE :: "Invalid room key request"
+// A sealed message to a room that is not encrypted.
+SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
 
 // Direct messages are per server, between any two accounts. Since protocol 17 (e2ee-design.md
 // 4.5, 4.6) a message is either end-to-end encrypted (an envelope of common/e2ee.odin's binary
@@ -1368,6 +1530,9 @@ DatabaseQueryRequest :: union {
 	DatabaseFetchUserKeysRequest,
 	DatabaseAppendRoomLogRequest,
 	DatabaseFetchRoomLogRequest,
+	DatabaseStoreRoomKeyEnvelopeRequest,
+	DatabaseFetchRoomKeysRequest,
+	DatabaseRoomKeyRequestCheckRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -1388,10 +1553,48 @@ DatabaseRoomMemberListRequest :: struct {
 
 // Checks membership, stores the message, and lists recipients in one statement, so the
 // membership check and the insert cannot race.
+//
+// Protocol 19: a sealed message (owned sealed bytes, already checked by the router against the
+// sender's identity key) carries its clientMessageId and the chain position the router decoded
+// from it; the statement stores it only in an encrypted room whose log version is epoch, and
+// the unique indexes refuse a reused clientMessageId or chain index.
 DatabasePostRoomChatMessageRequest :: struct {
-	roomId:   int,
-	senderId: int,
-	content:  string,
+	roomId:          int,
+	senderId:        int,
+	content:         string,
+	clientMessageId: ClientMessageID,
+	sealed:          []u8,
+	epoch:           int,
+	chainId:         ChainID,
+	chainIndex:      int,
+}
+
+// Protocol 19: one SenderKey envelope (owned) the router checked, with the user IDs its wraps
+// name (owned).
+DatabaseStoreRoomKeyEnvelopeRequest :: struct {
+	senderId:         int,
+	roomId:           int,
+	epoch:            int,
+	chainId:          ChainID,
+	envelope:         []u8,
+	recipientUserIDs: [dynamic]int,
+}
+
+// Protocol 19: a page of the envelopes with a wrap for userId.
+DatabaseFetchRoomKeysRequest :: struct {
+	userId:     int,
+	roomId:     int,
+	sinceEpoch: int,
+	afterId:    int,
+}
+
+// Protocol 19: whether requesterId may ask senderId to re-seal a stored chain.
+DatabaseRoomKeyRequestCheckRequest :: struct {
+	requesterId: int,
+	roomId:      int,
+	epoch:       int,
+	senderId:    int,
+	chainId:     ChainID,
 }
 
 // Returns a history page only when userId is a member of the room.
@@ -1584,6 +1787,9 @@ DatabaseQueryResult :: union {
 	DatabaseFetchUserKeysResult,
 	DatabaseAppendRoomLogResult,
 	DatabaseFetchRoomLogResult,
+	DatabaseStoreRoomKeyEnvelopeResult,
+	DatabaseFetchRoomKeysResult,
+	DatabaseRoomKeyRequestCheckResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -1623,10 +1829,16 @@ DatabaseRoomMemberListResult :: struct {
 // When isMember is false, or chatDisabled is true (a voice-only room, protocol 14), nothing was
 // stored and the other fields are empty.
 // encryptedRoom (protocol 18): the room is encrypted, which takes no plaintext message.
+// Protocol 19: notEncrypted refuses a sealed message to an unencrypted room, staleEpoch a sealed
+// message whose epoch is not the room's log version, duplicate a reused clientMessageId or
+// chain index.
 DatabasePostRoomChatMessageResult :: struct {
 	isMember:         bool,
 	chatDisabled:     bool,
 	encryptedRoom:    bool,
+	notEncrypted:     bool,
+	staleEpoch:       bool,
+	duplicate:        bool,
 	storedMessage:    StoredChatMessage,
 	recipientUserIDs: [dynamic]int,
 }
@@ -1810,6 +2022,38 @@ DatabaseFetchRoomLogResult :: struct {
 	entries:     [dynamic][]u8,
 	headVersion: int,
 	hasMore:     bool,
+}
+
+// How a key envelope store ended (protocol 19). Only Stored stored anything.
+RoomKeyEnvelopeOutcome :: enum u8 {
+	Stored,
+	NotMember, // No such room, or the sender is not a member
+	NotEncrypted,
+	StaleEpoch, // epoch is not the log version, and no envelope of the chain is stored
+	WrongRecipients, // A wrap names an account that is not a member
+}
+
+// stored (owned) and recipientUserIDs (owned) are set when outcome is Stored.
+DatabaseStoreRoomKeyEnvelopeResult :: struct {
+	outcome:          RoomKeyEnvelopeOutcome,
+	stored:           RoomKeyEnvelope,
+	recipientUserIDs: [dynamic]int,
+}
+
+// envelopes (owned) are in ID order when isMember. sinceEpoch and afterId echo the request.
+DatabaseFetchRoomKeysResult :: struct {
+	sinceEpoch: int,
+	afterId:    int,
+	isMember:  bool,
+	envelopes: [dynamic]RoomKeyEnvelope,
+	hasMore:   bool,
+}
+
+// allowed: the room is encrypted, both accounts are members, and an envelope of the chain is
+// stored. The request's fields come back so the router needs no pending state.
+DatabaseRoomKeyRequestCheckResult :: struct {
+	allowed: bool,
+	request: DatabaseRoomKeyRequestCheckRequest,
 }
 
 ProtocolErrorResponse :: struct {

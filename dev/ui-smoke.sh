@@ -52,6 +52,8 @@ set -euo pipefail
 #      "Encrypt this room" on by default with herself checked as a manager, and creates
 #      the room. Its Members page opens with the verified member list: alice as member and
 #      manager, the Managers and Admins sections, and the room's SQL row is encrypted.
+#      Protocol 19: alice sends a message there; the header shows the lock, the message
+#      carries the lock badge, and its SQL row is sealed with an empty content.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -128,6 +130,7 @@ access_room="ui-invite-$run_tag"
 nickname_dave="ui-dave-$run_tag"
 plain_message="ui smoke unencrypted to dave $run_tag"
 encrypted_room="ui-secret-$run_tag"
+encrypted_room_message="ui smoke sealed room message $run_tag"
 
 # run_sql SQL: runs statements against the server's database, like make_admin.
 run_sql() {
@@ -414,6 +417,16 @@ wait-text "Managers" 10000
 wait-text "$nickname_alice (you) (manager) · You" 10000
 screenshot $screenshot_dir/36-encrypted-room-members.bmp
 click "Close"
+# Sender chains (protocol 19): alice's message in the encrypted room is sealed with her chain;
+# the header and the message carry the lock (member list lines do not).
+click "# $encrypted_room"
+wait-text "🔒 # $encrypted_room" 10000
+click "Message #$encrypted_room (Enter to send, Shift+Enter for newline)"
+type "$encrypted_room_message"
+key Return
+wait-text "$encrypted_room_message" 15000
+wait-text "🔒" 5000
+screenshot $screenshot_dir/37-encrypted-room-message.bmp
 quit
 EOF
 
@@ -579,6 +592,12 @@ encrypted_row=$(run_sql "SELECT r.encrypted || ':' || r.log_version || ':' ||
 # Under --all earlier proofs leave other admins, whom the form names as managers too.
 [[ "$encrypted_row" == "true:1:1:1" ]] ||
 	fail "[e2ee] the encrypted room is not encrypted at version 1 with alice: $encrypted_row"
+sealed_rows=$(run_sql "SELECT count(*) || ':' ||
+	count(*) FILTER (WHERE c.sealed IS NOT NULL AND c.content = '') || ':' ||
+	count(*) FILTER (WHERE position(convert_to('ui smoke sealed', 'UTF8') in c.sealed) > 0)
+	FROM chat_messages c JOIN rooms r ON r.id = c.room_id WHERE r.name = '$encrypted_room'")
+[[ "$sealed_rows" == "1:1:0" ]] ||
+	fail "[e2ee] alice's room message is not one sealed row without its text: $sealed_rows"
 
 stop_client alice-watch
 stop_client bob
@@ -591,5 +610,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 36 ]] || fail "expected 36 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 37 ]] || fail "expected 37 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

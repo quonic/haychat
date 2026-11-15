@@ -243,8 +243,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,` +
-		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z",` +
-		`"content":"say \"hi\"\n\\o/"}`,
+		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z","encrypted":false,` +
+		`"decryptError":"","epoch":0,"protection":"plain","content":"say \"hi\"\n\\o/"}`,
 		"the room_chat JSON",
 	)
 	delete(line)
@@ -295,7 +295,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_history","serverID":1,"roomID":4,"hasOlder":true,` +
 		`"messages":[{"id":9,"senderID":2,"senderNickname":"","timestamp":"t",` +
-		`"content":"old"}]}`,
+		`"encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"old"}]}`,
 		"the room_history JSON",
 	)
 	delete(line)
