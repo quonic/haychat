@@ -388,6 +388,76 @@ DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS ::
 	"('direct messages client message id index', " +
 	"to_regclass('direct_messages_sender_client_message_id') IS NOT NULL)"
 
+// Migration 7 (protocol 18, e2ee-design.md 6.1, 6.2, 9.2): encrypted rooms and their signed
+// member log.
+//
+// - rooms.encrypted: fixed at creation (an encrypted room is never Public, rooms_encrypted_access).
+// - rooms.log_version: the version of the newest stored log entry, 0 before the room's Create
+//   entry and for unencrypted rooms (rooms_log_version_check).
+// - room_log_entries: each entry byte for byte (common/e2ee.odin's RoomLogEntry layout), one
+//   row per version. The primary key (room_id, version) makes a second entry at a version
+//   impossible, so concurrent appends cannot both win; the size check is
+//   common.ROOM_LOG_ENTRY_MAX_BYTES (4208).
+// - room_log_managers: the managers the log names after its newest entry, kept in the same
+//   transaction as each entry so a manager who is not a member can fetch the log without the
+//   server replaying it. It is derived data; the log is the source.
+//
+// Every existing room stays unencrypted with version 0, and both tables start empty. E4b adds
+// room_key_envelopes and the sealed chat_messages columns in its own migration. Never edit it;
+// append a migration instead.
+DATABASE_MIGRATION_7_ENCRYPTED_ROOM_LOG_SQL ::
+	"ALTER TABLE rooms ADD COLUMN encrypted BOOLEAN NOT NULL DEFAULT false, " +
+	"ADD COLUMN log_version BIGINT NOT NULL DEFAULT 0; " +
+	"ALTER TABLE rooms ADD CONSTRAINT rooms_encrypted_access " +
+	"CHECK (NOT encrypted OR access IN (2, 3)), " +
+	"ADD CONSTRAINT rooms_log_version_check " +
+	"CHECK (log_version >= 0 AND (encrypted OR log_version = 0)); " +
+	"CREATE TABLE room_log_entries (" +
+	"room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, " +
+	"version BIGINT NOT NULL, " +
+	"entry BYTEA NOT NULL, " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT now(), " +
+	"PRIMARY KEY (room_id, version), " +
+	"CONSTRAINT room_log_entries_version_check CHECK (version >= 1), " +
+	"CONSTRAINT room_log_entries_entry_size " +
+	"CHECK (octet_length(entry) BETWEEN 1 AND 4208)); " +
+	"CREATE TABLE room_log_managers (" +
+	"room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, " +
+	"user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"PRIMARY KEY (room_id, user_id)); " +
+	"CREATE INDEX room_log_managers_by_user_id ON room_log_managers (user_id, room_id);"
+
+// What migration 7 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ENCRYPTED_ROOM_LOG_CHECKS ::
+	"('rooms encrypted', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'encrypted' AND data_type = 'boolean' AND is_nullable = 'NO')), " +
+	"('rooms log_version', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'log_version' AND data_type = 'bigint' AND is_nullable = 'NO')), " +
+	"('rooms encryption checks', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname IN ('rooms_encrypted_access', 'rooms_log_version_check'))), " +
+	"('room_log_entries table', to_regclass('room_log_entries') IS NOT NULL), " +
+	"('room_log_entries columns', (SELECT count(*) = 4 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'room_log_entries' " +
+	"AND column_name IN ('room_id', 'version', 'entry', 'created_at'))), " +
+	"('room log entries primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_log_entries') AND contype = 'p')), " +
+	"('room log entries checks', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_log_entries') AND contype = 'c' " +
+	"AND conname IN ('room_log_entries_version_check', 'room_log_entries_entry_size'))), " +
+	"('room log entries cascade', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_log_entries') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('room_log_managers table', to_regclass('room_log_managers') IS NOT NULL), " +
+	"('room log managers primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_log_managers') AND contype = 'p')), " +
+	"('room log managers cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_log_managers') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('room log managers index', to_regclass('room_log_managers_by_user_id') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -420,6 +490,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "encrypted direct messages",
 		sql = DATABASE_MIGRATION_6_ENCRYPTED_DIRECT_MESSAGES_SQL,
 		checks = DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS,
+	},
+	{
+		version = 7,
+		name = "encrypted room log",
+		sql = DATABASE_MIGRATION_7_ENCRYPTED_ROOM_LOG_SQL,
+		checks = DATABASE_ENCRYPTED_ROOM_LOG_CHECKS,
 	},
 }
 
@@ -531,6 +607,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_USER_ENCRYPTION_KEYS_CHECKS +
 	", " +
 	DATABASE_ENCRYPTED_DIRECT_MESSAGES_CHECKS +
+	", " +
+	DATABASE_ENCRYPTED_ROOM_LOG_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

@@ -99,8 +99,21 @@ Each room has an access mode, chosen when it is created:
   (new members read only what is sent after they were added; someone removed and added again
   starts over) or **Full history** (they read everything). Public rooms always show the whole
   history.
-- Rooms are not end-to-end encrypted; access modes decide who the server lets read a room, and
-  the server and its operator can still read every room.
+- Unencrypted rooms are readable by the server: access modes decide who the server lets read
+  a room, and the server and its operator can still read every unencrypted room.
+- **Encrypted rooms** (invite rooms an admin created with **Encrypt this room**) carry a
+  signed member list. For now they take no messages and no voice: the composer says
+  "Encrypted room messages arrive in a later update". Their **Members** page lists the
+  members, the **managers** (who sign who joins, add and remove people and other managers)
+  and the server's **admins** separately, each with their key state ("Verified", "Not
+  verified", "Key changed", "No key"). A manager can **Make manager** / **Remove manager**, and
+  a manager who is also an admin can switch the room between letting members invite and
+  letting only admins invite. An admin who is not a manager can still remove people (the
+  server records it) but is told "Only this room's managers can add members; ask <names>".
+  Every change shows in the room as a line from **Member list** ("alice added carol", "the
+  server removed dave"). If the server ever presents a member list that does not match what
+  your client verified, the room says **This room's member list was changed on the server**
+  and your client changes nothing more in it; tell an admin.
 - **Direct messages.** Clicking a conversation or a member opens the conversation in the main
   pane, with the person's name and online state in the header, the transcript (your own messages
   are labelled "You"), **Load older messages**, and a composer like the room one. A message that
@@ -282,7 +295,11 @@ description of up to 256 bytes, a **Type** selector (**Text**, **Voice**, **Text
 **Who can join** (**Public**, **Member invite**, **Admin invite**; see
 [Room access](#room-access)), **History for new members** (**From join** or **Full history**;
 fixed for Public rooms, which show everything), and **Join this room** (on by default; Public
-rooms always include you), with **Create** or **Cancel**. The room's members refresh their room
+rooms always include you), **Encrypt this room** for invite rooms (checked by default; it can
+never be turned off later) with its **Managers** (every admin your client sees, checked, you
+always; an admin whose key your client could not pin yet cannot be checked), with **Create** or
+**Cancel**. An encrypted room opens its **Members** page after it is created and adds you from
+its signed member list when **Join this room** is on. The room's members refresh their room
 list (every account for a Public room, only you for an invite room), and the admin's client
 selects the new room. With **Join this room** off, you are not a member: the room is not in your
 channel list and you do not see its messages, but its **Members** page opens at once so you can
@@ -292,7 +309,8 @@ A room's header shows **Edit room**, which opens the same form filled in, with *
 **Cancel**, **Members…**, and **Delete room**; delete asks for a second click (**Confirm
 delete**) and removes the room with its history. **Who can join** can change between any two
 modes: making a room Public adds every account (the form says so), and making a Public room
-invite-only keeps everyone in it. Its history setting is shown but cannot change. The form warns before a save that would remove people from a room's
+invite-only keeps everyone in it. An encrypted room's access changes only from its Members page
+(a manager who is an admin signs it). Its history setting is shown but cannot change. The form warns before a save that would remove people from a room's
 voice, and before deleting `#general` (the server recreates it only on a start with no rooms
 left). It closes when another admin renames or deletes its room, and shows the server's answer
 when it refuses (for example a duplicate name, or "Admin permission required" when the role was

@@ -26,7 +26,17 @@ set -euo pipefail
 #               he signed in, and stays signed in so his client does not publish again): carol's
 #               `dm` to him is refused, and `dm-plain` reaches him with encrypted false and a
 #               valid signature on both sides; SQL finds that text, as it should.
-#   8. secrets: no client ever printed its encryption private key, and no client wrote the
+#   8. room:    (protocol 18, design 12.4 step 3) admin ra creates an encrypted Admin invite
+#               room (its Create entry signed by ra) and adds rb: both verify the member log
+#               with ra as manager and both as members. rc, not a member, cannot fetch its log
+#               or history, and a plaintext message to the room is refused and never stored.
+#   9. forged:  (step 5, second half) an unsigned Add of rc inserted into room_log_entries by
+#               SQL: ra's and rb's clients refuse the log with the member-list warning.
+#  10. managed: (step 9) ra creates a second encrypted room without joining it, adds rb and
+#               makes rb a manager; admin re, who is not a manager, is refused by the server
+#               when adding rc, removes rb through the server (rb sees "the server removed"),
+#               and an add signed by re and inserted by SQL is refused by ra's log check.
+#  11. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -310,6 +320,147 @@ stored=$(run_sql "SELECT count(*) FROM direct_messages WHERE sender_user_id = $c
 stop_client v
 stop_client c2
 stop_client d2
+
+echo "==> [e2ee] room: admin ra creates an encrypted room and adds rb"
+room_alice="e2ra-$run_tag"
+room_erin="e2re-$run_tag"
+room_bob="e2rb-$run_tag"
+room_carol="e2rc-$run_tag"
+start_client ra "$room_alice"
+expect_connected ra
+make_admin "$room_alice"
+expect_ok ra reconnect
+expect_ok ra wait connected 8000
+start_client re "$room_erin"
+expect_connected re
+make_admin "$room_erin"
+expect_ok re reconnect
+expect_ok re wait connected 8000
+start_client rb "$room_bob"
+expect_connected rb
+start_client rc "$room_carol"
+expect_connected rc
+for client in ra re rb rc; do
+	expect_ok "$client" wait room_list 5000
+done
+ra_id=$(user_id rb "$room_alice")
+re_id=$(user_id ra "$room_erin")
+rb_id=$(user_id ra "$room_bob")
+rc_id=$(user_id ra "$room_carol")
+fetch_keys ra "$rb_id" >/dev/null
+fetch_keys ra "$rc_id" >/dev/null
+
+# room_log_line CLIENT ROOM_ID FIELDS START: waits for a room_log of ROOM_ID whose status and
+# version start like FIELDS.
+room_log_line() {
+	expect_event "$1" "^\\{\"event\":\"room_log\",\"serverID\":[0-9]+,\"roomID\":$2,$3" "$4" \
+		"client $1 never reported room $2's log as $3"
+}
+
+start=$(lines ra)
+expect_ok ra users >/dev/null
+expect_ok ra room-create "text,admin-invite,encrypted,managers=none" "secret-$run_tag"
+created=$(expect_event ra "^\\{\"event\":\"room_created\",.*\"name\":\"secret-$run_tag\"" \
+	"$start" "ra never got room_created for the encrypted room")
+[[ "$created" == *'"isMember":false,"encrypted":true,"logVersion":0}' ]] ||
+	fail "the encrypted room did not start empty at version 0: $created"
+room_id=$(field "$created" roomID)
+first=$(room_log_line ra "$room_id" '"status":"verified","logVersion":1,' "$start")
+[[ "$first" == *"\"members\":[$ra_id],\"managers\":[$ra_id],"* ]] ||
+	fail "ra's verified Create does not name ra member and manager: $first"
+expect_event ra "^\\{\"event\":\"room_membership\",.*\"roomID\":$room_id,\"joined\":true" \
+	"$start" "ra never joined the encrypted room" >/dev/null
+
+start=$(lines ra)
+bstart=$(lines rb)
+expect_ok ra room-add "$room_id" "$rb_id"
+second=$(room_log_line ra "$room_id" '"status":"verified","logVersion":2,' "$start")
+[[ "$second" == *"\"members\":[$ra_id,$rb_id],"* && "$second" == *"added $room_bob"* ]] ||
+	fail "ra's log does not show rb added: $second"
+bob_log=$(room_log_line rb "$room_id" '"status":"verified","logVersion":2,' "$bstart")
+[[ "$bob_log" == *"\"members\":[$ra_id,$rb_id],\"managers\":[$ra_id],"* ]] ||
+	fail "rb's verified log differs: $bob_log"
+store_files=("$work_dir"/profile-rb/haychat/keys/*.json)
+grep -q '"log_head_hash"' "${store_files[0]}" || fail "rb's key store holds no room head"
+
+echo "==> [e2ee] room: rc, not a member, can fetch neither the log nor the history"
+cstart=$(lines rc)
+expect_ok rc room-log "$room_id"
+expect_event rc '^\{"event":"protocol_error",.*"message":"Not a room member"' "$cstart" \
+	"rc was not refused the room's log" >/dev/null
+cstart=$(lines rc)
+expect_ok rc history "$room_id"
+expect_event rc '^\{"event":"protocol_error",.*"message":"Not a room member"' "$cstart" \
+	"rc was not refused the room's history" >/dev/null
+expect_ok ra users >/dev/null
+reply=$(client_command ra send "$room_id" "plaintext-in-encrypted-$run_tag")
+chat=$(run_sql "SELECT count(*) FROM chat_messages WHERE room_id = $room_id")
+[[ "$chat" == 0 ]] || fail "a plaintext message was stored in the encrypted room ($reply)"
+
+echo "==> [e2ee] forged: an unsigned Add of rc inserted by SQL is refused by ra and rb"
+expect_ok ra room-log-entry "$room_id" add "$rc_id" unsigned
+forged_hex=$(field "$last_result" entry)
+forged_version=$(field "$last_result" version)
+run_sql "INSERT INTO room_log_entries (room_id, version, entry)
+	VALUES ($room_id, $forged_version, decode('$forged_hex', 'hex'));
+	UPDATE rooms SET log_version = $forged_version WHERE id = $room_id;" >/dev/null
+for client in ra rb; do
+	start=$(lines "$client")
+	expect_ok "$client" room-log "$room_id"
+	refused=$(room_log_line "$client" "$room_id" '"status":"failed",' "$start")
+	[[ "$refused" == *'"logError":"Unsigned","warning":"This room'"'"'s member list was changed on the server"'* ]] ||
+		fail "client $client did not refuse the unsigned add: $refused"
+done
+
+echo "==> [e2ee] managed: ra creates a room without joining; re is not a manager"
+start=$(lines ra)
+expect_ok ra room-create "text,admin-invite,encrypted,no-join,managers=none" "managed-$run_tag"
+created=$(expect_event ra "^\\{\"event\":\"room_created\",.*\"name\":\"managed-$run_tag\"" \
+	"$start" "ra never got room_created for the managed room")
+managed_id=$(field "$created" roomID)
+first=$(room_log_line ra "$managed_id" '"status":"verified","logVersion":1,' "$start")
+[[ "$first" == *'"members":[],'* ]] || fail "the managed room has members: $first"
+bstart=$(lines rb)
+expect_ok ra room-add "$managed_id" "$rb_id"
+room_log_line ra "$managed_id" '"status":"verified","logVersion":2,' "$start" >/dev/null
+room_log_line rb "$managed_id" '"status":"verified","logVersion":2,' "$bstart" >/dev/null
+fetch_keys rb "$ra_id" >/dev/null
+expect_ok ra room-manager "$managed_id" "$rb_id" on
+third=$(room_log_line rb "$managed_id" '"status":"verified","logVersion":3,' "$bstart")
+[[ "$third" == *"\"managers\":[$ra_id,$rb_id],"* && "$third" == *"made $room_bob a manager"* ]] ||
+	fail "rb does not see himself made a manager: $third"
+
+estart=$(lines re)
+expect_ok re admin-rooms
+room_log_line re "$managed_id" '"status":"verified","logVersion":3,' "$estart" >/dev/null
+fetch_keys re "$rc_id" >/dev/null
+fetch_keys re "$rb_id" >/dev/null
+fetch_keys re "$ra_id" >/dev/null
+estart=$(lines re)
+expect_ok re room-add "$managed_id" "$rc_id"
+expect_event re '^\{"event":"protocol_error",.*"message":"You may not make this change to the member list"' \
+	"$estart" "the server did not refuse re's add" >/dev/null
+bstart=$(lines rb)
+estart=$(lines re)
+expect_ok re room-remove "$managed_id" "$rb_id"
+removed=$(room_log_line rb "$managed_id" '"status":"verified","logVersion":4,' "$bstart")
+[[ "$removed" == *'"members":[],'* && "$removed" == *"the server removed $room_bob"* ]] ||
+	fail "rb does not see the server's removal: $removed"
+room_log_line re "$managed_id" '"status":"verified","logVersion":4,' "$estart" >/dev/null
+expect_ok re room-log-entry "$managed_id" add "$rc_id"
+forged_hex=$(field "$last_result" entry)
+forged_version=$(field "$last_result" version)
+run_sql "INSERT INTO room_log_entries (room_id, version, entry)
+	VALUES ($managed_id, $forged_version, decode('$forged_hex', 'hex'));
+	UPDATE rooms SET log_version = $forged_version WHERE id = $managed_id;" >/dev/null
+start=$(lines ra)
+expect_ok ra room-log "$managed_id"
+refused=$(room_log_line ra "$managed_id" '"status":"failed",' "$start")
+[[ "$refused" == *'"logError":"NotAuthorized"'* ]] ||
+	fail "ra's log check did not refuse re's add: $refused"
+for client in ra re rb rc; do
+	stop_client "$client"
+done
 
 echo "==> [e2ee] secrets: no client printed its encryption private key or a plaintext log"
 for marker in "$marker_one" "$marker_two"; do

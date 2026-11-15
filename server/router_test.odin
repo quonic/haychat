@@ -1769,8 +1769,10 @@ testOpenRoomSQLJoinsEveryAccount :: proc(t: ^testing.T) {
 	)
 	assert(
 		strings.contains(DATABASE_CREATE_ROOM_SQL, "CROSS JOIN users") &&
-		strings.contains(DATABASE_CREATE_ROOM_SQL, "WHERE created_room.access = 1 OR"),
-		"expected a Public room to include every account and an invite room only its creator",
+		strings.contains(DATABASE_CREATE_ROOM_SQL, "(created_room.access = 1 ") &&
+		strings.contains(DATABASE_CREATE_ROOM_SQL, "WHERE NOT created_room.encrypted AND"),
+		"expected a Public room to include every account, an invite room only its creator, " +
+		"and an encrypted room nobody until its log's Create",
 	)
 	assert(
 		strings.contains(DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, "nickname FROM users") &&

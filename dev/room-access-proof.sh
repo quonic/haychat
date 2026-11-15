@@ -157,7 +157,8 @@ user_c=${BASH_REMATCH[1]}
 echo "==> [access] admin invite: A adds B; C cannot see the room, its history, or its members"
 create_room a both,admin-invite "acc-admin-$run_tag"
 admin_room=$created_room
-[[ "$last_event" == *'"access":3,"historyVisibility":1,"isMember":true}' ]] ||
+created_tail='"access":3,"historyVisibility":1,"isMember":true,"encrypted":false,"logVersion":0}'
+[[ "$last_event" == *"$created_tail" ]] ||
 	fail "the Admin invite room was not created as asked: $last_event"
 start_a=$(lines a)
 start_b=$(lines b)
@@ -260,7 +261,7 @@ echo "==> [access] no join: A creates a room it is not in and manages it"
 hidden_name="acc-hidden-$run_tag"
 create_room a text,admin-invite,no-join "$hidden_name"
 hidden_room=$created_room
-[[ "$last_event" == *'"isMember":false}' ]] ||
+[[ "$last_event" == *'"isMember":false,"encrypted":false,"logVersion":0}' ]] ||
 	fail "the room created without joining has the creator as a member: $last_event"
 expect_ok a rooms
 [[ "$last_result" != *"\"id\":$hidden_room,"* ]] ||
@@ -293,7 +294,7 @@ expect_ok a room-edit "$hidden_room" text,public "$hidden_name"
 expect_membership c "$hidden_room" true "$user_c" "$start_c" \
 	"client c was not added when the room became Public"
 public_pattern="^\\{\"event\":\"room_list\",.*\"id\":$hidden_room,[^}]*"
-public_pattern+="\"access\":1,\"historyVisibility\":2\\}"
+public_pattern+="\"access\":1,\"historyVisibility\":2,"
 expect_event c "$public_pattern" "$start_c" \
 	"client c does not list the room as Public with full history"
 history_of c "$hidden_room"

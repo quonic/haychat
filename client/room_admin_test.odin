@@ -639,8 +639,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":false,"cmd":"room-create","error":"usage: room-create ` +
-		`TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join] ` +
-		`NAME [DESCRIPTION...]"}` +
+		`TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join]` +
+		`[,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-create type error",
 	)
@@ -721,7 +721,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_created","serverID":908,"roomID":9,"name":"random",` +
-		`"description":"Off","roomType":2,"access":0,"historyVisibility":0,"isMember":false}` +
+		`"description":"Off","roomType":2,"access":0,"historyVisibility":0,"isMember":false,` +
+		`"encrypted":false,"logVersion":0}` +
 		"\n",
 		"the room_created event",
 	)
@@ -738,7 +739,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		strings.contains(
 			output,
 			`{"usage":"room-create TYPE[,public|member-invite|admin-invite]` +
-			`[,from-join|full][,no-join] NAME [DESCRIPTION...]",`,
+			`[,from-join|full][,no-join][,encrypted][,managers=ID+ID|managers=none] ` +
+			`NAME [DESCRIPTION...]",`,
 		) &&
 		strings.contains(output, `"room_created"`),
 		fmt.tprintf("expected help to list the room commands and events, got %s", output),

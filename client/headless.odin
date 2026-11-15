@@ -13,6 +13,7 @@ import "core:fmt"
 import "core:io"
 import "core:os"
 import "core:reflect"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -256,6 +257,8 @@ HeadlessEventKind :: enum {
 	// is now opened (or settled), and queued messages that went out or back into the draft.
 	DirectOpened,
 	DirectQueue,
+	// Encrypted rooms (protocol 18): a room's member log after the client applied what arrived.
+	RoomLog,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -293,6 +296,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.UserKeys       = "user_keys",
 	.DirectOpened   = "direct_opened",
 	.DirectQueue    = "direct_queue",
+	.RoomLog        = "room_log",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -553,7 +557,8 @@ HeadlessRoomMembershipJSON :: struct {
 // roomType is the protocol's number: 1 text, 2 voice, 3 both (protocol 14). access is 1
 // Public, 2 Member invite, 3 Admin invite, and historyVisibility 1 From join, 2 Full (always 2
 // for a Public room) (protocol 15). isMember is set on room_created: false for a room created
-// without joining it.
+// without joining it. encrypted and logVersion (protocol 18) are the server's: whether the room
+// is encrypted and its member log's newest version (room_log says what the client verified).
 HeadlessRoomEditedJSON :: struct {
 	event:             string,
 	serverID:          int,
@@ -564,6 +569,42 @@ HeadlessRoomEditedJSON :: struct {
 	access:            int,
 	historyVisibility: int,
 	isMember:          bool,
+	encrypted:         bool,
+	logVersion:        int,
+}
+
+// An encrypted room's member log as this client verified it (protocol 18), printed after each
+// ServerRoomLog was applied and for room-log. status is unknown, loading, verified or failed;
+// logVersion and headHash the verified head (the epoch); serverLogVersion the server's newest;
+// members and managers (ascending) what the verified log proves; logError the rule that failed
+// (empty unless failed) and warning the sentence the GUI shows; events one line per verified
+// change ("alice added carol").
+HeadlessRoomLogJSON :: struct {
+	event:             string,
+	serverID:          int,
+	roomID:            int,
+	status:            string,
+	logVersion:        int,
+	serverLogVersion:  int,
+	headHash:          string,
+	access:            int,
+	historyVisibility: int,
+	members:           []int,
+	managers:          []int,
+	logError:          string,
+	warning:           string,
+	events:            []string,
+}
+
+// room-log-entry: a signed (or, with unsigned, an unsigned) entry built on the verified head,
+// as hex, not sent; for proofs that insert entries behind the server's back.
+HeadlessRoomLogEntryJSON :: struct {
+	ok:       bool,
+	cmd:      string,
+	serverID: int,
+	roomID:   int,
+	version:  int,
+	entry:    string,
 }
 
 // ServerRoomMembers: the room's members, ascending.
@@ -936,6 +977,9 @@ headlessRenderRuntimeEvent :: proc(
 	case .UserKeysReceived, .UserKeyChanged:
 		// Printed as user_keys after State applied them (headlessHandleRuntimeEvent).
 		return "", {}, false
+	case .RoomLogReceived:
+		// Printed as room_log after State verified it (headlessWriteRoomLogNotes).
+		return "", {}, false
 	case .RoomChatReceived:
 		kind = .RoomChat
 		line = headlessMarshal(
@@ -1008,6 +1052,8 @@ headlessRenderRuntimeEvent :: proc(
 				roomType = int(event.room.roomType),
 				access = int(event.room.access),
 				historyVisibility = int(event.room.historyVisibility),
+				encrypted = event.room.encrypted,
+				logVersion = event.room.logVersion,
 			},
 			allocator,
 		)
@@ -1024,6 +1070,8 @@ headlessRenderRuntimeEvent :: proc(
 				access = int(event.room.access),
 				historyVisibility = int(event.room.historyVisibility),
 				isMember = event.isMember,
+				encrypted = event.room.encrypted,
+				logVersion = event.room.logVersion,
 			},
 			allocator,
 		)
@@ -1523,9 +1571,10 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
 	{"room-create", 2, 0, .Optional,
-		"room-create TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join] " +
-		"NAME [DESCRIPTION...]",
-		"admins: creates a room (TYPE text|voice|both); it arrives as room_created",
+		"room-create TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join]" +
+		"[,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]",
+		"admins: creates a room (TYPE text|voice|both); it arrives as room_created; " +
+		"encrypted names every admin as a manager unless managers= says otherwise",
 		headlessCommandRoomCreate},
 	{"room-edit", 3, 0, .Optional,
 		"room-edit ROOM_ID TYPE[,public|member-invite|admin-invite] NAME [DESCRIPTION...]",
@@ -1541,7 +1590,21 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: removes an account from a room; answered by room_member_result",
 		headlessCommandRoomRemove},
 	{"room-leave", 1, 0, .None, "room-leave ROOM_ID",
-		"leaves a non-public room; answered by room_membership", headlessCommandRoomLeave},
+		"leaves a non-public room (encrypted: a signed Leave); answered by room_membership",
+		headlessCommandRoomLeave},
+	{"room-log", 1, 0, .None, "room-log ROOM_ID",
+		"an encrypted room's verified member log as room_log; fetches what is missing",
+		headlessCommandRoomLog},
+	{"room-manager", 3, 0, .None, "room-manager ROOM_ID USER_ID on|off",
+		"managers: names an account a manager of an encrypted room, or stops doing so",
+		headlessCommandRoomManager},
+	{"room-access", 2, 0, .None, "room-access ROOM_ID member-invite|admin-invite",
+		"manager admins: switches an encrypted room's mode with a signed SetAccess",
+		headlessCommandRoomAccess},
+	{"room-log-entry", 3, 1, .None,
+		"room-log-entry ROOM_ID add|remove|add-manager|remove-manager|leave USER_ID [unsigned]",
+		"prints a signed (or unsigned) entry on the verified head as hex without sending it",
+		headlessCommandRoomLogEntry},
 	{"admin-rooms", 0, 0, .None, "admin-rooms",
 		"admins: every room, joined or not; it arrives as admin_rooms",
 		headlessCommandAdminRooms},
@@ -1793,6 +1856,7 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		headlessWriteUserKeysEvent(harness, event.serverID, event.userKey.userId)
 	}
 	headlessWriteDirectNotes(harness)
+	headlessWriteRoomLogNotes(harness)
 	// Applying a voice event can start or stop the engine; report that right after it.
 	headlessPollVoice(harness)
 }
@@ -2097,6 +2161,7 @@ headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {
 	case .None:
 		parsed.command.run(harness, &parsed)
 		headlessWriteDirectNotes(harness)
+		headlessWriteRoomLogNotes(harness)
 	}
 }
 
@@ -2134,6 +2199,7 @@ headlessConnectAndWait :: proc(
 	harness.state = State_initFromConfig(config)
 	state := &harness.state
 	state.recordDirectNotes = true
+	state.recordRoomLogNotes = true
 	// The key store is written like the GUI writes it (keystore.odin), so a profile run twice
 	// keeps its pins.
 	if len(harness.keyStoreDir) > 0 {
@@ -2632,6 +2698,12 @@ HeadlessRoomOptions :: struct {
 	hasAccess:    bool,
 	history:      common.RoomHistoryVisibility,
 	creatorJoins: bool,
+	// Protocol 18 (room-create): encrypted, and the managers besides yourself; hasManagers
+	// false names every admin the client sees, as the create form does.
+	encrypted:    bool,
+	hasManagers:  bool,
+	managers:     [8]int,
+	managerCount: int,
 }
 
 headlessParseRoomOptions :: proc(word: string, create: bool) -> (HeadlessRoomOptions, bool) {
@@ -2674,8 +2746,28 @@ headlessParseRoomOptions :: proc(word: string, create: bool) -> (HeadlessRoomOpt
 				return options, false
 			}
 			options.creatorJoins = false
+		case "encrypted":
+			if !create {
+				return options, false
+			}
+			options.encrypted = true
 		case:
-			return options, false
+			if !create || !strings.has_prefix(part, "managers=") {
+				return options, false
+			}
+			options.hasManagers = true
+			list := part[len("managers="):]
+			if list == "none" {
+				continue
+			}
+			for id in strings.split_iterator(&list, "+") {
+				userID, ok := headlessParseNumber(id)
+				if !ok || userID <= 0 || options.managerCount == len(options.managers) {
+					return options, false
+				}
+				options.managers[options.managerCount] = userID
+				options.managerCount += 1
+			}
 		}
 	}
 	return options, !first
@@ -2692,6 +2784,10 @@ headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	name := command.args[1]
 	description := command.argCount > 2 ? command.args[2] : ""
 	state := &harness.state
+	managers := options.managers[:options.managerCount]
+	if options.encrypted && !options.hasManagers {
+		managers = State_roomLogAdminCandidates(state, state.selected_server_id)
+	}
 	errorMessage := State_sendCreateRoom(
 		state,
 		state.selected_server_id,
@@ -2701,6 +2797,8 @@ headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 		options.access,
 		options.history,
 		options.creatorJoins,
+		options.encrypted,
+		managers,
 	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
 	headlessWriteRoomRequest(
@@ -3281,4 +3379,237 @@ headlessMain :: proc(args: []string) -> int {
 		free_all(context.temp_allocator)
 	}
 	return HEADLESS_EXIT_OK
+}
+
+// ── Encrypted rooms (protocol 18) ────────────────────────────────
+
+@(private = "file")
+headlessRoomLogStatusName :: proc(status: RoomLogStatus) -> string {
+	switch status {
+	case .Unknown:
+		return "unknown"
+	case .Loading:
+		return "loading"
+	case .Verified:
+		return "verified"
+	case .Failed:
+		return "failed"
+	}
+	return "unknown"
+}
+
+headlessWriteRoomLogEvent :: proc(harness: ^HeadlessHarness, serverID, roomID: int) {
+	state := &harness.state
+	value := HeadlessRoomLogJSON {
+		event    = HEADLESS_EVENT_NAMES[.RoomLog],
+		serverID = serverID,
+		roomID   = roomID,
+		status   = "unknown",
+	}
+	members := make([dynamic]int, 0, context.temp_allocator)
+	managers := make([dynamic]int, 0, context.temp_allocator)
+	events := make([dynamic]string, 0, context.temp_allocator)
+	headHash := ""
+	if log := State_findRoomLog(state, serverID, roomID); log != nil {
+		value.status = headlessRoomLogStatusName(log.status)
+		value.serverLogVersion = log.serverHead
+		if log.status == .Failed {
+			value.logError = fmt.tprintf("%v", log.failure)
+			value.warning = ROOM_LOG_CHANGED_WARNING
+		}
+		if log.status == .Verified {
+			value.logVersion = log.state.version
+			value.access = int(log.state.access)
+			value.historyVisibility = int(log.state.historyVisibility)
+			hash := log.state.headHash
+			if log.state.version > 0 {
+				headHash = common.encodeBytesToHex(hash[:])
+			}
+			for userID in log.state.members {
+				append(&members, userID)
+			}
+			for userID in log.state.managers {
+				append(&managers, userID)
+			}
+			slice.sort(members[:])
+			slice.sort(managers[:])
+		}
+		for line in log.events {
+			append(&events, State_roomLogEventText(state, serverID, line))
+		}
+	}
+	defer delete(headHash)
+	value.headHash = headHash
+	value.members = members[:]
+	value.managers = managers[:]
+	value.events = events[:]
+	headlessWriteJSON(harness, value)
+	headlessRecordEvent(harness, .RoomLog)
+}
+
+// The rooms whose log changed since the last report, after an event or a command.
+headlessWriteRoomLogNotes :: proc(harness: ^HeadlessHarness) {
+	state := &harness.state
+	for index := 0; index < len(state.roomLogNotes); index += 1 {
+		note := state.roomLogNotes[index]
+		log := State_findRoomLog(state, note.serverID, note.roomID)
+		// A whole-log fetch reports once it is replayed.
+		if log != nil && log.status == .Loading {
+			continue
+		}
+		headlessWriteRoomLogEvent(harness, note.serverID, note.roomID)
+	}
+	for index := len(state.roomLogNotes) - 1; index >= 0; index -= 1 {
+		note := state.roomLogNotes[index]
+		log := State_findRoomLog(state, note.serverID, note.roomID)
+		if log == nil || log.status != .Loading {
+			ordered_remove(&state.roomLogNotes, index)
+		}
+	}
+}
+
+headlessCommandRoomLog :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, ok := headlessParseNumber(command.args[0])
+	if !ok || roomID <= 0 {
+		headlessWriteError(harness, command.name, "usage: room-log ROOM_ID")
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	errorMessage := State_requestRoomLog(state, serverID, roomID)
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteRoomLogEvent(harness, serverID, roomID)
+	headlessWriteRoomLogRequest(harness, command, "", roomID, 0)
+}
+
+headlessCommandRoomManager :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	userID, userOK := headlessParseNumber(command.args[1])
+	on := command.args[2] == "on"
+	if !roomOK || !userOK || roomID <= 0 || userID <= 0 || (!on && command.args[2] != "off") {
+		headlessWriteError(harness, command.name, "usage: room-manager ROOM_ID USER_ID on|off")
+		return
+	}
+	state := &harness.state
+	errorMessage := State_roomLogMemberChange(
+		state,
+		state.selected_server_id,
+		roomID,
+		on ? .AddManager : .RemoveManager,
+		userID,
+		checkRights = false,
+	)
+	headlessWriteRoomLogRequest(harness, command, errorMessage, roomID, userID)
+}
+
+headlessCommandRoomAccess :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	access: common.RoomLogAccess
+	switch command.args[1] {
+	case "member-invite":
+		access = .MemberInvite
+	case "admin-invite":
+		access = .AdminInvite
+	case:
+		roomOK = false
+	}
+	if !roomOK || roomID <= 0 {
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: room-access ROOM_ID member-invite|admin-invite",
+		)
+		return
+	}
+	state := &harness.state
+	errorMessage := State_roomLogMemberChange(
+		state,
+		state.selected_server_id,
+		roomID,
+		.SetAccess,
+		0,
+		checkRights = false,
+		access = access,
+	)
+	headlessWriteRoomLogRequest(harness, command, errorMessage, roomID, 0)
+}
+
+@(private = "file")
+headlessWriteRoomLogRequest :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	errorMessage: string,
+	roomID, userID: int,
+) {
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessRoomMemberRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = harness.state.selected_server_id,
+			roomID = roomID,
+			userID = userID,
+		},
+	)
+}
+
+headlessCommandRoomLogEntry :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	usage := "usage: " + "room-log-entry ROOM_ID add|remove|add-manager|remove-manager|leave " +
+		"USER_ID [unsigned]"
+	roomID, roomOK := headlessParseNumber(command.args[0])
+	userID, userOK := headlessParseNumber(command.args[2])
+	action: common.RoomLogAction
+	switch command.args[1] {
+	case "add":
+		action = .Add
+	case "remove":
+		action = .Remove
+	case "add-manager":
+		action = .AddManager
+	case "remove-manager":
+		action = .RemoveManager
+	case "leave":
+		action = .Leave
+	case:
+		roomOK = false
+	}
+	unsigned := command.argCount > 3 && command.args[3] == "unsigned"
+	if !roomOK || !userOK || roomID <= 0 || userID <= 0 ||
+	   (command.argCount > 3 && !unsigned) {
+		headlessWriteError(harness, command.name, usage)
+		return
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	entry, version, errorMessage := State_roomLogEncodeEntry(
+		state,
+		serverID,
+		roomID,
+		action,
+		userID,
+		!unsigned,
+	)
+	if len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	defer delete(entry)
+	headlessWriteJSON(
+		harness,
+		HeadlessRoomLogEntryJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			roomID = roomID,
+			version = version,
+			entry = entry,
+		},
+	)
 }

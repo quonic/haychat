@@ -257,7 +257,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"Room 1","description":"",` +
-		`"lastReadMessageId":0,"unreadCount":0,"roomType":0,"access":0,"historyVisibility":0}]}`,
+		`"lastReadMessageId":0,"unreadCount":0,"roomType":0,"access":0,"historyVisibility":0,` +
+		`"encrypted":false,"logVersion":0}]}`,
 		"the room_list JSON",
 	)
 	delete(line)
@@ -458,9 +459,10 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_list","serverID":801,"rooms":[{"id":1,"name":"Room 1","description":"",` +
-		`"lastReadMessageId":0,"unreadCount":0,"roomType":0,"access":0,"historyVisibility":0},` +
+		`"lastReadMessageId":0,"unreadCount":0,"roomType":0,"access":0,"historyVisibility":0,` +
+		`"encrypted":false,"logVersion":0},` +
 		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0,` +
-		`"roomType":0,"access":0,"historyVisibility":0}]}` +
+		`"roomType":0,"access":0,"historyVisibility":0,"encrypted":false,"logVersion":0}]}` +
 		"\n",
 		"the printed room list",
 	)
@@ -482,9 +484,9 @@ testHeadlessPrintsEventsBeforeApplyingThem :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"ok":true,"cmd":"rooms","serverID":801,"loaded":true,"loading":false,"rooms":[` +
 		`{"id":1,"name":"Room 1","description":"","lastReadMessageId":0,"unreadCount":0,` +
-		`"roomType":0,"access":0,"historyVisibility":0},` +
+		`"roomType":0,"access":0,"historyVisibility":0,"encrypted":false,"logVersion":0},` +
 		`{"id":2,"name":"Room 2","description":"","lastReadMessageId":0,"unreadCount":0,` +
-		`"roomType":0,"access":0,"historyVisibility":0}]}` +
+		`"roomType":0,"access":0,"historyVisibility":0,"encrypted":false,"logVersion":0}]}` +
 		"\n",
 		"the rooms result",
 	)

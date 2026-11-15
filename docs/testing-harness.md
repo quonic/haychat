@@ -90,7 +90,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `dm USER_ID TEXT...` | Sends the rest of the line as an end-to-end encrypted direct message to that account, through the same action as the GUI's direct-message composer (protocol 17). The result carries `encrypted` (it went out encrypted) and `queued` (the account's key is still being fetched: the message waits and a `direct_queue` event says when it went out, or that it went back into the draft). It is refused, with the reason, when encryption to the account is not possible (no key, a changed key, or a key the server no longer provides); use `dm-plain` then. The stored message comes back as a `direct_message` event to every session of both users (the sender's included), and a rejection as a `protocol_error` event (`Unknown direct message recipient`, `Cannot send a direct message to yourself`, `Invalid encrypted direct message`, `Duplicate direct message`). |
 | `dm-plain USER_ID TEXT...` | The plaintext fallback: turns on the conversation's **Send without encryption** switch through the GUI's action (accepting the first-time confirmation), sends a signed plaintext message, and turns the switch off again. Refused while encryption to the account is possible or its key is still being checked. See [Encrypted Direct Messages](#encrypted-direct-messages). |
 | `dm-history USER_ID [BEFORE_MESSAGE_ID]` | Requests one page (up to 50 messages, both directions) of the conversation with that account: the newest page with no cursor, older pages with the oldest loaded message ID. It arrives as a `direct_history` event. |
-| `room-create TYPE[,OPTION...] NAME [DESCRIPTION...]` | Admins: asks the server for a new room of type TYPE (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. Comma-separated options after the type (protocol 15): the access mode `public` (the default), `member-invite` or `admin-invite`; the history `from-join` (the default) or `full` (ignored for a Public room, which always has full history); and `no-join` to create an invite room you are not a member of. For example `room-create both,admin-invite,full,no-join ops`. The result echoes `serverID`, `roomID` (0), `name`, `description`, `roomType` (1 text, 2 voice, 3 both), `access`, `historyVisibility` and `creatorJoins` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room unless you did not join it), and its members (every connected client for a Public room, only you for an invite room you joined) get `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
+| `room-create TYPE[,OPTION...] NAME [DESCRIPTION...]` | Admins: (protocol 18 options `encrypted`, for an invite room, and `managers=ID+ID` or `managers=none`: the other managers to name; without `managers=` every admin this client sees is named, as in the form, after their keys are fetched; the room's Create entry is signed and sent when `room_created` arrives, and `room_log` reports it) asks the server for a new room of type TYPE (`text` takes chat only, `voice` voice only, `both` both; `chat` is a synonym of `text`) named NAME (one word here; a leading `#` is dropped) with the rest of the line as its description. Comma-separated options after the type (protocol 15): the access mode `public` (the default), `member-invite` or `admin-invite`; the history `from-join` (the default) or `full` (ignored for a Public room, which always has full history); and `no-join` to create an invite room you are not a member of. For example `room-create both,admin-invite,full,no-join ops`. The result echoes `serverID`, `roomID` (0), `name`, `description`, `roomType` (1 text, 2 voice, 3 both), `access`, `historyVisibility` and `creatorJoins` once the request is out. The new room arrives as a `room_created` event (to you only; it also becomes the selected room unless you did not join it), and its members (every connected client for a Public room, only you for an invite room you joined) get `room_membership` with `joined` true and then a fresh `room_list`. The same checks as the GUI form run first: an empty or over-long name, an over-long description, or the name of a listed room is an `ok:false` result. A non-admin gets `protocol_error "Admin permission required"`. |
 | `room-edit ROOM_ID TYPE[,ACCESS] NAME [DESCRIPTION...]` | Admins: sets the room's type and, with `public`, `member-invite` or `admin-invite` after it, its access mode (without one it keeps the mode the client knows; the history cannot change), renames it, and replaces its description (an empty one without DESCRIPTION). Making a room Public adds every account, and each gets `room_membership` with `joined` true. Every member, you included, gets `room_edited`. Making a room `text` first removes everyone from its voice (`voice_left` "voice is disabled in this room"). A voice-only room refuses `send` (`protocol_error "Chat is disabled in this room"`), a text-only room refuses `voice-join` (`voice_join_rejected` "voice is disabled in this room"). |
 | `room-delete ROOM_ID` | Admins: deletes the room and its history. Every member, you included, gets `room_deleted`; a client whose selected room it was falls back to `#general` (room 1) while it exists, otherwise to the first room. Room 1 can be deleted too; the server recreates `#general` on its next start only when no rooms are left. |
 | `admin-role USER_ID on\|off` | Admins: grants or revokes the server's admin role (protocol 14). `ok` (`serverID`, `userID`) means the request went out. The answer is `admin_result`; every connected client gets `user_updated`, and the target's sessions get `account_updated` with the new `isAdmin`, without reconnecting. Refusals are `protocol_error`: `Admin permission required`, `Unknown user`, `You cannot remove your own admin role`, `The server must keep at least one admin`, `Unban the account before making it an admin`. |
@@ -103,6 +103,10 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-remove ROOM_ID USER_ID` | Admins: removes the account from the room, in every mode. The answer is `room_member_result` with `added` false; the account (whose client drops the room), the remaining members and you get `room_membership` with `joined` false. Removing someone who is not a member changes nothing. Anyone else gets `protocol_error "Admin permission required"`. |
 | `room-leave ROOM_ID` | Leaves a non-public room you are a member of; the answer is `room_membership` with `joined` false and your `userID` (also to the room's other members), and the room leaves your `rooms`. Refusals: `You cannot leave a public room`, `Not a room member`. |
 | `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. |
+| `room-log ROOM_ID` | An encrypted room's member log as this client verified it (protocol 18): prints a `room_log` event at once, then its result (`serverID`, `roomID`), and fetches what the client lacks (the whole log the first time, else what follows its verified version), which prints another `room_log` once applied. A client whose log failed fetches nothing more. Non-members who are neither managers nor admins get `protocol_error "Not a room member"`. See [Encrypted Rooms](#encrypted-rooms). |
+| `room-manager ROOM_ID USER_ID on\|off` | Signs an AddManager or RemoveManager entry for an encrypted room. The account's key must be pinned (the change waits for a fetch otherwise). |
+| `room-access ROOM_ID member-invite\|admin-invite` | Signs a SetAccess entry (a manager who is also an admin). |
+| `room-log-entry ROOM_ID add\|remove\|add-manager\|remove-manager\|leave USER_ID [unsigned]` | Builds the next entry on this client's verified head, signed by this account or (`unsigned`) with no actor and no signature, and prints it as hex (`entry`, `version`) without sending it or checking the log's rules, so a proof can insert it behind the server's back. The target's key must be pinned or named by the log. |
 | `user-keys USER_ID` | Asks the server for the account's encryption key bundle (protocol 16). The result is `serverID`, `userID` and `requested` (false when a fetch for it was already on its way); the answer, checked and pinned, arrives as a `user_keys` event. Not for yourself. See [Encryption Keys](#encryption-keys). |
 | `verify USER_ID` | Mark as verified, after comparing `safetyNumber` with the other side's: the result has the `user_keys` fields with `keyState` `verified`. In `key_changed` it trusts the key the server now offers and marks it verified, like the GUI dialog. `ok:false` ("refused in key state ...") without a pin, or while the key is missing or invalid. |
 | `trust-key USER_ID` | Trust the new key: in `key_changed`, pins the key the server now offers, unverified (`ok:false` in any other state, or before the new bundle arrived). |
@@ -149,7 +153,8 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_member_result` | `{"event":"room_member_result","serverID":1,"roomID":2,"userID":4,"added":true,"changed":true}` (the answer to your own `room-add`, or with `added` false to `room-remove`) |
 | `admin_rooms` | `{"event":"admin_rooms","serverID":1,"rooms":[{"room":{"id":2,"name":"ops",...,"access":3,"historyVisibility":1},"isMember":false,"memberCount":2}]}` (the answer to `admin-rooms`, by name) |
 | `room_deleted` | `{"event":"room_deleted","serverID":1,"roomID":2}` |
-| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":true}` (the answer to your own `room-create`; `isMember` false for an invite room created with `no-join`) |
+| `room_created` | `{"event":"room_created","serverID":1,"roomID":2,"name":"random","description":"...","roomType":3,"access":1,"historyVisibility":2,"isMember":true,"encrypted":false,"logVersion":0}` (the answer to your own `room-create`; `isMember` false for an invite room created with `no-join`, and for every encrypted room, which starts empty at `logVersion` 0; `room_edited` carries `encrypted` and `logVersion` too, and so does every room in `room_list` and `rooms`) |
+| `room_log` | `{"event":"room_log","serverID":1,"roomID":5,"status":"verified","logVersion":2,"serverLogVersion":2,"headHash":"<hex>","access":3,"historyVisibility":1,"members":[3,4],"managers":[3],"logError":"","warning":"","events":["alice created this encrypted room (admins invite, 1 manager)","alice added bob"]}` (protocol 18: an encrypted room's member log after this client applied a `ServerRoomLog`, and for `room-log`; `status` `unknown`, `loading`, `verified` or `failed`, with `logError` naming the rule that failed and `warning` "This room's member list was changed on the server") |
 | `protocol_error` | `{"event":"protocol_error","serverID":1,"message":"..."}` |
 | `disconnected` | `{"event":"disconnected","serverID":1,"message":"connection lost","retryInMS":900}` |
 | `direct_message` | `{"event":"direct_message","serverID":1,"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","encrypted":true,"signed":true,"decryptError":"","protection":"encrypted","content":"hi"}` (printed after the client opened it; see [Encrypted Direct Messages](#encrypted-direct-messages)) |
@@ -458,6 +463,26 @@ SQL finds no message text in `direct_messages` (envelopes only, empty content); 
 deleted and his old messages open again; and dave, whose key bundle SQL removed while he stays
 signed in, cannot get carol's `dm`, while her `dm-plain` reaches him unencrypted and signed and
 SQL finds its text. No client may print its encryption private key or log a message's text.
+
+## Encrypted Rooms
+
+Protocol 18 ([protocol.md](protocol.md#encrypted-rooms-and-the-member-log-protocol-18)).
+`room-create text,admin-invite,encrypted NAME` creates an encrypted room: the server answers
+`room_created` with `"encrypted":true,"logVersion":0`, the client signs the log's Create entry,
+and the server's echo arrives as `room_log` with `logVersion` 1. In encrypted rooms
+`room-add`, `room-remove` and `room-leave` sign log entries (a removal by an admin who is not a
+manager goes to the server, which writes an unsigned Remove), `room-manager` and `room-access`
+sign manager changes and access switches, and every change reaches the room's members and
+managers as `room_log`. Like the other room commands, the harness does not check the log's
+rules before sending, so the server's refusal shows (`protocol_error` "You may not make this
+change to the member list", "The member list changed on the server; try again", "This
+encrypted room is full", …); the GUI checks them first and says who to ask.
+
+`send` to an encrypted room is refused (`protocol_error` "Encrypted room messages arrive in a
+later update") and `voice-join` too ("voice is not available in encrypted rooms yet") until
+sender chains exist. `dev/e2ee-proof.sh` (`./dev.sh live --e2ee`) creates encrypted rooms,
+adds and removes members, inserts an unsigned and a non-manager's entry by SQL with
+`room-log-entry`, and checks that the clients refuse those logs.
 
 ## Read State
 
@@ -800,7 +825,7 @@ context menus: she right-clicks her `#general` message, clicks **Copy message**,
 the empty composer, clicks **Paste** and sends it again (bob must receive it a second time);
 then bob posts in her new room, which she is not viewing, and once its unread badge is drawn
 she right-clicks the channel and clicks **Mark as read**: a second headless session of her
-account (same profile) must get the room's `read_marker` with `unreadCount` 0. Then the admin
+account (a copy of her profile, so the two never write one key store) must get the room's `read_marker` with `unreadCount` 0. Then the admin
 steps (plan P4): alice right-clicks bob in Members and clicks **Make admin**, and bob's harness
 must print `account_updated` with `"isAdmin":true` without reconnecting; she removes the role
 again (another admin cannot be banned), clicks **Ban…** in his menu, types a reason into the
@@ -824,9 +849,12 @@ opens the conversation with headless dave, whose key bundle SQL removed, sees th
 he has not set up encryption, turns on **Send without encryption** (`dm-fallback-switch 1
 DAVE`), accepts the confirmation (**Turn on**), sees "Unencrypted: the server can read this",
 and sends with **Send unencrypted**: her message shows **Unencrypted**, and dave must receive it
-with `"encrypted":false,"signed":true`. alice takes 35 screenshots on the way (`01-…` to `34-…`
-and `06b-server-settings.bmp`); the script prints the paths of the 34 numbered `NN-*.bmp` ones
-and checks that all 34 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
+with `"encrypted":false,"signed":true`. Last, the encrypted rooms (protocol 18): she opens the
+room form, picks Admin invite, sees **Encrypt this room: on** with herself checked as a
+manager, and creates the room; its Members page opens with her as member and manager and the
+Managers section, and SQL must find the room encrypted at log version 1. alice takes 37
+screenshots on the way (`01-…` to `36-…` and `06b-server-settings.bmp`); the script prints the
+paths of the 36 numbered `NN-*.bmp` ones and checks that all 36 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
 otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.

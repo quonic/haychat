@@ -27,6 +27,11 @@ import "shared:pg"
 // A removal or a leave also deletes the account's read marker for the room, so someone added
 // again later counts unread messages from the new joined_at, like a new member.
 //
+// Encrypted rooms (protocol 18): an add or a leave is `encrypted_room` (checked after the
+// requester may see the room), because their members change only through signed member log
+// entries (ClientAppendRoomLog). A removal by an admin becomes the log's unsigned Remove entry,
+// which database_room_log.odin writes and applies in one transaction.
+//
 // Every statement returns one row: outcome, whether a membership row changed, the room's
 // access, and the members after the action (ascending, comma separated). Data-modifying CTEs
 // do not see each other's changes, so the member list is the statement's snapshot with the
@@ -39,7 +44,7 @@ DATABASE_ROOM_MEMBER_PREFIX_SQL ::
 	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS is_admin, " +
 	"EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id = $1::bigint) AS is_member), " +
-	"room AS (SELECT id, access FROM rooms WHERE id = $2::bigint), " +
+	"room AS (SELECT id, access, encrypted FROM rooms WHERE id = $2::bigint), " +
 	"target AS (SELECT id FROM users WHERE id = $3::bigint), "
 
 // The final select. members is how the members after the action are built from the snapshot.
@@ -63,6 +68,7 @@ DATABASE_ROOM_ADD_MEMBER_SQL ::
 	"CASE WHEN (SELECT is_admin FROM actor) THEN 'unknown_room' ELSE 'not_member' END " +
 	"WHEN NOT (SELECT is_admin FROM actor) AND NOT (SELECT is_member FROM actor) " +
 	"THEN 'not_member' " +
+	"WHEN (SELECT encrypted FROM room) THEN 'encrypted_room' " +
 	"WHEN (SELECT access FROM room) = 1 THEN 'public_room' " +
 	"WHEN (SELECT access FROM room) = 3 AND NOT (SELECT is_admin FROM actor) " +
 	"THEN 'admin_required' " +
@@ -105,6 +111,7 @@ DATABASE_ROOM_LEAVE_SQL ::
 	"decision AS (SELECT CASE " +
 	"WHEN NOT EXISTS (SELECT 1 FROM room) OR NOT (SELECT is_member FROM actor) " +
 	"THEN 'not_member' " +
+	"WHEN (SELECT encrypted FROM room) THEN 'encrypted_room' " +
 	"WHEN (SELECT access FROM room) = 1 THEN 'public_room' " +
 	"ELSE 'applied' END AS outcome), " +
 	DATABASE_ROOM_MEMBER_DELETE_SQL
@@ -141,6 +148,8 @@ databaseRoomMemberOutcomeFromText :: proc(
 		return .UnknownUser, true
 	case "public_room":
 		return .PublicRoom, true
+	case "encrypted_room":
+		return .EncryptedRoom, true
 	}
 	return .NotMember, false
 }
@@ -155,6 +164,15 @@ databaseExecuteRoomMemberAction :: proc(
 	case .Add:
 		query = DATABASE_ROOM_ADD_MEMBER_SQL
 	case .Remove:
+		// Protocol 18: removing someone from an encrypted room goes through its member log, as
+		// an unsigned Remove entry the server writes (database_room_log.odin).
+		encrypted, encryptedOK := databaseRoomIsEncrypted(conn, request.roomId)
+		if !encryptedOK {
+			return databaseConnectionError(conn)
+		}
+		if encrypted {
+			return databaseExecuteServerRoomLogRemove(conn, request)
+		}
 		query = DATABASE_ROOM_REMOVE_MEMBER_SQL
 	case .Leave:
 		query = DATABASE_ROOM_LEAVE_SQL
@@ -212,8 +230,7 @@ DATABASE_ADMIN_LIST_ROOMS_SQL ::
 	"WITH actor AS (SELECT EXISTS (SELECT 1 FROM user_server_roles usr " +
 	"JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS ok) " +
-	"SELECT r.id::text, r.name, r.description, r.room_type::text, r.access::text, " +
-	"r.history_visibility::text, EXISTS (SELECT 1 FROM room_members rm " +
+	"SELECT " + DATABASE_ROOM_SUMMARY_COLUMNS_SQL + ", EXISTS (SELECT 1 FROM room_members rm " +
 	"WHERE rm.room_id = r.id AND rm.user_id = $1::bigint)::text, " +
 	"(SELECT count(*) FROM room_members rm WHERE rm.room_id = r.id)::text, a.ok::text " +
 	"FROM actor a LEFT JOIN rooms r ON a.ok ORDER BY r.name"
@@ -234,7 +251,7 @@ databaseExecuteAdminRoomList :: proc(
 		return databaseResultError(&result)
 	}
 	list := common.DatabaseAdminRoomListResult {
-		isAdmin = databaseGetBool(result, 0, 8),
+		isAdmin = databaseGetBool(result, 0, 10),
 	}
 	if !list.isAdmin {
 		return databaseSuccess(list)
@@ -245,12 +262,12 @@ databaseExecuteAdminRoomList :: proc(
 		if !roomOK {
 			continue
 		}
-		memberCount, _ := databaseGetInt(result, row, 7)
+		memberCount, _ := databaseGetInt(result, row, 9)
 		append(
 			&list.rooms,
 			common.AdminRoomSummary {
 				room = room,
-				isMember = databaseGetBool(result, row, 6),
+				isMember = databaseGetBool(result, row, 8),
 				memberCount = memberCount,
 			},
 		)

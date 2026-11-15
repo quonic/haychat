@@ -424,6 +424,18 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		MainRouterState_sendVoiceJoinRejected(pm, state, peerID, roomID, VOICE_REJECT_TEXT_ONLY)
 		return
 	}
+	// Protocol 18: voice in an encrypted room would be readable by the server; encrypted voice
+	// is a later package (E6), so joins are refused until then.
+	if members.encrypted {
+		MainRouterState_sendVoiceJoinRejected(
+			pm,
+			state,
+			peerID,
+			roomID,
+			common.ENCRYPTED_ROOM_VOICE_MESSAGE,
+		)
+		return
+	}
 
 	// The account's other session in voice, if any (one at most, but the scan does not rely on
 	// it). The decisions come first, before anything changes, so a refused join leaves every

@@ -104,6 +104,15 @@ State :: struct {
 	// prints after the event that caused them, recorded only while recordDirectNotes is set.
 	recordDirectNotes:              bool,
 	directNotes:                    [dynamic]DirectNote,
+	// Encrypted rooms' member logs per server (room_log.odin): verified state, creates and
+	// changes waiting for keys, the rooms the harness reports on (recordRoomLogNotes), and a
+	// hook E4b sets to hear about verified changes.
+	roomLogs:                       [dynamic]ServerRoomLogs,
+	roomLogPendingCreates:          [dynamic]RoomLogPendingCreate,
+	roomLogPendingActions:          [dynamic]RoomLogPendingAction,
+	recordRoomLogNotes:             bool,
+	roomLogNotes:                   [dynamic]RoomLogNote,
+	roomLogChanged:                 RoomLogChangedProc,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -234,6 +243,7 @@ State_deinit :: proc(state: ^State) {
 	VoiceSettingsPanel_deinit(&state.voicePanel)
 	ContextMenuState_deinit(&state.contextMenu)
 	State_e2eeDeinit(state)
+	State_roomLogDeinit(state)
 	delete(state.directNotes)
 	state^ = {}
 }

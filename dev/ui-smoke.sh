@@ -48,6 +48,10 @@ set -euo pipefail
 #      encryption", accepts the first-time confirmation, sees the red "Unencrypted: the server
 #      can read this" label, and sends with "Send unencrypted"; her message shows the
 #      "Unencrypted" badge and dave receives it unencrypted with a valid signature.
+#  11. encrypted rooms (protocol 18): alice opens the room form, picks Admin invite, sees
+#      "Encrypt this room" on by default with herself checked as a manager, and creates
+#      the room. Its Members page opens with the verified member list: alice as member and
+#      manager, the Managers and Admins sections, and the room's SQL row is encrypted.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -123,6 +127,7 @@ ban_reason="ui smoke ban $run_tag"
 access_room="ui-invite-$run_tag"
 nickname_dave="ui-dave-$run_tag"
 plain_message="ui smoke unencrypted to dave $run_tag"
+encrypted_room="ui-secret-$run_tag"
 
 # run_sql SQL: runs statements against the server's database, like make_admin.
 run_sql() {
@@ -346,6 +351,10 @@ click "e.g. random"
 type "$access_room"
 click-id room-access 3
 wait-text "Only admins add and remove people. Members can leave." 5000
+# An invite room is encrypted by default (protocol 18); this one is the plain invite room.
+wait-text "Encrypt this room: on" 5000
+click-id room-editor-encrypt
+wait-text "Encrypt this room: off" 5000
 screenshot $screenshot_dir/28-access-room-form.bmp
 click-id room-editor-submit
 wait-text "# $access_room" 10000
@@ -387,6 +396,24 @@ click "Send unencrypted"
 wait-text "$plain_message" 10000
 wait-text "Unencrypted" 5000
 screenshot $screenshot_dir/34-fallback-sent.bmp
+# Encrypted rooms (protocol 18): Encrypt this room is on by default for an invite room, with
+# alice checked as a manager (bob is no longer an admin); the Members page that opens shows the
+# verified member list.
+click "+ New room"
+click "e.g. random"
+type "$encrypted_room"
+click-id room-access 3
+wait-text "Encrypt this room: on" 5000
+# The managers list makes the form taller than the window: it and Create are below the fold.
+scroll 760 400 100
+wait-text "[x] $nickname_alice (you)" 5000
+screenshot $screenshot_dir/35-encrypted-room-form.bmp
+click-id room-editor-submit
+wait-text "Members of #$encrypted_room" 10000
+wait-text "Managers" 10000
+wait-text "$nickname_alice (you) (manager) · You" 10000
+screenshot $screenshot_dir/36-encrypted-room-members.bmp
+click "Close"
 quit
 EOF
 
@@ -463,8 +490,12 @@ again_line=$(wait_for_match bob "$room_pattern" "$first_room_line") ||
 echo "    bob< $again_line"
 
 echo "==> [ui] bob posts in alice's new room, alice marks it read from the channel's menu"
-# A second session of alice's account sees the read marker the server sends every session.
-start_client alice-watch "$nickname_alice" alice
+# A second session of alice's account sees the read marker the server sends every session. It
+# runs on a copy of her profile (same identity key): two clients writing one key store would
+# overwrite each other's pins (an encrypted room's head, alice's verification of bob).
+cp -r -- "$work_dir/profile-alice" "$work_dir/profile-alicewatch"
+rm -rf -- "$work_dir/profile-alicewatch/haychat/keys"
+start_client alice-watch "$nickname_alice" alicewatch
 expect_connected alice-watch
 expect_ok bob send "$admin_room_id" "$unread_message"
 marker_pattern="^\\{\"event\":\"read_marker\",.*\"kind\":\"room\","
@@ -539,6 +570,16 @@ plain_line=$(wait_for_match dave "$plain_pattern") ||
 	fail "[e2ee] dave did not receive alice's signed plaintext message"
 echo "    dave< $plain_line"
 
+echo "==> [ui] alice created an encrypted room from the form, signed by her as its manager"
+encrypted_row=$(run_sql "SELECT r.encrypted || ':' || r.log_version || ':' ||
+	(SELECT count(*) FROM room_members m WHERE m.room_id = r.id) || ':' ||
+	(SELECT count(*) FROM room_log_managers g WHERE g.room_id = r.id
+		AND g.user_id = $user_alice)
+	FROM rooms r WHERE r.name = '$encrypted_room'")
+# Under --all earlier proofs leave other admins, whom the form names as managers too.
+[[ "$encrypted_row" == "true:1:1:1" ]] ||
+	fail "[e2ee] the encrypted room is not encrypted at version 1 with alice: $encrypted_row"
+
 stop_client alice-watch
 stop_client bob
 stop_client dave
@@ -550,5 +591,5 @@ for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
 	echo "    $shot"
 	written=$((written + 1))
 done
-[[ $written -eq 34 ]] || fail "expected 34 screenshots in $screenshot_dir, found $written"
+[[ $written -eq 36 ]] || fail "expected 36 screenshots in $screenshot_dir, found $written"
 echo "==> [ui] passed"

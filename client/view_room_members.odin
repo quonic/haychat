@@ -1,5 +1,7 @@
 package client
 
+import "../common"
+import "core:fmt"
 import "ui"
 
 // A room's Members page (room_members.odin), drawn in the main pane like the room form: the
@@ -9,7 +11,9 @@ import "ui"
 //
 // Widget IDs for GUI automation (server ID, room ID, then the account's user ID):
 // room-members-remove, room-members-add, room-members-leave and room-members-edit (server and
-// room ID), room-members-close.
+// room ID), room-members-close. Encrypted rooms (protocol 18) add Managers and Admins sections
+// with room-members-make-manager and room-members-remove-manager (user ID), and
+// room-members-access (server and room ID) for a manager who is an admin.
 
 @(private = "file")
 roomMembersWrapped :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string, color: ui.Color) {
@@ -29,8 +33,102 @@ RoomMembersClick :: struct {
 		Leave,
 		Edit,
 		Close,
+		MakeManager,
+		RemoveManager,
+		SetAccess,
 	},
 	userID: int,
+}
+
+// An encrypted room's row label: the name, (manager), and the key state.
+@(private = "file")
+roomMembersEncryptedLabel :: proc(row: RoomMemberRow) -> RoomMemberRow {
+	labelled := row
+	manager := row.isManager ? " (manager)" : ""
+	if len(row.keyState) > 0 {
+		labelled.label = fmt.tprintf("%s%s · %s", row.label, manager, row.keyState)
+	} else {
+		labelled.label = fmt.tprintf("%s%s", row.label, manager)
+	}
+	return labelled
+}
+
+// The Managers and Admins sections of an encrypted room's page, and its access switch.
+@(private = "file")
+roomMembersEncryptedSections :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: RoomMembersView,
+	serverID, roomID: int,
+	click: ^RoomMembersClick,
+) {
+	sectionGap := ui.dp(ctx, ROOM_EDITOR_SECTION_GAP)
+	labelGap := ui.dp(ctx, ROOM_EDITOR_LABEL_GAP)
+	heading :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string) {
+		ui.label(ctx, ui.cutTop(column, ui.lineHeight(ctx)), text, ctx.theme.fgMuted, .Bold)
+	}
+	_ = ui.cutTop(column, sectionGap)
+	heading(ctx, column, "Managers")
+	_ = ui.cutTop(column, labelGap)
+	roomMembersWrapped(
+		ctx,
+		column,
+		"Managers sign who joins and leaves; a manager who is not a member reads nothing.",
+		ctx.theme.fgMuted,
+	)
+	_ = ui.cutTop(column, labelGap)
+	for manager in view.managers {
+		if roomMembersRow(
+			ctx,
+			column,
+			roomMembersEncryptedLabel(manager),
+			ui.idOf("room-members-remove-manager", serverID, roomID, manager.userID),
+			manager.canRemoveManager ? "Remove manager" : "",
+			true,
+			!view.busy,
+		) {
+			click^ = {kind = .RemoveManager, userID = manager.userID}
+		}
+	}
+	_ = ui.cutTop(column, sectionGap)
+	heading(ctx, column, "Admins")
+	_ = ui.cutTop(column, labelGap)
+	roomMembersWrapped(
+		ctx,
+		column,
+		"Admins run the server. Only those who are managers can add people here.",
+		ctx.theme.fgMuted,
+	)
+	_ = ui.cutTop(column, labelGap)
+	for admin in view.admins {
+		if roomMembersRow(
+			ctx,
+			column,
+			roomMembersEncryptedLabel(admin),
+			ui.idOf("room-members-make-manager", serverID, roomID, admin.userID),
+			admin.canMakeManager ? "Make manager" : "",
+			false,
+			!view.busy,
+		) {
+			click^ = {kind = .MakeManager, userID = admin.userID}
+		}
+	}
+	if view.canSetAccess {
+		_ = ui.cutTop(column, sectionGap)
+		rect := ui.cutTop(column, ui.dp(ctx, ROW_HEIGHT))
+		rect.w = min(rect.w, ui.dp(ctx, 260))
+		label := view.otherAccess == .MemberInvite ? "Let members invite" : "Only admins invite"
+		if ui.button(
+			   ctx,
+			   ui.idOf("room-members-access", serverID, roomID),
+			   rect,
+			   label,
+			   ui.ButtonOptions{align = .Center, background = ctx.theme.hover},
+		   ) &&
+		   !view.busy {
+			click^ = {kind = .SetAccess}
+		}
+	}
 }
 
 // One account's row: online dot, name, and an optional button at the right.
@@ -170,6 +268,10 @@ viewRoomMembers :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Co
 	}
 
 	_ = ui.cutTop(&column, sectionGap)
+	if len(view.logWarning) > 0 {
+		roomMembersWrapped(ctx, &column, view.logWarning, ctx.theme.danger)
+		_ = ui.cutTop(&column, sectionGap)
+	}
 	ui.label(
 		ctx,
 		ui.cutTop(&column, ui.lineHeight(ctx)),
@@ -178,6 +280,10 @@ viewRoomMembers :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Co
 		.Bold,
 	)
 	_ = ui.cutTop(&column, labelGap)
+	if view.encrypted && len(view.addNote) > 0 {
+		roomMembersWrapped(ctx, &column, view.addNote, ctx.theme.fgMuted)
+		_ = ui.cutTop(&column, labelGap)
+	}
 	if view.loading {
 		roomMembersWrapped(ctx, &column, "Loading the member list…", ctx.theme.fgMuted)
 	} else if len(view.members) == 0 {
@@ -188,7 +294,7 @@ viewRoomMembers :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Co
 		if roomMembersRow(
 			ctx,
 			&column,
-			member,
+			view.encrypted ? roomMembersEncryptedLabel(member) : member,
 			ui.idOf("room-members-remove", serverID, roomID, member.userID),
 			label,
 			true,
@@ -196,6 +302,10 @@ viewRoomMembers :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Co
 		) {
 			click = {kind = .Remove, userID = member.userID}
 		}
+	}
+
+	if view.encrypted && len(view.logWarning) == 0 && !view.loading {
+		roomMembersEncryptedSections(ctx, &column, view, serverID, roomID, &click)
 	}
 
 	if view.canAdd && !view.loading {
@@ -252,5 +362,15 @@ viewRoomMembers :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Co
 		State_openRoomEditor(state, roomID)
 	case .Close:
 		State_closeRoomEditor(state)
+	case .MakeManager:
+		State_roomLogMemberChange(state, serverID, roomID, .AddManager, click.userID)
+	case .RemoveManager:
+		State_roomLogMemberChange(state, serverID, roomID, .RemoveManager, click.userID)
+	case .SetAccess:
+		access := common.RoomLogAccess.AdminInvite
+		if view.otherAccess == .MemberInvite {
+			access = .MemberInvite
+		}
+		State_roomLogMemberChange(state, serverID, roomID, .SetAccess, 0, access = access)
 	}
 }

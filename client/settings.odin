@@ -348,6 +348,7 @@ State_removeServerRoomCache :: proc(state: ^State, serverID: int) {
 	// its key store is loaded again (pins are per server key, keystore.odin).
 	State_removeServerDirectCache(state, serverID)
 	State_removeServerE2EE(state, serverID)
+	State_removeServerRoomLogs(state, serverID)
 }
 
 // A live transport can be kept across a settings change only if nothing it connects with

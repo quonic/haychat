@@ -78,6 +78,9 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerUserKeyChanged, 164},
 	{.ClientSealedDirectMessage, 165},
 	{.ServerSealedDirectMessage, 166},
+	{.ClientAppendRoomLog, 167},
+	{.ClientFetchRoomLog, 168},
+	{.ServerRoomLog, 169},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -411,7 +414,7 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsSeventeenForEncryptedDirectMessages :: proc(t: ^testing.T) {
+testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
@@ -423,15 +426,103 @@ testProtocolVersionIsSeventeenForEncryptedDirectMessages :: proc(t: ^testing.T) 
 	// ServerUserKeys, ServerUserKeyChanged) and UserSummary.identityPublicKey and
 	// hasEncryptionKey; 17 added encrypted direct messages (ClientSealedDirectMessage,
 	// ServerSealedDirectMessage), the envelope, client message ID and signature fields of
-	// stored messages and conversation summaries, and the signed plaintext fallback, so peers
-	// on 16 or older cannot talk to this build.
+	// stored messages and conversation summaries, and the signed plaintext fallback; 18 added
+	// encrypted rooms and their member log (ClientAppendRoomLog, ClientFetchRoomLog,
+	// ServerRoomLog, RoomSummary.encrypted and logVersion, ClientCreateRoomPayload.encrypted,
+	// ClientEditRoomPayload.encrypted), so peers on 17 or older cannot talk to this build.
 	assert(
-		protocolVersion == 17,
+		protocolVersion == 18,
 		fmt.tprintf(
-			"expected protocol version 17 for encrypted direct messages, got %d",
+			"expected protocol version 18 for encrypted room logs, got %d",
 			protocolVersion,
 		),
 	)
+}
+
+// The protocol 18 log payloads carry entries as byte strings, unchanged, and own them once
+// decoded.
+@(test)
+testRoomLogPayloadsCarryEntriesAsByteStrings :: proc(t: ^testing.T) {
+	_ = t
+	first := make([]u8, 210)
+	defer delete(first)
+	second := make([]u8, 230)
+	defer delete(second)
+	for index in 0 ..< len(first) {
+		first[index] = u8(index * 5 + 1)
+	}
+	for index in 0 ..< len(second) {
+		second[index] = u8(index * 3 + 2)
+	}
+	{
+		original := ClientAppendRoomLogPayload {
+			roomId = 7,
+			entry  = first,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientAppendRoomLogPayload encoding to succeed")
+		defer delete(encoded)
+		assert(protocolTestContains(encoded, first), "expected the entry verbatim")
+		decoded: ClientAppendRoomLogPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected append decoding")
+		defer ClientAppendRoomLogPayload_deinit(&decoded)
+		assert(
+			decoded.roomId == 7 && string(decoded.entry) == string(first),
+			fmt.tprintf("expected every field to survive, got room %d", decoded.roomId),
+		)
+	}
+	{
+		entries := make([dynamic][]u8, 0, 2)
+		defer delete(entries)
+		append(&entries, first, second)
+		original := ServerRoomLogPayload {
+			roomId       = 7,
+			afterVersion = 3,
+			entries      = entries,
+			headVersion  = 5,
+			hasMore      = true,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerRoomLogPayload encoding to succeed")
+		defer delete(encoded)
+		assert(
+			protocolTestContains(encoded, first) && protocolTestContains(encoded, second),
+			"expected both entries verbatim",
+		)
+		decoded: ServerRoomLogPayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected room log decoding")
+		defer ServerRoomLogPayload_deinit(&decoded)
+		assert(
+			decoded.roomId == 7 &&
+			decoded.afterVersion == 3 &&
+			decoded.headVersion == 5 &&
+			decoded.hasMore &&
+			len(decoded.entries) == 2 &&
+			string(decoded.entries[0]) == string(first) &&
+			string(decoded.entries[1]) == string(second),
+			fmt.tprintf("expected every field to survive, got %d entries", len(decoded.entries)),
+		)
+	}
+	{
+		original := RoomSummary {
+			id         = 4,
+			name       = "secret",
+			access     = .AdminInvite,
+			encrypted  = true,
+			logVersion = 9,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected RoomSummary encoding to succeed")
+		defer delete(encoded)
+		decoded: RoomSummary
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected RoomSummary decoding")
+		defer delete(decoded.name)
+		defer delete(decoded.description)
+		assert(
+			decoded.encrypted && decoded.logVersion == 9,
+			"expected encrypted and logVersion to survive",
+		)
+	}
 }
 
 // The protocol 17 payloads survive CBOR: the envelope is one byte string whose bytes appear

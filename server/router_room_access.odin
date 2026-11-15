@@ -54,6 +54,7 @@ MainRouterState_enqueueRoomMemberAction :: proc(
 			actorUserId = session.authenticatedUserID,
 			roomId = roomID,
 			targetUserId = targetUserID,
+			serverIdentityPublicKey = state.serverIdentityPublicKey,
 		},
 		PendingDBRequest {
 			requestType = .RoomMemberAction,
@@ -148,6 +149,10 @@ MainRouterState_roomMemberRefusalMessage :: proc(
 		return ROOM_UNKNOWN_USER_MESSAGE
 	case .PublicRoom:
 		return action == .Leave ? ROOM_PUBLIC_LEAVE_MESSAGE : ROOM_PUBLIC_ADD_MESSAGE
+	case .EncryptedRoom:
+		return common.ROOM_LOG_REQUIRED_MESSAGE
+	case .LogDamaged:
+		return common.ROOM_LOG_DAMAGED_MESSAGE
 	case .Applied:
 	}
 	return ""
@@ -286,6 +291,20 @@ MainRouterState_handleRoomMemberActionResult :: proc(
 				request.roomID,
 				request.targetUserID,
 				VOICE_LEFT_REMOVED_FROM_ROOM,
+			)
+		}
+		// Protocol 18: the unsigned Remove entry the server wrote for an encrypted room.
+		if len(result.logEntry) > 0 {
+			MainRouterState_sendRoomLogEntry(
+				pm,
+				state,
+				request.roomID,
+				result.logVersion,
+				result.logEntry,
+				result.memberUserIDs[:],
+				result.managerUserIDs[:],
+				request.targetUserID,
+				request.peerID,
 			)
 		}
 	case .Leave:

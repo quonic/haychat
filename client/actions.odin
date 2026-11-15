@@ -496,6 +496,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_roomMembersProtocolError(state, serverID)
 	State_adminProtocolError(state, serverID, message)
 	State_e2eeProtocolError(state, serverID)
+	State_roomLogsProtocolError(state, serverID)
 	State_setChatStatus(state, message)
 }
 
@@ -516,6 +517,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		)
 	case .RoomListReceived:
 		State_receiveRoomList(state, event.serverID, &event.rooms)
+		State_roomLogsRoomsListed(state, event.serverID)
 	case .RoomHistoryReceived:
 		State_receiveRoomHistory(
 			state,
@@ -537,6 +539,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .RoomDeleted:
 		State_roomDeleted(state, event.serverID, event.roomID)
 	case .RoomCreated:
+		// An encrypted room's Create entry is signed first; roomCreated takes the room.
+		State_roomLogRoomCreated(state, event.serverID, event.room)
 		State_roomCreated(state, event.serverID, &event.room, event.isMember)
 	case .ProtocolError:
 		State_transportProtocolError(state, event.serverID, event.message)
@@ -601,6 +605,9 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_receiveRoomMembers(state, event.serverID, event.roomID, &event.userIDs)
 	case .AdminRoomsReceived:
 		State_receiveAdminRooms(state, event.serverID, &event.adminRooms)
+		State_roomLogsRoomsListed(state, event.serverID)
+	case .RoomLogReceived:
+		State_receiveRoomLog(state, event)
 	case .RoomMemberResult:
 		State_roomMemberResult(
 			state,

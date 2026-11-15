@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 17
+protocolVersion: ProtocolVersion = 18
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -364,6 +364,11 @@ MessageType :: enum {
 	// fallback (4.6).
 	ClientSealedDirectMessage, // ClientSealedDirectMessagePayload: an encrypted direct message
 	ServerSealedDirectMessage, // ServerSealedDirectMessagePayload: a stored encrypted one
+	// Encrypted rooms and their member log (protocol 18, e2ee-design.md 6.1-6.2), appended so no
+	// existing wire value moves.
+	ClientAppendRoomLog, // ClientAppendRoomLogPayload: a signed member log entry
+	ClientFetchRoomLog, // ClientFetchRoomLogPayload: a room's member log after a version
+	ServerRoomLog, // ServerRoomLogPayload: log entries, the answer and the live fan-out
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -513,6 +518,12 @@ RoomSummary :: struct {
 	// them.
 	access:            RoomAccess,
 	historyVisibility: RoomHistoryVisibility,
+	// Encrypted (protocol 18): fixed at creation; an encrypted room is never Public. logVersion
+	// is the version of the newest entry the server stored in the room's member log (0 for an
+	// unencrypted room, and for an encrypted one whose creator has not appended Create yet). It
+	// tells a client whether its verified log is behind; it proves nothing (e2ee-design.md 6.2).
+	encrypted:         bool,
+	logVersion:        int,
 }
 
 ClientListRoomsPayload :: struct {}
@@ -558,8 +569,16 @@ ServerRoomHistoryPayload :: struct {
 // room includes every account. An invite room includes only its creator, and only when
 // creatorJoins is set: an admin who clears it creates a room they are not a member of, which
 // they still manage (add, remove, edit, delete) from the Admin section. CBOR leaves a missing
-// bool false, so clients always send creatorJoins (the create form starts with it on). Later
-// fields (E4's encrypted) are appended after these.
+// bool false, so clients always send creatorJoins (the create form starts with it on).
+//
+// Encrypted rooms (protocol 18, e2ee-design.md 6.1): encrypted needs Member invite or Admin
+// invite (a Public one is refused with ENCRYPTED_ROOM_PUBLIC_MESSAGE). The server creates the
+// room with no members at all and answers ServerCreateRoom (isMember false, logVersion 0): the
+// room ID is part of every signed log entry, so the creator's client can sign the log's Create
+// entry only now. It sends it with ClientAppendRoomLog; that entry names the managers and says
+// whether the creator joins (creatorJoins here is ignored for an encrypted room), and the
+// server adds the creator to room_members from it. Until then the room has no members and
+// takes no messages; an admin can delete it.
 ClientCreateRoomPayload :: struct {
 	name:              string,
 	description:       string,
@@ -567,17 +586,24 @@ ClientCreateRoomPayload :: struct {
 	access:            RoomAccess,
 	historyVisibility: RoomHistoryVisibility,
 	creatorJoins:      bool,
+	encrypted:         bool,
 }
 
 // access (protocol 15) changes the room's mode; the history setting cannot change. Switching a
 // room to Public adds every account to it (each gets ServerRoomMembershipChanged); switching
 // away from Public keeps every member.
+//
+// encrypted (protocol 18) must be the room's own flag, which never changes: an edit that would
+// clear or set it is refused with ENCRYPTED_ROOM_FLAG_MESSAGE. An encrypted room's access
+// changes only through a signed SetAccess log entry, so an edit with another access is refused
+// with ENCRYPTED_ROOM_ACCESS_MESSAGE.
 ClientEditRoomPayload :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
 	roomType:    RoomType,
 	access:      RoomAccess,
+	encrypted:   bool,
 }
 
 ClientDeleteRoomPayload :: struct {
@@ -663,6 +689,82 @@ ServerAdminRoomsPayload_deinit :: proc(payload: ^ServerAdminRoomsPayload) {
 	delete(payload.rooms)
 	payload.rooms = nil
 }
+
+// Encrypted rooms and their member log (protocol 18, e2ee-design.md 6.1, 6.2). A log entry is
+// common/e2ee.odin's RoomLogEntry binary layout, carried as a CBOR byte string and stored byte
+// for byte, so its signed bytes never depend on a CBOR encoder.
+//
+// The server validates every appended entry with RoomLogState_validate against the head it
+// stored (it has no pins: every identity key an entry names must be the named account's
+// users.public_key), applies its own rules of design 5.1 on top (an Add needs the server's
+// permission, an admin or a member of a Member invite room, as well as a valid signature; a
+// SetAccess needs an admin), and stores it and applies it to room_members in one transaction.
+// An entry whose version or prevHash does not follow the head is refused
+// (ROOM_LOG_CONFLICT_MESSAGE), which serialises concurrent appends: the client fetches the log
+// and tries again. An admin's ClientRemoveRoomMember on an encrypted room makes the server
+// write an unsigned Remove itself. ClientAddRoomMember and ClientLeaveRoom are refused for
+// encrypted rooms (ROOM_LOG_REQUIRED_MESSAGE); their members change only through the log.
+//
+// The server stores what clients sign but proves nothing by it: clients replay the log against
+// their own pins and refuse a log that forks or rolls back what they verified before.
+
+// ClientAppendRoomLog: one entry, signed by the requester (its actorUserId must be the
+// session's account). Every accepted entry is fanned out as ServerRoomLog; refusals are
+// ServerProtocolError with a sentence.
+ClientAppendRoomLogPayload :: struct {
+	roomId: int,
+	entry:  []u8,
+}
+
+ClientAppendRoomLogPayload_deinit :: proc(payload: ^ClientAppendRoomLogPayload) {
+	delete(payload.entry)
+	payload.entry = nil
+}
+
+// ClientFetchRoomLog: the entries after afterVersion (0 for the whole log), at most
+// ROOM_LOG_FETCH_MAX_ENTRIES of them. Allowed to the room's members, its managers (named by
+// the log) and admins; anyone else gets "Not a room member", whether the room exists or not.
+ClientFetchRoomLogPayload :: struct {
+	roomId:       int,
+	afterVersion: int,
+}
+
+// ServerRoomLog: entries afterVersion+1 .. afterVersion+len(entries), in order, and the
+// server's head version. The answer to ClientFetchRoomLog (hasMore when more entries follow
+// the last one sent), and the fan-out of each appended entry (afterVersion its version - 1) to
+// every session of the room's members and managers after it, of the account it removed or
+// that left, and to the session that sent it. entries and each entry are owned once decoded.
+ServerRoomLogPayload :: struct {
+	roomId:       int,
+	afterVersion: int,
+	entries:      [dynamic][]u8,
+	headVersion:  int,
+	hasMore:      bool,
+}
+
+ServerRoomLogPayload_deinit :: proc(payload: ^ServerRoomLogPayload) {
+	for entry in payload.entries {
+		delete(entry)
+	}
+	delete(payload.entries)
+	payload.entries = nil
+}
+
+ROOM_LOG_FETCH_MAX_ENTRIES :: 128
+
+ENCRYPTED_ROOM_PUBLIC_MESSAGE :: "Public rooms cannot be encrypted"
+ENCRYPTED_ROOM_FLAG_MESSAGE :: "A room's encryption cannot change after it is created"
+ENCRYPTED_ROOM_ACCESS_MESSAGE :: "An encrypted room's access changes through its member list"
+ENCRYPTED_ROOM_FULL_MESSAGE :: "This encrypted room is full"
+// Until sender chains (E4b), nothing is ever stored as plaintext in an encrypted room.
+ENCRYPTED_ROOM_CHAT_MESSAGE :: "Encrypted room messages arrive in a later update"
+ENCRYPTED_ROOM_VOICE_MESSAGE :: "voice is not available in encrypted rooms yet"
+ROOM_LOG_REQUIRED_MESSAGE :: "This room is encrypted: its members change through its member list"
+ROOM_LOG_INVALID_MESSAGE :: "Invalid member list entry"
+ROOM_LOG_CONFLICT_MESSAGE :: "The member list changed on the server; try again"
+ROOM_LOG_NOT_AUTHORIZED_MESSAGE :: "You may not make this change to the member list"
+ROOM_LOG_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
+ROOM_LOG_DAMAGED_MESSAGE :: "This room's member list is damaged on the server"
 
 // Direct messages are per server, between any two accounts. Since protocol 17 (e2ee-design.md
 // 4.5, 4.6) a message is either end-to-end encrypted (an envelope of common/e2ee.odin's binary
@@ -1264,6 +1366,8 @@ DatabaseQueryRequest :: union {
 	DatabaseAdminRoomListRequest,
 	DatabasePublishEncryptionKeyRequest,
 	DatabaseFetchUserKeysRequest,
+	DatabaseAppendRoomLogRequest,
+	DatabaseFetchRoomLogRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -1312,15 +1416,20 @@ DatabaseCreateRoomRequest :: struct {
 	access:            RoomAccess,
 	historyVisibility: RoomHistoryVisibility,
 	creatorJoins:      bool,
+	// Protocol 18: an encrypted room starts with no members; its log's Create adds the creator.
+	encrypted:         bool,
 }
 
-// Switching access to Public adds every account in the same statement.
+// Switching access to Public adds every account in the same statement. encrypted (protocol
+// 18) must match the room's flag, and an encrypted room's access cannot change here; the
+// statement refuses both (DatabaseRoomMutationResult.refusal).
 DatabaseEditRoomRequest :: struct {
 	roomId:      int,
 	name:        string,
 	description: string,
 	roomType:    RoomType,
 	access:      RoomAccess,
+	encrypted:   bool,
 }
 
 DatabaseDeleteRoomRequest :: struct {
@@ -1338,11 +1447,16 @@ RoomMemberAction :: enum u8 {
 // One statement checks who actorUserId is (admin, member) against the room's access mode, and
 // for Add and Remove that targetUserId exists, and makes the change; Leave and Fetch ignore
 // targetUserId (Leave acts on the actor).
+//
+// Protocol 18: Add and Leave are refused for an encrypted room (EncryptedRoom); a Remove of a
+// member of an encrypted room makes the worker write the log's unsigned Remove entry and apply
+// it in one transaction, for which it replays the stored log against serverIdentityPublicKey.
 DatabaseRoomMemberActionRequest :: struct {
-	action:       RoomMemberAction,
-	actorUserId:  int,
-	roomId:       int,
-	targetUserId: int,
+	action:                  RoomMemberAction,
+	actorUserId:             int,
+	roomId:                  int,
+	targetUserId:            int,
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
 }
 
 // Every admin's view of every room.
@@ -1425,6 +1539,24 @@ DatabaseFetchUserKeysRequest :: struct {
 	userIds: [dynamic]int,
 }
 
+// Protocol 18: one member log entry (owned) that actorUserId sent. The worker locks the room,
+// replays its stored log against serverIdentityPublicKey, validates the entry as the next one
+// (every identity key it names must be the named account's users.public_key), checks the
+// server's own rules, and stores and applies it in one transaction.
+DatabaseAppendRoomLogRequest :: struct {
+	actorUserId:             int,
+	roomId:                  int,
+	entry:                   []u8,
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+}
+
+// Protocol 18: the entries after afterVersion, for a member, a manager or an admin.
+DatabaseFetchRoomLogRequest :: struct {
+	actorUserId:  int,
+	roomId:       int,
+	afterVersion: int,
+}
+
 // message holds the error text when success is false. All strings and arrays are owned.
 DatabaseQueryResponse :: struct {
 	success: bool,
@@ -1450,6 +1582,8 @@ DatabaseQueryResult :: union {
 	DatabaseAdminRoomListResult,
 	DatabasePublishEncryptionKeyResult,
 	DatabaseFetchUserKeysResult,
+	DatabaseAppendRoomLogResult,
+	DatabaseFetchRoomLogResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -1478,17 +1612,21 @@ DatabaseRoomListResult :: struct {
 
 // roomFound is false when no room has the requested ID; roomType is the room's type
 // (protocol 14), which the voice join check reads.
+// encrypted (protocol 18) refuses voice joins until encrypted voice exists (E6).
 DatabaseRoomMemberListResult :: struct {
 	userIDs:   [dynamic]int,
 	roomFound: bool,
 	roomType:  RoomType,
+	encrypted: bool,
 }
 
 // When isMember is false, or chatDisabled is true (a voice-only room, protocol 14), nothing was
 // stored and the other fields are empty.
+// encryptedRoom (protocol 18): the room is encrypted, which takes no plaintext message.
 DatabasePostRoomChatMessageResult :: struct {
 	isMember:         bool,
 	chatDisabled:     bool,
+	encryptedRoom:    bool,
 	storedMessage:    StoredChatMessage,
 	recipientUserIDs: [dynamic]int,
 }
@@ -1505,11 +1643,22 @@ DatabaseUserServerAdminResult :: struct {
 
 // Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
 // lists the accounts an edit to Public added.
+// Why an edit was refused (protocol 18); None for every other mutation.
+RoomEditRefusal :: enum u8 {
+	None,
+	EncryptionFlag, // The edit would set or clear the room's encrypted flag
+	EncryptedAccess, // The edit would change an encrypted room's access
+}
+
+// Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
+// lists the accounts an edit to Public added. Protocol 18: refusal says why an edit of an
+// existing room changed nothing (changed false).
 DatabaseRoomMutationResult :: struct {
 	room:         RoomSummary,
 	changed:      bool,
 	isMember:     bool,
 	addedUserIDs: [dynamic]int,
+	refusal:      RoomEditRefusal,
 }
 
 // How a room member statement ended (protocol 15). Applied means the rules passed (changed says
@@ -1521,15 +1670,24 @@ DatabaseRoomMemberOutcome :: enum u8 {
 	UnknownRoom, // To admins: no room has the ID
 	UnknownUser, // No account has the target ID
 	PublicRoom, // An add to, or a leave of, a Public room
+	EncryptedRoom, // Protocol 18: an add or leave of an encrypted room (use the member log)
+	LogDamaged, // Protocol 18: an encrypted room's stored log does not replay
 }
 
 // memberUserIDs (owned) are the room's members after the action, ascending; access is the
 // room's mode. Both are set only when outcome is Applied.
+//
+// Protocol 18: a removal from an encrypted room also returns the unsigned Remove entry the
+// server wrote (logEntry, owned, empty when nothing changed), its version, and the managers the
+// log names (managerUserIDs, owned), who get the entry too.
 DatabaseRoomMemberActionResult :: struct {
-	outcome:       DatabaseRoomMemberOutcome,
-	changed:       bool,
-	access:        RoomAccess,
-	memberUserIDs: [dynamic]int,
+	outcome:        DatabaseRoomMemberOutcome,
+	changed:        bool,
+	access:         RoomAccess,
+	memberUserIDs:  [dynamic]int,
+	logEntry:       []u8,
+	logVersion:     int,
+	managerUserIDs: [dynamic]int,
 }
 
 // isAdmin false means the requester is not an admin and rooms is empty. rooms is owned.
@@ -1616,6 +1774,42 @@ DatabasePublishEncryptionKeyResult :: struct {
 DatabaseFetchUserKeysResult :: struct {
 	keys:           [dynamic]UserKeyBundle,
 	missingUserIds: [dynamic]int,
+}
+
+// How a member log append ended (protocol 18). Only Applied stored anything.
+RoomLogAppendOutcome :: enum u8 {
+	Applied,
+	NotMember, // No such room, or the requester may not see it
+	NotEncrypted, // The room has no member log
+	Invalid, // The entry does not decode or the log's rules refuse it (logError says which)
+	Conflict, // Its version or prevHash does not follow the stored head
+	NotAuthorized, // The server's own rules refuse it, or its actor is not the requester
+	RoomFull, // An Add past ENCRYPTED_ROOM_MEMBERS_MAX
+	Damaged, // The stored log does not replay
+}
+
+// Set when outcome is Applied: the stored entry (owned), its version and action, its target,
+// whether a room_members row changed, the room's members and managers after it (owned,
+// ascending), and its access after it.
+DatabaseAppendRoomLogResult :: struct {
+	outcome:           RoomLogAppendOutcome,
+	logError:          RoomLogError,
+	entry:             []u8,
+	version:           int,
+	action:            RoomLogAction,
+	targetUserId:      int,
+	membershipChanged: bool,
+	memberUserIDs:     [dynamic]int,
+	managerUserIDs:    [dynamic]int,
+	access:            RoomAccess,
+}
+
+// outcome is Applied, NotMember or NotEncrypted. entries (owned) are in version order.
+DatabaseFetchRoomLogResult :: struct {
+	outcome:     RoomLogAppendOutcome,
+	entries:     [dynamic][]u8,
+	headVersion: int,
+	hasMore:     bool,
 }
 
 ProtocolErrorResponse :: struct {

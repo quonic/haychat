@@ -3,6 +3,7 @@ package client
 import "../common"
 import "core:fmt"
 import "core:slice"
+import "core:strings"
 
 // View models are pure snapshots of State that the immediate-mode view draws from. Keeping
 // them free of SDL lets tests check what the UI would show without opening a window.
@@ -28,6 +29,9 @@ RoomView :: struct {
 	// False for a voice-only room (protocol 14): no composer, voiceOnlyNote instead.
 	allowsChat:       bool,
 	voiceOnlyNote:    string,
+	// Protocol 18: an encrypted room (no composer yet), and whether its member log failed.
+	encrypted:        bool,
+	logFailed:        bool,
 	hasOlder:         bool,
 	isLoadingHistory: bool,
 	lines:            []TranscriptLine,
@@ -55,6 +59,36 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	if !view.allowsChat {
 		view.voiceOnlyNote = ROOM_VOICE_ONLY_NOTE
 	}
+	// Protocol 18: an encrypted room shows its verified member list changes as event lines and
+	// takes no message until sender chains exist (E4b); a log that failed verification says so
+	// where the composer would be.
+	logLines: []TranscriptLine
+	if view.hasSelectedRoom &&
+	   State_roomIsEncrypted(state, state.selected_server_id, state.selected_channel_id) {
+		view.encrypted = true
+		view.voiceOnlyNote = ENCRYPTED_ROOM_PENDING_NOTE
+		log := State_findRoomLog(state, state.selected_server_id, state.selected_channel_id)
+		if log != nil && log.status == .Failed {
+			view.voiceOnlyNote = ROOM_LOG_CHANGED_WARNING
+			view.logFailed = true
+		}
+		if log != nil {
+			logLines = make([]TranscriptLine, len(log.events), allocator)
+			for line, index in log.events {
+				logLines[index] = TranscriptLine {
+					messageID   = -line.version,
+					senderLabel = "Member list",
+					content     = strings.clone(
+						State_roomLogEventText(state, state.selected_server_id, line),
+						allocator,
+					),
+					badge       = "🔒",
+					placeholder = true,
+				}
+			}
+		}
+	}
+	view.lines = logLines
 	roomCacheIndex := ServerRoomCache_roomCacheIndex(serverCache^, state.selected_channel_id)
 	if roomCacheIndex < 0 {
 		return
@@ -66,8 +100,10 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	// The worker writes the transport's user ID, so read the UI thread's copy instead.
 	selfUserID := State_selfUserID(state, state.selected_server_id)
 
-	lines := make([]TranscriptLine, len(roomCache.messages), allocator)
-	for message, index in roomCache.messages {
+	lines := make([]TranscriptLine, len(logLines) + len(roomCache.messages), allocator)
+	copy(lines, logLines)
+	for message, messageIndex in roomCache.messages {
+		index := len(logLines) + messageIndex
 		isSelf := selfUserID != 0 && message.senderId == selfUserID
 		// A sender without a user row has no nickname; fall back to the user ID.
 		senderLabel := "You"
@@ -455,7 +491,26 @@ RoomEditorView :: struct {
 	joinLabel:     string,
 	joinNote:      string,
 	joinLocked:    bool,
+	// Encrypt this room (protocol 18, Create): offered for invite modes, checked by default
+	// (Q9); the managers (every admin the client sees, Q10, the creator always) with whether
+	// each can be named yet (a pinned key) and why not. Edit: whether the room is encrypted,
+	// which fixes its access here.
+	showEncrypt:   bool,
+	encrypted:     bool,
+	encryptLabel:  string,
+	encryptNote:   string,
+	managers:      []RoomEditorManagerRow,
+	encryptedRoom: bool,
 	error:         string,
+}
+
+RoomEditorManagerRow :: struct {
+	userID:  int,
+	label:   string, // In the view allocator
+	checked: bool,
+	locked:  bool, // The creator, always a manager
+	ready:   bool, // A pinned key; otherwise note says why it cannot be named
+	note:    string,
 }
 
 // The room types the form offers, in the selector's order.
@@ -515,7 +570,26 @@ buildRoomEditorView :: proc(
 				"You are not a member: you do not see its messages, but you can still add " +
 				"and remove members and delete it from Server settings → Admin."
 		}
+		view.showEncrypt = view.access != .Public
+		view.encrypted = editor.encrypted && view.showEncrypt
+		view.encryptLabel = view.encrypted ? "Encrypt this room: on" : "Encrypt this room: off"
+		switch {
+		case !view.showEncrypt:
+			view.encryptNote = "Public rooms are not encrypted: anyone can join them."
+		case view.encrypted:
+			view.encryptNote =
+				"Messages are end-to-end encrypted. Managers sign who joins; the server cannot " +
+				"add a reader. This cannot be turned off later."
+		case:
+			view.encryptNote = "The server can read this room's messages."
+		}
+		if view.encrypted {
+			view.managers = buildRoomEditorManagerRows(state, allocator)
+		}
 		return
+	}
+	if room := State_knownRoom(state, editor.serverID, editor.roomID); room != nil {
+		view.encryptedRoom = room.encrypted
 	}
 	view.historyLocked = true
 	view.title = "Edit room"
@@ -555,4 +629,40 @@ buildRoomEditorView :: proc(
 		)
 	}
 	return
+}
+
+// The create form's managers (protocol 18): every admin the client sees, this account first.
+buildRoomEditorManagerRows :: proc(
+	state: ^State,
+	allocator := context.temp_allocator,
+) -> []RoomEditorManagerRow {
+	editor := &state.roomEditor
+	selfUserID := State_selfUserID(state, editor.serverID)
+	candidates := State_roomLogAdminCandidates(state, editor.serverID)
+	rows := make([]RoomEditorManagerRow, len(candidates), allocator)
+	for userID, index in candidates {
+		name := State_roomLogUserName(state, editor.serverID, userID)
+		row := RoomEditorManagerRow {
+			userID = userID,
+			locked = userID == selfUserID,
+			ready  = State_roomLogManagerReady(state, editor.serverID, userID),
+		}
+		row.label = strings.clone(name, allocator)
+		if row.locked {
+			row.label = fmt.aprintf("%s (you)", name, allocator = allocator)
+		}
+		row.checked = true
+		for unchecked in editor.uncheckedManagers {
+			if unchecked == userID {
+				row.checked = false
+			}
+		}
+		if !row.ready {
+			info := State_e2eePeerKeyInfo(state, editor.serverID, userID)
+			row.note = info.state == .Unknown ? "Fetching key…" : "No usable key"
+			row.checked = false
+		}
+		rows[index] = row
+	}
+	return rows
 }
