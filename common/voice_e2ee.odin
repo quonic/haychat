@@ -28,7 +28,7 @@ import "core:encoding/endian"
 // or behind the last one it sealed under that key. A new engine (a join, a device change) always
 // makes a new generation. So (key, nonce) never repeats and the nonce needs no random bytes.
 //
-// The Opus bytes are not padded: encrypted rooms encode at constant bitrate instead (design 8).
+// No padding here: the client pads the Opus packet itself to one size per bitrate (design 8).
 // flags is in the AAD, so the server cannot mark a frame as the end of a spurt. keyId names one
 // of the two keys a listener holds per speaker; the AAD binds the full generation.
 //

@@ -313,7 +313,8 @@ AAD   = "haychat-voice-frame-v1" ‖ serverIdentityPublicKey ‖ roomId i64 ‖ 
         ‖ version u8 ‖ keyId u8
 ```
 
-- The Opus bytes are not padded: section 8's constant bitrate does that job.
+- The sealed payload adds no padding of its own: the Opus packet inside is already padded to
+  one size per bitrate with Opus's own padding (section 8).
 - `VOICE_E2EE_OVERHEAD :: 18`, so the encoder's largest packet in an encrypted room is
   `VOICE_OPUS_MAX_BYTES - 18` (494 bytes, far above any HayChat bitrate). The 512-byte wire
   limit does not change.
@@ -400,23 +401,37 @@ starts sending frames once the key is out. Re-join after a reconnect starts a ne
 - A harness command, `voice-key-rotate SECONDS`, shortens the rotation period of 4.1 for this
   process so the live proof can see one; the GUI has no way to change it.
 
-## 8. Length leak and constant bitrate
+## 8. Length leak and fixed-size packets
 
 The encoder runs constrained VBR, so each Opus packet's length follows the speech. Lengths of VBR
 voice packets are known to leak phrases and languages to someone who sees only ciphertext
 (Wright et al., "Spot me if you can", 2008; "Language identification of encrypted VoIP
 traffic", 2007). The server sees every length.
 
-Encrypted rooms therefore encode at **constant bitrate** (`SET_VBR_REQUEST 0`) at the user's
-chosen bitrate: every 20 ms packet of a speaker has the same length. Quality at 24 kbit/s CBR is
-slightly below constrained VBR, and bandwidth while talking is the same. The gate still sends
-nothing in silence, so talk spurts remain visible (section 1). Measure it with
-`dev/voice-manual-test.sh` before release, as AGENTS.md asks for any voice constant.
+Encrypted rooms therefore send **fixed-size packets**. The encoder keeps the constrained VBR of
+unencrypted rooms, but each packet is capped at 1.6 times the bitrate's nominal 20 ms frame
+(bitrate / 400 bytes: 96 bytes at the default 24 kbit/s) and then padded to exactly that size
+with Opus's own padding (`opus_packet_pad`, RFC 6716 section 3.2.5). Every decoder skips that
+padding, so no length field is needed and the audio, in-band FEC included, is the same as in an
+unencrypted room. Every 20 ms packet of a speaker then has the same length at a given bitrate
+(`voiceE2EEPaddedOpusBytes` in `client/voice_engine.odin`). The cost is bandwidth while
+talking: 1.6 times the nominal rate, about 38 kbit/s of Opus at the default. The gate still
+sends nothing in silence, so talk spurts remain visible (section 1).
 
-Rejected: padding Opus packets to a bucket size (it hides less than CBR at the same cost, and
-needs a length field); sending frames continuously through silence (50 frames a second per
-participant to hide who talks, which the server learns from the participant list and timing
-anyway).
+**Constant bitrate, the first implementation (#65), was replaced** after the manual test
+(2026-11-15). With HayChat's in-band FEC tuned for 10 % loss, libopus 1.6 at constant bitrate
+dropped a steady 440 Hz tone by 40 to 50 dB for some 20 ms blocks at 24 kbit/s (the default)
+and 28 kbit/s, and by about 7 dB at 32 kbit/s; 16, 20 and 40 kbit/s and up were clean, and so
+was every bitrate with 5 % loss. The manual test caught it as a tone split in two
+(`dev/voice-manual-test.sh` with `HAYCHAT_VOICE_MANUAL_ENCRYPTED=1`). Constrained VBR capped at
+1.6 times never reached the cap in 60 s of tone at any bitrate from 16 to 64 kbit/s and never
+dipped. `testVoiceE2EEPaddedTonesKeepTheirLevel` pins this: it fails with constant bitrate.
+
+Rejected: constant bitrate (above); constant bitrate with FEC tuned for 5 % loss (clean in
+testing, but it rests on an encoder quirk that may return at other bitrates or libopus
+versions, and FEC is weaker on lossy links); padding to size buckets (still leaks the bucket);
+sending frames continuously through silence (50 frames a second per participant to hide who
+talks, which the server learns from the participant list and timing anyway).
 
 ## 9. Wire and schema changes
 
@@ -438,7 +453,7 @@ The maintainer took every recommendation on 2026-11-15.
 | --- | --- | --- |
 | **V1. Key source** | A fresh random key per generation in a `VoiceKey` envelope, never stored or forwarded (2). | Design 8's derivation from the text chain's `chainKey_0`: no new envelope, but voice gets Full history and fails for holders without index 0. |
 | **V2. Replay freshness** | A clock window: keys older than 1 hour are refused, speakers rotate every 30 minutes (4.3). Costs a dependency on roughly correct clocks. | No clock check: monotonic generations only, accepting that the server can replay any recording from the current epoch to a listener who joins later. |
-| **V3. Bitrate in encrypted rooms** | Constant bitrate, so packet lengths do not follow speech (8). | Keep constrained VBR and accept the length leak as metadata. |
+| **V3. Bitrate in encrypted rooms** | Constant bitrate, so packet lengths do not follow speech (8). **Revised 2026-11-15:** constrained VBR padded to a fixed size per bitrate, after constant bitrate dropped steady tones with in-band FEC (8). | Keep constrained VBR and accept the length leak as metadata. |
 | **V4. Packaging** | One package, `e2ee-voice`. | Two: E6a (common primitives, protocol, server) and E6b (client, harness, proof). |
 
 ## 11. Test plan
@@ -482,7 +497,8 @@ The maintainer took every recommendation on 2026-11-15.
 - Listener rules of 4.2 and 4.3: wrong pin, sender not in the epoch, later epoch held until the
   log catches up, earlier epoch refused except within the grace, old keys wiped after the grace,
   stale `createdAtUnix`, future `createdAtUnix`, non-increasing generation, older session.
-- The encoder is CBR in encrypted rooms and constrained VBR elsewhere.
+- The encoder is constrained VBR everywhere; in encrypted rooms every packet is padded to the
+  size for its bitrate, and a steady tone keeps its level at 16 to 64 kbit/s.
 
 ### 11.4 Live proof
 
@@ -499,8 +515,8 @@ The maintainer took every recommendation on 2026-11-15.
    the tone.
 5. The unencrypted voice steps that already exist run unchanged.
 
-Manual: `dev/voice-manual-test.sh` measures CBR tone and speech quality and mouth-to-ear delay in
-an encrypted room against the unencrypted baseline.
+Manual: `dev/voice-manual-test.sh` with `HAYCHAT_VOICE_MANUAL_ENCRYPTED=1` measures tone and
+speech quality and mouth-to-ear delay in an encrypted room against the unencrypted baseline.
 
 ## 12. Work breakdown
 
@@ -513,7 +529,7 @@ free at merge time (21 today):
 2. `server/`: the router's voice key state, checks, fan-out and requests; `logVersion` in the
    join check and its update on log appends; `NetworkVoiceRoute.encrypted` and the relay's
    encrypted path; remove the encrypted-room refusal.
-3. `client/`: `voice_e2ee.odin`, the engine's key table and seal/open, CBR in encrypted rooms,
+3. `client/`: `voice_e2ee.odin`, the engine's key table and seal/open, padded packets in encrypted rooms,
    join gating and UI, harness counters, events and `voice-key-rotate`.
 4. Live proof, then documentation: `docs/protocol.md`, `docs/user-guide.md` (encrypted voice,
    clocks), `docs/testing-harness.md`, the voice and E2EE parts of `AGENTS.md`, `client/AGENTS.md`
@@ -534,7 +550,7 @@ and that an encrypted room can never send or play plaintext.
 - **Seconds of audio at a removal** (4.1) are readable by the removed member if the server keeps
   relaying to them.
 - **Member impersonation** with the server's help (section 1), as in SFrame.
-- **CBR quality** at the default bitrate must be measured before release (8).
+- **Bandwidth** of padded packets is 1.6 times the nominal bitrate while talking (8).
 - **The hand-built envelope** gains a fourth kind; the outside review the round plan asks for
   before a release should include it.
 

@@ -145,8 +145,9 @@ Follow-ups:
 
 - **E6 voice in encrypted rooms**: designed in [e2ee-voice-design.md](e2ee-voice-design.md) and
   merged as #65 (ea1ec3c, protocol 21, no migration); voice in encrypted rooms is end-to-end
-  encrypted. Constant-bitrate quality still needs a manual `dev/voice-manual-test.sh` run
-  before release.
+  encrypted. The manual test then found that constant bitrate dropped steady tones with
+  in-band FEC; encrypted rooms now pad constrained VBR packets to a fixed size instead
+  (branch `e2ee-voice-padding`, design section 8).
 - **Voice log version race.** When a member log append lands while a room's first voice join
   is still in its database check, the router skips the append (no voice room yet) and the join
   result seeds the older log version, so every voice key at the new epoch is refused as

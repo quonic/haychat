@@ -2,13 +2,14 @@ package client
 
 import "../common"
 import "core:fmt"
+import "core:math"
 import "core:testing"
 import "opus"
 
 // The voice engine in an encrypted room (protocol 21, voice_engine.odin): sealing before the
-// outbound seam, opening before the jitter buffer, the key table, the sequence rule, constant
-// bitrate, and wiping. Loopback frames come back as VOICE_LOOPBACK_USER_ID, so the engine's own
-// sender ID is set to it and its send key doubles as the loopback speaker's key.
+// outbound seam, opening before the jitter buffer, the key table, the sequence rule, padded
+// fixed-size packets, and wiping. Loopback frames come back as VOICE_LOOPBACK_USER_ID, so the
+// engine's own sender ID is set to it and its send key doubles as the loopback speaker's key.
 
 @(private = "file")
 VoiceE2EETestOutbound :: struct {
@@ -98,9 +99,12 @@ testVoiceEngineSealsAndOpensWithItsKeyTable :: proc(t: ^testing.T) {
 	engine := voiceE2EETestEngine(&outbound)
 	defer VoiceEngine_destroy(engine)
 
-	// Constant bitrate in an encrypted room.
+	// Constrained VBR in an encrypted room too: fixed lengths come from padding, not CBR,
+	// which dropped steady tones by tens of dB with in-band FEC (e2ee-voice-design.md 8).
 	vbr, code := opus.encoderGet(engine.encoder, opus.GET_VBR_REQUEST)
-	assert(code == opus.OK && vbr == 0, fmt.tprintf("expected CBR, got VBR %d", vbr))
+	assert(code == opus.OK && vbr == 1, fmt.tprintf("expected VBR, got VBR %d", vbr))
+	constrained, _ := opus.encoderGet(engine.encoder, opus.GET_VBR_CONSTRAINT_REQUEST)
+	assert(constrained == 1, "expected constrained VBR in an encrypted room")
 
 	// No send key: nothing leaves, sealed or not.
 	voiceE2EETestSteps(engine, 20)
@@ -134,11 +138,16 @@ testVoiceEngineSealsAndOpensWithItsKeyTable :: proc(t: ^testing.T) {
 	assert(snapshot.speakerCount == 1 && snapshot.jitter.played > 0, "expected the speaker heard")
 	assert(snapshot.stats.decodeErrors == 0, "expected every opened frame to decode")
 	assert(snapshot.stats.e2ee.drops[.BadTag] == 0, "expected no bad tags")
-	// Every sealed frame has the same length: constant bitrate.
+	// Every sealed frame has the same length: the padded size plus the sealing overhead.
+	padded := voiceE2EEPaddedOpusBytes(int(opus.VOICE_ENCODER_SETTINGS.bitrate))
 	for length in outbound.lengths {
 		assert(
-			length == outbound.lengths[0],
-			fmt.tprintf("expected one frame length under CBR, got %v", outbound.lengths[:]),
+			length == padded + common.VOICE_E2EE_OVERHEAD,
+			fmt.tprintf(
+				"expected every frame %d bytes, got %v",
+				padded + common.VOICE_E2EE_OVERHEAD,
+				outbound.lengths[:],
+			),
 		)
 	}
 
@@ -305,4 +314,93 @@ testVoiceEngineKeepsVBROutsideEncryptedRooms :: proc(t: ^testing.T) {
 	assert(constrained == 1, "expected constrained VBR outside encrypted rooms")
 	voiceE2EETestSteps(engine, 10)
 	assert(outbound.count > 0 && !outbound.allSealed, "expected plain Opus without encryption")
+}
+
+@(test)
+testVoiceE2EEPaddedSizes :: proc(t: ^testing.T) {
+	cases := [?][2]int {
+		{24000, 96}, // the default: 60 bytes nominal, 1.6 times
+		{12000, 48},
+		{64000, 256},
+		{20001, 81}, // rounds up
+		{0, VOICE_E2EE_PADDED_MIN_BYTES},
+		{1_000_000, common.VOICE_E2EE_OPUS_MAX_BYTES},
+	}
+	for entry in cases {
+		got := voiceE2EEPaddedOpusBytes(entry[0])
+		assert(
+			got == entry[1],
+			fmt.tprintf("expected %d bytes at %d bit/s, got %d", entry[1], entry[0], got),
+		)
+	}
+}
+
+// The encoder path of an encrypted room (capped constrained VBR, then padded) on a steady
+// 440 Hz tone, at the bitrates where constant bitrate failed: every packet has the padded
+// size and decodes to one 20 ms frame, its in-band FEC still decodes, and no 20 ms block of
+// the decoded tone falls 20 dB under the tone's level (CBR dropped some by 40 to 50 dB at 24
+// and 28 kbit/s with libopus 1.6, e2ee-voice-design.md 8).
+@(test)
+testVoiceE2EEPaddedTonesKeepTheirLevel :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) {
+		return
+	}
+	FRAMES :: 20 * 50 // 20 s
+	for bitrate in ([]i32{16000, 24000, 28000, 32000, 64000}) {
+		settings := opus.VOICE_ENCODER_SETTINGS
+		settings.bitrate = bitrate
+		encoder, code := opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, settings)
+		assert(encoder != nil, fmt.tprintf("expected an encoder, got %d", code))
+		decoder, decoderCode := opus.createDecoder(common.VOICE_SAMPLE_RATE)
+		assert(decoder != nil, fmt.tprintf("expected a decoder, got %d", decoderCode))
+		padded := voiceE2EEPaddedOpusBytes(int(bitrate))
+		pcm: [common.VOICE_FRAME_SAMPLES]f32
+		decoded: [common.VOICE_FRAME_SAMPLES]f32
+		rebuilt: [common.VOICE_FRAME_SAMPLES]f32
+		packet: [opus.MAX_PACKET_BYTES]u8
+		quietest := f64(0)
+		for frame in 0 ..< FRAMES {
+			for index in 0 ..< len(pcm) {
+				sample := f64(frame * len(pcm) + index)
+				pcm[index] = 0.5 * f32(math.sin(2 * math.PI * 440 * sample / 48000))
+			}
+			length := opus.encodeFloat(encoder, pcm[:], packet[:padded])
+			assert(
+				length > 0 && int(length) <= padded,
+				fmt.tprintf("expected 1..%d bytes at %d bit/s, got %d", padded, bitrate, length),
+			)
+			assert(
+				opus.padPacket(packet[:], int(length), padded) == opus.OK,
+				"expected the packet to pad",
+			)
+			assert(
+				opus.packetSampleCount(packet[:padded], common.VOICE_SAMPLE_RATE) ==
+				common.VOICE_FRAME_SAMPLES,
+				"expected a padded packet of one 20 ms frame",
+			)
+			if frame == 100 {
+				got := opus.decodeFloat(decoder, packet[:padded], rebuilt[:], fec = true)
+				assert(got == common.VOICE_FRAME_SAMPLES, "expected FEC from a padded packet")
+			}
+			got := opus.decodeFloat(decoder, packet[:padded], decoded[:])
+			assert(got == common.VOICE_FRAME_SAMPLES, fmt.tprintf("expected a decode, got %d", got))
+			if frame < 10 {
+				continue // the codec's start
+			}
+			power := f64(0)
+			for value in decoded {
+				power += f64(value) * f64(value)
+			}
+			levelDB := 10 * math.log10(max(power / f64(len(decoded)), 1e-20))
+			quietest = min(quietest, levelDB)
+		}
+		opus.destroyEncoder(encoder)
+		opus.destroyDecoder(decoder)
+		// The tone is at -9 dBFS RMS.
+		assert(
+			quietest > -29,
+			fmt.tprintf("expected no 20 ms block under -29 dBFS at %d bit/s, got %.1f", bitrate,
+				quietest),
+		)
+	}
 }

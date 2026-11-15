@@ -35,7 +35,9 @@ Settings, all optional, as environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `HAYCHAT_VOICE_MANUAL_ROOM` | `1` | Room to join |
+| `HAYCHAT_VOICE_MANUAL_ROOM` | `1` | Room to join (ignored in encrypted mode) |
+| `HAYCHAT_VOICE_MANUAL_ENCRYPTED` | `0` | `1` measures voice in an encrypted room instead (below) |
+| `HAYCHAT_VOICE_MANUAL_PSQL` | `dev.sh psql` | psql command that encrypted mode uses to make A an admin |
 | `HAYCHAT_VOICE_MANUAL_PHASES` | `tone speech taps bursts clicks` | Phases to run |
 | `HAYCHAT_VOICE_MANUAL_LEVELS` | `-6 -18 -30` | Peak levels of the speech, in dBFS |
 | `HAYCHAT_VOICE_MANUAL_NOISE_DB` | `-60` | Pink noise under the speech, RMS in dBFS |
@@ -43,6 +45,28 @@ Settings, all optional, as environment variables:
 | `HAYCHAT_VOICE_MANUAL_CLICKS` | `20` | Clicks in the latency train, and taps in the `taps` phase |
 | `HAYCHAT_VOICE_MANUAL_CLIENT` | build one | Use this client binary, for example one built with a changed constant, to compare |
 | `HAYCHAT_VOICE_MANUAL_KEEP` | `0` | `1` keeps the work directory with every recording and log |
+
+### Encrypted Rooms
+
+Voice in an encrypted room (protocol 21, `docs/plan/e2ee-voice-design.md`) seals every frame
+and pads every Opus packet to one size per bitrate, so its quality is measured separately.
+The first version used constant bitrate, which this comparison caught dropping a steady tone
+(design section 8). Run the kit twice and compare the summaries:
+
+```sh
+dev/voice-manual-test.sh                                  # unencrypted baseline, room 1
+HAYCHAT_VOICE_MANUAL_ENCRYPTED=1 dev/voice-manual-test.sh # encrypted room, padded packets
+```
+
+In encrypted mode A signs in once without audio, is made an admin with
+`deploy/sql/make-admin.sql` through `HAYCHAT_VOICE_MANUAL_PSQL` (by default `./dev.sh psql`,
+because the dev pod does not publish its database; another server needs its own psql
+command), and signs in again. It then creates an encrypted Admin invite room named
+`voice-mt-e2ee-…` and adds B. Once both have verified the room's member log, the phases run
+as usual in that room. The kit checks that both joins report `encrypted` and that each client
+accepted the other's voice key. The summary gets an `encrypted:` line with the frames B opened
+and its drops: bad tag, no key, unknown key ID. All three should be 0. The room stays on the
+server afterwards, like the accounts.
 
 ### What It Sets Up
 

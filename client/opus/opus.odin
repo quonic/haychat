@@ -80,6 +80,7 @@ Symbols :: struct {
 	) -> c.int,
 	decoder_destroy:       proc "c" (st: ^Decoder),
 	packet_get_nb_samples: proc "c" (data: [^]u8, len: i32, fs: i32) -> c.int,
+	packet_pad:            proc "c" (data: [^]u8, len: i32, new_len: i32) -> c.int,
 	strerror:              proc "c" (error: c.int) -> cstring,
 	get_version_string:    proc "c" () -> cstring,
 	__handle:              dynlib.Library,
@@ -95,6 +96,7 @@ SYMBOL_NAMES :: [?]string {
 	"decode_float",
 	"decoder_destroy",
 	"packet_get_nb_samples",
+	"packet_pad",
 	"strerror",
 	"get_version_string",
 }
@@ -202,6 +204,7 @@ Symbols_firstMissing :: proc(symbols: ^Symbols) -> string {
 		rawptr(symbols.decode_float),
 		rawptr(symbols.decoder_destroy),
 		rawptr(symbols.packet_get_nb_samples),
+		rawptr(symbols.packet_pad),
 		rawptr(symbols.strerror),
 		rawptr(symbols.get_version_string),
 	}
@@ -275,10 +278,6 @@ EncoderSettings :: struct {
 	inbandFEC:         bool,
 	dtx:               bool,
 	constrainedVBR:    bool,
-	// Constant bitrate (protocol 21, e2ee-voice-design.md 8): every 20 ms packet the same
-	// length, so the lengths of an encrypted room's frames do not follow the speech. The zero
-	// value keeps VBR (constrained when constrainedVBR is set).
-	cbr:               bool,
 }
 
 // HayChat's voice settings (voice-rooms-design.md section 2.1, Q4 and Q5): 24 kbit/s
@@ -325,7 +324,7 @@ configureEncoder :: proc(encoder: ^Encoder, settings: EncoderSettings) -> c.int 
 	requests := [?][2]i32 {
 		{SET_SIGNAL_REQUEST, SIGNAL_VOICE},
 		{SET_BITRATE_REQUEST, settings.bitrate},
-		{SET_VBR_REQUEST, settings.cbr ? 0 : 1},
+		{SET_VBR_REQUEST, 1},
 		{SET_VBR_CONSTRAINT_REQUEST, settings.constrainedVBR ? 1 : 0},
 		{SET_COMPLEXITY_REQUEST, settings.complexity},
 		{SET_INBAND_FEC_REQUEST, settings.inbandFEC ? 1 : 0},
@@ -417,6 +416,22 @@ decodeFloat :: proc(decoder: ^Decoder, packet: []u8, pcm: []f32, fec := false) -
 		c.int(len(pcm)),
 		fec && len(packet) > 0 ? 1 : 0,
 	)
+}
+
+// padPacket grows the Opus packet in buffer[:length] to exactly targetLength bytes with Opus's
+// own padding (RFC 6716 section 3.2.5, opus_packet_pad), which every decoder skips: the audio
+// and its in-band FEC are unchanged. buffer must hold targetLength bytes and targetLength must
+// be at least length. Returns OK or a negative libopus error code. Encrypted rooms use it so
+// every frame of a speaker has the same length (e2ee-voice-design.md 8).
+padPacket :: proc(buffer: []u8, length: int, targetLength: int) -> c.int {
+	if length <= 0 || targetLength < length || len(buffer) < targetLength ||
+	   targetLength > MAX_PACKET_BYTES {
+		return -1
+	}
+	if targetLength == length {
+		return OK
+	}
+	return defaultLibrary.packet_pad(raw_data(buffer), i32(length), i32(targetLength))
 }
 
 // packetSampleCount returns how many samples per channel a packet decodes to at sampleRate,

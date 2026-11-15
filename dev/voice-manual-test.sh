@@ -39,7 +39,12 @@ set -euo pipefail
 # Usage: dev/voice-manual-test.sh [HOST:PORT]   (default 127.0.0.1:12345; any running server)
 #
 # Environment:
-#   HAYCHAT_VOICE_MANUAL_ROOM           room to join (default 1)
+#   HAYCHAT_VOICE_MANUAL_ROOM           room to join (default 1; ignored when encrypted)
+#   HAYCHAT_VOICE_MANUAL_ENCRYPTED=1    measure an encrypted room's voice (protocol 21: sealed
+#                                       frames, constant bitrate) instead: A is made an admin
+#                                       and creates an encrypted Admin invite room with B in it
+#   HAYCHAT_VOICE_MANUAL_PSQL           psql command for making A an admin in encrypted mode
+#                                       (default "<repo>/dev.sh psql", the dev pod's database)
 #   HAYCHAT_VOICE_MANUAL_LEVELS         speech peak levels in dBFS (default "-6 -18 -30")
 #   HAYCHAT_VOICE_MANUAL_NOISE_DB       pink noise floor under the speech, RMS dBFS (default -60)
 #   HAYCHAT_VOICE_MANUAL_THRESHOLD_DB   A's voice activity threshold (default: the client's)
@@ -56,6 +61,8 @@ set -euo pipefail
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
 server_address=${1:-127.0.0.1:12345}
 room_id=${HAYCHAT_VOICE_MANUAL_ROOM:-1}
+encrypted=${HAYCHAT_VOICE_MANUAL_ENCRYPTED:-0}
+psql_command=${HAYCHAT_VOICE_MANUAL_PSQL:-"$repo_dir/dev.sh psql"}
 speech_levels=${HAYCHAT_VOICE_MANUAL_LEVELS:-"-6 -18 -30"}
 noise_db=${HAYCHAT_VOICE_MANUAL_NOISE_DB:--60}
 threshold_db=${HAYCHAT_VOICE_MANUAL_THRESHOLD_DB:-}
@@ -409,6 +416,86 @@ join_voice() {
 	expect_ok "$client" voice-join "$room_id"
 	expect_event "$client" "^\\{\"event\":\"voice_status\",.*\"status\":\"joined\"," "$start" \
 		"voice never reached joined"
+	if [[ "$encrypted" == 1 ]]; then
+		expect_event "$client" "^\\{\"event\":\"voice_status\",.*\"encrypted\":true," "$start" \
+			"voice_status does not say encrypted"
+	fi
+}
+
+# -------------------------------------------------------------------------------------------
+# Encrypted mode (HAYCHAT_VOICE_MANUAL_ENCRYPTED=1, e2ee-voice-design.md 8 and 11.4).
+
+connected_user_id() {
+	local line
+	line=$(wait_for_line "$1" '{"event":"connected",' 0) || fail "client $1 never connected"
+	json_number "$line" userID
+}
+
+# make_admin_here NICKNAME: gives the account NICKNAME the admin role through
+# HAYCHAT_VOICE_MANUAL_PSQL (the dev pod's database by default; it is not published to the
+# host, so plain psql would reach a different database).
+make_admin_here() {
+	local -a command
+	read -r -a command <<<"$psql_command"
+	"${command[@]}" -q -X -v ON_ERROR_STOP=1 -v owner="$1" \
+		<"$repo_dir/deploy/sql/make-admin.sql" >/dev/null ||
+		fail "could not make $1 an admin with: $psql_command (is the dev pod up?)"
+	echo "    made $1 an admin (deploy/sql/make-admin.sql)"
+}
+
+# room_log_at CLIENT VERSION START: waits for CLIENT's verified log of the room at VERSION.
+room_log_at() {
+	local pattern="^\\{\"event\":\"room_log\",\"serverID\":[0-9]+,\"roomID\":$room_id,"
+	pattern+="\"status\":\"verified\",\"logVersion\":$2,"
+	expect_event "$1" "$pattern" "$3" "the encrypted room's log never verified at version $2"
+}
+
+# setup_encrypted_room: A (already an admin) creates an encrypted Admin invite room with B in
+# it, and room_id becomes that room. Both clients have verified the log when it returns.
+setup_encrypted_room() {
+	local user_b start bstart created
+	user_b=$(connected_user_id b)
+	expect_ok a wait room_list 5000
+	expect_ok b wait room_list 5000
+	start=$(wc -l <"$work_dir/a.out")
+	expect_ok a user-keys "$user_b"
+	expect_event a "^\\{\"event\":\"user_keys\",.*\"userID\":$user_b," "$start" \
+		"A got no keys for B"
+	start=$(wc -l <"$work_dir/a.out")
+	expect_ok a room-create "both,admin-invite,encrypted,managers=none" "voice-mt-e2ee-$run_tag"
+	created=$(wait_for_match a \
+		"^\\{\"event\":\"room_created\",.*\"name\":\"voice-mt-e2ee-$run_tag\"" "$start") ||
+		fail "A never got room_created for the encrypted room"
+	[[ "$created" =~ \"roomID\":([0-9]+) ]] || fail "no roomID in: $created"
+	room_id=${BASH_REMATCH[1]}
+	room_log_at a 1 "$start"
+	bstart=$(wc -l <"$work_dir/b.out")
+	expect_ok a room-add "$room_id" "$user_b"
+	room_log_at a 2 "$start"
+	room_log_at b 2 "$bstart"
+	note "encrypted room $room_id (voice-mt-e2ee-$run_tag), A and B verified its log"
+}
+
+# expect_voice_key CLIENT USER START: CLIENT accepted a voice key from USER after START.
+expect_voice_key() {
+	local pattern="^\\{\"event\":\"voice_key\",\"serverID\":[0-9]+,\"roomID\":$room_id,"
+	pattern+="\"kind\":\"accepted\",\"userID\":$2,"
+	expect_event "$1" "$pattern" "$3" "no voice key accepted from user $2"
+}
+
+# e2ee_summary: B's sealed-frame counters for the whole run.
+e2ee_summary() {
+	local stats
+	stats=$(client_command b voice-stats) || fail "no voice-stats from b"
+	[[ "$stats" == *'"e2ee":{"encrypted":true,'* ]] ||
+		fail "B's voice-stats do not say encrypted: $stats"
+	local line
+	line="encrypted: B opened $(json_number "$stats" framesOpened) frames;"
+	line+=" bad tag $(json_number "$stats" dropBadTag),"
+	line+=" no key $(json_number "$stats" dropNoKey),"
+	line+=" unknown key ID $(json_number "$stats" dropUnknownKeyID),"
+	line+=" keys accepted $(json_number "$stats" keysAccepted)"
+	summary+=("$line")
 }
 
 # -------------------------------------------------------------------------------------------
@@ -432,7 +519,11 @@ default_source=$(pactl get-default-source)
 modules_before=$(module_ids)
 ! kit_nodes_exist ||
 	fail "an hc_mt_ node already exists (another run, or a leftover; see docs/voice-manual-test.md)"
-note "server $server_address, room $room_id"
+if [[ "$encrypted" == 1 ]]; then
+	note "server $server_address, an encrypted room made for this run"
+else
+	note "server $server_address, room $room_id"
+fi
 note "default sink $default_sink, default source $default_source (left alone)"
 note "PipeWire $(pactl info | sed -n 's/^Server Name: .*PipeWire \(.*\))$/\1/p')," \
 	"$(pw-metadata -n settings 0 2>/dev/null |
@@ -528,6 +619,15 @@ note "starting headless clients A (speaks into $mic_name) and B (plays into $b_o
 # SDL's PipeWire driver only: the pulseaudio and alsa drivers would ignore the PipeWire
 # properties below. PIPEWIRE_NODE targets the virtual node and node.dont-fallback makes a
 # missing node an error instead of the default device, whatever name SDL resolves.
+if [[ "$encrypted" == 1 ]]; then
+	# A signs in once without audio so its account exists, becomes an admin, and comes back
+	# with the same profile: a role changed in the database applies at the next sign-in.
+	note "encrypted mode: making A an admin"
+	start_client a0 "voice-mt-a-$run_tag" a
+	expect_connected a0
+	stop_client a0
+	make_admin_here "voice-mt-a-$run_tag"
+fi
 export SDL_AUDIO_DRIVER=pipewire PIPEWIRE_PROPS="{ $no_fallback }"
 export PIPEWIRE_NODE=$mic_source
 start_client a "voice-mt-a-$run_tag"
@@ -536,6 +636,15 @@ start_client b "voice-mt-b-$run_tag"
 unset SDL_AUDIO_DRIVER PIPEWIRE_PROPS PIPEWIRE_NODE
 expect_connected a
 expect_connected b
+if [[ "$encrypted" == 1 ]]; then
+	[[ "$(wait_for_line a '{"event":"connected",' 0)" == *'"isAdmin":true'* ]] ||
+		fail "A is not an admin after make-admin.sql"
+	setup_encrypted_room
+	user_a=$(connected_user_id a)
+	user_b=$(connected_user_id b)
+	b_key_start=$(wc -l <"$work_dir/b.out")
+	a_key_start=$(wc -l <"$work_dir/a.out")
+fi
 expect_ok a voice-source "device:$mic_name"
 expect_ok a voice-sink null
 expect_ok b voice-source silence
@@ -545,6 +654,10 @@ join_voice b
 expect_routed b sink-inputs sinks "$b_sink"
 join_voice a
 expect_routed a source-outputs sources "$mic_source"
+if [[ "$encrypted" == 1 ]]; then
+	expect_voice_key b "$user_a" "$b_key_start"
+	expect_voice_key a "$user_b" "$a_key_start"
+fi
 
 # Summary lines in phase order.
 summary=()
@@ -651,6 +764,7 @@ phase taps && run_taps
 phase bursts && run_bursts
 phase clicks && run_clicks
 
+[[ "$encrypted" != 1 ]] || e2ee_summary
 expect_ok a voice-leave
 expect_ok b voice-leave
 stop_client a
