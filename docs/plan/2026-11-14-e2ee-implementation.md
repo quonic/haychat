@@ -143,8 +143,9 @@ messages in encrypted invite rooms are end-to-end encrypted; public rooms stay u
 
 Follow-ups:
 
-- **E6 voice in encrypted rooms** needs its own design note (design section 8) before it is
-  built. Until then voice joins in encrypted rooms are refused.
+- **E6 voice in encrypted rooms**: designed in [e2ee-voice-design.md](e2ee-voice-design.md) and
+  built as protocol 21 (branch `e2ee-voice`); voice in encrypted rooms is end-to-end encrypted.
+  Constant-bitrate quality still needs a manual `dev/voice-manual-test.sh` run before release.
 - **Bogus forwards.** The server keeps only the first forward per chain and recipient, so a
   member can send a forward with a wrong chain key ahead of the real one and block that chain
   for the newcomer (its sender can still re-seal it). A chain-key commitment in the original

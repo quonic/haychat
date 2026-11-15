@@ -87,6 +87,10 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerRoomKeys, 173},
 	{.ClientRequestRoomKey, 174},
 	{.ServerRoomKeyRequest, 175},
+	{.ClientVoiceKey, 176},
+	{.ServerVoiceKey, 177},
+	{.ClientRequestVoiceKey, 178},
+	{.ServerVoiceKeyRequest, 179},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -436,11 +440,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// ClientFetchRoomKeys, ServerRoomKeys, ClientRequestRoomKey, ServerRoomKeyRequest); 20 added
 	// Full history in encrypted rooms (RoomKeyForward envelopes: ClientRoomKeyEnvelope.senderId,
 	// RoomKeyEnvelope.forwarderId, ServerRoomKeyRequest.senderId, and key requests relayed to
-	// every member), so peers on 19 or older cannot talk to this build.
+	// every member); 21 added end-to-end encrypted voice in encrypted rooms (ClientVoiceKey,
+	// ServerVoiceKey, ClientRequestVoiceKey, ServerVoiceKeyRequest, the VoiceKey envelope kind and
+	// sealed voice payloads), so peers on 20 or older cannot talk to this build.
 	assert(
-		protocolVersion == 20,
+		protocolVersion == 21,
 		fmt.tprintf(
-			"expected protocol version 20 for Full history in encrypted rooms, got %d",
+			"expected protocol version 21 for encrypted voice, got %d",
 			protocolVersion,
 		),
 	)

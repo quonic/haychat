@@ -712,6 +712,11 @@ warning about the identity key. Section 11 lists key backup as a later step.
 
 ## 8. Voice (later phase)
 
+> **Superseded.** Voice in encrypted rooms was designed again in
+> [e2ee-voice-design.md](e2ee-voice-design.md) and built as protocol 21 (E6): the voice key is a
+> fresh random key in its own `VoiceKey` envelope, not derived from the text chain below. This
+> section is kept as the historical record.
+
 For encrypted rooms only. Each participant derives a voice key from its current sender chain at
 join, with a fresh random 16-byte `voiceSessionId` that its join announces to the other
 participants, and seals each Opus payload inside the existing voice frame plaintext:

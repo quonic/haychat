@@ -25,9 +25,21 @@ package client
 //     VoiceEngine_snapshot / VoiceEngine_inputLevel.
 //   - SDL's audio subsystem is initialised only when a device source or sink is opened, so a
 //     headless client never touches SDL unless asked to.
+//
+// Encrypted rooms (protocol 21, e2ee-voice-design.md 5 and 7.1): an engine created with
+// config.encryption.enabled seals every encoded frame (common/voice_e2ee.odin) before
+// onOutbound and opens every inbound frame before its jitter buffer, so a frame that does not
+// open counts as a lost one for PLC and FEC. It never sends a frame without a send key and
+// never plays a frame that did not open; the flag is fixed for the engine's life. Keys come
+// from the UI thread (VoiceEngine_setSendKey, VoiceEngine_setSpeakerKeys) into a small table
+// under keyMutex, which the voice thread copies when keyVersion moved, like the speaker
+// controls. A send key is used by this engine only, and the engine refuses to seal a sequence
+// at or behind the last one it sealed under it. Every key is wiped when replaced, when the
+// engine closes and when it is destroyed. The encoder runs at constant bitrate there.
 
 import "../common"
 import "core:c"
+import "core:crypto"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -65,6 +77,52 @@ VOICE_ERROR_BUFFER_SIZE :: 512
 VOICE_SPEAKER_CONTROL_CAPACITY :: 256
 // The highest per-speaker gain, 200 %. Linear, like the output volume.
 VOICE_SPEAKER_GAIN_MAX :: f32(2)
+
+// Protocol 21: what an encrypted room's engine needs to build the voice frame AAD. Fixed for
+// the engine's life; the UI thread sets it from the room's encrypted flag, which never changes.
+VoiceEngineEncryption :: struct {
+	enabled:                 bool,
+	serverIdentityPublicKey: common.IdentityPublicKeyBytes,
+	roomID:                  int,
+	selfUserID:              int, // the sender ID this engine's frames carry
+}
+
+// One voice key and the fields of the AAD it is used with.
+VoiceEngineKey :: struct {
+	set:            bool,
+	epoch:          int,
+	voiceSessionID: common.VoiceSessionID,
+	generation:     u32,
+	key:            common.VoiceKey,
+}
+
+// A speaker's current key and the one before it (for frames still in flight after a
+// rotation); a frame's keyId picks one.
+VoiceEngineSpeakerKeys :: struct {
+	userID:   u32,
+	current:  VoiceEngineKey,
+	previous: VoiceEngineKey,
+}
+
+// Why an inbound frame of an encrypted room was not played.
+VoiceE2EEDropReason :: enum u8 {
+	NoKey, // no key for its speaker
+	UnknownKeyID, // its keyId matches neither of the speaker's keys
+	BadTag, // it did not open
+	NotSealed, // not a sealed payload of a known version
+	BadDuration, // it opened, but is not one 20 ms Opus packet
+}
+
+VoiceEngineE2EEStats :: struct {
+	framesSealed:    u64,
+	framesOpened:    u64,
+	// Encoded frames not sent because no send key was set (waiting for the key to go out).
+	sendNoKey:       u64,
+	// Encoded frames refused because their sequence was at or behind the last one sealed.
+	sequenceRefused: u64,
+	sealErrors:      u64,
+	drops:           [VoiceE2EEDropReason]u64,
+}
 
 VoiceSourceKind :: enum u8 {
 	Silence,
@@ -180,6 +238,8 @@ VoiceEngineConfig :: struct {
 	// Optional, for latency tests: every encoded and every played frame.
 	onFrameTiming:    VoiceFrameTimingProc,
 	timingUserdata:   rawptr,
+	// Protocol 21: set for an encrypted room's voice. Implies constant bitrate.
+	encryption:       VoiceEngineEncryption,
 }
 
 VoiceEngineStats :: struct {
@@ -212,6 +272,8 @@ VoiceEngineStats :: struct {
 	// dropped, and frames it delayed. Always 0 in normal builds.
 	faultDropped:        u64,
 	faultDelayed:        u64,
+	// Protocol 21: sealing and opening in an encrypted room.
+	e2ee:                VoiceEngineE2EEStats,
 }
 
 VoiceSpeakerSnapshot :: struct {
@@ -231,6 +293,10 @@ VoiceEngineSnapshot :: struct {
 	transmitting:  bool,
 	frameSequence: u32,
 	stats:         VoiceEngineStats,
+	// Protocol 21: whether the engine seals and opens, and the send key it seals with.
+	encrypted:         bool,
+	hasSendKey:        bool,
+	sendKeyGeneration: u32,
 	// Totals over every speaker, including expired ones.
 	jitter:        JitterStats,
 	speakerCount:  int,
@@ -344,6 +410,24 @@ VoiceEngine :: struct {
 	appliedControls:       [VOICE_SPEAKER_CONTROL_CAPACITY]VoiceSpeakerControl,
 	appliedControlCount:   int,
 	appliedControlVersion: u64,
+	// Protocol 21: voice keys. Any thread writes them under keyMutex and bumps keyVersion
+	// (atomic); the voice thread copies them into the applied fields when it moved. Only
+	// speakers with a key take a slot, packed at the front.
+	keyMutex:               sync.Mutex,
+	sendKey:                VoiceEngineKey,
+	speakerKeys:            [VOICE_MAX_SPEAKERS]VoiceEngineSpeakerKeys,
+	speakerKeyCount:        int,
+	keyVersion:             u64,
+	// Voice-thread copy, and the last sequence sealed under appliedSendKey.
+	appliedSendKey:         VoiceEngineKey,
+	appliedSpeakerKeys:     [VOICE_MAX_SPEAKERS]VoiceEngineSpeakerKeys,
+	appliedSpeakerKeyCount: int,
+	appliedKeyVersion:      u64,
+	lastSealedSequence:     u32,
+	hasSealed:              bool,
+	// Voice-thread scratch: a sealed outbound frame and an opened inbound one.
+	sealBuffer:             [common.VOICE_OPUS_MAX_BYTES]u8,
+	openBuffer:             [common.VOICE_OPUS_MAX_BYTES]u8,
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────
@@ -364,6 +448,10 @@ VoiceEngine_create :: proc(
 	engine.encoderSettings = config.encoder
 	if engine.encoderSettings == {} {
 		engine.encoderSettings = opus.VOICE_ENCODER_SETTINGS
+	}
+	if config.encryption.enabled {
+		// Frame lengths must not follow the speech the server cannot read (design 8).
+		engine.encoderSettings.cbr = true
 	}
 	if engine.config.inputGain == 0 && !config.explicitLevels {
 		engine.config.inputGain = 1
@@ -393,6 +481,7 @@ VoiceEngine_destroy :: proc(engine: ^VoiceEngine) {
 		return
 	}
 	VoiceEngine_stop(engine)
+	VoiceEngine_wipeKeys(engine)
 	allocator := engine.allocator
 	delete(engine.config.source.path, allocator)
 	delete(engine.config.source.deviceName, allocator)
@@ -603,7 +692,28 @@ VoiceEngine_close :: proc(engine: ^VoiceEngine) {
 		engine.sourceSamples = nil
 	}
 	sync.atomic_store(&engine.transmitting, false)
+	VoiceEngine_wipeKeys(engine)
 	VoiceEngine_publish(engine)
+}
+
+// Wipes every voice key the engine holds, shared and applied, and the scratch buffers that
+// held sealed or opened frames. The voice thread must not run.
+@(private = "file")
+VoiceEngine_wipeKeys :: proc(engine: ^VoiceEngine) {
+	sync.mutex_lock(&engine.keyMutex)
+	crypto.zero_explicit(&engine.sendKey, size_of(engine.sendKey))
+	crypto.zero_explicit(&engine.speakerKeys, size_of(engine.speakerKeys))
+	engine.speakerKeyCount = 0
+	sync.atomic_add(&engine.keyVersion, 1)
+	sync.mutex_unlock(&engine.keyMutex)
+	crypto.zero_explicit(&engine.appliedSendKey, size_of(engine.appliedSendKey))
+	crypto.zero_explicit(&engine.appliedSpeakerKeys, size_of(engine.appliedSpeakerKeys))
+	engine.appliedSpeakerKeyCount = 0
+	engine.appliedKeyVersion = sync.atomic_load(&engine.keyVersion)
+	engine.hasSealed = false
+	crypto.zero_explicit(&engine.sealBuffer, size_of(engine.sealBuffer))
+	crypto.zero_explicit(&engine.openBuffer, size_of(engine.openBuffer))
+	crypto.zero_explicit(&engine.encodeBuffer, size_of(engine.encodeBuffer))
 }
 
 // ── SDL devices ───────────────────────────────────────────────────
@@ -821,6 +931,86 @@ VoiceEngine_appliedControl :: proc(engine: ^VoiceEngine, userID: u32) -> (gain: 
 	return 1, false
 }
 
+// ── Voice keys (any thread, protocol 21) ──────────────────────────
+
+// VoiceEngine_setSendKey sets the key this engine seals its frames with from the next frame on,
+// wiping the one before. The UI thread calls it only after the key's envelope went out, and
+// gives every engine its own new generation, so no key ever meets a second sequence counter.
+VoiceEngine_setSendKey :: proc(engine: ^VoiceEngine, key: VoiceEngineKey) {
+	key := key
+	key.set = true
+	sync.mutex_lock(&engine.keyMutex)
+	crypto.zero_explicit(&engine.sendKey, size_of(engine.sendKey))
+	engine.sendKey = key
+	sync.atomic_add(&engine.keyVersion, 1)
+	sync.mutex_unlock(&engine.keyMutex)
+	crypto.zero_explicit(&key, size_of(key))
+}
+
+// VoiceEngine_clearSendKey wipes the send key: an encrypted engine sends nothing until the next
+// VoiceEngine_setSendKey (a new epoch waits for its key).
+VoiceEngine_clearSendKey :: proc(engine: ^VoiceEngine) {
+	sync.mutex_lock(&engine.keyMutex)
+	crypto.zero_explicit(&engine.sendKey, size_of(engine.sendKey))
+	sync.atomic_add(&engine.keyVersion, 1)
+	sync.mutex_unlock(&engine.keyMutex)
+}
+
+// VoiceEngine_setSpeakerKeys replaces userID's keys (current and previous; either may be unset)
+// and wipes the ones before. Both unset removes the speaker's entry. Returns false when the
+// table is full (VOICE_MAX_SPEAKERS) and userID is new.
+VoiceEngine_setSpeakerKeys :: proc(
+	engine: ^VoiceEngine,
+	userID: u32,
+	current, previous: VoiceEngineKey,
+) -> bool {
+	entry := VoiceEngineSpeakerKeys {
+		userID   = userID,
+		current  = current,
+		previous = previous,
+	}
+	defer crypto.zero_explicit(&entry, size_of(entry))
+	sync.mutex_lock(&engine.keyMutex)
+	defer sync.mutex_unlock(&engine.keyMutex)
+	index := -1
+	for keys, at in engine.speakerKeys[:engine.speakerKeyCount] {
+		if keys.userID == userID {
+			index = at
+			break
+		}
+	}
+	remove := !current.set && !previous.set
+	switch {
+	case index >= 0 && remove:
+		engine.speakerKeyCount -= 1
+		last := &engine.speakerKeys[engine.speakerKeyCount]
+		crypto.zero_explicit(&engine.speakerKeys[index], size_of(VoiceEngineSpeakerKeys))
+		engine.speakerKeys[index] = last^
+		crypto.zero_explicit(last, size_of(VoiceEngineSpeakerKeys))
+	case index >= 0:
+		crypto.zero_explicit(&engine.speakerKeys[index], size_of(VoiceEngineSpeakerKeys))
+		engine.speakerKeys[index] = entry
+	case remove:
+		return true
+	case engine.speakerKeyCount == VOICE_MAX_SPEAKERS:
+		return false
+	case:
+		engine.speakerKeys[engine.speakerKeyCount] = entry
+		engine.speakerKeyCount += 1
+	}
+	sync.atomic_add(&engine.keyVersion, 1)
+	return true
+}
+
+// VoiceEngine_clearSpeakerKeys wipes every speaker's keys.
+VoiceEngine_clearSpeakerKeys :: proc(engine: ^VoiceEngine) {
+	sync.mutex_lock(&engine.keyMutex)
+	crypto.zero_explicit(&engine.speakerKeys, size_of(engine.speakerKeys))
+	engine.speakerKeyCount = 0
+	sync.atomic_add(&engine.keyVersion, 1)
+	sync.mutex_unlock(&engine.keyMutex)
+}
+
 // VoiceEngine_setBitrate asks for a new Opus bitrate in bit/s. The voice thread owns the
 // encoder, so it applies the change (OPUS_SET_BITRATE) on its next step; the stream goes on
 // without a restart.
@@ -948,6 +1138,147 @@ VoiceEngine_applyControls :: proc(engine: ^VoiceEngine) {
 		}
 	}
 	VoiceEngine_applySpeakerControls(engine)
+	VoiceEngine_applyKeys(engine)
+}
+
+// Copies the key table when it changed, wiping the old copy. A send key of another session,
+// generation or epoch starts its sequence check over.
+@(private = "file")
+VoiceEngine_applyKeys :: proc(engine: ^VoiceEngine) {
+	version := sync.atomic_load(&engine.keyVersion)
+	if version == engine.appliedKeyVersion {
+		return
+	}
+	previous := engine.appliedSendKey
+	defer crypto.zero_explicit(&previous, size_of(previous))
+	crypto.zero_explicit(&engine.appliedSendKey, size_of(engine.appliedSendKey))
+	crypto.zero_explicit(&engine.appliedSpeakerKeys, size_of(engine.appliedSpeakerKeys))
+	sync.mutex_lock(&engine.keyMutex)
+	engine.appliedSendKey = engine.sendKey
+	engine.appliedSpeakerKeyCount = engine.speakerKeyCount
+	copy(engine.appliedSpeakerKeys[:], engine.speakerKeys[:engine.speakerKeyCount])
+	engine.appliedKeyVersion = sync.atomic_load(&engine.keyVersion)
+	sync.mutex_unlock(&engine.keyMutex)
+	sameKey :=
+		previous.set &&
+		engine.appliedSendKey.set &&
+		previous.voiceSessionID == engine.appliedSendKey.voiceSessionID &&
+		previous.generation == engine.appliedSendKey.generation &&
+		previous.epoch == engine.appliedSendKey.epoch
+	if !sameKey {
+		engine.hasSealed = false
+	}
+}
+
+// Seals one encoded frame under the send key into sealBuffer. False, counted, when there is no
+// send key, the sequence is at or behind the last one sealed under this key, or sealing fails:
+// the frame is then not sent at all.
+@(private = "file")
+VoiceEngine_sealOutbound :: proc(
+	engine: ^VoiceEngine,
+	sequence: u32,
+	flags: u8,
+	opusBytes: []u8,
+) -> (
+	sealed: []u8,
+	ok: bool,
+) {
+	key := &engine.appliedSendKey
+	if !key.set {
+		engine.stats.e2ee.sendNoKey += 1
+		return nil, false
+	}
+	if engine.hasSealed && sequence <= engine.lastSealedSequence {
+		engine.stats.e2ee.sequenceRefused += 1
+		return nil, false
+	}
+	encryption := engine.config.encryption
+	n, result := common.sealVoicePayload(
+		&key.key,
+		common.VoiceFrameAADFields {
+			serverIdentityPublicKey = encryption.serverIdentityPublicKey,
+			roomID = encryption.roomID,
+			senderUserID = encryption.selfUserID,
+			epoch = key.epoch,
+			voiceSessionID = key.voiceSessionID,
+			generation = key.generation,
+			frameSequence = sequence,
+			flags = flags,
+		},
+		opusBytes,
+		engine.sealBuffer[:],
+	)
+	if result != .Ok {
+		engine.stats.e2ee.sealErrors += 1
+		return nil, false
+	}
+	engine.lastSealedSequence = sequence
+	engine.hasSealed = true
+	engine.stats.e2ee.framesSealed += 1
+	return engine.sealBuffer[:n], true
+}
+
+// Opens one inbound frame of an encrypted room in place: frame.data becomes the Opus packet.
+// False, counted by reason, when it has no key, names no key held, does not open, or is not one
+// 20 ms packet (the duration the relay could not check).
+@(private = "file")
+VoiceEngine_openInbound :: proc(engine: ^VoiceEngine, frame: ^VoiceInboundFrame) -> bool {
+	payload := frame.data[:frame.length]
+	keys: ^VoiceEngineSpeakerKeys
+	for &candidate in engine.appliedSpeakerKeys[:engine.appliedSpeakerKeyCount] {
+		if candidate.userID == frame.senderUserID {
+			keys = &candidate
+			break
+		}
+	}
+	if keys == nil {
+		engine.stats.e2ee.drops[.NoKey] += 1
+		return false
+	}
+	if !common.voicePayloadLooksSealed(payload) {
+		engine.stats.e2ee.drops[.NotSealed] += 1
+		return false
+	}
+	_, keyID, _ := common.peekVoicePayloadHeader(payload)
+	key: ^VoiceEngineKey
+	if keys.current.set && common.voiceKeyIDForGeneration(keys.current.generation) == keyID {
+		key = &keys.current
+	} else if keys.previous.set &&
+	   common.voiceKeyIDForGeneration(keys.previous.generation) == keyID {
+		key = &keys.previous
+	}
+	if key == nil {
+		engine.stats.e2ee.drops[.UnknownKeyID] += 1
+		return false
+	}
+	encryption := engine.config.encryption
+	opened, result := common.openVoicePayload(
+		&key.key,
+		common.VoiceFrameAADFields {
+			serverIdentityPublicKey = encryption.serverIdentityPublicKey,
+			roomID = encryption.roomID,
+			senderUserID = int(frame.senderUserID),
+			epoch = key.epoch,
+			voiceSessionID = key.voiceSessionID,
+			generation = key.generation,
+			frameSequence = frame.frameSequence,
+			flags = frame.flags,
+		},
+		payload,
+		engine.openBuffer[:],
+	)
+	if result != .Ok {
+		engine.stats.e2ee.drops[.BadTag] += 1
+		return false
+	}
+	defer crypto.zero_explicit(&engine.openBuffer, len(opened))
+	if !voicePacketIsOneFrame(opened) {
+		engine.stats.e2ee.drops[.BadDuration] += 1
+		return false
+	}
+	frame.length = copy(frame.data[:], opened)
+	engine.stats.e2ee.framesOpened += 1
+	return true
 }
 
 // Copies the per-speaker table when it changed and applies it to the active speakers: a new
@@ -1115,8 +1446,13 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		engine.stats.framesGated += 1
 		return
 	}
-	length := opus.encodeFloat(engine.encoder, frame, engine.encodeBuffer[:])
-	if length <= 0 || int(length) > common.VOICE_OPUS_MAX_BYTES {
+	// An encrypted room's packets leave room for the sealed payload's overhead.
+	maxBytes := common.VOICE_OPUS_MAX_BYTES
+	if engine.config.encryption.enabled {
+		maxBytes = common.VOICE_E2EE_OPUS_MAX_BYTES
+	}
+	length := opus.encodeFloat(engine.encoder, frame, engine.encodeBuffer[:maxBytes])
+	if length <= 0 || int(length) > maxBytes {
 		engine.stats.encodeErrors += 1
 		return
 	}
@@ -1131,6 +1467,14 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		frameSequence = sequence,
 		flags         = flags,
 		opus          = engine.encodeBuffer[:length],
+	}
+	if engine.config.encryption.enabled {
+		// Never a frame without a send key, never an unsealed one.
+		sealed, sealedOK := VoiceEngine_sealOutbound(engine, sequence, flags, outbound.opus)
+		if !sealedOK {
+			return
+		}
+		outbound.opus = sealed
 	}
 	engine.stats.framesSent += 1
 	if engine.config.onFrameTiming != nil {
@@ -1355,6 +1699,10 @@ VoiceEngine_deliverInbound :: proc(
 		engine.stats.inboundLocallyMuted += 1
 		return true
 	}
+	// An encrypted room plays only what opened; a dropped frame is a loss for PLC and FEC.
+	if engine.config.encryption.enabled && !VoiceEngine_openInbound(engine, frame) {
+		return true
+	}
 	speaker := VoiceEngine_findSpeaker(engine, frame.senderUserID, now)
 	if speaker == nil {
 		return false
@@ -1530,6 +1878,9 @@ VoiceEngine_publish :: proc(engine: ^VoiceEngine) {
 	snapshot.inputLevelDB, snapshot.transmitting = VoiceEngine_inputLevel(engine)
 	snapshot.frameSequence = engine.frameSequence
 	snapshot.stats = engine.stats
+	snapshot.encrypted = engine.config.encryption.enabled
+	snapshot.hasSendKey = engine.appliedSendKey.set
+	snapshot.sendKeyGeneration = engine.appliedSendKey.generation
 	snapshot.jitter = engine.retiredJitter
 	snapshot.speakerCount = 0
 	for &speaker in engine.speakers {

@@ -30,7 +30,9 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   created without **Encrypt this room**) are not end-to-end encrypted: the server decrypts
   their messages and stores them unencrypted in its PostgreSQL database, so the server and its
   operator can read them, and direct messages from before protocol 17. Voice is relayed and
-  never stored or logged; it is not available in encrypted rooms yet. Invite-only rooms
+  never stored or logged; since protocol 21 voice in an encrypted room is end-to-end encrypted
+  too ([below](#encrypted-voice-protocol-21)), while voice in an unencrypted room is readable
+  by the server as it relays it. Invite-only rooms
   (protocol 15) limit which accounts the server lets read a room; without encryption they do
   not hide it from the server. The server always sees who writes to whom and when.
 
@@ -58,6 +60,7 @@ version below therefore needs clients and servers rebuilt together.
 | 18 | Encrypted rooms and their signed member log (end-to-end encryption, part 3a): `ClientAppendRoomLog`, `ClientFetchRoomLog`, `ServerRoomLog`, `RoomSummary.encrypted`/`logVersion`, `ClientCreateRoomPayload.encrypted` and `ClientEditRoomPayload.encrypted`, with schema migration 7 (`rooms.encrypted`, `rooms.log_version`, `room_log_entries`, `room_log_managers`). Encrypted rooms take no message and no voice yet |
 | 19 | Sender chains in encrypted rooms (end-to-end encryption, part 3b): sealed room messages (`ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `clientMessageId` and `sealed`), `ClientRoomKeyEnvelope`/`ServerRoomKeyEnvelope`, `ClientFetchRoomKeys`/`ServerRoomKeys`, `ClientRequestRoomKey`/`ServerRoomKeyRequest`, with schema migration 8 (sealed `chat_messages` columns, `room_key_envelopes`). Plaintext in an encrypted room is refused |
 | 20 | Full history in encrypted rooms (end-to-end encryption, part 4): `RoomKeyForward` envelopes (`ClientRoomKeyEnvelopePayload.senderId` names the chain's sender, `RoomKeyEnvelope.forwarderId` the forwarding account), `ServerRoomKeyRequest.senderId`, and key requests relayed to every member of a Full history room, with schema migration 9 (`room_key_envelopes.forwarder_user_id`) |
+| 21 | Encrypted voice in encrypted rooms (end-to-end encryption, part 5): voice joins of encrypted rooms are accepted, `ClientVoiceKey`/`ServerVoiceKey` (a participant's `VoiceKey` envelope, kind 4), `ClientRequestVoiceKey`/`ServerVoiceKeyRequest`, and sealed voice payloads in the frames of encrypted rooms. No schema migration: voice keys are never stored |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -143,7 +146,8 @@ The third part of end-to-end encryption, first half ([plan/e2ee-design.md](plan/
 sections 6.1, 6.2 and 6.7): encrypted rooms and their membership as a signed log. Their
 messages are sealed with sender chains since protocol 19
 ([below](#sender-chains-in-encrypted-rooms-protocol-19)); the server never stores anything
-readable in one. Voice joins are refused ("voice is not available in encrypted rooms yet").
+readable in one. Voice in one is end-to-end encrypted since protocol 21
+([below](#encrypted-voice-protocol-21)); protocols 18 to 20 refused voice joins there.
 
 - **Creating one.** An admin creates an encrypted room with `ClientCreateRoom{encrypted}`; it
   must be Member invite or Admin invite ("Public rooms cannot be encrypted"). The server
@@ -271,13 +275,68 @@ never does any of this.
   identity the log names). Messages are still verified against their real senders' keys, so a
   forwarder can give access to history but never forge a message in it.
 
+## Encrypted voice (protocol 21)
+
+The fifth part of end-to-end encryption ([plan/e2ee-voice-design.md](plan/e2ee-voice-design.md)):
+voice in an encrypted room is end-to-end encrypted. The relay forwards Opus it cannot read. An
+encrypted room's voice is encrypted or silent; there is no plaintext fallback. Unencrypted
+rooms keep their voice exactly as before.
+
+- **Voice keys.** Every participant makes its own voice key: 32 random bytes per voice session
+  (a random 16-byte `voiceSessionId` per join) and *generation* (from 0, one more on every
+  rotation). It is sealed as a `VoiceKey` envelope (kind 4 of the end-to-end envelope) with a
+  wrap for every other member of the current epoch in the sender's verified member log, each
+  to the encryption key the sender pinned, and signed by the sender under its own AAD
+  (`"haychat-voice-key-v1"`, this server, the room, the epoch, the sender, the voice session,
+  the generation and the creation time). The plaintext repeats those fields. A voice key is
+  never derived from a text sender chain, so Full history never reaches calls.
+- **Wire.** `ClientVoiceKey{roomId, epoch, voiceSessionId, generation, createdAt, envelope}` and
+  `ServerVoiceKey` (the same plus `senderId`); `ClientRequestVoiceKey{roomId, senderId}` and
+  `ServerVoiceKeyRequest{roomId, requesterId}`. `createdAt` (Unix seconds by the sender's clock)
+  travels next to the envelope because the AAD binds it and the server checks the signature.
+- **Server.** The router accepts a `ClientVoiceKey` only from a session in that room's voice,
+  for an encrypted room, at the room's current member log version ("Voice key is out of date"
+  for an older one, so the client fetches the log and makes a new key; "Invalid voice key"
+  otherwise), with a valid `VoiceKey` envelope without a wrap for its sender, signed by the
+  session's identity key. It keeps the latest key per participant **in memory only** (never in
+  the database), sends it as `ServerVoiceKey` to every other session in the room's voice, and
+  hands each joiner every other participant's current key right after its participant list. It
+  forgets a key when its participant leaves voice, is taken over by another device, is evicted
+  or disconnects, and drops keys of an older epoch when the member log moves on. A key request
+  goes to the speaker's voice session at most once per requester and speaker every 10 seconds.
+- **Rotation.** A participant makes a new generation when its join is acknowledged, whenever
+  its voice engine is reopened (a device change), when its verified log reaches a new epoch (a
+  member added or removed: frames wait for the new key, and the old one is never used again),
+  every 30 minutes, and when a member asks (at most once every 10 seconds).
+- **Freshness.** A listener accepts a key only from a member of its epoch in the verified log,
+  checked against the sender's pin; for the epoch it has verified (a later one waits for the
+  log, an earlier one is accepted only within 10 seconds of the log moving on); made no more
+  than an hour before and no more than 5 minutes after the listener's own clock; and newer than
+  the last key it accepted from that sender. A user whose clock is off by more than about half
+  an hour cannot be heard in encrypted rooms.
+- **Frames.** In an encrypted room the `opus` field of `ClientVoiceFrame`/`ServerVoiceFrame`
+  holds `version (1) ‖ keyId (1) ‖ ciphertext ‖ tag (16)`: XChaCha20-Poly1305 under the
+  sender's voice key, the nonce is the frame sequence followed by 20 zero bytes, and the AAD
+  (`"haychat-voice-frame-v1"`) binds the server, the room, the sender, the epoch, the voice
+  session, the generation, the sequence, the flags, the version and the key ID. The relay skips
+  its Opus duration check there, drops a payload that is not sealed, applies
+  `HAYCHAT_VOICE_MAX_FRAME_BYTES` to the Opus bytes inside, and forwards the payload unchanged.
+  Encrypted rooms encode at constant bitrate, so the packet lengths the server sees do not
+  follow the speech.
+- **What the server still sees.** Who is in voice, who talks and when (nothing is sent in
+  silence), and the bitrate. A member who controls or colludes with the server can speak under
+  another member's key (there are no per-frame signatures), and the server can replay a
+  recording less than an hour old to a listener that has not seen a newer key from that
+  speaker. See section 1 of the design note.
+
 ## End-to-end encryption primitives
 
 `common/e2ee.odin` holds the building blocks of the end-to-end encryption design
 ([plan/e2ee-design.md](plan/e2ee-design.md)). Protocol 16 uses the encryption key bundle and
 safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback,
 protocol 18 the member log, protocol 19 the sender chains, their distributions and sealed
-room messages, and protocol 20 the forwarded chains of Full history rooms.
+room messages, protocol 20 the forwarded chains of Full history rooms, and protocol 21 the
+voice key envelopes (sealed voice payloads are in `common/voice_e2ee.odin`).
 
 - **What is there.** The signed encryption key bundle (X25519 key, signed by the identity key),
   sealed envelopes (one random message key wrapped per recipient, the body sealed with
@@ -291,6 +350,6 @@ room messages, and protocol 20 the forwarded chains of Full history rooms.
 - **Opening.** Every procedure that opens or verifies checks the signature against the caller's
   pinned identity key before it touches key material, and each failure has its own error value
   (`E2EEError`, `RoomLogError`); nothing is retried with another key.
-- **Known answers.** `common/e2ee_test.odin` pins vectors produced by
-  `dev/tools/e2ee-vectors.py`, an independent implementation with Python's `cryptography`
-  package. Rerun it after changing a layout, a domain string or an HKDF label.
+- **Known answers.** `common/e2ee_test.odin` and `common/voice_e2ee_test.odin` pin vectors
+  produced by `dev/tools/e2ee-vectors.py`, an independent implementation with Python's
+  `cryptography` package. Rerun it after changing a layout, a domain string or an HKDF label.

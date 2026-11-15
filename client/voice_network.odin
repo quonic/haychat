@@ -258,6 +258,9 @@ VoiceControlRequestKind :: enum u8 {
 	Join, // ClientJoinVoice{roomID, muted, deafened, rejoin, deviceID}
 	Leave, // ClientLeaveVoice
 	State, // ClientVoiceState{muted, deafened}
+	// Protocol 21 (voice_e2ee.odin).
+	Key, // ClientVoiceKey{roomID, epoch, voiceSessionID, generation, createdAt, envelope}
+	RequestKey, // ClientRequestVoiceKey{roomID, senderID}
 }
 
 VoiceControlRequest :: struct {
@@ -270,6 +273,13 @@ VoiceControlRequest :: struct {
 	// (borrowed from State.config).
 	rejoin:   bool,
 	deviceID: string,
+	// Key and RequestKey only (protocol 21). envelope is borrowed for the call.
+	epoch:          int,
+	voiceSessionID: common.VoiceSessionID,
+	generation:     u32,
+	createdAt:      i64,
+	envelope:       []u8,
+	senderID:       int,
 }
 
 VoiceControlSendBridge :: #type proc(
@@ -309,6 +319,28 @@ ClientServerTransport_sendVoiceControl :: proc(
 			transport,
 			.ClientVoiceState,
 			common.ClientVoiceStatePayload{muted = request.muted, deafened = request.deafened},
+		)
+	case .Key:
+		return ClientServerTransport_sendEncryptedRuntimeMessage(
+			transport,
+			.ClientVoiceKey,
+			common.ClientVoiceKeyPayload {
+				roomId = request.roomID,
+				epoch = request.epoch,
+				voiceSessionId = request.voiceSessionID,
+				generation = request.generation,
+				createdAt = request.createdAt,
+				envelope = request.envelope,
+			},
+		)
+	case .RequestKey:
+		return ClientServerTransport_sendEncryptedRuntimeMessage(
+			transport,
+			.ClientRequestVoiceKey,
+			common.ClientRequestVoiceKeyPayload {
+				roomId = request.roomID,
+				senderId = request.senderID,
+			},
 		)
 	}
 	return false

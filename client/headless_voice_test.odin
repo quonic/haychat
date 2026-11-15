@@ -331,7 +331,7 @@ testHeadlessVoicePollReportsStatusChanges :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"voice_status","serverID":813,"roomID":4,"status":"joining","wantRoomID":4,` +
-		`"error":""}` + "\n",
+		`"error":"","encrypted":false,"sendGeneration":-1}` + "\n",
 		"the joining status",
 	)
 	testing.expect(t, harness.pendingEvents[.VoiceStatus] == 1, "expected it counted for wait")
@@ -345,7 +345,8 @@ testHeadlessVoicePollReportsStatusChanges :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"voice_status","serverID":813,"roomID":4,"status":"unavailable",` +
-		`"wantRoomID":4,"error":"voice sink /nope: Not_Exist"}` + "\n",
+		`"wantRoomID":4,"error":"voice sink /nope: Not_Exist","encrypted":false,` +
+		`"sendGeneration":-1}` + "\n",
 		"the unavailable status",
 	)
 	testing.expect(t, HEADLESS_EVENT_NAMES[.VoiceSpeaking] == "voice_speaking", "event name")

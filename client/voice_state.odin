@@ -18,6 +18,11 @@ package client
 // moved to. Both reasons end in Idle with the want cleared and show in the voice bar.
 //   Joined ──engine cannot start──▶ Unavailable (want cleared, leave sent; chat unaffected)
 //
+// Encrypted rooms (protocol 21, voice_e2ee.odin): voice is end to end encrypted. A join needs
+// the room's verified member log and this profile's encryption key (State_voiceE2EEJoinBlocker);
+// the engine is created sealing and opening (VoiceEngineConfig.encryption), and every engine
+// start makes a new voice key generation.
+//
 // The engine runs only while Joined. Starting it binds it to the server's transport
 // (voice_network.odin), and stopping clears that binding under the worker lock before the
 // engine is destroyed, so the worker and the voice thread never use a freed engine.
@@ -75,6 +80,10 @@ ClientVoiceState :: struct {
 	engineTemplate:   VoiceEngineConfig,
 	// What the last frame showed of the engine-driven voice state (State_voiceVisualKey).
 	drawnVisual:      VoiceVisualKey,
+	// Protocol 21: the room voice is in (or wanted in) is encrypted, as RoomSummary said when it
+	// was joined; it never changes, and a re-join after a reconnect keeps it. Its keys.
+	encrypted:        bool,
+	e2ee:             VoiceE2EEState,
 }
 
 VOICE_DEFAULT_ENGINE_TEMPLATE :: VoiceEngineConfig {
@@ -113,6 +122,7 @@ ClientVoiceState_deinit :: proc(voice: ^ClientVoiceState) {
 	delete(voice.roomParticipants)
 	delete(voice.lastError)
 	VoiceEngineConfig_deleteStrings(&voice.engineTemplate)
+	VoiceE2EEState_deinit(&voice.e2ee)
 	voice^ = {}
 }
 
@@ -202,7 +212,6 @@ State_voiceIsActive :: proc(state: ^State) -> bool {
 }
 
 // Sends one voice control message on serverID. On failure the error is a temp string.
-@(private = "file")
 State_voiceSendControl :: proc(
 	state: ^State,
 	serverID: int,
@@ -268,6 +277,19 @@ State_joinVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 		ClientVoiceState_setError(&state.voice, NOT_CONNECTED_MESSAGE)
 		return false
 	}
+	// Protocol 21: an encrypted room's voice needs its verified member list and this profile's
+	// encryption key before anything goes out. Checked first, so a refused join leaves the
+	// current voice session alone.
+	encrypted := State_roomIsEncrypted(state, serverID, roomID)
+	if encrypted {
+		if blocker := State_voiceE2EEJoinBlocker(state, serverID, roomID); len(blocker) > 0 {
+			if blocker == VOICE_E2EE_SETTING_UP_NOTE {
+				State_requestRoomLog(state, serverID, roomID)
+			}
+			ClientVoiceState_setError(&state.voice, blocker)
+			return false
+		}
+	}
 	if State_voiceIsActive(state) || state.voice.wantVoiceRoomID != 0 {
 		State_leaveVoice(state)
 	}
@@ -291,6 +313,7 @@ State_joinVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 	state.voice.serverID = serverID
 	state.voice.roomID = roomID
 	state.voice.wantVoiceRoomID = roomID
+	state.voice.encrypted = encrypted
 	ClientVoiceState_setError(&state.voice, "")
 	return true
 }
@@ -307,6 +330,7 @@ State_leaveVoice :: proc(state: ^State) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_setError(&state.voice, "")
 }
 
@@ -367,12 +391,14 @@ State_setVoicePushToTalk :: proc(state: ^State, held: bool) {
 // On failure voice becomes Unavailable with the engine's error and the server is told to
 // drop the session from voice; chat is unaffected.
 // resumeSequence and resumeAt continue a stopped engine's media clock (see
-// VoiceEngineConfig.resumeSequence); a fresh join leaves them zero.
+// VoiceEngineConfig.resumeSequence); a fresh join leaves them zero. restart is set for
+// State_voiceRestartEngine, which keeps an encrypted room's voice session (voice_e2ee.odin).
 @(private = "file")
 State_voiceStartEngine :: proc(
 	state: ^State,
 	resumeSequence: u32 = 0,
 	resumeAt: time.Tick = {},
+	restart := false,
 ) {
 	serverID := state.voice.serverID
 	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
@@ -394,6 +420,26 @@ State_voiceStartEngine :: proc(
 	config.outboundUserdata = link
 	config.resumeSequence = resumeSequence
 	config.resumeSequenceAt = resumeAt
+	// Protocol 21: an encrypted room's engine seals and opens every frame; once known as
+	// encrypted, the room stays so (its flag never changes).
+	state.voice.encrypted ||= State_roomIsEncrypted(state, serverID, state.voice.roomID)
+	config.encryption = {}
+	if state.voice.encrypted {
+		encryption, reason, encryptionOK := State_voiceE2EEEngineEncryption(
+			state,
+			serverID,
+			state.voice.roomID,
+		)
+		if !encryptionOK {
+			free(link)
+			ClientVoiceState_setError(&state.voice, reason)
+			_, _ = State_voiceSendControl(state, serverID, {kind = .Leave})
+			state.voice.status = .Unavailable
+			state.voice.wantVoiceRoomID = 0
+			return
+		}
+		config.encryption = encryption
+	}
 	engine := VoiceEngine_create(config)
 	link.engine = engine
 	VoiceEngine_setMuted(engine, state.voice.muted)
@@ -406,6 +452,7 @@ State_voiceStartEngine :: proc(
 		ClientVoiceState_setError(&state.voice, VoiceEngine_lastError(engine))
 		VoiceEngine_destroy(engine)
 		free(link)
+		State_voiceE2EEEnd(state)
 		_, _ = State_voiceSendControl(state, serverID, {kind = .Leave})
 		state.voice.status = .Unavailable
 		state.voice.wantVoiceRoomID = 0
@@ -421,16 +468,29 @@ State_voiceStartEngine :: proc(
 	ClientNetworkWorker_unlock(state.networkWorker)
 	state.voice.engine = engine
 	state.voice.link = link
+	if config.encryption.enabled {
+		State_voiceE2EEEngineStarted(state, restart)
+	}
 }
 
 // Unbinds and destroys the engine. The binding is cleared under the worker lock first, so
 // once the lock is released neither the worker nor the voice thread can reach the engine
 // through the transport; VoiceEngine_destroy then joins the voice thread, and only after that
 // is the link it sends through freed. Returns the stopped engine's next frameSequence and
-// when it stopped, for State_voiceRestartEngine.
-State_voiceStopEngine :: proc(state: ^State) -> (nextSequence: u32, stoppedAt: time.Tick) {
+// when it stopped, for State_voiceRestartEngine. An encrypted room's voice keys go with it,
+// unless keepE2EE (a restart) keeps the voice session's keys for the next engine.
+State_voiceStopEngine :: proc(
+	state: ^State,
+	keepE2EE := false,
+) -> (
+	nextSequence: u32,
+	stoppedAt: time.Tick,
+) {
 	engine := state.voice.engine
 	link := state.voice.link
+	if !keepE2EE {
+		State_voiceE2EEEnd(state)
+	}
 	if engine == nil {
 		return
 	}
@@ -459,8 +519,10 @@ State_voiceRestartEngine :: proc(state: ^State) {
 	if state.voice.status != .Joined || state.voice.engine == nil {
 		return
 	}
-	nextSequence, stoppedAt := State_voiceStopEngine(state)
-	State_voiceStartEngine(state, nextSequence, stoppedAt)
+	// The new engine gets a new voice key generation (voice_e2ee.odin), so no key is ever used
+	// by two engines.
+	nextSequence, stoppedAt := State_voiceStopEngine(state, keepE2EE = true)
+	State_voiceStartEngine(state, nextSequence, stoppedAt, restart = true)
 }
 
 // Stops the engine without telling the server, for shutdown.
@@ -555,6 +617,7 @@ State_voiceJoinRejected :: proc(state: ^State, serverID, roomID: int, reason: ^s
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_takeError(&state.voice, reason)
 }
 
@@ -573,6 +636,7 @@ State_voiceLeft :: proc(state: ^State, serverID, roomID: int, reason: ^string) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 	ClientVoiceState_takeError(&state.voice, reason)
 }
 
@@ -611,6 +675,7 @@ State_voiceEndedByAdmin :: proc(state: ^State, serverID: int) {
 	state.voice.serverID = 0
 	state.voice.roomID = 0
 	state.voice.wantVoiceRoomID = 0
+	state.voice.encrypted = false
 }
 
 // A session on serverID was established: re-join the wanted room. The join is marked as

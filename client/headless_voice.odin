@@ -11,6 +11,7 @@ package client
 // a script changes them before voice-join, or leaves and joins again. Mute, deafen,
 // push-to-talk and the gate mode also reach a running engine at once.
 
+import "../common"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
@@ -131,13 +132,61 @@ HeadlessVoiceSpeakingJSON :: struct {
 
 // A change of State.voice.status. roomID is the room voice is in or being joined, or the one
 // a reconnect will re-join (wantRoomID) while idle; error is why voice last stopped or failed.
+// encrypted (protocol 21) says the room's voice is end-to-end encrypted, and sendGeneration is
+// the generation of this client's voice key there (-1 while it has none).
 HeadlessVoiceStatusJSON :: struct {
+	event:          string,
+	serverID:       int,
+	roomID:         int,
+	status:         string,
+	wantRoomID:     int,
+	error:          string,
+	encrypted:      bool,
+	sendGeneration: int,
+}
+
+// A voice key event (protocol 21): kind is sent (this client's new key, rotation says why),
+// accepted or refused (another participant's key; reason and error say why it was refused),
+// requested (this client asked userID) or request_received (userID asked this client).
+HeadlessVoiceKeyJSON :: struct {
 	event:      string,
 	serverID:   int,
 	roomID:     int,
-	status:     string,
-	wantRoomID: int,
+	kind:       string,
+	userID:     int,
+	epoch:      int,
+	generation: u32,
+	rotation:   string,
+	reason:     string,
 	error:      string,
+}
+
+HEADLESS_VOICE_KEY_KIND_NAMES := [VoiceKeyNoteKind]string {
+	.Sent            = "sent",
+	.Accepted        = "accepted",
+	.Refused         = "refused",
+	.Requested       = "requested",
+	.RequestReceived = "request_received",
+}
+
+headlessRenderVoiceKey :: proc(note: VoiceKeyNote, allocator := context.allocator) -> string {
+	result := HeadlessVoiceKeyJSON {
+		event      = HEADLESS_EVENT_NAMES[.VoiceKey],
+		serverID   = note.serverID,
+		roomID     = note.roomID,
+		kind       = HEADLESS_VOICE_KEY_KIND_NAMES[note.kind],
+		userID     = note.userID,
+		epoch      = note.epoch,
+		generation = note.generation,
+		reason     = VOICE_KEY_REFUSAL_NAMES[note.refusal],
+	}
+	if note.kind == .Sent {
+		result.rotation = VOICE_KEY_ROTATION_NAMES[note.rotation]
+	}
+	if note.error != .None {
+		result.error = fmt.tprintf("%v", note.error)
+	}
+	return headlessMarshal(result, allocator)
 }
 
 headlessRenderVoiceSpeaking :: proc(
@@ -162,6 +211,10 @@ headlessRenderVoiceStatus :: proc(
 	voice: ^ClientVoiceState,
 	allocator := context.allocator,
 ) -> string {
+	sendGeneration := -1
+	if voice.e2ee.active && voice.e2ee.hasSendKey {
+		sendGeneration = int(voice.e2ee.sendGeneration)
+	}
 	return headlessMarshal(
 		HeadlessVoiceStatusJSON {
 			event = HEADLESS_EVENT_NAMES[.VoiceStatus],
@@ -170,6 +223,8 @@ headlessRenderVoiceStatus :: proc(
 			status = HEADLESS_VOICE_STATUS_NAMES[voice.status],
 			wantRoomID = voice.wantVoiceRoomID,
 			error = voice.lastError,
+			encrypted = voice.encrypted,
+			sendGeneration = sendGeneration,
 		},
 		allocator,
 	)
@@ -191,6 +246,15 @@ headlessPollVoice :: proc(harness: ^HeadlessHarness) {
 	state := &harness.state
 	tracker := &harness.voice
 	voice := &state.voice
+	// Encrypted voice's periodic work, then its notes (protocol 21).
+	State_voiceE2EETick(state)
+	for note in voice.e2ee.notes {
+		line := headlessRenderVoiceKey(note)
+		headlessWriteLine(harness, line)
+		delete(line)
+		headlessRecordEvent(harness, .VoiceKey)
+	}
+	clear(&voice.e2ee.notes)
 	if voice.status != tracker.status {
 		tracker.status = voice.status
 		if voice.status == .Joined {
@@ -298,6 +362,72 @@ HeadlessVoiceStatsJSON :: struct {
 	// Per-user volumes and local mutes stored for serverID, and what the running engine holds
 	// for each (voice-volume, voice-mute-user).
 	userVoice:         []HeadlessUserVoiceJSON,
+	// Protocol 21: encrypted voice's counters.
+	e2ee:              HeadlessVoiceE2EEJSON,
+}
+
+// voice-stats' encrypted voice counters: whether the engine seals and opens and its send key's
+// generation (-1 for none); frames sealed and opened and encoded frames held back without a
+// key (sendNoKey); inbound drops by reason; voice keys sent, accepted and refused by reason,
+// and key requests sent and received.
+HeadlessVoiceE2EEJSON :: struct {
+	encrypted:        bool,
+	sendGeneration:   int,
+	framesSealed:     u64,
+	framesOpened:     u64,
+	sendNoKey:        u64,
+	sequenceRefused:  u64,
+	dropNoKey:        u64,
+	dropUnknownKeyID: u64,
+	dropBadTag:       u64,
+	dropNotSealed:    u64,
+	dropBadDuration:  u64,
+	keysSent:         u64,
+	keysAccepted:     u64,
+	keysRefused:      map[string]u64,
+	requestsSent:     u64,
+	requestsReceived: u64,
+}
+
+// Fills the encrypted voice counters; keysRefused lists only the reasons that happened.
+headlessVoiceE2EEJSON :: proc(
+	voice: ^ClientVoiceState,
+	snapshot: ^VoiceEngineSnapshot,
+	allocator := context.allocator,
+) -> HeadlessVoiceE2EEJSON {
+	stats := voice.e2ee.stats
+	result := HeadlessVoiceE2EEJSON {
+		encrypted        = voice.encrypted,
+		sendGeneration   = -1,
+		keysSent         = stats.sent,
+		keysAccepted     = stats.accepted,
+		keysRefused      = make(map[string]u64, allocator),
+		requestsSent     = stats.requestsSent,
+		requestsReceived = stats.requestsReceived,
+	}
+	for count, refusal in stats.refused {
+		if count > 0 {
+			result.keysRefused[VOICE_KEY_REFUSAL_NAMES[refusal]] = count
+		}
+	}
+	if snapshot == nil {
+		return result
+	}
+	if snapshot.hasSendKey {
+		result.sendGeneration = int(snapshot.sendKeyGeneration)
+	}
+	e2ee := snapshot.stats.e2ee
+	result.encrypted ||= snapshot.encrypted
+	result.framesSealed = e2ee.framesSealed
+	result.framesOpened = e2ee.framesOpened
+	result.sendNoKey = e2ee.sendNoKey
+	result.sequenceRefused = e2ee.sequenceRefused
+	result.dropNoKey = e2ee.drops[.NoKey]
+	result.dropUnknownKeyID = e2ee.drops[.UnknownKeyID]
+	result.dropBadTag = e2ee.drops[.BadTag]
+	result.dropNotSealed = e2ee.drops[.NotSealed]
+	result.dropBadDuration = e2ee.drops[.BadDuration]
+	return result
 }
 
 // One user's voice playback setting on a server: stored is what the config holds (and the
@@ -651,8 +781,22 @@ headlessCommandVoiceStats :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	defer delete(result.speakers)
 	result.userVoice = headlessUserVoiceList(state, serverID)
 	defer delete(result.userVoice)
+	result.e2ee = headlessVoiceE2EEJSON(&state.voice, snapshotPointer)
+	defer delete(result.e2ee.keysRefused)
 	result.cmd = command.name
 	headlessWriteJSON(harness, result)
+}
+
+// voice-key-rotate SECONDS: the voice key rotation period of this process (protocol 21, design
+// 4.1 step 4), so a proof can see a timed rotation; the GUI keeps VOICE_KEY_ROTATE_SECONDS.
+headlessCommandVoiceKeyRotate :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	seconds, ok := headlessParseNumber(command.args[0])
+	if !ok || seconds < 1 || seconds > common.VOICE_KEY_ROTATE_SECONDS {
+		headlessVoiceUsage(harness, command)
+		return
+	}
+	harness.state.voice.e2ee.rotateSeconds = seconds
+	headlessVoiceWriteSetting(harness, command, command.args[0])
 }
 
 headlessCommandVoiceFlush :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {

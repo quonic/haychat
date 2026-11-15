@@ -35,7 +35,9 @@ set -euo pipefail
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
 #                   through injected loss, and one voice session per user (two profiles with
-#                   one identity key and different device IDs: the second join takes over)
+#                   one identity key and different device IDs: the second join takes over),
+#                   then encrypted voice in an encrypted room (three clients, a removal and
+#                   timed key rotations)
 #   --ui            only the GUI automation smoke test (dev/ui-smoke.sh): the real window on
 #                   SDL's offscreen video driver, driven by --ui-script; screenshots go to
 #                   HAYCHAT_UI_SCREENSHOT_DIR when it is set

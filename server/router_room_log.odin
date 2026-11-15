@@ -132,6 +132,8 @@ MainRouterState_sendRoomLogEntry :: proc(
 		entries      = entries,
 		headVersion  = version,
 	}
+	// Protocol 21: voice keys must name the new epoch from now on.
+	MainRouterState_voiceLogAdvanced(state, roomID, version)
 	for recipientPeerID, recipientSession in state.peerSessions {
 		if !recipientSession.isAuthenticated {
 			continue

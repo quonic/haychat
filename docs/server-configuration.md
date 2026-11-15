@@ -65,7 +65,7 @@ range; a value that does not parse uses the default.
 | `HAYCHAT_VOICE_ENABLED` | `true` | `false` (or `0`, `no`, `off`) turns voice off server-wide; every join is refused with "voice is disabled" |
 | `HAYCHAT_VOICE_MAX_PARTICIPANTS` | `25` (1 to 200) | Voice sessions per room. An account has one voice session, so a user joining from a second device takes the first device's place. A join into a full room is refused with "voice room is full" |
 | `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` | `60` (1 to 1000) | Per-connection rate limit for voice datagrams, as a token bucket with a burst of a third of the rate. A client sends 50 per second while talking, so values below 50 cut speech up |
-| `HAYCHAT_VOICE_MAX_FRAME_BYTES` | `512` (64 to 512) | The largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes |
+| `HAYCHAT_VOICE_MAX_FRAME_BYTES` | `512` (64 to 512) | The largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes. In an encrypted room it counts the Opus bytes inside the sealed payload, without its 18 bytes of overhead |
 
 ## Startup and Exit Status
 
@@ -121,7 +121,8 @@ thread logs one line of space-separated `key=value` pairs, for example:
   `voice_send_failures` failed sends.
 - One `voice_drops_<reason>` pair per drop reason: `unknown_peer`, `not_in_room`,
   `rate_limited`, `malformed`, `replayed`, `too_old`, `bad_tag`, `inactive`, `malformed_frame`,
-  `wrong_room`, `muted`, `oversize`, `bad_duration`. A dropped datagram never disconnects anyone.
+  `wrong_room`, `muted`, `oversize`, `bad_duration`, `not_sealed` (protocol 21: an encrypted
+  room's frame that is not a sealed payload). A dropped datagram never disconnects anyone.
 
 The frame counters start over when the network service restarts. In the dev pod, read the latest
 line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`; in production, see [deploy/README.md

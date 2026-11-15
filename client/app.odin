@@ -208,6 +208,8 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		if State_drainNetworkEvents(&state) {
 			redraw = true
 		}
+		// Encrypted voice (voice_e2ee.odin): timed rotations, epoch grace and key requests.
+		State_voiceE2EETick(&state)
 		// After the events and the network: both the window's key and a voice join or leave
 		// change what push-to-talk follows.
 		if State_voiceSyncPushToTalk(&state, ui.hasTextFocus(&ctx)) {

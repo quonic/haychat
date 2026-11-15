@@ -117,8 +117,9 @@ Each room has an access mode, chosen when it is created:
   hands over the keys they hold, and other members' clients answer for the rest, so an older
   message opens once a member who has its key is online (until then it shows **Waiting for
   this message's key**). Losing your key store file does not lose the room's
-  messages: your client fetches the keys again from the server. Voice is not available in
-  encrypted rooms yet. Their **Members** page lists the
+  messages: your client fetches the keys again from the server. Voice in an encrypted room is
+  end-to-end encrypted too ([Encrypted voice](#encrypted-voice)). Their **Members** page lists
+  the
   members, the **managers** (who sign who joins, add and remove people and other managers)
   and the server's **admins** separately, each with their key state ("Verified", "Not
   verified", "Key changed", "No key"). A manager can **Make manager** / **Remove manager**, and
@@ -187,6 +188,33 @@ cancellation or noise suppression: use headphones.
   "Microphone not available: …", or the server's refusal) with **Dismiss** when voice failed.
 - **Per-user volume and mute:** Server settings → Voice, or a voice participant's right-click
   menu. Only you hear the change.
+
+### Encrypted voice
+
+Voice in an encrypted room (🔒 before its name) is end-to-end encrypted: the server relays it
+but cannot listen. The voice bar shows "🔒 Voice is end-to-end encrypted" there. Voice in an
+unencrypted room is not: the server can hear it as it relays it.
+
+- **Joining** needs the room's verified member list and a valid encryption key on this profile.
+  Until then **Join voice** reports why: "Setting up encryption…" (the member list is still
+  loading; try again in a moment), "This profile has no valid encryption key", or "This room's
+  member list was changed on the server".
+- **Who can listen.** Your client hands its voice key only to the members the room's verified
+  member list names, and makes a new one whenever someone is added or removed, every 30
+  minutes, and when you change audio device. Someone removed from the room is taken out of its
+  voice and gets no key for anything said after the change.
+- **Waiting for a key.** A participant whose key has not reached you yet shows "no key" after
+  their name and **Waiting for <name>'s voice key** when you hover it; your client asks for it
+  after two seconds. You hear them as soon as it arrives.
+- **Keep your clock synchronised.** A voice key carries the time it was made, and clients
+  refuse keys made more than an hour ago or more than five minutes in the future, so a
+  recording cannot be played back later as live audio. If your computer's clock is off by more
+  than about half an hour, others cannot hear you in encrypted rooms (and you may not hear
+  them); a participant whose key was refused for its time shows "clock" and **Clock out of
+  sync**. Turn on automatic time synchronisation in your operating system.
+- **What stays visible.** The server still sees who is in voice, who talks and when, and for
+  how long. Encrypted rooms send audio at a constant bitrate, so the size of the voice packets
+  does not give away what is said.
 
 ### Settings → Voice
 

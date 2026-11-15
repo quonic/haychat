@@ -77,7 +77,10 @@ Per datagram, in order, each failure counted by reason and none of them disconne
 3. `openVoiceDatagram`: malformed, replayed, too old, bad tag, inactive.
 4. `decodeClientVoiceFrame`; then wrong room ID, muted sender, Opus payload over
    `HAYCHAT_VOICE_MAX_FRAME_BYTES`, or a TOC byte that is not exactly 20 ms
-   (`opusPacketIsVoiceFrameDuration`; the server needs no libopus).
+   (`opusPacketIsVoiceFrameDuration`; the server needs no libopus). In an encrypted room
+   (protocol 21) the payload is sealed end to end: the relay drops one that is not a version 1
+   sealed payload with at least one Opus byte (`NotSealed`), applies the size limit to the
+   payload minus its 18 bytes of overhead, and skips the TOC check, which it cannot read.
 5. `encodeServerVoiceFrame` in place with the sender's user ID, then for every other room
    member that is not deafened: `sealVoiceDatagram` with that member's send state and
    `ENet.peer_send` on channel 2 with `UNSEQUENCED`, so a late frame still reaches the jitter

@@ -103,6 +103,7 @@ SERVER_STATUS_VOICE_DROP_NAMES := [VoiceRelayDropReason]string {
 	.Muted          = "muted",
 	.Oversize       = "oversize",
 	.BadDuration    = "bad_duration",
+	.NotSealed      = "not_sealed",
 }
 
 // Prints the [Status] line. The text is heap-allocated and freed here, because no server loop

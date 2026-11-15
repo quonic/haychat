@@ -1048,6 +1048,8 @@ State_roomChainsTakeEnvelopes :: proc(
 // The verified log of roomID changed (or failed): envelopes and messages that waited for it
 // are looked at again, and sends continue (a new epoch starts a new chain).
 State_roomChainsLogChanged :: proc(state: ^State, serverID, roomID: int) {
+	// Encrypted voice (protocol 21) follows the same verified log.
+	defer State_voiceE2EELogChanged(state, serverID, roomID)
 	room := State_findRoomChains(state, serverID, roomID)
 	if room != nil && len(room.pendingEnvelopes) > 0 {
 		waiting := room.pendingEnvelopes

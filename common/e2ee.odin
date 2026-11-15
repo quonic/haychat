@@ -37,7 +37,8 @@ import "core:unicode/utf8"
 //
 //   offset        size   field
 //   0             1      version = 1
-//   1             1      kind (EnvelopeKind: 1 DirectMessage, 2 SenderKey, 3 RoomKeyForward)
+//   1             1      kind (EnvelopeKind: 1 DirectMessage, 2 SenderKey, 3 RoomKeyForward,
+//                          4 VoiceKey)
 //   2             32     ephemeralKey: X25519 public key, fresh per envelope
 //   34            2      wrapCount u16 (1..SEALED_ENVELOPE_MAX_WRAPS)
 //   36            56*n   wraps, each KeyWrap:
@@ -56,7 +57,7 @@ import "core:unicode/utf8"
 //                           info = "haychat-e2ee-wrap-v1" || kind (1) || AAD), 32 bytes
 //
 //   The AAD is not carried; both sides rebuild it (makeDirectMessageAAD, makeRoomKeyAAD,
-//   makeRoomKeyForwardAAD) and it is at most E2EE_AAD_MAX_BYTES.
+//   makeRoomKeyForwardAAD, makeVoiceKeyAAD) and it is at most E2EE_AAD_MAX_BYTES.
 //
 // SealedDirectMessagePlaintext (design 4.4): CBOR map {"content": text}, content 1..
 //   CHAT_MESSAGE_MAX_BYTES bytes of UTF-8. encodeSealedDirectMessagePlaintext writes the one
@@ -80,6 +81,22 @@ import "core:unicode/utf8"
 //   under makeRoomKeyForwardAAD, which names the chain's original sender, the forwarder and the
 //   recipient. Messages of the chain are still signed by the original sender, so a forwarder
 //   can give access to a chain but never forge a message in it.
+//
+// VoiceKeyPlaintext, version 1 (e2ee-voice-design.md 3.1), 77 bytes, sealed in a VoiceKey
+//   envelope with one wrap per member of the epoch in the sender's verified log, the sender
+//   excluded, under makeVoiceKeyAAD:
+//
+//   0   1   version = 1
+//   1   8   roomId i64 (> 0)
+//   9   8   epoch i64 (> 0): the verified log version the key is for
+//   17  16  voiceSessionId: random, one per voice join
+//   33  4   generation u32: from 0, one more on every rotation within the voice session
+//   37  8   createdAtUnix i64: seconds by the sender's clock
+//   45  32  voiceKey: 32 random bytes, used by one voice engine only (common/voice_e2ee.odin)
+//
+//   The opener checks that the plaintext repeats the AAD's fields. Voice keys are never stored
+//   or forwarded by anyone: the server keeps the latest envelope per voice participant in
+//   memory only.
 //
 // SealedRoomMessage, version 1 (design 6.5). At most SEALED_ROOM_MESSAGE_MAX_BYTES in total.
 //
@@ -145,6 +162,7 @@ E2EE_AAD_MAX_BYTES :: 256
 CLIENT_MESSAGE_ID_SIZE :: 16
 CHAIN_ID_SIZE :: 16
 ROOM_LOG_HASH_SIZE :: 32
+VOICE_SESSION_ID_SIZE :: 16
 
 EncryptionPrivateKeyBytes :: distinct [ENCRYPTION_PRIVATE_KEY_SIZE]u8
 EncryptionPublicKeyBytes :: distinct [ENCRYPTION_PUBLIC_KEY_SIZE]u8
@@ -155,6 +173,9 @@ E2EENonce :: [E2EE_NONCE_SIZE]u8
 ClientMessageID :: [CLIENT_MESSAGE_ID_SIZE]u8
 ChainID :: [CHAIN_ID_SIZE]u8
 RoomLogHash :: [ROOM_LOG_HASH_SIZE]u8
+// A voice participant's random per-join ID, and one of its voice keys (e2ee-voice-design.md 3).
+VoiceSessionID :: [VOICE_SESSION_ID_SIZE]u8
+VoiceKey :: distinct [E2EE_KEY_SIZE]u8
 
 // Domain strings and HKDF labels. Changing one changes every vector in e2ee_test.odin.
 ENCRYPTION_KEY_BUNDLE_DOMAIN :: "haychat-e2ee-encryption-key-v1"
@@ -171,6 +192,10 @@ ROOM_LOG_SIGNATURE_DOMAIN :: "haychat-room-log-v1"
 SENDER_CHAIN_MESSAGE_INFO :: "haychat-room-msg-v1"
 SENDER_CHAIN_STEP_INFO :: "haychat-room-chain-v1"
 SAFETY_NUMBER_DOMAIN :: "haychat-safety-number-v1"
+// Protocol 21 (e2ee-voice-design.md 3.1, 5.1): the voice key envelope's AAD and the voice frame
+// AAD (common/voice_e2ee.odin). Prefix-free against every label above.
+VOICE_KEY_AAD_DOMAIN :: "haychat-voice-key-v1"
+VOICE_FRAME_AAD_DOMAIN :: "haychat-voice-frame-v1"
 
 // Every failure of the envelope, room message, padding and plaintext procedures. Each has its
 // own value so tests and logs can tell them apart; the UI shows one message for all of them
@@ -214,12 +239,16 @@ E2EEError :: enum u8 {
 	// Appended (protocol 20): a RoomKeyForward's forwarder is not positive or is the chain's
 	// sender (who re-seals its own chain as a SenderKey envelope).
 	BadForwarderUserID,
+	// Appended (protocol 21): a VoiceKey plaintext names another room, epoch, voice session,
+	// generation or creation time than its AAD.
+	MismatchedVoiceKey,
 }
 
 EnvelopeKind :: enum u8 {
 	DirectMessage  = 1,
 	SenderKey      = 2,
 	RoomKeyForward = 3,
+	VoiceKey       = 4, // protocol 21: a voice participant's key (e2ee-voice-design.md 3.1)
 }
 
 EncryptionKeyPair :: struct {
@@ -525,6 +554,41 @@ makeRoomMessageAAD :: proc(
 	e2eeWriteBytes(&writer, header.chainID[:])
 	e2eeWriteU32(&writer, header.index)
 	e2eeWriteBytes(&writer, roomContext.clientMessageID[:])
+	return aad
+}
+
+VOICE_KEY_AAD_SIZE :: len(VOICE_KEY_AAD_DOMAIN) + AUTH_IDENTITY_PUBLIC_KEY_SIZE + 8 + 8 + 8 +
+	VOICE_SESSION_ID_SIZE + 4 + 8
+VoiceKeyAAD :: [VOICE_KEY_AAD_SIZE]u8
+
+// The fields of a VoiceKey envelope's AAD (e2ee-voice-design.md 3.1). Every one but the server
+// key is repeated in the plaintext, and travels next to the envelope in ClientVoiceKey and
+// ServerVoiceKey so the server can check the signature.
+VoiceKeyAADFields :: struct {
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	roomID:                  int,
+	epoch:                   int,
+	senderUserID:            int, // the voice participant who made, seals and signs the key
+	voiceSessionID:          VoiceSessionID,
+	generation:              u32,
+	createdAtUnix:           i64,
+}
+
+// "haychat-voice-key-v1" || serverIdentityPublicKey (32) || roomId (i64) || epoch (i64)
+// || senderUserId (i64) || voiceSessionId (16) || generation (u32) || createdAtUnix (i64):
+// 104 bytes.
+makeVoiceKeyAAD :: proc(fields: VoiceKeyAADFields) -> VoiceKeyAAD {
+	fields := fields
+	aad: VoiceKeyAAD
+	writer := e2eeWriter(aad[:])
+	e2eeWriteString(&writer, VOICE_KEY_AAD_DOMAIN)
+	e2eeWriteBytes(&writer, fields.serverIdentityPublicKey[:])
+	e2eeWriteInt(&writer, fields.roomID)
+	e2eeWriteInt(&writer, fields.epoch)
+	e2eeWriteInt(&writer, fields.senderUserID)
+	e2eeWriteBytes(&writer, fields.voiceSessionID[:])
+	e2eeWriteU32(&writer, fields.generation)
+	e2eeWriteU64(&writer, u64(fields.createdAtUnix))
 	return aad
 }
 
@@ -1595,6 +1659,147 @@ openRoomKeyForward :: proc(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Voice keys (e2ee-voice-design.md 3.1, protocol 21).
+
+VOICE_KEY_PLAINTEXT_VERSION :: u8(1)
+VOICE_KEY_PLAINTEXT_SIZE :: 1 + 8 + 8 + VOICE_SESSION_ID_SIZE + 4 + 8 + E2EE_KEY_SIZE
+
+@(private = "file")
+encodeVoiceKeyPlaintext :: proc(
+	fields: VoiceKeyAADFields,
+	voiceKey: VoiceKey,
+) -> [VOICE_KEY_PLAINTEXT_SIZE]u8 {
+	fields := fields
+	voiceKey := voiceKey
+	defer crypto.zero_explicit(&voiceKey, size_of(voiceKey))
+	plaintext: [VOICE_KEY_PLAINTEXT_SIZE]u8
+	writer := e2eeWriter(plaintext[:])
+	e2eeWriteU8(&writer, VOICE_KEY_PLAINTEXT_VERSION)
+	e2eeWriteInt(&writer, fields.roomID)
+	e2eeWriteInt(&writer, fields.epoch)
+	e2eeWriteBytes(&writer, fields.voiceSessionID[:])
+	e2eeWriteU32(&writer, fields.generation)
+	e2eeWriteU64(&writer, u64(fields.createdAtUnix))
+	e2eeWriteBytes(&writer, voiceKey[:])
+	return plaintext
+}
+
+@(private = "file")
+checkVoiceKeyFields :: proc(fields: VoiceKeyAADFields) -> E2EEError {
+	if fields.roomID <= 0 {
+		return .BadRoomID
+	}
+	if fields.epoch <= 0 {
+		return .BadEpoch
+	}
+	if fields.senderUserID <= 0 {
+		return .BadSenderUserID
+	}
+	return .None
+}
+
+// Seals voiceKey for every recipient (the members of aadFields.epoch in the sender's verified
+// log, each with the encryption key pinned for them, the sender excluded) as one VoiceKey
+// envelope signed by the sender. A recipient that is the sender is refused (WrongRecipients):
+// a speaker never needs its own key back.
+sealVoiceKey :: proc(
+	aadFields: VoiceKeyAADFields,
+	voiceKey: VoiceKey,
+	recipients: []EnvelopeRecipient,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+	dst: []u8,
+) -> (
+	n: int,
+	err: E2EEError,
+) {
+	checkVoiceKeyFields(aadFields) or_return
+	for recipient in recipients {
+		if recipient.userID == aadFields.senderUserID {
+			return 0, .WrongRecipients
+		}
+	}
+	plaintext := encodeVoiceKeyPlaintext(aadFields, voiceKey)
+	defer crypto.zero_explicit(&plaintext, size_of(plaintext))
+	aad := makeVoiceKeyAAD(aadFields)
+	return sealEnvelope(
+		.VoiceKey,
+		aad[:],
+		plaintext[:],
+		recipients,
+		senderIdentityPrivateKey,
+		dst,
+	)
+}
+
+// Checks a decoded VoiceKey envelope without opening it, as the server does: the fields, the
+// signature against the sender's identity key over the voice key AAD, the kind, and that no
+// wrap names the sender. The wrap count is already bounded by decodeSealedEnvelope
+// (SEALED_ENVELOPE_MAX_WRAPS, which is ENCRYPTED_ROOM_MEMBERS_MAX).
+verifyVoiceKeyEnvelope :: proc(
+	envelope: SealedEnvelope,
+	aadFields: VoiceKeyAADFields,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+) -> E2EEError {
+	checkVoiceKeyFields(aadFields) or_return
+	aad := makeVoiceKeyAAD(aadFields)
+	verifySealedEnvelopeSignature(envelope, aad[:], senderIdentityPublicKey) or_return
+	if envelope.kind != .VoiceKey {
+		return .WrongKind
+	}
+	if _, wrapsSender := SealedEnvelope_findWrap(envelope, aadFields.senderUserID); wrapsSender {
+		return .WrongRecipients
+	}
+	return .None
+}
+
+// Opens a VoiceKey envelope for ownUserID (this profile) with its key pair. Order: structure,
+// the signature against the sender's PINNED identity key, the kind and the wraps, this
+// recipient's wrap, the body, and that the plaintext repeats every AAD field. The caller also
+// checks, in its verified log, that the sender is a member of the epoch, and the key's
+// freshness (e2ee-voice-design.md 4.2, 4.3). Every failure is final for the envelope.
+openVoiceKey :: proc(
+	data: []u8,
+	aadFields: VoiceKeyAADFields,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	ownUserID: int,
+	ownKeyPair: EncryptionKeyPair,
+) -> (
+	voiceKey: VoiceKey,
+	err: E2EEError,
+) {
+	envelope := decodeSealedEnvelope(data) or_return
+	verifyVoiceKeyEnvelope(envelope, aadFields, senderIdentityPublicKey) or_return
+	aad := makeVoiceKeyAAD(aadFields)
+	buffer: [SEALED_ENVELOPE_MAX_BYTES]u8
+	defer crypto.zero_explicit(&buffer, size_of(buffer))
+	opened := openVerifiedEnvelope(envelope, aad[:], ownUserID, ownKeyPair, buffer[:]) or_return
+	if len(opened) != VOICE_KEY_PLAINTEXT_SIZE {
+		return {}, .BadPlaintext
+	}
+	if opened[0] != VOICE_KEY_PLAINTEXT_VERSION {
+		return {}, .BadPlaintext
+	}
+	reader := e2eeReader(opened[1:])
+	roomID := e2eeReadInt(&reader)
+	epoch := e2eeReadInt(&reader)
+	voiceSessionID: VoiceSessionID
+	copy(voiceSessionID[:], e2eeReadBytes(&reader, VOICE_SESSION_ID_SIZE))
+	generation := e2eeReadU32(&reader)
+	createdAtUnix := i64(e2eeReadU64(&reader))
+	copy(voiceKey[:], e2eeReadBytes(&reader, E2EE_KEY_SIZE))
+	if reader.failed ||
+	   roomID != aadFields.roomID ||
+	   epoch != aadFields.epoch ||
+	   voiceSessionID != aadFields.voiceSessionID ||
+	   generation != aadFields.generation ||
+	   createdAtUnix != aadFields.createdAtUnix {
+		crypto.zero_explicit(&voiceKey, size_of(voiceKey))
+		return {}, .MismatchedVoiceKey
+	}
+	return voiceKey, .None
+}
+
+// ---------------------------------------------------------------------------------------------
 // Sealed room messages (design 6.5).
 
 SEALED_ROOM_MESSAGE_VERSION :: u8(1)
@@ -2554,7 +2759,7 @@ writeRoomLogEntryUnsigned :: proc(entry: RoomLogEntry, out: []u8) {
 
 @(private = "file")
 envelopeKindIsValid :: proc(kind: u8) -> bool {
-	return kind >= u8(EnvelopeKind.DirectMessage) && kind <= u8(EnvelopeKind.RoomKeyForward)
+	return kind >= u8(EnvelopeKind.DirectMessage) && kind <= u8(EnvelopeKind.VoiceKey)
 }
 
 @(private = "file")
