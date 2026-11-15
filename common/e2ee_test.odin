@@ -2518,7 +2518,10 @@ testVoiceKey :: proc() -> VoiceKey {
 
 // The voice key plaintext for fields and key, built by hand from the layout.
 @(private = "file")
-testVoiceKeyPlaintext :: proc(fields: VoiceKeyAADFields, key: VoiceKey) -> [VOICE_KEY_PLAINTEXT_SIZE]u8 {
+testVoiceKeyPlaintext :: proc(
+	fields: VoiceKeyAADFields,
+	key: VoiceKey,
+) -> [VOICE_KEY_PLAINTEXT_SIZE]u8 {
 	fields := fields
 	key := key
 	plaintext: [VOICE_KEY_PLAINTEXT_SIZE]u8
@@ -2585,8 +2588,11 @@ testVoiceKeyVectorAndRoundTrip :: proc(t: ^testing.T) {
 			recipient.id,
 			testEncryptionKeyPair(recipient.name),
 		)
-		assert(err == .None, fmt.tprintf("expected %s to open the voice key, got %v", recipient.name, err))
-		assert(key == testVoiceKey(), fmt.tprintf("expected %s to get the voice key", recipient.name))
+		assert(
+			err == .None,
+			fmt.tprintf("expected %s to open the voice key, got %v", recipient.name, err),
+		)
+		assert(key == testVoiceKey(), fmt.tprintf("expected %s's voice key", recipient.name))
 	}
 	decoded, decodeErr := decodeSealedEnvelope(katBytes)
 	assert(decodeErr == .None && decoded.kind == .VoiceKey, "expected a VoiceKey envelope")
@@ -2596,11 +2602,14 @@ testVoiceKeyVectorAndRoundTrip :: proc(t: ^testing.T) {
 	)
 
 	// A member without a wrap, and a wrong pin, which fails before any key material is used.
-	_, err := openVoiceKey(katBytes, fields, alice.publicKey, TEST_DAVE_ID, testEncryptionKeyPair("dave"))
+	bobKeys := testEncryptionKeyPair("bob")
+	daveKeys := testEncryptionKeyPair("dave")
+	_, err := openVoiceKey(katBytes, fields, alice.publicKey, TEST_DAVE_ID, daveKeys)
 	assert(err == .NoWrapForRecipient, fmt.tprintf("expected no wrap for dave, got %v", err))
-	_, err = openVoiceKey(katBytes, fields, bob.publicKey, TEST_BOB_ID, testEncryptionKeyPair("bob"))
+	_, err = openVoiceKey(katBytes, fields, bob.publicKey, TEST_BOB_ID, bobKeys)
 	assert(err == .BadSignature, fmt.tprintf("expected the wrong pin to fail, got %v", err))
-	_, err = openVoiceKey(katBytes, fields, alice.publicKey, TEST_BOB_ID, testEncryptionKeyPair("carol"))
+	carolKeys := testEncryptionKeyPair("carol")
+	_, err = openVoiceKey(katBytes, fields, alice.publicKey, TEST_BOB_ID, carolKeys)
 	assert(err == .BadWrap, fmt.tprintf("expected carol's key to fail bob's wrap, got %v", err))
 
 	// Every AAD field is bound: a change to any of them fails the signature.
@@ -2616,8 +2625,8 @@ testVoiceKeyVectorAndRoundTrip :: proc(t: ^testing.T) {
 	tampered[5].generation += 1
 	tampered[6].createdAtUnix += 1
 	for field, index in tampered {
-		_, err = openVoiceKey(katBytes, field, alice.publicKey, TEST_BOB_ID, testEncryptionKeyPair("bob"))
-		assert(err == .BadSignature, fmt.tprintf("AAD field %d: expected BadSignature, got %v", index, err))
+		_, err = openVoiceKey(katBytes, field, alice.publicKey, TEST_BOB_ID, bobKeys)
+		assert(err == .BadSignature, fmt.tprintf("AAD field %d: BadSignature: %v", index, err))
 		assert(
 			verifyVoiceKeyEnvelope(decoded, field, alice.publicKey) == .BadSignature,
 			fmt.tprintf("AAD field %d: expected the server's check to fail", index),
@@ -2629,11 +2638,11 @@ testVoiceKeyVectorAndRoundTrip :: proc(t: ^testing.T) {
 	data := copied[:len(katBytes)]
 	copy(data, katBytes)
 	data[1] = u8(EnvelopeKind.SenderKey)
-	_, err = openVoiceKey(data, fields, alice.publicKey, TEST_BOB_ID, testEncryptionKeyPair("bob"))
+	_, err = openVoiceKey(data, fields, alice.publicKey, TEST_BOB_ID, bobKeys)
 	assert(err == .BadSignature, fmt.tprintf("expected a changed kind to fail, got %v", err))
 	copy(data, katBytes)
 	data[len(data) - 1] ~= 1
-	_, err = openVoiceKey(data, fields, alice.publicKey, TEST_BOB_ID, testEncryptionKeyPair("bob"))
+	_, err = openVoiceKey(data, fields, alice.publicKey, TEST_BOB_ID, bobKeys)
 	assert(err == .BadSignature, fmt.tprintf("expected a changed signature to fail, got %v", err))
 
 	// A fresh key through the public procedure.
@@ -2642,8 +2651,8 @@ testVoiceKeyVectorAndRoundTrip :: proc(t: ^testing.T) {
 	recipients := [1]EnvelopeRecipient{{TEST_BOB_ID, testEncryptionKeyPair("bob").publicKey}}
 	n, sealErr := sealVoiceKey(fields, key, recipients[:], alice.privateKey, buffer[:])
 	assert(sealErr == .None, fmt.tprintf("expected the voice key to seal, got %v", sealErr))
-	opened, openErr := openVoiceKey(buffer[:n], fields, alice.publicKey, TEST_BOB_ID, testEncryptionKeyPair("bob"))
-	assert(openErr == .None && opened == key, fmt.tprintf("expected the round trip, got %v", openErr))
+	opened, openErr := openVoiceKey(buffer[:n], fields, alice.publicKey, TEST_BOB_ID, bobKeys)
+	assert(openErr == .None && opened == key, fmt.tprintf("expected the round trip: %v", openErr))
 }
 
 @(test)
@@ -2661,11 +2670,12 @@ testVoiceKeyRefusesWhatItMustNot :: proc(t: ^testing.T) {
 		{TEST_ALICE_ID, testEncryptionKeyPair("alice").publicKey},
 	}
 	_, err := sealVoiceKey(fields, testVoiceKey(), withSender[:], alice.privateKey, buffer[:])
-	assert(err == .WrongRecipients, fmt.tprintf("expected the sender's wrap to be refused, got %v", err))
+	assert(err == .WrongRecipients, fmt.tprintf("expected the sender's wrap refused: %v", err))
 	plaintext := testVoiceKeyPlaintext(fields, testVoiceKey())
 	aad := makeVoiceKeyAAD(fields)
 	n: int
-	n, err = sealEnvelope(.VoiceKey, aad[:], plaintext[:], withSender[:], alice.privateKey, buffer[:])
+	signer := alice.privateKey
+	n, err = sealEnvelope(.VoiceKey, aad[:], plaintext[:], withSender[:], signer, buffer[:])
 	assert(err == .None, "expected the raw envelope to seal")
 	decoded, decodeErr := decodeSealedEnvelope(buffer[:n])
 	assert(decodeErr == .None, "expected the raw envelope to decode")
@@ -2692,10 +2702,13 @@ testVoiceKeyRefusesWhatItMustNot :: proc(t: ^testing.T) {
 	mismatched[4].createdAtUnix -= 1
 	for other, index in mismatched {
 		otherPlaintext := testVoiceKeyPlaintext(other, testVoiceKey())
-		n, err = sealEnvelope(.VoiceKey, aad[:], otherPlaintext[:], bobOnly[:], alice.privateKey, buffer[:])
+		n, err = sealEnvelope(.VoiceKey, aad[:], otherPlaintext[:], bobOnly[:], signer, buffer[:])
 		assert(err == .None, "expected the mismatched envelope to seal")
 		_, err = openVoiceKey(buffer[:n], fields, alice.publicKey, TEST_BOB_ID, bobKeys)
-		assert(err == .MismatchedVoiceKey, fmt.tprintf("field %d: expected MismatchedVoiceKey, got %v", index, err))
+		assert(
+			err == .MismatchedVoiceKey,
+			fmt.tprintf("field %d: expected MismatchedVoiceKey, got %v", index, err),
+		)
 	}
 	// A plaintext of the wrong version or length.
 	badVersion := plaintext
@@ -2704,10 +2717,10 @@ testVoiceKeyRefusesWhatItMustNot :: proc(t: ^testing.T) {
 	assert(err == .None, "expected the version 2 envelope to seal")
 	_, err = openVoiceKey(buffer[:n], fields, alice.publicKey, TEST_BOB_ID, bobKeys)
 	assert(err == .BadPlaintext, fmt.tprintf("expected version 2 to be refused, got %v", err))
-	n, err = sealEnvelope(.VoiceKey, aad[:], plaintext[:76], bobOnly[:], alice.privateKey, buffer[:])
+	n, err = sealEnvelope(.VoiceKey, aad[:], plaintext[:76], bobOnly[:], signer, buffer[:])
 	assert(err == .None, "expected the short envelope to seal")
 	_, err = openVoiceKey(buffer[:n], fields, alice.publicKey, TEST_BOB_ID, bobKeys)
-	assert(err == .BadPlaintext, fmt.tprintf("expected a short plaintext to be refused, got %v", err))
+	assert(err == .BadPlaintext, fmt.tprintf("expected a short plaintext refused: %v", err))
 
 	// Field rules.
 	bad := fields

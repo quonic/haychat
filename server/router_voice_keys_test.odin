@@ -320,9 +320,15 @@ testVoiceKeysRouterRefusesBadKeys :: proc(t: ^testing.T) {
 	}
 	refusals := [?]Refusal {
 		// Signed by bob's identity key, not the session's.
-		{routerVoiceKeysTestPayload(&test, test.keys[1], 42, 0, {43}), common.VOICE_KEY_INVALID_MESSAGE},
+		{
+			routerVoiceKeysTestPayload(&test, test.keys[1], 42, 0, {43}),
+			common.VOICE_KEY_INVALID_MESSAGE,
+		},
 		// Signed for another sender ID.
-		{routerVoiceKeysTestPayload(&test, test.keys[0], 43, 0, {44}), common.VOICE_KEY_INVALID_MESSAGE},
+		{
+			routerVoiceKeysTestPayload(&test, test.keys[0], 43, 0, {44}),
+			common.VOICE_KEY_INVALID_MESSAGE,
+		},
 		// Another envelope kind under the voice key AAD.
 		{
 			routerVoiceKeysTestPayload(&test, test.keys[0], 42, 0, {43}, kind = .SenderKey),
@@ -440,7 +446,8 @@ testVoiceKeysRouterForgetsKeys :: proc(t: ^testing.T) {
 	assert(storedKeys(&test) == 2, "expected carol's key forgotten when she left")
 
 	// An eviction (removed from the room) forgets it too.
-	MainRouterState_voiceEvictUser(&test.h.pm, &test.h.state, room, 43, VOICE_LEFT_REMOVED_FROM_ROOM)
+	reason := VOICE_LEFT_REMOVED_FROM_ROOM
+	MainRouterState_voiceEvictUser(&test.h.pm, &test.h.state, room, 43, reason)
 	drain = routerVoiceTestDrain(&test.h, test.clients[:])
 	RouterVoiceTestDrain_deinit(&drain)
 	assert(storedKeys(&test) == 1, "expected bob's key forgotten on eviction")
@@ -502,7 +509,10 @@ testVoiceKeysRouterRelaysRateLimitedRequests :: proc(t: ^testing.T) {
 	drain = request(&test, 1, 42)
 	assert(len(drain.packets) == 1, "expected one relayed request")
 	entry := drain.packets[0]
-	assert(entry.peerID == 1 && entry.packet.messageType == .ServerVoiceKeyRequest, "expected alice")
+	assert(
+		entry.peerID == 1 && entry.packet.messageType == .ServerVoiceKeyRequest,
+		"expected alice",
+	)
 	relayed: common.ServerVoiceKeyRequestPayload
 	assert(cbor.unmarshal(entry.packet.payload, &relayed) == nil, "expected the request to decode")
 	assert(

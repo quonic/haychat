@@ -327,10 +327,17 @@ buildVoiceBarView :: proc(
 		// A failed send of a mute or deafen change, or a failed re-join attempt.
 		view.note = voice.lastError
 	}
-	if voice.encrypted && view.kind != .Notice && view.kind != .Unavailable && view.kind != .Hidden {
-		view.encrypted = true
-		lock := "🔒 " + VOICE_E2EE_ENCRYPTED_NOTE
-		view.note = len(view.note) > 0 ? fmt.aprintf("%s · %s", lock, view.note, allocator = allocator) : lock
+	switch view.kind {
+	case .Joined, .Joining, .Rejoining:
+		if voice.encrypted {
+			view.encrypted = true
+			lock := "🔒 " + VOICE_E2EE_ENCRYPTED_NOTE
+			if len(view.note) > 0 {
+				lock = fmt.aprintf("%s · %s", lock, view.note, allocator = allocator)
+			}
+			view.note = lock
+		}
+	case .Hidden, .Unavailable, .Notice:
 	}
 	return
 }

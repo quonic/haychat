@@ -35,12 +35,23 @@ set -euo pipefail
 #                   voice_left "joined voice on another device" and go idle without a re-join,
 #                   and both must see a participant list that names the user exactly once,
 #                   joined only on H.
+#   5. encrypted (protocol 21, e2ee-voice-design.md 11.4): admin EA creates an encrypted Admin
+#                   invite room for text and voice and adds EB and EC; all three join its voice
+#                   and each reports voice_status encrypted and a voice_key accepted from both
+#                   others. EA sends the tone; EB and EC record it, voice-check finds it in both
+#                   files, and their engines opened frames without a bad tag. EA removes EC: EC
+#                   is evicted from voice, EA and EB each accept the other's key at the new
+#                   epoch, and the tone keeps reaching EB. After `voice-key-rotate 5` on EA, EB
+#                   accepts at least one timed rotation and the tone still reaches it. The relay
+#                   forwarded sealed payloads only (the server's NotSealed counter is not read
+#                   here: the engines' counters show every frame opened).
 #
 # dev/live-proof.sh --voice runs it against its throwaway server (and --all, so CI does too).
 # HAYCHAT_VOICE_PROOF_SECONDS sets how long A talks while both are joined (default 4), and
 # HAYCHAT_VOICE_PROOF_FAULT_SECONDS how long E talks (default 8, so 5 % is about 20 frames).
 # HAYCHAT_VOICE_PROOF_FAULTS=0 skips the faults stage; HAYCHAT_TEST_VOICE_SEED changes its
-# loss pattern (default 1).
+# loss pattern (default 1). HAYCHAT_VOICE_PROOF_ENCRYPTED=0 skips the encrypted stage, which
+# needs psql (through the HAYCHAT_DATABASE_* variables) to make EA an admin.
 #
 # Usage: dev/voice-proof.sh [HOST:PORT]   (default 127.0.0.1:12345)
 
@@ -51,6 +62,7 @@ command_timeout_secs=15
 talk_seconds=${HAYCHAT_VOICE_PROOF_SECONDS:-4}
 fault_talk_seconds=${HAYCHAT_VOICE_PROOF_FAULT_SECONDS:-8}
 run_faults=${HAYCHAT_VOICE_PROOF_FAULTS:-1}
+run_encrypted=${HAYCHAT_VOICE_PROOF_ENCRYPTED:-1}
 fault_loss=0.05
 fault_jitter_ms=20
 fault_seed=${HAYCHAT_TEST_VOICE_SEED:-1}
@@ -111,14 +123,16 @@ participants_acked="^\\{\"event\":\"voice_participants\",\"serverID\":[0-9]+,"
 participants_acked+="\"roomID\":$room_id,\"recipientJoined\":true,"
 speaking_prefix="^\\{\"event\":\"voice_speaking\",\"serverID\":[0-9]+,\"roomID\":$room_id,"
 
-# join_voice CLIENT: voice-join room 1 and wait for the server's acknowledgement of this
-# session (recipientJoined) and the engine running (voice_status joined).
+# join_voice CLIENT [ROOM_ID]: voice-join the room (default room 1) and wait for the server's
+# acknowledgement of this session (recipientJoined) and the engine running (voice_status
+# joined).
 join_voice() {
-	local client=$1 start
+	local client=$1 room=${2:-$room_id} start acked
 	start=$(wc -l <"$work_dir/$client.out")
-	expect_ok "$client" voice-join "$room_id"
-	expect_event "$client" "$participants_acked" "$start" \
-		"no voice_participants acknowledging the join"
+	expect_ok "$client" voice-join "$room"
+	acked="^\\{\"event\":\"voice_participants\",\"serverID\":[0-9]+,"
+	acked+="\"roomID\":$room,\"recipientJoined\":true,"
+	expect_event "$client" "$acked" "$start" "no voice_participants acknowledging the join"
 	expect_event "$client" "^\\{\"event\":\"voice_status\",.*\"status\":\"joined\"," "$start" \
 		"voice never reached joined"
 }
@@ -369,7 +383,7 @@ voice_left_line+="\"reason\":\"$takeover_reason\"\\}$"
 expect_event g "$voice_left_line" "$g_start" "G was not told that another device took voice"
 # Idle with no room to re-join, and the reason the voice bar shows.
 idle_line="^\\{\"event\":\"voice_status\",.*\"status\":\"idle\",\"wantRoomID\":0,"
-idle_line+="\"error\":\"$takeover_reason\"\\}$"
+idle_line+="\"error\":\"$takeover_reason\","
 expect_event g "$idle_line" "$g_start" "G did not go idle without a re-join"
 # One participant object, the shared user, joined on H and not on G.
 only_user="\"participants\":\\[\\{\"userID\":$user_g,[^{}]*\\}\\]\\}$"
@@ -386,5 +400,163 @@ expect_ok h voice-leave
 stop_client g
 stop_client h
 echo "==> [voice] one session per user passed"
+
+# voice_key_line CLIENT KIND USER_ID EPOCH START: waits for a voice_key event of KIND about
+# USER_ID at EPOCH (any epoch when EPOCH is empty) and echoes it.
+voice_key_line() {
+	local client=$1 kind=$2 user=$3 epoch=$4 start=$5 pattern
+	pattern="^\\{\"event\":\"voice_key\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	pattern+="\"kind\":\"$kind\",\"userID\":$user,\"epoch\":${epoch:-[0-9]+},"
+	expect_event "$client" "$pattern" "$start" "no voice_key $kind for user $user"
+}
+
+# opened_frames CLIENT: the client's voice-stats framesOpened, after checking that nothing it
+# received failed its tag.
+opened_frames() {
+	local client=$1 opened bad
+	expect_ok "$client" voice-stats >/dev/null
+	opened=$(json_number "$last_result" framesOpened)
+	bad=$(json_number "$last_result" dropBadTag)
+	((bad == 0)) || fail "[encrypted] client $client had $bad frames fail their tag"
+	[[ "$last_result" == *'"e2ee":{"encrypted":true,'* ]] ||
+		fail "[encrypted] client $client's voice-stats do not say encrypted: $last_result"
+	echo "    [encrypted] $client: opened $opened," \
+		"no key $(json_number "$last_result" dropNoKey)," \
+		"unknown key ID $(json_number "$last_result" dropUnknownKeyID)," \
+		"keys accepted $(json_number "$last_result" keysAccepted)" >&2
+	printf '%s\n' "$opened"
+}
+
+# room_log_at CLIENT VERSION START: waits for CLIENT's verified log of the encrypted room at
+# VERSION.
+room_log_at() {
+	local pattern="^\\{\"event\":\"room_log\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	pattern+="\"status\":\"verified\",\"logVersion\":$2,"
+	expect_event "$1" "$pattern" "$3" "the encrypted room's log never verified at version $2"
+}
+
+if [[ "$run_encrypted" == 1 ]]; then
+	echo "==> [voice] encrypted: EA, EB and EC in an encrypted room's voice"
+	start_client ea "voice-ea-$run_tag"
+	start_client eb "voice-eb-$run_tag"
+	start_client ec "voice-ec-$run_tag"
+	expect_connected ea
+	expect_connected eb
+	expect_connected ec
+	user_ea=$(connected_user_id ea)
+	user_eb=$(connected_user_id eb)
+	user_ec=$(connected_user_id ec)
+	make_admin "voice-ea-$run_tag"
+	expect_ok ea reconnect
+	expect_ok ea wait connected 8000
+	for client in ea eb ec; do
+		expect_ok "$client" wait room_list 5000
+	done
+	for user in "$user_eb" "$user_ec"; do
+		start=$(wc -l <"$work_dir/ea.out")
+		expect_ok ea user-keys "$user"
+		expect_event ea "^\\{\"event\":\"user_keys\",.*\"userID\":$user," "$start" \
+			"EA got no keys for user $user"
+	done
+	start=$(wc -l <"$work_dir/ea.out")
+	expect_ok ea room-create "both,admin-invite,encrypted,managers=none" "voice-e2ee-$run_tag"
+	created_line="^\\{\"event\":\"room_created\",.*\"name\":\"voice-e2ee-$run_tag\""
+	created=$(wait_for_match ea "$created_line" "$start") ||
+		fail "[encrypted] EA never got room_created"
+	[[ "$created" =~ \"roomID\":([0-9]+) ]] || fail "[encrypted] no roomID in: $created"
+	e2ee_room=${BASH_REMATCH[1]}
+	room_log_at ea 1 "$start"
+	bstart=$(wc -l <"$work_dir/eb.out")
+	expect_ok ea room-add "$e2ee_room" "$user_eb"
+	room_log_at ea 2 "$start"
+	room_log_at eb 2 "$bstart"
+	cstart=$(wc -l <"$work_dir/ec.out")
+	expect_ok ea room-add "$e2ee_room" "$user_ec"
+	room_log_at ea 3 "$start"
+	room_log_at eb 3 "$bstart"
+	room_log_at ec 3 "$cstart"
+
+	eb_sink="$work_dir/eb.f32"
+	ec_sink="$work_dir/ec.f32"
+	expect_ok ea voice-source "tone:$tone_hz:$tone_amplitude"
+	expect_ok ea voice-gate open
+	expect_ok eb voice-sink "file:$eb_sink"
+	expect_ok ec voice-sink "file:$ec_sink"
+	declare -A key_start=()
+	for client in eb ec ea; do
+		key_start[$client]=$(wc -l <"$work_dir/$client.out")
+		join_voice "$client" "$e2ee_room"
+		expect_event "$client" "^\\{\"event\":\"voice_status\",.*\"encrypted\":true," \
+			"${key_start[$client]}" "voice_status does not say encrypted"
+	done
+	# Each hears both others' keys at epoch 3.
+	voice_key_line ea accepted "$user_eb" 3 "${key_start[ea]}"
+	voice_key_line ea accepted "$user_ec" 3 "${key_start[ea]}"
+	voice_key_line eb accepted "$user_ea" 3 "${key_start[eb]}"
+	voice_key_line eb accepted "$user_ec" 3 "${key_start[eb]}"
+	voice_key_line ec accepted "$user_ea" 3 "${key_start[ec]}"
+	voice_key_line ec accepted "$user_eb" 3 "${key_start[ec]}"
+	speaking="^\\{\"event\":\"voice_speaking\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	speaking+="\"userID\":$user_ea,\"speaking\":true,\"self\":false\\}$"
+	expect_event eb "$speaking" "${key_start[eb]}" "EB never heard EA speaking"
+	expect_event ec "$speaking" "${key_start[ec]}" "EC never heard EA speaking"
+	sleep "$talk_seconds"
+	opened_eb=$(opened_frames eb)
+	opened_ec=$(opened_frames ec)
+	expect_ratio "[encrypted] EB's frames opened for ${talk_seconds} s" "$opened_eb" \
+		"$((talk_seconds * 50))" 80
+	expect_ratio "[encrypted] EC's frames opened for ${talk_seconds} s" "$opened_ec" \
+		"$((talk_seconds * 50))" 80
+
+	echo "==> [voice] encrypted: EA removes EC; EA and EB rotate to the new epoch"
+	astart=$(wc -l <"$work_dir/ea.out")
+	bstart=$(wc -l <"$work_dir/eb.out")
+	cstart=$(wc -l <"$work_dir/ec.out")
+	expect_ok ea room-remove "$e2ee_room" "$user_ec"
+	removed="^\\{\"event\":\"voice_left\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	removed+="\"reason\":\"removed from the room\"\\}$"
+	expect_event ec "$removed" "$cstart" "EC was not evicted from voice"
+	voice_key_line ea accepted "$user_eb" 4 "$astart"
+	voice_key_line eb accepted "$user_ea" 4 "$bstart"
+	expect_ok ec voice-flush
+	"$check_bin" "$ec_sink" --freq "$tone_hz" --tolerance 5 --min-seconds "$min_tone_seconds" \
+		--amplitude "$tone_amplitude" || fail "[encrypted] voice-check rejected EC's recording"
+	before=$(opened_frames eb)
+	sleep "$talk_seconds"
+	after=$(opened_frames eb)
+	expect_ratio "[encrypted] EB's frames opened after the removal" "$((after - before))" \
+		"$((talk_seconds * 50))" 80
+
+	echo "==> [voice] encrypted: a timed rotation every 5 s on EA"
+	astart=$(wc -l <"$work_dir/ea.out")
+	bstart=$(wc -l <"$work_dir/eb.out")
+	expect_ok ea voice-key-rotate 5
+	timed="^\\{\"event\":\"voice_key\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	timed+="\"kind\":\"sent\",\"userID\":$user_ea,\"epoch\":4,\"generation\":([0-9]+),"
+	timed+="\"rotation\":\"timer\","
+	line=$(wait_for_match ea "$timed" "$astart") || fail "[encrypted] EA never rotated on time"
+	echo "    ea< $line"
+	[[ "$line" =~ \"generation\":([0-9]+) ]] || fail "[encrypted] no generation in: $line"
+	timed_generation=${BASH_REMATCH[1]}
+	accepted="^\\{\"event\":\"voice_key\",\"serverID\":[0-9]+,\"roomID\":$e2ee_room,"
+	accepted+="\"kind\":\"accepted\",\"userID\":$user_ea,\"epoch\":4,"
+	accepted+="\"generation\":$timed_generation,"
+	expect_event eb "$accepted" "$bstart" "EB never accepted EA's timed rotation"
+	before=$(opened_frames eb)
+	sleep "$talk_seconds"
+	after=$(opened_frames eb)
+	expect_ratio "[encrypted] EB's frames opened across timed rotations" "$((after - before))" \
+		"$((talk_seconds * 50))" 80
+	expect_ok ea voice-leave
+	expect_ok eb voice-flush
+	"$check_bin" "$eb_sink" --freq "$tone_hz" --tolerance 5 \
+		--min-seconds "$min_tone_seconds" --amplitude "$tone_amplitude" ||
+		fail "[encrypted] voice-check rejected EB's recording"
+	expect_ok eb voice-leave
+	stop_client ea
+	stop_client eb
+	stop_client ec
+	echo "==> [voice] encrypted passed"
+fi
 
 echo "==> [voice] passed"

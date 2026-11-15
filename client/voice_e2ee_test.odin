@@ -36,7 +36,10 @@ VoiceKeyTestSent :: struct {
 voiceKeyTestSent: [dynamic]VoiceKeyTestSent
 
 @(private = "file")
-voiceKeyTestBridge :: proc(transport: ^ClientServerTransport, request: VoiceControlRequest) -> bool {
+voiceKeyTestBridge :: proc(
+	transport: ^ClientServerTransport,
+	request: VoiceControlRequest,
+) -> bool {
 	if transport.serverID != VOICE_KEY_TEST_SERVER {
 		return false
 	}
@@ -516,15 +519,21 @@ testVoiceKeysJoinSealsToTheLogAndTheListenerAccepts :: proc(t: ^testing.T) {
 		fmt.tprintf("expected bob to accept alice's key, got %v", bob.voice.e2ee.notes[:]),
 	)
 	keys, held := voiceKeyTestEngineKeys(bob, VOICE_KEY_TEST_ALICE)
-	assert(held && keys.current.set && keys.current.generation == 0, "expected the key in bob's engine")
+	assert(
+		held && keys.current.set && keys.current.generation == 0,
+		"expected the key in bob's engine",
+	)
 	assert(
 		keys.current.voiceSessionID == sent.request.voiceSessionID && keys.current.epoch == 2,
 		"expected the AAD fields with the key",
 	)
-	assert(
-		State_voiceE2EEParticipantNote(bob, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, VOICE_KEY_TEST_ALICE) == "",
-		"expected no note on a participant whose key is held",
+	aliceNote := State_voiceE2EEParticipantNote(
+		bob,
+		VOICE_KEY_TEST_SERVER,
+		VOICE_KEY_TEST_ROOM,
+		VOICE_KEY_TEST_ALICE,
 	)
+	assert(aliceNote == "", "expected no note on a participant whose key is held")
 	// The same key again is a duplicate, not an error.
 	voiceKeyTestDeliver(bob, sent)
 	refused, _ := voiceKeyTestLastNote(bob, .Refused)
@@ -574,12 +583,13 @@ testVoiceKeysRotateOnEveryTrigger :: proc(t: ^testing.T) {
 	assert(note.rotation == .Timer, "expected a timer rotation")
 
 	// A member's request, at most once every 10 seconds; a non-member's is ignored.
-	State_voiceE2EEReceiveRequest(alice, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, VOICE_KEY_TEST_BOB)
+	SERVER, ROOM :: VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM
+	State_voiceE2EEReceiveRequest(alice, SERVER, ROOM, VOICE_KEY_TEST_BOB)
 	assert(voiceKeyTestLastKey(VOICE_KEY_TEST_ALICE).request.generation == 3, "request rotation")
-	State_voiceE2EEReceiveRequest(alice, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, VOICE_KEY_TEST_BOB)
+	State_voiceE2EEReceiveRequest(alice, SERVER, ROOM, VOICE_KEY_TEST_BOB)
 	assert(len(voiceKeyTestKeysFrom(VOICE_KEY_TEST_ALICE)) == 4, "expected the limit to hold")
 	alice.voice.e2ee.nowOverrideMS += 11_000
-	State_voiceE2EEReceiveRequest(alice, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, VOICE_KEY_TEST_CAROL)
+	State_voiceE2EEReceiveRequest(alice, SERVER, ROOM, VOICE_KEY_TEST_CAROL)
 	assert(len(voiceKeyTestKeysFrom(VOICE_KEY_TEST_ALICE)) == 4, "expected carol ignored")
 
 	// A new epoch (carol added): the old key leaves the engine, and the new one wraps carol.
@@ -619,7 +629,12 @@ testVoiceKeysListenerRefusesWhatTheRulesRefuse :: proc(t: ^testing.T) {
 	nowSeconds := VOICE_KEY_TEST_NOW_MS / 1000
 	A :: VOICE_KEY_TEST_ALICE
 
-	expectRefused :: proc(bob: ^State, sent: VoiceKeyTestSent, refusal: VoiceKeyRefusal, what: string) {
+	expectRefused :: proc(
+		bob: ^State,
+		sent: VoiceKeyTestSent,
+		refusal: VoiceKeyRefusal,
+		what: string,
+	) {
 		voiceKeyTestDeliver(bob, sent)
 		note, _ := voiceKeyTestLastNote(bob, .Refused)
 		last := bob.voice.e2ee.notes[len(bob.voice.e2ee.notes) - 1]
@@ -635,7 +650,8 @@ testVoiceKeysListenerRefusesWhatTheRulesRefuse :: proc(t: ^testing.T) {
 	}
 
 	// Signed with carol's identity in alice's name: alice's pin refuses it, finally.
-	expectRefused(bob, voiceKeyTestCraft(&trio, carol, A, 2, 1, 0, nowSeconds, bob), .Failed, "wrong pin")
+	wrongPin := voiceKeyTestCraft(&trio, carol, A, 2, 1, 0, nowSeconds, bob)
+	expectRefused(bob, wrongPin, .Failed, "wrong pin")
 	// From carol, who is not a member of epoch 2.
 	expectRefused(
 		bob,
@@ -648,15 +664,15 @@ testVoiceKeysListenerRefusesWhatTheRulesRefuse :: proc(t: ^testing.T) {
 	expectRefused(bob, voiceKeyTestCraft(&trio, alice, A, 2, 3, 0, old, bob), .TooOld, "old")
 	future := nowSeconds + common.VOICE_KEY_MAX_FUTURE_SECONDS + 1
 	expectRefused(bob, voiceKeyTestCraft(&trio, alice, A, 2, 3, 0, future, bob), .TooNew, "future")
-	assert(
-		State_voiceE2EEParticipantNote(bob, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, A) == VOICE_E2EE_CLOCK_NOTE,
-		"expected the clock note on alice",
-	)
+	clockNote := State_voiceE2EEParticipantNote(bob, VOICE_KEY_TEST_SERVER, VOICE_KEY_TEST_ROOM, A)
+	assert(clockNote == VOICE_E2EE_CLOCK_NOTE, "expected the clock note on alice")
 	// No wrap for bob.
-	expectRefused(bob, voiceKeyTestCraft(&trio, alice, A, 2, 3, 0, nowSeconds, carol), .NoWrap, "no wrap")
+	noWrap := voiceKeyTestCraft(&trio, alice, A, 2, 3, 0, nowSeconds, carol)
+	expectRefused(bob, noWrap, .NoWrap, "no wrap")
 
 	// A good key, then the generation rules within its session and against an older session.
-	expectAccepted(bob, voiceKeyTestCraft(&trio, alice, A, 2, 4, 5, nowSeconds, bob), "session 4 gen 5")
+	good := voiceKeyTestCraft(&trio, alice, A, 2, 4, 5, nowSeconds, bob)
+	expectAccepted(bob, good, "session 4 gen 5")
 	expectRefused(
 		bob,
 		voiceKeyTestCraft(&trio, alice, A, 2, 4, 4, nowSeconds, bob),
@@ -683,7 +699,10 @@ testVoiceKeysListenerRefusesWhatTheRulesRefuse :: proc(t: ^testing.T) {
 	voiceKeyTestDeliverLog(bob, 2, 3, trio.log[2])
 	last := bob.voice.e2ee.notes[len(bob.voice.e2ee.notes) - 1]
 	accepted, _ := voiceKeyTestLastNote(bob, .Accepted)
-	assert(accepted.epoch == 3 && accepted.generation == 7, fmt.tprintf("expected epoch 3, got %v", last))
+	assert(
+		accepted.epoch == 3 && accepted.generation == 7,
+		fmt.tprintf("expected epoch 3, got %v", last),
+	)
 	assert(len(bob.voice.e2ee.pending) == 0, "expected nothing held any more")
 
 	// Within the grace an epoch 2 key of a newer session is still accepted; after it, refused,
@@ -729,7 +748,10 @@ testVoiceKeysListenerAsksOnceForAMissingKey :: proc(t: ^testing.T) {
 		VOICE_KEY_TEST_ROOM,
 		VOICE_KEY_TEST_ALICE,
 	)
-	assert(strings.has_prefix(note, "Waiting for "), fmt.tprintf("expected a waiting note: %q", note))
+	assert(
+		strings.has_prefix(note, "Waiting for "),
+		fmt.tprintf("expected a waiting note: %q", note),
+	)
 	bob.voice.e2ee.nowOverrideMS += VOICE_KEY_MISSING_REQUEST_MS
 	State_voiceE2EETick(bob)
 	State_voiceE2EETick(bob)

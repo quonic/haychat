@@ -2,8 +2,28 @@
 
 **Date:** 2026-11-15
 **Base:** `main` at `33275a6` (protocol 20, schema migration 9)
-**Status:** Design. Nothing is implemented. Every open question was decided by the maintainer on
-2026-11-15 (section 10).
+**Status:** Implemented as protocol 21 on branch `e2ee-voice` (2026-11-15), every decision of
+section 10 as recommended. Decisions the note left open, taken while building it:
+
+- `ClientVoiceKey` and `ServerVoiceKey` also carry `createdAt` (3.2 listed only the other AAD
+  fields): the AAD binds it, and the server must rebuild the AAD to check the signature.
+- A speaker never wraps its own key: `sealVoiceKey` refuses a recipient that is the sender
+  (`WrongRecipients`) and the server refuses an envelope with a wrap for its sender. A plaintext
+  that does not repeat its AAD fields fails with a new `E2EEError.MismatchedVoiceKey`.
+- The router answers a key for an epoch *later* than the room's log version with "Invalid voice
+  key" (only an older one is "Voice key is out of date"): no client can be ahead of the server.
+  The server checks nothing about generations; listeners do.
+- A rotation waits, like a chain distribution, while a member's key is still being fetched
+  (`rotatePending`); the engine stays silent meanwhile. A speaker who is the epoch's only member
+  sends no key and therefore no frames.
+- An earlier-epoch key within the grace (4.2) is accepted only for the epoch the listener just
+  left; the listener holds at most 64 waiting keys, one per sender.
+- "Two seconds without a key" (4.2) is counted per participant of the voice participant list,
+  not per received frame, and a refused key (other than for a missing wrap) makes no request.
+- The harness's `voice_status` appends `encrypted` and `sendGeneration` after `error`;
+  `voice_key` events also report this client's own `sent` keys (with why) and key requests.
+- The constant-bitrate quality measurement with `dev/voice-manual-test.sh` (8, 11.4) touches
+  real audio devices and is left to the maintainer before a release.
 **Audience:** HayChat maintainers and the agent that will implement package E6
 
 This note designs voice in encrypted rooms, the package that `docs/plan/e2ee-design.md` section 8

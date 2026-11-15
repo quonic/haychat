@@ -537,6 +537,20 @@ State_voiceE2EESpeaker :: proc(state: ^State, userID: int) -> ^VoiceE2EESpeaker 
 			return &speaker
 		}
 	}
+	// The entries hold key bytes: growing the array copies them, so the old buffer is wiped
+	// before it is freed instead of leaving a copy behind.
+	if len(e2ee.speakers) == cap(e2ee.speakers) {
+		grown := make([dynamic]VoiceE2EESpeaker, 0, max(8, 2 * cap(e2ee.speakers)))
+		append(&grown, ..e2ee.speakers[:])
+		if len(e2ee.speakers) > 0 {
+			crypto.zero_explicit(
+				raw_data(e2ee.speakers),
+				len(e2ee.speakers) * size_of(VoiceE2EESpeaker),
+			)
+		}
+		delete(e2ee.speakers)
+		e2ee.speakers = grown
+	}
 	append(&e2ee.speakers, VoiceE2EESpeaker{userID = userID})
 	return &e2ee.speakers[len(e2ee.speakers) - 1]
 }
@@ -909,7 +923,12 @@ State_voiceE2EETick :: proc(state: ^State) {
 			e2ee.stats.requestsSent += 1
 			State_voiceE2EENote(
 				state,
-				{kind = .Requested, serverID = e2ee.serverID, roomID = e2ee.roomID, userID = userID},
+				{
+					kind = .Requested,
+					serverID = e2ee.serverID,
+					roomID = e2ee.roomID,
+					userID = userID,
+				},
 			)
 		}
 	}

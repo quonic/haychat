@@ -72,7 +72,10 @@ voiceE2EETestEngine :: proc(
 	}
 	engine := VoiceEngine_create(config)
 	VoiceEngine_setPushToTalk(engine, true)
-	assert(VoiceEngine_open(engine), fmt.tprintf("expected to open: %s", VoiceEngine_lastError(engine)))
+	assert(
+		VoiceEngine_open(engine),
+		fmt.tprintf("expected to open: %s", VoiceEngine_lastError(engine)),
+	)
 	return engine
 }
 

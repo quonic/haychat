@@ -49,6 +49,7 @@ testServerStatusLineListsVoiceCounters :: proc(t: ^testing.T) {
 			"voice_drops_rate_limited=7",
 			"voice_drops_bad_tag=3",
 			"voice_drops_bad_duration=0",
+			"voice_drops_not_sealed=0",
 		}) {
 		found := false
 		for candidate in pairs {

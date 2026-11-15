@@ -123,6 +123,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `voice-mute-user USER_ID on\|off` | Mute for me: this client stops playing that user's voice (frames are dropped before decoding and counted in `engine.inboundLocallyMuted`) and keeps its volume. Same result as `voice-volume`. |
 | `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
 | `voice-flush` | With a file sink: replies once every frame played so far is in the file (`path`, `bytes`, `seconds`, `running`), so a script can analyse it without leaving. Without a running engine it reports the file as the engine closed it. |
+| `voice-key-rotate SECONDS` | Encrypted voice (protocol 21): this process makes a new voice key every `SECONDS` (1 to 1800) instead of every 30 minutes, so a proof can see a timed rotation (`voice_key` `sent` with `"rotation":"timer"`). The GUI has no way to change it. See [Encrypted Voice](#encrypted-voice). |
 | `wait EVENT_KIND [TIMEOUT_MS]` | Waits for an event of that kind (default 5000 ms, at most 600000). `ok:false` on timeout. |
 | `sleep MS` | Keeps servicing the connection for `MS` milliseconds, printing events. |
 | `help` | Lists the commands and event kinds. |
@@ -178,7 +179,8 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `voice_participants` | `{"event":"voice_participants","serverID":1,"roomID":1,"recipientJoined":true,"participants":[{"userID":3,"nickname":"alice","muted":false,"deafened":false}]}` (a room's full voice participant set; `"participants":[]` when the last one left) |
 | `voice_join_rejected` | `{"event":"voice_join_rejected","serverID":1,"roomID":1,"reason":"voice room is full"}` |
 | `voice_left` | `{"event":"voice_left","serverID":1,"roomID":1,"reason":"the room was deleted"}` (the server removed this session from that room's voice) |
-| `voice_status` | `{"event":"voice_status","serverID":1,"roomID":1,"status":"joined","wantRoomID":1,"error":""}` (the client's voice state changed: `idle`, `joining`, `joined`, or `unavailable`; printed by the harness, not the server) |
+| `voice_status` | `{"event":"voice_status","serverID":1,"roomID":1,"status":"joined","wantRoomID":1,"error":"","encrypted":false,"sendGeneration":-1}` (the client's voice state changed: `idle`, `joining`, `joined`, or `unavailable`; `encrypted` is set for an encrypted room's voice and `sendGeneration` is the generation of this client's voice key there, -1 while it has none; printed by the harness, not the server) |
+| `voice_key` | `{"event":"voice_key","serverID":1,"roomID":2,"kind":"accepted","userID":4,"epoch":3,"generation":0,"rotation":"","reason":"","error":""}` (encrypted voice, protocol 21: `kind` is `sent` (this client's new key; `rotation` is `join`, `engine`, `epoch`, `timer`, `request` or `keys`), `accepted` or `refused` (another participant's key; `reason` is `log_failed`, `not_member`, `no_pin`, `old_epoch`, `too_old`, `too_new`, `not_newer`, `no_wrap`, `failed` with the `E2EEError` in `error`, or `duplicate`), `requested` (this client asked `userID` for a key) or `request_received` (`userID` asked this client); printed by the harness) |
 | `voice_speaking` | `{"event":"voice_speaking","serverID":1,"roomID":1,"userID":3,"speaking":true,"self":false}` (a speaker started or stopped being heard; `self` is this client's own sending; printed by the harness) |
 
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
@@ -279,6 +281,30 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
   voice.
 - Voice frames are never events: they go from the network thread straight to the voice engine.
 
+### Encrypted Voice
+
+Voice in an encrypted room (protocol 21, [plan/e2ee-voice-design.md](plan/e2ee-voice-design.md))
+is end-to-end encrypted: each participant's client makes its own voice key, seals it to the
+members of the room's verified member log and sends it before any frame under it.
+
+- `voice-join` of an encrypted room fails with `ok:false` until the client verified the room's
+  member log ("Setting up encryption…": wait for its `room_log` and try again), and without a
+  valid encryption key in the profile.
+- `voice_status` says `"encrypted":true` there, and `sendGeneration` the generation of the key
+  this client sends with (it moves on every rotation; the status line is printed only when the
+  voice status changes, so follow `voice_key` events for rotations).
+- `voice_key` reports each key this client sent (with why), each key of another participant it
+  accepted or refused, and each key request sent or received. A join prints a `sent` with
+  `"rotation":"join"` and, for every other participant, an `accepted` right after the
+  acknowledgement. A member added or removed moves the epoch: every participant prints a
+  `sent` with `"rotation":"epoch"` and accepts the others' keys at the new epoch.
+- Keys are refused for their age (`too_old`, `too_new`) when the clocks differ by more than an
+  hour back or 5 minutes ahead; a participant waiting for a key is asked once after 2 s
+  (`requested`), and answers with a new key (`request_received`, then `sent` with
+  `"rotation":"request"`), at most once every 10 s.
+- `voice-stats` gains an `e2ee` object (below) with the engine's sealing and opening counters
+  and the client's key counters; `engine.e2ee` is the engine's raw `VoiceEngineE2EEStats`.
+
 ### Voice Stats
 
 `voice-stats` reports the flat fields scripts need first, then every counter:
@@ -292,7 +318,8 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
  "speakers":[{"userID":3,"volumePercent":100,"speaking":true,"levelDB":-9.0,"bufferedFrames":3,
  "targetDepth":3,"jitterMS":1.18}],
  "network":{"datagramsReceived":211,"framesDelivered":211,"receiveDropped":{"Malformed":0,...},
- "framesSent":0,"sendDropped":{"NotJoined":0,...}},"userVoice":[]}
+ "framesSent":0,"sendDropped":{"NotJoined":0,...}},"userVoice":[],
+ "e2ee":{"encrypted":false,"sendGeneration":-1,"framesSealed":0,"framesOpened":0,...}}
 ```
 
 (Wrapped here; the harness prints one line.)
@@ -316,6 +343,7 @@ writes 20 ms of silence for every frame nobody speaks, so the file's time base i
 | `speakers` | Each current remote speaker: `userID`, `volumePercent` (the per-user volume the engine applies), `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
 | `network` | The transport's `ClientVoiceNetworkStats` for the voice server, read under the network worker's lock: datagrams received and delivered, frames sent, and every drop by reason |
 | `userVoice` | Every per-user volume and mute stored for that server (`voice-volume`, `voice-mute-user`, Server settings), each as in the `voice-volume` result: `userID`, `volumePercent`, `muted`, `engineRunning`, `engineVolumePercent`, `engineMuted` |
+| `e2ee` | Encrypted voice (protocol 21): `encrypted`, `sendGeneration` (-1 for none), `framesSealed` and `framesOpened`, `sendNoKey` (encoded frames held back because no key had gone out yet), `sequenceRefused`, the inbound drops `dropNoKey`, `dropUnknownKeyID` (a key ID neither held key matches, typically a few frames right after a rotation), `dropBadTag`, `dropNotSealed` and `dropBadDuration`, then `keysSent`, `keysAccepted`, `keysRefused` (by reason, only the reasons that happened), `requestsSent` and `requestsReceived` |
 
 A speaker's frames stop without an end-of-spurt flag when it leaves, so the listener conceals
 a few (`plc`, then `silent`) before its spurt times out. Take stats while the speaker still
@@ -375,6 +403,17 @@ below half the rate.
    another device" and `voice_status` `idle` with `wantRoomID` 0 (no re-join), H a
    `voice_participants` with `recipientJoined` true and G one with `recipientJoined` false,
    both naming the user exactly once.
+5. Encrypted (protocol 21): admin EA creates an encrypted Admin invite room for text and voice
+   and adds EB and EC (each verifies the log at version 3); all three join its voice, print
+   `voice_status` with `"encrypted":true`, and accept a `voice_key` from both others. EA sends
+   the tone with an open gate; after `HAYCHAT_VOICE_PROOF_SECONDS` EB and EC must each have
+   opened at least 80 % of the frames that time calls for, none with a bad tag. EA removes EC:
+   EC gets `voice_left` "removed from the room", `voice-check` passes on EC's file, EA and EB
+   each accept the other's key at epoch 4, and EB keeps opening 80 % of the frames. Then
+   `voice-key-rotate 5` on EA: EA prints a `sent` with `"rotation":"timer"`, EB accepts that
+   generation, and keeps opening 80 % of the frames across the rotations; `voice-check` passes
+   on EB's file. It needs `psql` (through the `HAYCHAT_DATABASE_*` variables) to make EA an
+   admin; `HAYCHAT_VOICE_PROOF_ENCRYPTED=0` skips the stage.
 
 It needs libopus (in the dev image and CI) and nothing else: no audio server, no device, no
 display. Each stage prints its counters, including the jitter buffer's playout delay.

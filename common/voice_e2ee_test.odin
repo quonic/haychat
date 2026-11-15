@@ -153,7 +153,7 @@ testVoicePayloadBindsEveryAADField :: proc(t: ^testing.T) {
 	changed[7].flags ~= VOICE_FRAME_FLAG_END_OF_SPURT
 	for field, index in changed {
 		_, result := openVoicePayload(&key, field, kat, opened[:])
-		assert(result == .BadTag, fmt.tprintf("AAD field %d: expected BadTag, got %v", index, result))
+		assert(result == .BadTag, fmt.tprintf("AAD field %d: expected BadTag: %v", index, result))
 	}
 	// A key ID that names another generation, with or without the matching generation.
 	other := fields
@@ -165,7 +165,7 @@ testVoicePayloadBindsEveryAADField :: proc(t: ^testing.T) {
 	copy(data, kat)
 	data[1] = voiceKeyIDForGeneration(other.generation)
 	_, result = openVoicePayload(&key, other, data, opened[:])
-	assert(result == .BadTag, fmt.tprintf("expected a changed keyId to fail the tag, got %v", result))
+	assert(result == .BadTag, fmt.tprintf("expected a changed keyId to fail: %v", result))
 	// The version byte is in the AAD too, but a version 2 payload is refused before.
 	copy(data, kat)
 	data[0] = 2
@@ -203,7 +203,7 @@ testVoicePayloadSizes :: proc(t: ^testing.T) {
 
 	// The largest packet fits the wire exactly; one byte more is refused.
 	n, result := sealVoicePayload(&key, fields, opus[:VOICE_E2EE_OPUS_MAX_BYTES], sealed[:])
-	assert(result == .Ok && n == VOICE_OPUS_MAX_BYTES, fmt.tprintf("expected 494 to fit: %v", result))
+	assert(result == .Ok && n == VOICE_OPUS_MAX_BYTES, fmt.tprintf("494 must fit: %v", result))
 	plaintext, openResult := openVoicePayload(&key, fields, sealed[:n], opened[:])
 	assert(openResult == .Ok && len(plaintext) == VOICE_E2EE_OPUS_MAX_BYTES, "expected it back")
 	_, result = sealVoicePayload(&key, fields, opus[:VOICE_E2EE_OPUS_MAX_BYTES + 1], sealed[:])
