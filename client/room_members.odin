@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "base:runtime"
 import "core:fmt"
 import "core:slice"
 import "core:strings"
@@ -215,6 +216,8 @@ RoomMemberRights :: struct {
 	canAdd:    bool,
 	canRemove: bool,
 	canLeave:  bool,
+	// Protocol 18: the rights come from the verified member log (roomLogRights).
+	encrypted: bool,
 }
 
 // The rights for a room. Pure but for reading State.
@@ -227,6 +230,16 @@ roomMemberRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomM
 	rights.access = roomAccessShown(room.access)
 	rights.isAdmin = State_isServerAdmin(state, serverID)
 	rights.isMember = ServerRoomCache_roomIsJoined(State_serverRoomCache(state, serverID), roomID)
+	if room.encrypted {
+		// Protocol 18: what the verified member log allows (room_log.odin), not room_members.
+		log := roomLogRights(state, serverID, roomID)
+		rights.encrypted = true
+		rights.canView = rights.isAdmin || rights.isMember || log.isMember || log.isManager
+		rights.canAdd = log.canAdd
+		rights.canRemove = log.canRemove
+		rights.canLeave = log.canLeave
+		return
+	}
 	public := rights.access == .Public
 	rights.canView = rights.isAdmin || (rights.isMember && !public)
 	rights.canAdd =
@@ -289,6 +302,9 @@ State_openRoomMembers :: proc(state: ^State, serverID, roomID: int) -> bool {
 	State_closeServerSettings(state)
 	State_resetRoomEditor(state, .Members, serverID, roomID)
 	State_requestRoomMembers(state)
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		State_requestRoomLog(state, serverID, roomID)
+	}
 	return true
 }
 
@@ -421,6 +437,9 @@ State_addRoomMember :: proc(
 	if userID <= 0 {
 		return "No account to add."
 	}
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		return State_roomLogMemberChange(state, serverID, roomID, .Add, userID, checkRights)
+	}
 	return State_sendRoomMemberChange(
 		state,
 		serverID,
@@ -437,6 +456,12 @@ State_removeRoomMember :: proc(
 	if userID <= 0 {
 		return "No account to remove."
 	}
+	// Protocol 18: a manager signs the removal; an admin who is not one asks the server, which
+	// writes the log's unsigned Remove itself.
+	if State_roomIsEncrypted(state, serverID, roomID) &&
+	   roomLogRights(state, serverID, roomID).isManager {
+		return State_roomLogMemberChange(state, serverID, roomID, .Remove, userID, checkRights)
+	}
 	return State_sendRoomMemberChange(
 		state,
 		serverID,
@@ -448,12 +473,47 @@ State_removeRoomMember :: proc(
 // Leaves a non-public room. The answer is RoomMembershipChanged for this account, which drops
 // the room from the list.
 State_leaveRoom :: proc(state: ^State, serverID, roomID: int, checkRights := true) -> string {
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		return State_roomLogMemberChange(state, serverID, roomID, .Leave, 0, checkRights)
+	}
 	return State_sendRoomMemberChange(
 		state,
 		serverID,
 		{kind = .Leave, roomID = roomID},
 		checkRights,
 	)
+}
+
+// A signed change of an encrypted room's member log, with the Members page's notice. The answer
+// is the server's ServerRoomLog echo (which updates the page), or a protocol error.
+State_roomLogMemberChange :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	action: common.RoomLogAction,
+	userID: int,
+	checkRights := true,
+	access := common.RoomLogAccess.MemberInvite,
+) -> string {
+	errorMessage, queued := State_roomLogAppend(
+		state,
+		serverID,
+		roomID,
+		action,
+		userID,
+		access,
+		checkRights,
+	)
+	if editor := State_roomMembersPageFor(state, serverID, roomID); editor != nil {
+		if len(errorMessage) > 0 {
+			RoomEditor_setError(editor, errorMessage)
+		} else {
+			delete(editor.error)
+			editor.error = ""
+			delete(editor.notice)
+			editor.notice = queued ? strings.clone("Fetching the account's key first…") : ""
+		}
+	}
+	return errorMessage
 }
 
 // Asks for a room's members without opening its page (the harness); the answer is
@@ -502,6 +562,12 @@ RoomMemberRow :: struct {
 	isOnline:  bool,
 	isSelf:    bool,
 	canRemove: bool,
+	// Encrypted rooms (protocol 18): the account's key state ("Verified", "Key changed", …),
+	// whether the verified log names it a manager, and the manager controls.
+	keyState:  string,
+	isManager: bool,
+	canMakeManager:   bool,
+	canRemoveManager: bool,
 }
 
 RoomMembersView :: struct {
@@ -523,6 +589,17 @@ RoomMembersView :: struct {
 	error:       string,
 	// For admins: the room's settings (Edit room…).
 	canEdit:     bool,
+	// Encrypted rooms (protocol 18): members come from the verified member log, managers and
+	// admins are listed apart, and logWarning replaces the lists when the log failed.
+	encrypted:   bool,
+	logWarning:  string,
+	managers:    []RoomMemberRow,
+	admins:      []RoomMemberRow,
+	// Why an admin who is not a manager cannot add ("ask <names>").
+	addNote:     string,
+	// Managers who are admins switch between Member invite and Admin invite.
+	canSetAccess: bool,
+	otherAccess: common.RoomAccess,
 }
 
 // The Members page of the selected server, or visible false when it is not shown.
@@ -557,6 +634,10 @@ buildRoomMembersView :: proc(
 	view.error = editor.error
 
 	selfUserID := State_selfUserID(state, serverID)
+	if room != nil && room.encrypted {
+		buildEncryptedRoomMembersView(state, &view, serverID, roomID, allocator)
+		return
+	}
 	users: []common.UserSummary
 	if index := State_serverDirectCacheIndex(state^, serverID); index >= 0 {
 		users = slice.clone(state.serverDirectCaches[index].users[:], allocator)
@@ -613,4 +694,135 @@ buildRoomMembersView :: proc(
 	view.members = members[:]
 	view.candidates = candidates[:]
 	return
+}
+
+// The Members page of an encrypted room (protocol 18): the verified log's members, its
+// managers, and the server's admins, each with its key state.
+@(private = "file")
+buildEncryptedRoomMembersView :: proc(
+	state: ^State,
+	view: ^RoomMembersView,
+	serverID, roomID: int,
+	allocator := context.temp_allocator,
+) {
+	view.encrypted = true
+	log := State_findRoomLog(state, serverID, roomID)
+	rights := roomLogRights(state, serverID, roomID)
+	view.canAdd = rights.canAdd
+	view.canLeave = rights.canLeave
+	view.isMember = rights.isMember
+	view.addNote = rights.addNote
+	view.loading = log == nil || log.status == .Unknown || log.status == .Loading
+	if log != nil && log.status == .Failed {
+		view.logWarning = roomLogFailureText(log, allocator)
+		view.canAdd = false
+		view.canLeave = false
+		view.loading = false
+		return
+	}
+	if log == nil || log.status != .Verified {
+		return
+	}
+	if log.state.version == 0 {
+		view.logWarning = ROOM_LOG_NOT_SET_UP_NOTE
+		return
+	}
+	view.accessLabel = roomAccessLabel(common.RoomAccess(u8(log.state.access)))
+	view.canSetAccess = rights.canSetAccess
+	view.otherAccess = log.state.access == .MemberInvite ? .AdminInvite : .MemberInvite
+
+	selfUserID := State_selfUserID(state, serverID)
+	users: []common.UserSummary
+	if index := State_serverDirectCacheIndex(state^, serverID); index >= 0 {
+		users = state.serverDirectCaches[index].users[:]
+	}
+	row :: proc(
+		state: ^State,
+		serverID, userID, selfUserID: int,
+		users: []common.UserSummary,
+		allocator: runtime.Allocator,
+	) -> RoomMemberRow {
+		result := RoomMemberRow {
+			userID = userID,
+			isSelf = userID == selfUserID,
+		}
+		nickname := ""
+		for user in users {
+			if user.id == userID {
+				nickname = user.nickname
+				result.isOnline = user.isOnline
+			}
+		}
+		result.label = userLabel(nickname, userID, allocator)
+		if result.isSelf {
+			result.label = fmt.aprintf("%s (you)", result.label, allocator = allocator)
+			result.keyState = "You"
+		} else {
+			result.keyState = roomMemberKeyStateLabel(
+				State_e2eePeerKeyInfo(state, serverID, userID).state,
+			)
+		}
+		return result
+	}
+	sorted :: proc(
+		ids: map[int]common.IdentityPublicKeyBytes,
+		allocator: runtime.Allocator,
+	) -> []int {
+		list := make([dynamic]int, 0, len(ids), allocator)
+		for userID in ids {
+			append(&list, userID)
+		}
+		slice.sort(list[:])
+		return list[:]
+	}
+	members := make([dynamic]RoomMemberRow, 0, allocator)
+	for userID in sorted(log.state.members, allocator) {
+		member := row(state, serverID, userID, selfUserID, users, allocator)
+		member.isManager = userID in log.state.managers
+		member.canRemove = rights.canRemove
+		member.canMakeManager = rights.canManageManagers && !member.isManager
+		append(&members, member)
+	}
+	managers := make([dynamic]RoomMemberRow, 0, allocator)
+	lastManager := len(log.state.managers) == 1 && len(log.state.members) > 0
+	for userID in sorted(log.state.managers, allocator) {
+		manager := row(state, serverID, userID, selfUserID, users, allocator)
+		manager.isManager = true
+		manager.canRemoveManager = rights.canManageManagers && !lastManager
+		append(&managers, manager)
+	}
+	admins := make([dynamic]RoomMemberRow, 0, allocator)
+	candidates := make([dynamic]RoomMemberRow, 0, allocator)
+	for user in users {
+		if user.isAdmin {
+			admin := row(state, serverID, user.id, selfUserID, users, allocator)
+			admin.isManager = user.id in log.state.managers
+			admin.canMakeManager = rights.canManageManagers && !admin.isManager
+			append(&admins, admin)
+		}
+		if rights.canAdd && user.id not_in log.state.members && !user.isBanned {
+			append(&candidates, row(state, serverID, user.id, selfUserID, users, allocator))
+		}
+	}
+	view.members = members[:]
+	view.managers = managers[:]
+	view.admins = admins[:]
+	view.candidates = candidates[:]
+}
+
+// The key state a Members row shows next to an encrypted room's member.
+roomMemberKeyStateLabel :: proc(keyState: E2EEKeyState) -> string {
+	switch keyState {
+	case .Verified:
+		return "Verified"
+	case .Unverified:
+		return "Not verified"
+	case .KeyChanged:
+		return "Key changed"
+	case .NotSetUp, .NotProvided, .InvalidKey:
+		return "No key"
+	case .Unknown:
+		return "Key not fetched"
+	}
+	return ""
 }

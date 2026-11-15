@@ -40,6 +40,9 @@ PendingDBRequestType :: enum {
 	// Account encryption keys (router_encryption_keys.odin, protocol 16).
 	PublishEncryptionKey,
 	FetchUserKeys,
+	// Encrypted rooms' member logs (router_room_log.odin, protocol 18).
+	AppendRoomLog,
+	FetchRoomLog,
 }
 
 PendingDBRequest :: struct {
@@ -66,6 +69,8 @@ PendingDBRequest :: struct {
 	roomAccess:       common.RoomAccess,
 	roomHistory:      common.RoomHistoryVisibility,
 	creatorJoins:     bool,
+	// Room create and edit (protocol 18): the encrypted flag asked for.
+	roomEncrypted:    bool,
 	// RoomMemberAction: which one.
 	roomMemberAction: common.RoomMemberAction,
 	// Admin actions (protocol 14): which one, and its flag (isAdmin, locked, or banned). name
@@ -638,7 +643,9 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .MarkRead,
 		     .AdminUserAction,
 		     .PublishEncryptionKey,
-		     .FetchUserKeys:
+		     .FetchUserKeys,
+		     .AppendRoomLog,
+		     .FetchRoomLog:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
@@ -1086,6 +1093,11 @@ MainRouterState_handleClientCreateRoom :: proc(
 	}
 	defer delete(req.name)
 	defer delete(req.description)
+	// Protocol 18: encrypting a room anyone joins protects nothing (e2ee-design.md 6.1).
+	if req.encrypted && req.access == .Public {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ENCRYPTED_ROOM_PUBLIC_MESSAGE)
+		return
+	}
 	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
 	if !ok {
 		return
@@ -1103,6 +1115,7 @@ MainRouterState_handleClientCreateRoom :: proc(
 			roomAccess = req.access,
 			roomHistory = req.historyVisibility,
 			creatorJoins = req.creatorJoins,
+			roomEncrypted = req.encrypted,
 		},
 	)
 }
@@ -1142,6 +1155,7 @@ MainRouterState_handleClientEditRoom :: proc(
 			description = strings.clone(req.description),
 			roomType = req.roomType,
 			roomAccess = req.access,
+			roomEncrypted = req.encrypted,
 		},
 	)
 }
@@ -1258,6 +1272,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientPublishEncryptionKey(pm, state, peerID, packet.payload)
 	case .ClientFetchUserKeys:
 		MainRouterState_handleClientFetchUserKeys(pm, state, peerID, packet.payload)
+	case .ClientAppendRoomLog:
+		MainRouterState_handleClientAppendRoomLog(pm, state, peerID, packet.payload)
+	case .ClientFetchRoomLog:
+		MainRouterState_handleClientFetchRoomLog(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1526,6 +1544,15 @@ MainRouterState_handleDatabaseResult :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, "Not a room member")
 			return
 		}
+		if posted.encryptedRoom {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				common.ENCRYPTED_ROOM_CHAT_MESSAGE,
+			)
+			return
+		}
 		if posted.chatDisabled {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, CHAT_DISABLED_MESSAGE)
 			return
@@ -1595,6 +1622,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				access = request.roomAccess,
 				historyVisibility = request.roomHistory,
 				creatorJoins = request.creatorJoins,
+				encrypted = request.roomEncrypted,
 			},
 			PendingDBRequest {
 				requestType = .CreateRoom,
@@ -1657,6 +1685,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				description = strings.clone(request.description),
 				roomType = request.roomType,
 				access = request.roomAccess,
+				encrypted = request.roomEncrypted,
 			},
 			PendingDBRequest{requestType = .EditRoom, roomID = request.roomID},
 		)
@@ -1666,7 +1695,15 @@ MainRouterState_handleDatabaseResult :: proc(
 			return
 		}
 		if !mutation.changed {
-			MainRouterState_sendProtocolError(pm, state, request.peerID, "Room not found")
+			message := "Room not found"
+			switch mutation.refusal {
+			case .EncryptionFlag:
+				message = common.ENCRYPTED_ROOM_FLAG_MESSAGE
+			case .EncryptedAccess:
+				message = common.ENCRYPTED_ROOM_ACCESS_MESSAGE
+			case .None:
+			}
+			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			return
 		}
 		// Voice first, as for a deletion, so clients leave the room's voice before they see it
@@ -1700,6 +1737,9 @@ MainRouterState_handleDatabaseResult :: proc(
 				roomType = mutation.room.roomType,
 				roomAccess = mutation.room.access,
 				roomHistory = mutation.room.historyVisibility,
+				roomEncrypted = mutation.room.encrypted,
+				// The room's log version travels in targetUserID's place.
+				targetUserID = mutation.room.logVersion,
 			},
 		)
 	case .ListEditRoomRecipients:
@@ -1715,6 +1755,8 @@ MainRouterState_handleDatabaseResult :: proc(
 				roomType = request.roomType,
 				access = request.roomAccess,
 				historyVisibility = request.roomHistory,
+				encrypted = request.roomEncrypted,
+				logVersion = request.targetUserID,
 			},
 			roomId = request.roomID,
 			changed = true,
@@ -1819,6 +1861,10 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handlePublishEncryptionKeyResult(pm, state, request, response)
 	case .FetchUserKeys:
 		MainRouterState_handleFetchUserKeysResult(pm, state, request, response)
+	case .AppendRoomLog:
+		MainRouterState_handleAppendRoomLogResult(pm, state, request, response)
+	case .FetchRoomLog:
+		MainRouterState_handleFetchRoomLogResult(pm, state, request, response)
 	}
 }
 

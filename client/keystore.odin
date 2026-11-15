@@ -14,19 +14,25 @@ import "core:strings"
 // atomically (writeFileAtomically). The fingerprint is the server's pinned key's, so a server
 // whose key changed and was trusted again gets a fresh store and its users are pinned again.
 //
-// Format 2, JSON (format 1 is the same without direct_conversations entries; a format 1 file
-// loads as is and is written back as format 2, which an E1 build reads only read-only, so it
-// never drops the flags):
+// Format 3, JSON (format 1 is the same without direct_conversations and rooms entries, format 2
+// without rooms entries; an older file loads as is and is written back as format 3, which an
+// older build reads only read-only, so it never drops what it does not know):
 //
 //   {
-//     "format": 2,
+//     "format": 3,
 //     "server_public_key": "<hex identity key of the server>",
 //     "users": [{"user_id": 2, "identity_public_key": "<hex>", "encryption_public_key": "<hex>",
 //                "encryption_key_created_at": 1731600000, "verified": false,
 //                "first_seen": 1731600000}],
-//     "rooms": [],                 // reserved for E4: {"room_id": N, ...}
+//     "rooms": [{"room_id": 5, "log_version": 3, "log_head_hash": "<hex SHA-256>"}],
 //     "direct_conversations": [{"peer_user_id": 2, "encrypted": true}]
 //   }
+//
+// rooms (E4a, design 6.2) holds, per encrypted room, the head of its member log this profile
+// last verified: the newest entry's version and hash. A log that rewrites that entry (a fork)
+// or ends before it (a rollback) is refused (room_log.odin). Heads only move forward and are
+// never removed, not even when the room is deleted, so a server that presents a deleted room's
+// ID again cannot start its log over. E4b adds chain keys per room here.
 //
 // direct_conversations (E2, design 4.5) lists the peers with whom an encrypted message was
 // sent or opened on this server. It only ever gains entries: once a conversation is encrypted
@@ -40,7 +46,7 @@ import "core:strings"
 //
 // The GUI and the headless harness both write it (State.keyStoreDir); tests keep it in memory.
 
-KEY_STORE_FORMAT :: 2
+KEY_STORE_FORMAT :: 3
 KEY_STORE_DIR_NAME :: "keys"
 
 // One pinned account (design 3.4): first seen with these keys, verified by comparing safety
@@ -65,9 +71,17 @@ KeyStoreFileUser :: struct {
 	first_seen:                i64,
 }
 
-// Reserved for E4: the verified member log head and chain keys of a room.
+// An encrypted room's verified member log head (format 3). log_head_hash is hex.
 KeyStoreFileRoom :: struct {
-	room_id: int,
+	room_id:       int,
+	log_version:   int,
+	log_head_hash: string,
+}
+
+// The same in memory.
+KeyStoreRoom :: struct {
+	roomID: int,
+	head:   common.RoomLogHead,
 }
 
 // Whether a direct conversation has been encrypted (no downgrade, design 4.5).
@@ -91,6 +105,9 @@ KeyStoreFile_deinit :: proc(file: ^KeyStoreFile) {
 		delete(user.encryption_public_key)
 	}
 	delete(file.users)
+	for room in file.rooms {
+		delete(room.log_head_hash)
+	}
 	delete(file.rooms)
 	delete(file.direct_conversations)
 	file^ = {}
@@ -107,7 +124,7 @@ KeyStore :: struct {
 	writable:            bool,
 	loadError:           string,
 	pins:                [dynamic]KeyPin,
-	rooms:               [dynamic]KeyStoreFileRoom,
+	rooms:               [dynamic]KeyStoreRoom,
 	directConversations: [dynamic]KeyStoreFileDirectConversation,
 }
 
@@ -144,6 +161,35 @@ KeyStore_setPin :: proc(store: ^KeyStore, pin: KeyPin) {
 		return
 	}
 	append(&store.pins, pin)
+}
+
+// The verified member log head of roomID, version 0 when this profile never verified one.
+KeyStore_roomHead :: proc(store: KeyStore, roomID: int) -> common.RoomLogHead {
+	for room in store.rooms {
+		if room.roomID == roomID {
+			return room.head
+		}
+	}
+	return {}
+}
+
+// Records a newly verified head for roomID. Heads only move forward: an older version than
+// the stored one is refused. Returns true when that changed something (the caller saves then).
+KeyStore_setRoomHead :: proc(store: ^KeyStore, roomID: int, head: common.RoomLogHead) -> bool {
+	if roomID <= 0 || head.version <= 0 {
+		return false
+	}
+	for &room in store.rooms {
+		if room.roomID == roomID {
+			if head.version < room.head.version || room.head == head {
+				return false
+			}
+			room.head = head
+			return true
+		}
+	}
+	append(&store.rooms, KeyStoreRoom{roomID = roomID, head = head})
+	return true
 }
 
 // Whether an encrypted message was sent to or opened from peerUserID on this server.
@@ -269,7 +315,19 @@ keyStoreParse :: proc(data: []u8, serverPublicKey: common.IdentityPublicKeyBytes
 		}
 		append(&store.pins, pin)
 	}
-	append(&store.rooms, ..file.rooms[:])
+	for room in file.rooms {
+		entry := KeyStoreRoom {
+			roomID = room.room_id,
+			head = {version = room.log_version},
+		}
+		hashOK := common.decodeHexIntoBuffer(room.log_head_hash, entry.head.hash[:])
+		duplicate := KeyStore_roomHead(store, room.room_id).version > 0
+		if room.room_id <= 0 || room.log_version <= 0 || !hashOK || duplicate {
+			KeyStore_refuseWrites(&store, "the key store file has an invalid room entry")
+			continue
+		}
+		append(&store.rooms, entry)
+	}
 	for conversation in file.direct_conversations {
 		if conversation.peer_user_id <= 0 {
 			KeyStore_refuseWrites(&store, "the key store file has an invalid conversation entry")
@@ -350,7 +408,17 @@ keyStoreEncode :: proc(store: KeyStore) -> ([]u8, bool) {
 			},
 		)
 	}
-	append(&file.rooms, ..store.rooms[:])
+	for room in store.rooms {
+		hash := room.head.hash
+		append(
+			&file.rooms,
+			KeyStoreFileRoom {
+				room_id = room.roomID,
+				log_version = room.head.version,
+				log_head_hash = common.encodeBytesToHex(hash[:]),
+			},
+		)
+	}
 	append(&file.direct_conversations, ..store.directConversations[:])
 	data, err := json.marshal(file, {pretty = true})
 	if err != nil {

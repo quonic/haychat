@@ -48,6 +48,11 @@ RoomEditor :: struct {
 	access:        common.RoomAccess,
 	history:       common.RoomHistoryVisibility,
 	creatorJoins:  bool,
+	// Protocol 18 (Create): Encrypt this room, on by default for invite rooms (Q9) and never
+	// for Public ones, and the admins left out of the managers (every admin the client sees
+	// is a manager unless unchecked, Q10; the creator always is).
+	encrypted:     bool,
+	uncheckedManagers: [dynamic]int,
 	// Members: the room's members from the last ServerRoomMembers, and the answer to the last
 	// add or removal (owned), shown above the list.
 	members:       [dynamic]int,
@@ -68,6 +73,7 @@ RoomEditor_deinit :: proc(editor: ^RoomEditor) {
 	delete(editor.error)
 	delete(editor.members)
 	delete(editor.notice)
+	delete(editor.uncheckedManagers)
 	editor^ = {}
 }
 
@@ -94,6 +100,8 @@ RoomAdminRequest :: struct {
 	access:      common.RoomAccess,
 	history:     common.RoomHistoryVisibility,
 	creatorJoins: bool,
+	// Create and Edit (protocol 18): the room's encrypted flag (an edit repeats the room's).
+	encrypted:   bool,
 }
 
 RoomAdminSendBridge :: #type proc(
@@ -118,6 +126,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.access,
 			request.history,
 			request.creatorJoins,
+			request.encrypted,
 		)
 	case .Edit:
 		return ClientServerTransport_editRoom(
@@ -127,6 +136,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.description,
 			request.roomType,
 			request.access,
+			request.encrypted,
 		)
 	case .Delete:
 		return ClientServerTransport_deleteRoom(transport, request.roomID)
@@ -173,7 +183,6 @@ validateRoomMetadata :: proc(
 // Room names are unique on a server (exactly, as PostgreSQL compares them). Checking the
 // cached list first turns the server's constraint error into a sentence; a room another admin
 // created a moment ago can still slip past, and then the server's error is shown instead.
-@(private = "file")
 State_roomNameTaken :: proc(
 	state: ^State,
 	serverID: int,
@@ -260,6 +269,10 @@ State_sendRoomAdminRequest :: proc(
 // creator joining unless told otherwise). The answer arrives as RoomCreated (to this session
 // only) and as RoomMembershipChanged (to the room's members). Returns the reason when nothing
 // was sent.
+//
+// encrypted (protocol 18) needs an invite mode. managers are the other admins to name as
+// managers (this account always is one). The managers' keys are pinned first when needed, so
+// the request may go out a moment later (room_log.odin); its Create entry follows RoomCreated.
 State_sendCreateRoom :: proc(
 	state: ^State,
 	serverID: int,
@@ -268,6 +281,61 @@ State_sendCreateRoom :: proc(
 	access: common.RoomAccess = .Public,
 	history: common.RoomHistoryVisibility = .FromJoin,
 	creatorJoins := true,
+	encrypted := false,
+	managers: []int = nil,
+) -> string {
+	if encrypted {
+		cleanName, cleanDescription, errorMessage := validateRoomMetadata(name, description)
+		if len(errorMessage) > 0 {
+			return errorMessage
+		}
+		if State_roomNameTaken(state, serverID, cleanName, 0) {
+			return fmt.tprintf("A room named #%s already exists.", cleanName)
+		}
+		if !common.roomTypeIsSupported(roomType) {
+			return "Choose text, voice, or both for the room."
+		}
+		if !common.roomHistoryVisibilityIsSupported(history) {
+			return "Choose what new members can read."
+		}
+		return State_roomLogBeginCreate(
+			state,
+			serverID,
+			cleanName,
+			cleanDescription,
+			roomType,
+			access,
+			history,
+			creatorJoins,
+			managers,
+		)
+	}
+	return State_sendRoomAdminRequest(
+		state,
+		serverID,
+		RoomAdminRequest {
+			kind = .Create,
+			name = name,
+			description = description,
+			roomType = roomType,
+			access = access,
+			history = history,
+			creatorJoins = creatorJoins,
+		},
+	)
+}
+
+// Sends ClientCreateRoom as given (room_log.odin, once an encrypted room's managers are
+// pinned).
+State_sendRoomAdminCreate :: proc(
+	state: ^State,
+	serverID: int,
+	name, description: string,
+	roomType: common.RoomType,
+	access: common.RoomAccess,
+	history: common.RoomHistoryVisibility,
+	creatorJoins: bool,
+	encrypted: bool,
 ) -> string {
 	return State_sendRoomAdminRequest(
 		state,
@@ -280,6 +348,7 @@ State_sendCreateRoom :: proc(
 			access = access,
 			history = history,
 			creatorJoins = creatorJoins,
+			encrypted = encrypted,
 		},
 	)
 }
@@ -308,6 +377,8 @@ State_sendEditRoom :: proc(
 			description = description,
 			roomType = roomType,
 			access = access,
+			// The flag never changes; an edit repeats the room's (protocol 18).
+			encrypted = State_roomIsEncrypted(state, serverID, roomID),
 		},
 	)
 }
@@ -369,6 +440,8 @@ State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roo
 	editor.access = .Public
 	editor.history = .FromJoin
 	editor.creatorJoins = true
+	editor.encrypted = false
+	clear(&editor.uncheckedManagers)
 	editor.pending = .None
 	editor.confirmDelete = false
 	delete(editor.error)
@@ -458,8 +531,82 @@ State_setRoomEditorAccess :: proc(state: ^State, access: common.RoomAccess) {
 	   !common.roomAccessIsSupported(access) {
 		return
 	}
+	// An encrypted room's access changes only through its member list (protocol 18).
+	if editor.mode == .Edit && State_roomIsEncrypted(state, editor.serverID, editor.roomID) {
+		return
+	}
+	if editor.mode == .Create && editor.access != access {
+		// Encrypt this room follows the mode: on for invite rooms (Q9), never for Public ones.
+		editor.encrypted = access != .Public
+		if editor.encrypted {
+			State_roomEditorFetchManagerKeys(state)
+		}
+	}
 	editor.access = access
 	editor.confirmDelete = false
+}
+
+// Encrypt this room (Create, invite modes only).
+State_toggleRoomEditorEncrypted :: proc(state: ^State) {
+	editor := &state.roomEditor
+	if editor.mode != .Create || editor.pending != .None || editor.access == .Public {
+		return
+	}
+	editor.encrypted = !editor.encrypted
+	if editor.encrypted {
+		State_roomEditorFetchManagerKeys(state)
+	}
+}
+
+// Checks or unchecks an admin as a manager of the room being created. The creator always is.
+State_toggleRoomEditorManager :: proc(state: ^State, userID: int) {
+	editor := &state.roomEditor
+	if editor.mode != .Create ||
+	   editor.pending != .None ||
+	   userID == State_selfUserID(state, editor.serverID) {
+		return
+	}
+	for unchecked, index in editor.uncheckedManagers {
+		if unchecked == userID {
+			ordered_remove(&editor.uncheckedManagers, index)
+			return
+		}
+	}
+	append(&editor.uncheckedManagers, userID)
+}
+
+// The managers the form would name now: every admin candidate that is checked and whose key is
+// pinned. Temp.
+State_roomEditorManagers :: proc(state: ^State) -> []int {
+	editor := &state.roomEditor
+	managers := make([dynamic]int, 0, context.temp_allocator)
+	for userID in State_roomLogAdminCandidates(state, editor.serverID) {
+		unchecked := false
+		for other in editor.uncheckedManagers {
+			if other == userID {
+				unchecked = true
+			}
+		}
+		if !unchecked && State_roomLogManagerReady(state, editor.serverID, userID) {
+			append(&managers, userID)
+		}
+	}
+	return managers[:]
+}
+
+// Fetches the keys of admins the client has not pinned, so the managers list can name them.
+State_roomEditorFetchManagerKeys :: proc(state: ^State) {
+	editor := &state.roomEditor
+	missing := make([dynamic]int, 0, context.temp_allocator)
+	for userID in State_roomLogAdminCandidates(state, editor.serverID) {
+		if State_e2eePeerKeyInfo(state, editor.serverID, userID).state == .Unknown &&
+		   userID != State_selfUserID(state, editor.serverID) {
+			append(&missing, userID)
+		}
+	}
+	if len(missing) > 0 {
+		State_e2eeRequestUserKeys(state, editor.serverID, missing[:])
+	}
 }
 
 // The history selector (Create only; it is fixed afterwards).
@@ -505,6 +652,8 @@ State_submitRoomEditor :: proc(state: ^State) {
 			editor.access,
 			editor.history,
 			editor.creatorJoins || editor.access == .Public,
+			editor.encrypted && editor.access != .Public,
+			State_roomEditorManagers(state),
 		)
 		pending = .Create
 	} else {

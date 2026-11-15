@@ -305,6 +305,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.reason)
 	case common.DatabaseFetchUserKeysRequest:
 		delete(r.userIds)
+	case common.DatabaseAppendRoomLogRequest:
+		delete(r.entry)
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
@@ -316,7 +318,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseDirectConversationListRequest,
 	     common.DatabaseUserDirectoryRequest,
 	     common.DatabaseMarkReadRequest,
-	     common.DatabasePublishEncryptionKeyRequest:
+	     common.DatabasePublishEncryptionKeyRequest,
+	     common.DatabaseFetchRoomLogRequest:
 	case nil:
 	}
 }
@@ -361,6 +364,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.addedUserIDs)
 	case common.DatabaseRoomMemberActionResult:
 		delete(r.memberUserIDs)
+		delete(r.logEntry)
+		delete(r.managerUserIDs)
 	case common.DatabaseAdminRoomListResult:
 		for entry in r.rooms {
 			delete(entry.room.name)
@@ -397,6 +402,15 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseFetchUserKeysResult:
 		delete(r.keys)
 		delete(r.missingUserIds)
+	case common.DatabaseAppendRoomLogResult:
+		delete(r.entry)
+		delete(r.memberUserIDs)
+		delete(r.managerUserIDs)
+	case common.DatabaseFetchRoomLogResult:
+		for entry in r.entries {
+			delete(entry)
+		}
+		delete(r.entries)
 	case common.DatabaseUserServerAdminResult,
 	     common.DatabaseMarkReadResult,
 	     common.DatabasePublishEncryptionKeyResult:

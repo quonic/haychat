@@ -184,6 +184,11 @@ databaseGetInt :: proc(result: pg.Result, row: i32, column: i32) -> (int, bool) 
 	return value, ok
 }
 
+databaseGetIntOrZero :: proc(result: pg.Result, row: i32, column: i32) -> int {
+	value, _ := databaseGetInt(result, row, column)
+	return value
+}
+
 databaseGetBool :: proc(result: pg.Result, row: i32, column: i32) -> bool {
 	text := databaseGetText(result, row, column)
 	defer delete(text)
@@ -220,7 +225,8 @@ databaseGetRoomHistoryVisibility :: proc(
 }
 
 // Reads a room's columns in the order id, name, description, room_type, access,
-// history_visibility starting at first. The strings are owned by the caller.
+// history_visibility, encrypted, log_version (protocol 18) starting at first. The strings are
+// owned by the caller.
 databaseGetRoomSummary :: proc(
 	result: pg.Result,
 	row: i32,
@@ -243,8 +249,16 @@ databaseGetRoomSummary :: proc(
 		first + 5,
 		room.access,
 	)
+	room.encrypted = databaseGetBool(result, row, first + 6)
+	room.logVersion, _ = databaseGetInt(result, row, first + 7)
 	return room, true
 }
+
+// The columns databaseGetRoomSummary reads, for a rooms row aliased r.
+DATABASE_ROOM_SUMMARY_COLUMNS_SQL ::
+	"r.id::text, r.name, r.description, r.room_type::text, r.access::text, " +
+	"r.history_visibility::text, r.encrypted::text, r.log_version::text"
+
 
 // Reads a rooms.room_type column. The column's check allows only the supported types, so
 // anything else means a broken row; it reads as ChatAndVoice, what rooms were before types.
@@ -329,8 +343,8 @@ databaseExecuteUserIdentityResolution :: proc(
 DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"SELECT r.id::text, r.name, r.description, " +
 	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text, r.room_type::text, " +
-	"r.access::text, r.history_visibility::text FROM rooms r " +
-	"JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
+	"r.access::text, r.history_visibility::text, r.encrypted::text, r.log_version::text " +
+	"FROM rooms r JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
 	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NOT NULL AND cm.room_id = r.id " +
@@ -379,6 +393,8 @@ databaseExecuteListRoomsForUser :: proc(
 				roomType = databaseGetRoomType(result, row, 5),
 				access = access,
 				historyVisibility = databaseGetRoomHistoryVisibility(result, row, 7, access),
+				encrypted = databaseGetBool(result, row, 8),
+				logVersion = databaseGetIntOrZero(result, row, 9),
 			},
 		)
 	}
@@ -386,9 +402,10 @@ databaseExecuteListRoomsForUser :: proc(
 }
 
 // The room's type and members: one row per member, or one row with a NULL member for a room
-// without members, and no row for a room that does not exist.
+// without members, and no row for a room that does not exist. The last column is the room's
+// encrypted flag (protocol 18).
 DATABASE_LIST_ROOM_MEMBERS_SQL ::
-	"SELECT r.room_type::text, rm.user_id::text FROM rooms r " +
+	"SELECT r.room_type::text, rm.user_id::text, r.encrypted::text FROM rooms r " +
 	"LEFT JOIN room_members rm ON rm.room_id = r.id WHERE r.id = $1"
 
 databaseExecuteListRoomMemberUserIDs :: proc(
@@ -414,6 +431,7 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 		if row == 0 {
 			members.roomFound = true
 			members.roomType = databaseGetRoomType(result, row, 0)
+			members.encrypted = databaseGetBool(result, row, 2)
 		}
 		if userID, ok := databaseGetInt(result, row, 1); ok {
 			append(&members.userIDs, userID)
@@ -425,17 +443,21 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 // One statement checks membership and the room type (a voice-only room takes no chat, protocol
 // 14), stores the message only for members of a room with chat, and lists the room's
 // recipients and the sender's nickname from the same snapshot. It always returns exactly one
-// row: membership, the message ID and time, recipients, nickname, and whether chat is allowed.
+// row: membership, the message ID and time, recipients, nickname, whether chat is allowed, and
+// whether the room is encrypted (protocol 18): an encrypted room takes no plaintext message,
+// so nothing readable is ever stored in one.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
-	"chat AS (SELECT 1 FROM rooms WHERE id = $1 AND room_type IN (1, 3)), " +
+	"room AS (SELECT room_type, encrypted FROM rooms WHERE id = $1), " +
+	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND NOT encrypted), " +
 	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content) " +
 	"SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
 	"RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $2), ''), " +
-	"EXISTS (SELECT 1 FROM chat) FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
+	"EXISTS (SELECT 1 FROM chat), COALESCE((SELECT encrypted FROM room), false) " +
+	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
 	conn: pg.Conn,
@@ -463,6 +485,11 @@ databaseExecutePostRoomChatMessage :: proc(
 
 	if !databaseGetBool(result, 0, 0) {
 		return databaseSuccess(common.DatabasePostRoomChatMessageResult{isMember = false})
+	}
+	if databaseGetBool(result, 0, 6) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, encryptedRoom = true},
+		)
 	}
 	if !databaseGetBool(result, 0, 5) {
 		return databaseSuccess(
@@ -617,22 +644,26 @@ databaseExecuteCheckUserServerAdmin :: proc(
 
 // A new Public room ($5 = 1) includes every account, the creator among them, and stores Full
 // history whatever $6 says; an invite room includes only the creator, and only when $7
-// (creatorJoins) is true. The database worker runs one statement at a time on one connection,
-// so an account created concurrently either sees this room or is seen by it. The last column
-// says whether the creator is a member.
+// (creatorJoins) is true. An encrypted room ($8, protocol 18; never Public, which the router
+// and rooms_encrypted_access refuse) starts with no members: its log's Create entry adds the
+// creator. The database worker runs one statement at a time on one connection, so an account
+// created concurrently either sees this room or is seen by it. The last column says whether the
+// creator is a member.
 DATABASE_CREATE_ROOM_SQL ::
 	"WITH created_room AS (" +
 	"INSERT INTO rooms (name, description, created_by_user_id, room_type, access, " +
-	"history_visibility) VALUES ($2, $3, $1, $4::smallint, $5::smallint, " +
-	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END) " +
-	"RETURNING id, name, description, room_type, access, history_visibility" +
+	"history_visibility, encrypted) VALUES ($2, $3, $1, $4::smallint, $5::smallint, " +
+	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END, $8::boolean) " +
+	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
+	"log_version" +
 	"), members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
-	"WHERE created_room.access = 1 OR (users.id = $1::bigint AND $7::boolean) " +
+	"WHERE NOT created_room.encrypted AND (created_room.access = 1 " +
+	"OR (users.id = $1::bigint AND $7::boolean)) " +
 	"ON CONFLICT DO NOTHING RETURNING user_id" +
 	") SELECT id::text, name, description, room_type::text, access::text, " +
-	"history_visibility::text, " +
+	"history_visibility::text, encrypted::text, log_version::text, " +
 	"EXISTS (SELECT 1 FROM members WHERE user_id = $1::bigint)::text FROM created_room"
 
 databaseExecuteCreateRoom :: proc(
@@ -653,6 +684,8 @@ databaseExecuteCreateRoom :: proc(
 	defer delete(historyParam)
 	joinsParam := strings.clone_to_cstring(request.creatorJoins ? "true" : "false")
 	defer delete(joinsParam)
+	encryptedParam := strings.clone_to_cstring(request.encrypted ? "true" : "false")
+	defer delete(encryptedParam)
 	params := [?][^]byte {
 		transmute([^]byte)creatorUserIDParam,
 		transmute([^]byte)nameCString,
@@ -661,6 +694,7 @@ databaseExecuteCreateRoom :: proc(
 		transmute([^]byte)accessParam,
 		transmute([^]byte)historyParam,
 		transmute([^]byte)joinsParam,
+		transmute([^]byte)encryptedParam,
 	}
 	result := databaseExecParams(conn, DATABASE_CREATE_ROOM_SQL, params[:])
 	if result == nil {
@@ -679,25 +713,32 @@ databaseExecuteCreateRoom :: proc(
 		common.DatabaseRoomMutationResult {
 			changed = true,
 			room = room,
-			isMember = databaseGetBool(result, 0, 6),
+			isMember = databaseGetBool(result, 0, 8),
 		},
 	)
 }
 
-// Switching a room to Public ($5 = 1) adds every account in the same statement; the last
-// column lists the accounts it added. Switching away from Public keeps every member. The
-// history setting never changes.
+// Switching a room to Public ($5 = 1) adds every account in the same statement; column 8
+// lists the accounts it added. Switching away from Public keeps every member. The history
+// setting never changes. Protocol 18: the edit applies only when $6 is the room's encrypted
+// flag and, for an encrypted room, $5 its access (an encrypted room's access changes through a
+// signed SetAccess log entry). It always returns one row; columns 9 and 10 are the room's flag
+// and access before the edit (NULL for no such room), so a refusal can say why.
 DATABASE_EDIT_ROOM_SQL ::
-	"WITH updated AS (UPDATE rooms SET name = $2, description = $3, " +
+	"WITH current AS (SELECT encrypted, access FROM rooms WHERE id = $1), " +
+	"updated AS (UPDATE rooms SET name = $2, description = $3, " +
 	"room_type = $4::smallint, access = $5::smallint WHERE id = $1 " +
-	"RETURNING id, name, description, room_type, access, history_visibility), " +
+	"AND encrypted = $6::boolean AND (NOT encrypted OR access = $5::smallint) " +
+	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
+	"log_version), " +
 	"added AS (INSERT INTO room_members (room_id, user_id) " +
 	"SELECT updated.id, users.id FROM updated CROSS JOIN users WHERE updated.access = 1 " +
 	"ON CONFLICT DO NOTHING RETURNING user_id) " +
-	"SELECT id::text, name, description, room_type::text, access::text, " +
-	"history_visibility::text, " +
-	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM added), '') " +
-	"FROM updated"
+	"SELECT u.id::text, u.name, u.description, u.room_type::text, u.access::text, " +
+	"u.history_visibility::text, u.encrypted::text, u.log_version::text, " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM added), ''), " +
+	"(SELECT encrypted FROM current)::text, (SELECT access FROM current)::text " +
+	"FROM (SELECT 1) AS one LEFT JOIN updated u ON true"
 
 databaseExecuteEditRoom :: proc(
 	conn: pg.Conn,
@@ -713,31 +754,41 @@ databaseExecuteEditRoom :: proc(
 	defer delete(roomTypeParam)
 	accessParam := databaseIntParam(int(request.access))
 	defer delete(accessParam)
+	encryptedParam := strings.clone_to_cstring(request.encrypted ? "true" : "false")
+	defer delete(encryptedParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)nameCString,
 		transmute([^]byte)descriptionCString,
 		transmute([^]byte)roomTypeParam,
 		transmute([^]byte)accessParam,
+		transmute([^]byte)encryptedParam,
 	}
 	result := databaseExecParams(conn, DATABASE_EDIT_ROOM_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
 	defer pg.clear(result)
-	if pg.result_status(result) != .Tuples_OK {
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
 		return databaseResultError(&result)
 	}
 
 	mutation := common.DatabaseRoomMutationResult {
-		changed = pg.n_tuples(result) == 1,
+		changed = !pg.get_is_null(result, 0, 0),
 	}
 	if mutation.changed {
 		mutation.room, _ = databaseGetRoomSummary(result, 0, 0)
 		mutation.room.id = request.roomId
-		added := databaseGetText(result, 0, 6)
+		added := databaseGetText(result, 0, 8)
 		defer delete(added)
 		mutation.addedUserIDs = databaseParseIDList(added)
+	} else if !pg.get_is_null(result, 0, 9) {
+		// The room exists, so the encryption rules refused the edit.
+		if databaseGetBool(result, 0, 9) != request.encrypted {
+			mutation.refusal = .EncryptionFlag
+		} else {
+			mutation.refusal = .EncryptedAccess
+		}
 	}
 	return databaseSuccess(mutation)
 }
@@ -807,6 +858,10 @@ databaseExecuteRequest :: proc(
 		return databaseExecutePublishEncryptionKey(conn, r)
 	case common.DatabaseFetchUserKeysRequest:
 		return databaseExecuteFetchUserKeys(conn, r)
+	case common.DatabaseAppendRoomLogRequest:
+		return databaseExecuteAppendRoomLog(conn, r)
+	case common.DatabaseFetchRoomLogRequest:
+		return databaseExecuteFetchRoomLog(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

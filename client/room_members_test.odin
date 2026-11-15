@@ -401,6 +401,13 @@ testRoomEditorCreatesWithAccessHistoryAndJoining :: proc(t: ^testing.T) {
 		fmt.tprintf("expected a Public room by default, got %v", view),
 	)
 	State_setRoomEditorAccess(&state, .AdminInvite)
+	// Protocol 18: an invite room is encrypted by default (Q9); this test creates a plain one.
+	testing.expect(
+		t,
+		buildRoomEditorView(&state).encrypted,
+		"expected Encrypt this room on for an invite room",
+	)
+	State_toggleRoomEditorEncrypted(&state)
 	State_setRoomEditorHistory(&state, .Full)
 	State_toggleRoomEditorCreatorJoins(&state)
 	view = buildRoomEditorView(&state)

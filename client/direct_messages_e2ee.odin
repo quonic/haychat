@@ -337,6 +337,9 @@ State_directKeyMayArrive :: proc(state: ^State, serverID, userID: int) -> bool {
 State_directKeysChanged :: proc(state: ^State, serverID: int) {
 	State_directReopenPending(state, serverID)
 	State_directFlushQueued(state, serverID)
+	// Encrypted rooms (room_log.odin): verified logs are checked against the new pins, and
+	// changes and creates that waited for a key go out.
+	State_roomLogsPinsChanged(state, serverID)
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return

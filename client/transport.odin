@@ -78,6 +78,10 @@ ClientTransportRuntimeEventKind :: enum {
 	// ServerUserKeyChanged's bundle in userKey (nothing owned).
 	UserKeysReceived,
 	UserKeyChanged,
+	// Encrypted rooms (protocol 18, room_log.odin). RoomLogReceived is ServerRoomLog: roomID,
+	// the entries after logAfterVersion in logEntries (owned), the server's head version in
+	// logHeadVersion, and hasOlder set when the server has more entries after these.
+	RoomLogReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -143,6 +147,10 @@ ClientTransportRuntimeEvent :: struct {
 	userKeys:          [dynamic]common.UserKeyBundle,
 	missingUserIDs:    [dynamic]int,
 	userKey:           common.UserKeyBundle,
+	// RoomLogReceived (protocol 18).
+	logEntries:        [dynamic][]u8,
+	logAfterVersion:   int,
+	logHeadVersion:    int,
 }
 
 ClientServerTransport :: struct {
@@ -316,6 +324,10 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	AdminRoomSummaries_deinit(&event.adminRooms)
 	delete(event.userKeys)
 	delete(event.missingUserIDs)
+	for entry in event.logEntries {
+		delete(entry)
+	}
+	delete(event.logEntries)
 	event^ = {}
 }
 
@@ -1001,6 +1013,7 @@ ClientServerTransport_createRoom :: proc(
 	access: common.RoomAccess,
 	historyVisibility: common.RoomHistoryVisibility,
 	creatorJoins: bool,
+	encrypted := false,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
@@ -1012,6 +1025,7 @@ ClientServerTransport_createRoom :: proc(
 			access = access,
 			historyVisibility = historyVisibility,
 			creatorJoins = creatorJoins,
+			encrypted = encrypted,
 		},
 	)
 }
@@ -1023,6 +1037,7 @@ ClientServerTransport_editRoom :: proc(
 	description: string,
 	roomType: common.RoomType,
 	access: common.RoomAccess,
+	encrypted := false,
 ) -> bool {
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
@@ -1033,7 +1048,33 @@ ClientServerTransport_editRoom :: proc(
 			description = description,
 			roomType = roomType,
 			access = access,
+			encrypted = encrypted,
 		},
+	)
+}
+
+// Encrypted rooms (protocol 18): one signed member log entry, and a fetch of the log after a
+// version. The answers, and the fan-out of every stored entry, are ServerRoomLog.
+ClientServerTransport_appendRoomLog :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	entry: []u8,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAppendRoomLog,
+		common.ClientAppendRoomLogPayload{roomId = roomID, entry = entry},
+	)
+}
+
+ClientServerTransport_fetchRoomLog :: proc(
+	transport: ^ClientServerTransport,
+	roomID, afterVersion: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientFetchRoomLog,
+		common.ClientFetchRoomLogPayload{roomId = roomID, afterVersion = afterVersion},
 	)
 }
 
@@ -1288,6 +1329,30 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				serverID = transport.serverID,
 				roomID = payload.roomId,
 				userIDs = payload.userIds,
+			},
+			true
+
+	case .ServerRoomLog:
+		payload: common.ServerRoomLogPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.roomId <= 0 ||
+		   payload.afterVersion < 0 ||
+		   payload.headVersion < 0 {
+			common.ServerRoomLogPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room log payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoomLogReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				logEntries = payload.entries,
+				logAfterVersion = payload.afterVersion,
+				logHeadVersion = payload.headVersion,
+				hasOlder = payload.hasMore,
 			},
 			true
 

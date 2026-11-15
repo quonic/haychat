@@ -185,11 +185,19 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 		},
 	)
 	append(&store.directConversations, KeyStoreFileDirectConversation{E2EE_TEST_BOB, true})
+	roomHead := common.RoomLogHead {
+		version = 4,
+	}
+	for index in 0 ..< len(roomHead.hash) {
+		roomHead.hash[index] = u8(index * 3 + 1)
+	}
+	assert(KeyStore_setRoomHead(&store, 7, roomHead), "expected a room head stored")
 	data, ok := keyStoreEncode(store)
 	assert(ok, "expected the store to encode")
 	defer delete(data)
 	assert(
-		strings.contains(string(data), `"format": 2`) &&
+		strings.contains(string(data), `"format": 3`) &&
+		strings.contains(string(data), `"log_head_hash"`) &&
 		strings.contains(string(data), `"users"`) &&
 		strings.contains(string(data), `"rooms"`) &&
 		strings.contains(string(data), `"direct_conversations"`),
@@ -207,25 +215,41 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 		len(parsed.directConversations) == 1 && parsed.directConversations[0].encrypted,
 		"expected the reserved sections to survive",
 	)
+	assert(
+		KeyStore_roomHead(parsed, 7) == roomHead && KeyStore_roomHead(parsed, 8).version == 0,
+		"expected room 7's head to survive (format 3)",
+	)
+	// Heads only move forward.
+	older := roomHead
+	older.version = 3
+	assert(!KeyStore_setRoomHead(&parsed, 7, older), "expected an older head refused")
+	assert(!KeyStore_setRoomHead(&parsed, 7, roomHead), "expected the same head to be no change")
 	// A format 1 file (E1) loads as is and stays writable.
 	formatOne, _ := strings.replace(
 		string(data),
-		`"format": 2`,
+		`"format": 3`,
 		`"format": 1`,
 		1,
 		context.temp_allocator,
 	)
-	older := keyStoreParse(transmute([]u8)formatOne, serverKey)
-	defer KeyStore_deinit(&older)
+	olderStore := keyStoreParse(transmute([]u8)formatOne, serverKey)
+	defer KeyStore_deinit(&olderStore)
 	assert(
-		older.writable && KeyStore_conversationEncrypted(older, E2EE_TEST_BOB),
-		fmt.tprintf("expected a format 1 store to load writable, got %q", older.loadError),
+		olderStore.writable && KeyStore_conversationEncrypted(olderStore, E2EE_TEST_BOB),
+		fmt.tprintf("expected a format 1 store to load writable, got %q", olderStore.loadError),
 	)
 
 	// A store for another server key, a newer format, bad JSON, and a damaged entry are all
 	// used read-only and never written back.
 	text := string(data)
-	newer, _ := strings.replace(text, `"format": 2`, `"format": 3`, 1, context.temp_allocator)
+	newer, _ := strings.replace(text, `"format": 3`, `"format": 4`, 1, context.temp_allocator)
+	badRoom, _ := strings.replace(
+		text,
+		`"room_id": 7`,
+		`"room_id": 0`,
+		1,
+		context.temp_allocator,
+	)
 	damaged, _ := strings.replace(
 		text,
 		`"user_id": 2`,
@@ -244,6 +268,7 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 		{"a newer format", newer, serverKey, 1},
 		{"invalid JSON", "{not json", serverKey, 0},
 		{"a damaged entry", damaged, serverKey, 0},
+		{"a damaged room entry", badRoom, serverKey, 1},
 	}
 	for testCase in cases {
 		readOnly := keyStoreParse(transmute([]u8)testCase.data, testCase.serverKey)

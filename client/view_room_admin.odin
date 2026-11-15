@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:fmt"
 import "ui"
 
 // The admin's room form, drawn in the main pane in place of the room (see room_admin.odin).
@@ -11,7 +12,8 @@ import "ui"
 // Widget IDs for GUI automation: room-editor-name and room-editor-description (server and room
 // ID, 0 while creating), room-type N (N the protocol's type number: 1 text, 2 voice, 3 both),
 // room-access N (1 Public, 2 Member invite, 3 Admin invite), room-history N (1 From join,
-// 2 Full; Create only), room-editor-join (Create), room-editor-members (Edit),
+// 2 Full; Create only), room-editor-join (Create), room-editor-encrypt and
+// room-editor-manager (user ID) (Create, protocol 18), room-editor-members (Edit),
 // room-editor-submit, room-editor-cancel, room-editor-delete. The Members page
 // (view_room_members.odin) has its own.
 
@@ -207,6 +209,15 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	}
 	_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 	roomEditorWrapped(ctx, &column, view.accessNote, ctx.theme.fgMuted)
+	if view.encryptedRoom {
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		roomEditorWrapped(
+			ctx,
+			&column,
+			"This room is encrypted: its managers change who can invite from its Members page.",
+			ctx.theme.fgMuted,
+		)
+	}
 	if len(view.accessWarning) > 0 {
 		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 		roomEditorWrapped(ctx, &column, view.accessWarning, ctx.theme.warning)
@@ -249,6 +260,8 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 
 	joinClicked := false
 	membersClicked := false
+	encryptClicked := false
+	managerClicked := 0
 	if view.isCreate {
 		_ = ui.cutTop(&column, sectionGap)
 		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
@@ -265,6 +278,69 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		}
 		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 		roomEditorWrapped(ctx, &column, view.joinNote, ctx.theme.fgMuted)
+
+		// Encrypt this room and its managers (protocol 18).
+		_ = ui.cutTop(&column, sectionGap)
+		encryptRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+		encryptRect := ui.cutLeft(&encryptRow, min(encryptRow.w, ui.dp(ctx, 220)))
+		encryptOptions := ui.ButtonOptions {
+			align      = .Center,
+			selected   = view.encrypted,
+			background = ctx.theme.hover,
+			color      = view.showEncrypt ? ctx.theme.fg : ctx.theme.fgMuted,
+		}
+		if ui.button(
+			   ctx,
+			   ui.idOf("room-editor-encrypt"),
+			   encryptRect,
+			   view.encryptLabel,
+			   encryptOptions,
+		   ) &&
+		   view.showEncrypt {
+			encryptClicked = true
+		}
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		roomEditorWrapped(ctx, &column, view.encryptNote, ctx.theme.fgMuted)
+		if view.encrypted {
+			_ = ui.cutTop(&column, sectionGap)
+			roomEditorLabel(ctx, &column, "Managers")
+			roomEditorWrapped(
+				ctx,
+				&column,
+				"Managers can add and remove people and other managers. Every admin you see " +
+				"is listed; you always are one.",
+				ctx.theme.fgMuted,
+			)
+			_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+			for manager in view.managers {
+				line := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+				label := manager.label
+				if len(manager.note) > 0 {
+					label = fmt.tprintf("%s · %s", manager.label, manager.note)
+				}
+				options := ui.ButtonOptions {
+					selected   = manager.checked,
+					background = ctx.theme.hover,
+					color      = ctx.theme.fgMuted,
+				}
+				if manager.ready && !manager.locked {
+					options.color = ctx.theme.fg
+				}
+				prefix := manager.checked ? "[x] " : "[ ] "
+				if ui.button(
+					   ctx,
+					   ui.idOf("room-editor-manager", manager.userID),
+					   line,
+					   fmt.tprintf("%s%s", prefix, label),
+					   options,
+				   ) &&
+				   manager.ready &&
+				   !manager.locked {
+					managerClicked = manager.userID
+				}
+				_ = ui.cutTop(&column, ui.dp(ctx, ROW_SPACING))
+			}
+		}
 	} else {
 		_ = ui.cutTop(&column, sectionGap)
 		row := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
@@ -356,6 +432,10 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		State_setRoomEditorHistory(state, ROOM_EDITOR_HISTORY_OPTIONS[historyClicked])
 	case joinClicked:
 		State_toggleRoomEditorCreatorJoins(state)
+	case encryptClicked:
+		State_toggleRoomEditorEncrypted(state)
+	case managerClicked > 0:
+		State_toggleRoomEditorManager(state, managerClicked)
 	case membersClicked:
 		State_openRoomMembers(state, editor.serverID, editor.roomID)
 	case cancelClicked:

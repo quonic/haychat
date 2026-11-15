@@ -309,11 +309,19 @@ roomTypeShown :: proc(roomType: common.RoomType) -> common.RoomType {
 }
 
 // Whether the room takes chat (has a composer) and voice (offers Join voice).
+// Protocol 18: an encrypted room takes neither plaintext chat nor voice until sender chains
+// (E4b) and encrypted voice (E6) exist; the server refuses both too.
 State_roomAllowsChat :: proc(state: ^State, serverID, roomID: int) -> bool {
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		return false
+	}
 	return common.roomTypeAllowsChat(roomTypeShown(State_roomType(state, serverID, roomID)))
 }
 
 State_roomAllowsVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		return false
+	}
 	return common.roomTypeAllowsVoice(roomTypeShown(State_roomType(state, serverID, roomID)))
 }
 

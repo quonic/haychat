@@ -48,6 +48,7 @@ version below therefore needs clients and servers rebuilt together.
 | 14 | Admin actions on accounts (role, rename with name lock, kick, ban and unban) and room types (text, voice, or both), with schema migration 3 |
 | 16 | Account encryption keys (end-to-end encryption, part 1): `ClientPublishEncryptionKey` (each profile's X25519 key, signed by its identity key, sent once per session), `ClientFetchUserKeys`/`ServerUserKeys` (at most 64 accounts per request; accounts without a key are listed as missing), `ServerUserKeyChanged` (an account stored a new key), and `UserSummary.identityPublicKey`/`hasEncryptionKey`, with schema migration 5 (`user_encryption_keys`). No message is encrypted yet |
 | 17 | Encrypted direct messages (end-to-end encryption, part 2): `ClientSealedDirectMessage`/`ServerSealedDirectMessage` (an envelope the sender sealed for itself and the recipient, carried byte for byte), the envelope, client message ID and signature fields of `StoredDirectMessage` and `DirectConversationSummary`, and the signed plaintext fallback (`ClientDirectMessage` now needs `clientMessageId` and `signature`; unsigned messages are refused), with schema migration 6 |
+| 18 | Encrypted rooms and their signed member log (end-to-end encryption, part 3a): `ClientAppendRoomLog`, `ClientFetchRoomLog`, `ServerRoomLog`, `RoomSummary.encrypted`/`logVersion`, `ClientCreateRoomPayload.encrypted` and `ClientEditRoomPayload.encrypted`, with schema migration 7 (`rooms.encrypted`, `rooms.log_version`, `room_log_entries`, `room_log_managers`). Encrypted rooms take no message and no voice yet |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -126,6 +127,56 @@ The second part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design
   256-byte steps. It can also withhold or delete messages, and it can insert an unsigned
   message that looks like one from before protocol 17 ("Not encrypted"); it cannot read,
   change or forge an encrypted or signed one.
+
+## Encrypted rooms and the member log (protocol 18)
+
+The third part of end-to-end encryption, first half ([plan/e2ee-design.md](plan/e2ee-design.md),
+sections 6.1, 6.2 and 6.7): encrypted rooms exist and their membership is a signed log, but
+their messages (sender chains, part 3b) do not exist yet, so the server refuses every message
+to an encrypted room ("Encrypted room messages arrive in a later update") and stores nothing
+readable in one. Voice joins are refused too ("voice is not available in encrypted rooms
+yet").
+
+- **Creating one.** An admin creates an encrypted room with `ClientCreateRoom{encrypted}`; it
+  must be Member invite or Admin invite ("Public rooms cannot be encrypted"). The server
+  creates it with no members and answers `ServerCreateRoom` with `logVersion` 0. Because the
+  room ID is part of every signed entry, only then does the creator's client sign the log's
+  first entry, `Create`, which names the room's access, its history setting, whether the
+  creator joins, and its managers (every admin the creator's client sees, checked by default,
+  with their pinned identity keys; the creator always is one). It sends it with
+  `ClientAppendRoomLog`. The flag never changes: an edit that would set or clear it, or change
+  an encrypted room's access, is refused.
+- **The log.** Each entry is `common/e2ee.odin`'s `RoomLogEntry`, carried as a CBOR byte
+  string: a version (also the room's epoch), the previous entry's SHA-256, an action (Create,
+  Add, Remove, AddManager, RemoveManager, Leave, SetAccess), the target and actor with their
+  identity keys, and the actor's Ed25519 signature over the server's identity key and the entry.
+  Adds need a manager (or, in a Member invite room, a member); manager changes and access
+  switches need a manager; a Leave is signed by whoever leaves; a Remove is signed by a manager
+  or written unsigned by the server (it can always take readers away, never add one). The last
+  manager cannot be removed while the room has members; an encrypted room holds at most 100
+  members ("This encrypted room is full").
+- **The server.** It replays the stored log on every append, validates the new entry as the
+  next one (version and previous hash must follow the head, so concurrent appends cannot both
+  win: "The member list changed on the server; try again"), requires every identity key it
+  names to be the named account's own, applies its own rules on top (an add needs an admin or a
+  member of a Member invite room as well as a valid signature; an access switch needs an admin;
+  the actor must be the sender), and stores the entry and applies it to `room_members` in one
+  transaction. Every stored entry goes out as `ServerRoomLog` to the room's members and
+  managers and to whoever it removed. An admin's `ClientRemoveRoomMember` on an encrypted room
+  becomes an unsigned Remove the server writes; `ClientAddRoomMember` and `ClientLeaveRoom` are
+  refused for encrypted rooms in favour of the log. `ClientFetchRoomLog` serves members,
+  managers and admins.
+- **Clients.** A client replays the whole log against its own pins, keeps the verified head
+  (version and hash) per room in its [key store](client-configuration.md#key-store), and
+  refuses a log that rewrites a verified entry (a fork), ends before it (a rollback), or has any
+  entry that does not verify. Every such failure is final for the session: the room shows
+  "This room's member list was changed on the server" and nothing is signed for it. Accounts
+  the log names that the client has not pinned are fetched and pinned on first use, and the
+  log is checked against those pins once they arrive. Verified changes show in the room as
+  event lines ("alice added carol", "the server removed dave").
+- **What the server still can do.** Remove members, delete the room, refuse appends and
+  withhold entries (a client then sees an older log, or a rollback once it has seen a newer
+  one). It cannot add a member or a manager to a log that clients accept.
 
 ## End-to-end encryption primitives
 
