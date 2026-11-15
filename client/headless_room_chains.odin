@@ -186,17 +186,21 @@ headlessWriteRoomHistory :: proc(harness: ^HeadlessHarness, event: ^ClientTransp
 }
 
 HEADLESS_ROOM_KEY_OUTCOME_NAMES := [RoomChainKeyOutcome]string {
-	.Stored    = "stored",
-	.Duplicate = "duplicate",
-	.NotForMe  = "not_for_me",
-	.Pending   = "pending",
-	.NotMember = "not_member",
-	.Failed    = "failed",
-	.Refused   = "refused",
+	.Stored     = "stored",
+	.Duplicate  = "duplicate",
+	.NotForMe   = "not_for_me",
+	.Pending    = "pending",
+	.NotMember  = "not_member",
+	.Failed     = "failed",
+	.Refused    = "refused",
+	.NotAllowed = "not_allowed",
+	.NotHeld    = "not_held",
 }
 
 // room_key: an envelope this client handled. room_key_request: a request it answered
-// (outcome stored) or refused.
+// (outcome stored), refused, or could not answer (not_held), and (Full history) each chain an
+// inviter forwards. forwarderID: who forwarded a RoomKeyForward envelope (room_key), or this
+// account when it forwarded one (room_key_request); 0 for a SenderKey envelope.
 HeadlessRoomKeyJSON :: struct {
 	event:       string,
 	serverID:    int,
@@ -207,6 +211,7 @@ HeadlessRoomKeyJSON :: struct {
 	requesterID: int,
 	outcome:     string,
 	error:       string,
+	forwarderID: int,
 }
 
 HeadlessRoomQueueJSON :: struct {
@@ -246,6 +251,7 @@ headlessWriteRoomChainNotes :: proc(harness: ^HeadlessHarness) {
 				chainID     = headlessTempHex(chainID[:]),
 				requesterID = note.peerID,
 				outcome     = HEADLESS_ROOM_KEY_OUTCOME_NAMES[note.outcome],
+				forwarderID = note.forwarderID,
 			}
 			if note.error != .None {
 				value.error = headlessE2EEErrorName(note.error)

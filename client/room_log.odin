@@ -295,6 +295,27 @@ roomLogMembershipsInclude :: proc(memberships: []RoomLogMembership, userID, epoc
 	return false
 }
 
+// Whether a and b were members at the same time in some epoch (protocol 20: who may forward a
+// chain to whom in a Full history room).
+roomLogMembershipsOverlap :: proc(memberships: []RoomLogMembership, a, b: int) -> bool {
+	for first in memberships {
+		if first.userID != a {
+			continue
+		}
+		for second in memberships {
+			if second.userID != b {
+				continue
+			}
+			firstEndsAfter := first.untilEpoch == 0 || second.fromEpoch < first.untilEpoch
+			secondEndsAfter := second.untilEpoch == 0 || first.fromEpoch < second.untilEpoch
+			if firstEndsAfter && secondEndsAfter {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // After an entry was applied to state: opens or closes the stretches of the users it named.
 @(private = "file")
 roomLogNoteMemberships :: proc(
@@ -679,6 +700,10 @@ State_roomLogApplyEntries :: proc(
 	}
 	changed := false
 	roomID := room.roomID
+	selfUserID := State_selfUserID(state, serverID)
+	// Adds this account signed, (newcomer, epoch): Full history rooms forward older chains.
+	signedAdds := make([dynamic][2]int, 0, 1)
+	defer delete(signedAdds)
 	for data in entries {
 		managers: [common.ROOM_LOG_MANAGERS_MAX]common.RoomLogManager
 		decoded, decodeErr := common.decodeRoomLogEntry(data, managers[:])
@@ -707,9 +732,15 @@ State_roomLogApplyEntries :: proc(
 		append(&room.events, line)
 		roomLogNoteMemberships(&room.memberships, &room.state, line)
 		changed = true
+		if line.action == .Add && line.actorUserID == selfUserID && selfUserID > 0 {
+			append(&signedAdds, [2]int{line.targetUserID, line.version})
+		}
 	}
 	if changed {
 		State_roomLogVerifiedChanged(state, serverID, roomID)
+	}
+	for add in signedAdds {
+		State_roomChainsForwardHistory(state, serverID, roomID, add[0], add[1])
 	}
 }
 

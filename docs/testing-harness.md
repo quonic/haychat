@@ -490,6 +490,12 @@ chain's distribution (`room_queue` with `state` `sent`). Room messages are print
 client opened them, with `encrypted`, `decryptError`, `epoch` and `protection`; one that waits
 for its key is printed when it opens (`room_chat` for a live one, `room_opened` for history).
 `room_key` and `room_key_request` show what happened to key envelopes and key requests, and
+(protocol 20, Full history rooms) carry `forwarderID`: on `room_key` the account that forwarded
+a `RoomKeyForward` envelope, on `room_key_request` this account when it forwarded one, 0 for a
+`SenderKey` envelope. `room_key_request` lines also print each chain an inviter forwards after
+its `room-add`, and `outcome` `not_held` when this profile does not hold the chain asked for;
+`room_key` has `not_allowed` for a forward the client refused (a From join room, or a
+forwarder who was never a member at the same time). And
 `room-keys ROOM_ID [fetch]` lists the chains a profile holds (never a key). `voice-join` is
 refused ("voice is not available in encrypted rooms yet").
 
@@ -500,7 +506,12 @@ non-member gets neither keys nor history, that a restart of the sender starts a 
 stored message at its own chain position), that no message text is in `chat_messages`, that a
 deleted key store is rebuilt from the server, that an account invited to a From join room reads
 only what follows, that a removed member gets no key for what follows, and that an account
-inserted into `room_members` by SQL opens nothing.
+inserted into `room_members` by SQL opens nothing. For Full history (protocol 20) ra and rb
+send in a Full history room, rb sends again from a new run while ra is offline (a chain ra
+never holds), ra invites rc and forwards the two chains she holds, rc reads all three messages
+(rb's newest chain re-sealed by rb on request, ra answering `not_held`), then with rb offline ra
+invites re and rc forwards rb's chain to re on request; SQL finds forward envelopes only in the
+Full history room.
 
 ## Read State
 
@@ -643,6 +654,27 @@ account joins every Public room, and the server creates `#general` (room 1) on a
 database before it reports readiness, which `dev/live-proof.sh` checks before any client
 connects. If the sender is not a member of room 1 the server answers with
 `protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
+
+### Step Timeouts
+
+`dev/live-proof.sh` runs every step under `timeout`, so a hung client, proof script or test
+binary (such as an SQL test runner that does not exit after a failed assertion) fails the run
+within minutes instead of using up CI's two-hour job limit. A step that runs out prints
+`[live] STEP timed out after N s` and the run fails with its status. The limits are several
+times a normal run, the compile included:
+
+| Step | Limit |
+| --- | --- |
+| Live client tests (startup auth, room chat, direct message, in-process voice) | 20 min |
+| `dev/harness-smoke.sh`, `dev/admin-proof.sh`, `dev/room-access-proof.sh` | 10 min each |
+| `dev/voice-proof.sh`, `dev/ui-smoke.sh` | 15 min each |
+| `dev/e2ee-proof.sh` | 20 min |
+| Server SQL proof (`HAYCHAT_DATABASE_SQL_TEST=1 odin test server`) | 20 min |
+| Failed startup exit check | 1 min |
+
+`HAYCHAT_LIVE_STEP_TIMEOUT_SECS` replaces every limit, for a slow machine or a short limit while
+debugging. `timeout` signals the step's whole process group (the clients a proof started
+included) and kills what is left 30 seconds later.
 
 ## GUI Automation
 

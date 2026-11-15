@@ -84,6 +84,21 @@ KAT_PLAIN_SIGNATURE ::
 @(private = "file")
 KAT_SAFETY_NUMBER :: "63169 33002 55097 54173 25823 15407 58924 75444 38904 85841 67880 39441"
 
+@(private = "file")
+KAT_ROOM_KEY_FORWARD ::
+	"010313de0e4f9a3dec1e7461450153148681526a2d1ab6239d0ac884d24e7fafa03501000b000000" +
+	"00000000fb64864c8655b477eb43e9834a980f02cf339f00182b489b8e1e1e9389f6b007f8e3a2d7" +
+	"5105bbbae931402668d3777ec91b9028578e01ee75e98eb4bd3edae54c377b9b96c7651610010000" +
+	"cc1bc88e6494abcbd392b4e49723614a4f28fb03b0c8c29e221e64222ca719ee1d7a4623d5ee3fe2" +
+	"bc4609f13f4f00d5ab833f8a7045c59276b3f3af5f2235e25bfe038b8a9ae32f7d33745373ed5422" +
+	"db2c954679bffd9e96462827621b46602d606c7aa8ed80166baf0e86acd83fbb51d08290242f5ae2" +
+	"d2575b6fdc669e16dcf5f9ed00adcf030ada70a6683e231b155cb1b226c56cafef80097b2c588dfc" +
+	"3d3d9154b7af57ccd892504235ae0385e8907abedc460929a88e39eb1b4656ac7e568924bcfea47a" +
+	"6856e2908dbae245d0f9932dadcde7cb64863d285a69f43028bb3b4b390e7fac61f80d9ae92311ce" +
+	"d95807410c2a7493c999c48a0eb14b459c259e9302b2d4b21f3081e046e7fb5cf730b7dfd3eecb80" +
+	"5159457bf8bdb4ace93caf847c7e035302a027ecd16a94889b47aee27c012f87959d6e2ce944e812" +
+	"16c95568d2838d8dffc200fc379ed40b"
+
 // Fixtures shared with dev/tools/e2ee-vectors.py.
 @(private = "file")
 TEST_ALICE_ID :: 7
@@ -244,6 +259,10 @@ testE2EEConstants :: proc(t: ^testing.T) {
 	assert(ROOM_KEY_AAD_SIZE == 91, fmt.tprintf("room key AAD: %d", ROOM_KEY_AAD_SIZE))
 	assert(ROOM_MESSAGE_AAD_SIZE == 107, fmt.tprintf("room AAD: %d", ROOM_MESSAGE_AAD_SIZE))
 	assert(
+		ROOM_KEY_FORWARD_AAD_SIZE == 115,
+		fmt.tprintf("room key forward AAD: %d", ROOM_KEY_FORWARD_AAD_SIZE),
+	)
+	assert(
 		ENCRYPTION_KEY_BUNDLE_SIGNED_SIZE == 102,
 		fmt.tprintf("bundle: %d", ENCRYPTION_KEY_BUNDLE_SIGNED_SIZE),
 	)
@@ -280,6 +299,23 @@ testE2EEConstants :: proc(t: ^testing.T) {
 				assert(
 					!strings.has_prefix(domain, other),
 					fmt.tprintf("expected %q not to start with %q", domain, other),
+				)
+			}
+		}
+	}
+	// The same for the AAD labels, so no AAD can be read as one of another kind.
+	labels := [?]string {
+		DIRECT_MESSAGE_AAD_DOMAIN,
+		ROOM_KEY_AAD_DOMAIN,
+		ROOM_KEY_FORWARD_AAD_DOMAIN,
+		ROOM_MESSAGE_AAD_DOMAIN,
+	}
+	for label, index in labels {
+		for other, otherIndex in labels {
+			if index != otherIndex {
+				assert(
+					!strings.has_prefix(label, other),
+					fmt.tprintf("expected %q not to start with %q", label, other),
 				)
 			}
 		}
@@ -1456,6 +1492,268 @@ testSenderKeyDistribution :: proc(t: ^testing.T) {
 	invalid.roomID = -1
 	_, err = encodeSenderKeyDistribution(invalid, encoded[:])
 	assert(err == .BadRoomID, "expected BadRoomID")
+}
+
+@(private = "file")
+testForwardFields :: proc() -> RoomKeyForwardAADFields {
+	return RoomKeyForwardAADFields {
+		serverIdentityPublicKey = testServerPublicKey(),
+		roomID = TEST_ROOM_ID,
+		epoch = 3,
+		senderUserID = TEST_ALICE_ID,
+		chainID = testRoomHeader().chainID,
+		forwarderUserID = TEST_BOB_ID,
+		recipientUserID = TEST_CAROL_ID,
+	}
+}
+
+// The KAT_ROOM_KEY_FORWARD envelope, sealed with the vector's fixed randomness.
+@(private = "file")
+testSealVectorForward :: proc(dst: []u8) -> []u8 {
+	bob := testUser("bob", TEST_BOB_ID)
+	fields := testForwardFields()
+	plaintext: [SENDER_KEY_DISTRIBUTION_SIZE]u8
+	_, encodeErr := encodeSenderKeyDistribution(
+		{
+			roomID = fields.roomID,
+			epoch = fields.epoch,
+			chainID = fields.chainID,
+			chainKey = testChainKey0(),
+		},
+		plaintext[:],
+	)
+	assert(encodeErr == .None, "expected the forward plaintext to encode")
+	aad := makeRoomKeyForwardAAD(fields)
+	recipients := [1]EnvelopeRecipient{{TEST_CAROL_ID, testEncryptionKeyPair("carol").publicKey}}
+	nonceLabel := testLabel("haychat-e2ee-test-forward-nonce")
+	nonce: E2EENonce
+	copy(nonce[:], nonceLabel[:E2EE_NONCE_SIZE])
+	n, err := sealEnvelopeWithRandomness(
+		.RoomKeyForward,
+		aad[:],
+		plaintext[:],
+		recipients[:],
+		bob.privateKey,
+		MessageKey(testLabel("haychat-e2ee-test-forward-message-key")),
+		EncryptionPrivateKeyBytes(testLabel("haychat-e2ee-test-forward-ephemeral")),
+		nonce,
+		dst,
+	)
+	assert(err == .None, fmt.tprintf("expected the vector forward to seal, got %v", err))
+	return dst[:n]
+}
+
+@(test)
+testRoomKeyForwardVectorAndRoundTrip :: proc(t: ^testing.T) {
+	_ = t
+	bob := testUser("bob", TEST_BOB_ID)
+	carolKeys := testEncryptionKeyPair("carol")
+	fields := testForwardFields()
+	buffer: [SEALED_ENVELOPE_MAX_BYTES]u8
+	vector := testSealVectorForward(buffer[:])
+	assert(testHexEqual(vector, KAT_ROOM_KEY_FORWARD), "expected the forward vector bytes")
+	kat: [SEALED_ENVELOPE_MAX_BYTES]u8
+	katBytes := testHex(KAT_ROOM_KEY_FORWARD, kat[:])
+	distribution, err := openRoomKeyForward(katBytes, fields, bob.publicKey, carolKeys)
+	assert(err == .None, fmt.tprintf("expected carol to open the vector forward, got %v", err))
+	assert(distribution.chainKey == testChainKey0(), "expected the forwarded chain key")
+	assert(distribution.startIndex == 0 && distribution.epoch == 3, "expected index and epoch")
+	decoded, decodeErr := decodeSealedEnvelope(katBytes)
+	assert(decodeErr == .None && decoded.kind == .RoomKeyForward, "expected a forward kind")
+	assert(
+		verifyRoomKeyForwardEnvelope(decoded, fields, bob.publicKey) == .None,
+		"expected the server's check to accept the forward",
+	)
+
+	// A fresh forward from a later start, through the public sealing procedure.
+	chainKey := advanceSenderChainKey(testChainKey0())
+	n, sealErr := sealRoomKeyForward(
+		fields,
+		1,
+		chainKey,
+		carolKeys.publicKey,
+		bob.privateKey,
+		buffer[:],
+	)
+	assert(sealErr == .None, fmt.tprintf("expected the forward to seal, got %v", sealErr))
+	distribution, err = openRoomKeyForward(buffer[:n], fields, bob.publicKey, carolKeys)
+	assert(err == .None && distribution.startIndex == 1, "expected the start index to travel")
+	assert(distribution.chainKey == chainKey, "expected the chain key at index 1")
+
+	// Nobody but the recipient opens it, even with the right AAD for themselves.
+	daveFields := fields
+	daveFields.recipientUserID = TEST_DAVE_ID
+	daveKeys := testEncryptionKeyPair("dave")
+	_, err = openRoomKeyForward(buffer[:n], daveFields, bob.publicKey, daveKeys)
+	assert(err == .BadSignature, fmt.tprintf("expected dave's AAD to fail, got %v", err))
+	_, err = openRoomKeyForward(buffer[:n], fields, bob.publicKey, daveKeys)
+	assert(err == .BadWrap, fmt.tprintf("expected dave's key to fail the wrap, got %v", err))
+
+	// The field rules: a forwarder is never the sender, nor the recipient.
+	carolPublic := carolKeys.publicKey
+	bad := fields
+	bad.forwarderUserID = TEST_ALICE_ID
+	_, sealErr = sealRoomKeyForward(bad, 0, chainKey, carolPublic, bob.privateKey, buffer[:])
+	assert(sealErr == .BadForwarderUserID, fmt.tprintf("sender as forwarder: %v", sealErr))
+	bad = fields
+	bad.forwarderUserID = 0
+	_, sealErr = sealRoomKeyForward(bad, 0, chainKey, carolPublic, bob.privateKey, buffer[:])
+	assert(sealErr == .BadForwarderUserID, fmt.tprintf("no forwarder: %v", sealErr))
+	bad = fields
+	bad.recipientUserID = TEST_BOB_ID
+	_, sealErr = sealRoomKeyForward(bad, 0, chainKey, carolPublic, bob.privateKey, buffer[:])
+	assert(sealErr == .DuplicateRecipient, fmt.tprintf("forward to self: %v", sealErr))
+	bad = fields
+	bad.epoch = 0
+	_, sealErr = sealRoomKeyForward(bad, 0, chainKey, carolPublic, bob.privateKey, buffer[:])
+	assert(sealErr == .BadEpoch, fmt.tprintf("epoch 0: %v", sealErr))
+	_, sealErr = sealRoomKeyForward(
+		fields,
+		0,
+		chainKey,
+		carolKeys.publicKey,
+		testUser("dave", TEST_DAVE_ID).privateKey,
+		buffer[:],
+	)
+	assert(sealErr == .None, "a forward signed by anyone seals; the opener's pin decides")
+}
+
+@(test)
+testRoomKeyForwardTamperingFails :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	carolKeys := testEncryptionKeyPair("carol")
+	fields := testForwardFields()
+	buffer: [SEALED_ENVELOPE_MAX_BYTES]u8
+	vector := testSealVectorForward(buffer[:])
+
+	// Each AAD field: server, room, epoch, original sender, chain, forwarder, recipient.
+	changes: [7]RoomKeyForwardAADFields
+	for &change in changes {
+		change = fields
+	}
+	changes[0].serverIdentityPublicKey = alice.publicKey
+	changes[1].roomID += 1
+	changes[2].epoch += 1
+	changes[3].senderUserID = TEST_DAVE_ID
+	changes[4].chainID[5] ~= 0x01
+	changes[5].forwarderUserID = TEST_DAVE_ID
+	changes[6].recipientUserID = TEST_ERIN_ID
+	for change, index in changes {
+		_, err := openRoomKeyForward(vector, change, bob.publicKey, carolKeys)
+		assert(err == .BadSignature, fmt.tprintf("forward AAD change %d: %v", index, err))
+	}
+
+	// The wrong forwarder key: the forward is bob's, presented as dave's or checked as alice's.
+	_, err := openRoomKeyForward(vector, fields, alice.publicKey, carolKeys)
+	assert(err == .BadSignature, fmt.tprintf("expected another forwarder key to fail, got %v", err))
+	decoded, _ := decodeSealedEnvelope(vector)
+	assert(
+		verifyRoomKeyForwardEnvelope(decoded, fields, alice.publicKey) == .BadSignature,
+		"expected the server's check to refuse another forwarder key",
+	)
+
+	// A flipped bit anywhere in the envelope.
+	for offset in 0 ..< len(vector) {
+		vector[offset] ~= 0x10
+		_, flipErr := openRoomKeyForward(vector, fields, bob.publicKey, carolKeys)
+		assert(flipErr != .None, fmt.tprintf("expected a flipped bit at %d to fail", offset))
+		vector[offset] ~= 0x10
+	}
+
+	// A forward presented as a SenderKey distribution: the kind and the AAD differ.
+	roomKeyFields := RoomKeyAADFields {
+		serverIdentityPublicKey = fields.serverIdentityPublicKey,
+		roomID                  = fields.roomID,
+		epoch                   = fields.epoch,
+		senderUserID            = TEST_BOB_ID,
+		chainID                 = fields.chainID,
+	}
+	_, err = openSenderKeyDistribution(
+		vector,
+		roomKeyFields,
+		bob.publicKey,
+		TEST_CAROL_ID,
+		carolKeys,
+	)
+	assert(err == .BadSignature, fmt.tprintf("forward as a SenderKey: %v", err))
+	// Re-signed by bob over the SenderKey AAD, the kind still gives it away.
+	forwardCopy: [SEALED_ENVELOPE_MAX_BYTES]u8
+	copy(forwardCopy[:], vector)
+	resigned := forwardCopy[:len(vector)]
+	roomKeyAAD := makeRoomKeyAAD(roomKeyFields)
+	testResign(resigned, ENVELOPE_SIGNATURE_DOMAIN, roomKeyAAD[:], bob.privateKey)
+	_, err = openSenderKeyDistribution(
+		resigned,
+		roomKeyFields,
+		bob.publicKey,
+		TEST_CAROL_ID,
+		carolKeys,
+	)
+	assert(err == .WrongKind, fmt.tprintf("re-signed forward as a SenderKey: %v", err))
+
+	// And a SenderKey distribution presented as a forward, as is and re-signed.
+	recipients := [1]EnvelopeRecipient{{TEST_CAROL_ID, carolKeys.publicKey}}
+	senderKeyFields := roomKeyFields
+	senderKeyFields.senderUserID = TEST_ALICE_ID
+	other: [SEALED_ENVELOPE_MAX_BYTES]u8
+	n, sealErr := sealSenderKeyDistribution(
+		senderKeyFields,
+		0,
+		testChainKey0(),
+		recipients[:],
+		alice.privateKey,
+		other[:],
+	)
+	assert(sealErr == .None, "expected the distribution to seal")
+	aliceForwardFields := fields
+	aliceForwardFields.forwarderUserID = TEST_BOB_ID
+	_, err = openRoomKeyForward(other[:n], aliceForwardFields, alice.publicKey, carolKeys)
+	assert(err == .BadSignature, fmt.tprintf("SenderKey as a forward: %v", err))
+	forwardAAD := makeRoomKeyForwardAAD(fields)
+	testResign(other[:n], ENVELOPE_SIGNATURE_DOMAIN, forwardAAD[:], bob.privateKey)
+	_, err = openRoomKeyForward(other[:n], fields, bob.publicKey, carolKeys)
+	assert(err == .WrongKind, fmt.tprintf("re-signed SenderKey as a forward: %v", err))
+
+	// Two wraps, both carol's and bob's, signed by bob: refused, a forward has one recipient.
+	twoRecipients := [2]EnvelopeRecipient {
+		{TEST_CAROL_ID, carolKeys.publicKey},
+		{TEST_BOB_ID, testEncryptionKeyPair("bob").publicKey},
+	}
+	plaintext: [SENDER_KEY_DISTRIBUTION_SIZE]u8
+	_, _ = encodeSenderKeyDistribution(
+		{roomID = fields.roomID, epoch = fields.epoch, chainID = fields.chainID},
+		plaintext[:],
+	)
+	n, sealErr = sealEnvelope(
+		.RoomKeyForward,
+		forwardAAD[:],
+		plaintext[:],
+		twoRecipients[:],
+		bob.privateKey,
+		other[:],
+	)
+	assert(sealErr == .None, "expected the two-wrap forward to seal")
+	_, err = openRoomKeyForward(other[:n], fields, bob.publicKey, carolKeys)
+	assert(err == .WrongRecipients, fmt.tprintf("two-wrap forward: %v", err))
+
+	// A plaintext naming another epoch than the AAD.
+	_, _ = encodeSenderKeyDistribution(
+		{roomID = fields.roomID, epoch = fields.epoch + 1, chainID = fields.chainID},
+		plaintext[:],
+	)
+	n, sealErr = sealEnvelope(
+		.RoomKeyForward,
+		forwardAAD[:],
+		plaintext[:],
+		recipients[:],
+		bob.privateKey,
+		other[:],
+	)
+	assert(sealErr == .None, "expected the mismatched forward to seal")
+	_, err = openRoomKeyForward(other[:n], fields, bob.publicKey, carolKeys)
+	assert(err == .MismatchedKeyDistribution, fmt.tprintf("mismatched forward: %v", err))
 }
 
 @(test)

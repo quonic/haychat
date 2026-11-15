@@ -112,8 +112,11 @@ Each room has an access mode, chosen when it is created:
   message was sent; it opens by itself once the key arrives. A message that fails its checks
   shows **This message could not be decrypted** and stays that way. Someone removed from the
   room keeps what they could already read but gets no key for anything sent after the
-  removal; someone added reads what is sent from then on (From join; Full history encrypted
-  rooms behave the same for now). Losing your key store file does not lose the room's
+  removal; someone added to a From join room reads what is sent from then on. In a **Full
+  history** encrypted room a newcomer reads the older messages too: the member who added them
+  hands over the keys they hold, and other members' clients answer for the rest, so an older
+  message opens once a member who has its key is online (until then it shows **Waiting for
+  this message's key**). Losing your key store file does not lose the room's
   messages: your client fetches the keys again from the server. Voice is not available in
   encrypted rooms yet. Their **Members** page lists the
   members, the **managers** (who sign who joins, add and remove people and other managers)

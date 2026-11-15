@@ -557,6 +557,33 @@ DATABASE_ROOM_SENDER_CHAINS_CHECKS ::
 	"('room key envelopes chain index', " +
 	"to_regclass('room_key_envelopes_by_chain') IS NOT NULL)"
 
+// Migration 9 (protocol 20, e2ee-design.md 6.6): Full history in encrypted rooms.
+//
+// - room_key_envelopes.forwarder_user_id: NULL for a SenderKey envelope (sealed by
+//   sender_user_id, the chain's sender), and the forwarding account for a RoomKeyForward
+//   envelope of sender_user_id's chain. room_key_envelopes_forward_check: a forwarder is a
+//   positive ID other than the sender, and a forward has exactly one recipient.
+//
+// The column has no foreign key: migration 8's checks count the table's cascading keys (two),
+// and the server never deletes accounts. A forward whose forwarder was deleted by hand stays
+// valid, because clients verify it against the identity the room's member log names. Every
+// existing row is a SenderKey envelope and keeps NULL. Never edit it; append a migration
+// instead.
+DATABASE_MIGRATION_9_ROOM_KEY_FORWARDS_SQL ::
+	"ALTER TABLE room_key_envelopes ADD COLUMN forwarder_user_id BIGINT NULL; " +
+	"ALTER TABLE room_key_envelopes ADD CONSTRAINT room_key_envelopes_forward_check " +
+	"CHECK (forwarder_user_id IS NULL OR (forwarder_user_id >= 1 " +
+	"AND forwarder_user_id <> sender_user_id AND cardinality(recipient_user_ids) = 1));"
+
+// What migration 9 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ROOM_KEY_FORWARDS_CHECKS ::
+	"('room_key_envelopes forwarder_user_id', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'room_key_envelopes' " +
+	"AND column_name = 'forwarder_user_id' AND data_type = 'bigint' AND is_nullable = 'YES')), " +
+	"('room key envelopes forward check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_key_envelopes') AND contype = 'c' " +
+	"AND conname = 'room_key_envelopes_forward_check'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -601,6 +628,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "room sender chains",
 		sql = DATABASE_MIGRATION_8_ROOM_SENDER_CHAINS_SQL,
 		checks = DATABASE_ROOM_SENDER_CHAINS_CHECKS,
+	},
+	{
+		version = 9,
+		name = "room key forwards",
+		sql = DATABASE_MIGRATION_9_ROOM_KEY_FORWARDS_SQL,
+		checks = DATABASE_ROOM_KEY_FORWARDS_CHECKS,
 	},
 }
 
@@ -716,6 +749,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ENCRYPTED_ROOM_LOG_CHECKS +
 	", " +
 	DATABASE_ROOM_SENDER_CHAINS_CHECKS +
+	", " +
+	DATABASE_ROOM_KEY_FORWARDS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

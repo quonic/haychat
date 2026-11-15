@@ -123,9 +123,14 @@ an encrypted room:
 - **Epochs.** Every log entry starts a new epoch, and the server accepts a message only in the
   current one ("Room key is out of date" otherwise; the client then sends it again with a new
   chain). So a removed member gets no key for anything sent after the removal, and an added
-  member gets the chains of its first epoch on and none before (From join). Full history for
-  new members of encrypted rooms (forwarding older chains) is a later part; such rooms behave
-  like From join rooms for now.
+  member gets the chains of its first epoch on and none before (From join).
+- **Full history in encrypted rooms** (protocol 20): the member who adds someone hands them
+  every older room key it holds, and any member online answers the newcomer's requests for the
+  rest, so the newcomer reads the room's earlier messages as members' clients come online. A
+  message whose key no online member holds waits until one connects. The server stores these
+  forwarded keys only for Full history rooms, and the clients check every one against the
+  member list; forwarded keys give access, but every message is still verified against its
+  real sender. From join encrypted rooms never forward anything.
 - **Keys from a database row.** A row added to `room_members` behind the log lets the server
   serve that account the room's history and its envelopes, but the log does not name it, so no
   envelope has a wrap for it and no member's client re-seals a chain to it: it opens nothing.
@@ -204,8 +209,8 @@ newest message.
 
 - Only encrypted rooms are end-to-end encrypted. For every other room, access modes decide whom
   the server lets read it, not who can technically read it (the server and its operator can
-  read every unencrypted room). Encrypted rooms take no voice yet, and Full history encrypted
-  rooms show new members only what is sent after they joined.
+  read every unencrypted room). Encrypted rooms take no voice yet. In a Full history encrypted
+  room a new member reads older messages only once a member who holds their keys is online.
 - Bans and account changes do not remove anyone from encrypted rooms' member lists by
   themselves; an admin removes them from each room.
 - The Admin section's room list does not refresh by itself when another admin changes a room
