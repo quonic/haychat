@@ -66,6 +66,7 @@ E0 and E3 start in parallel from `main`. E1 starts when E0 merges and runs along
 | E3 Room access modes | #59 | 076cbe3 | 15 | 4 |
 | E1 Account keys | #60 | dfe6759 | 16 | 5 |
 | E2 Encrypted direct messages | #61 | c262e91 | 17 | 6 |
+| E4a Encrypted rooms: member log | #62 | d908114 | 18 | 7 |
 
 E0's departures from the design are listed in #58: an explicit domain on the room message
 signature, explicit wrap count and ciphertext length in the envelope, small-order X25519 keys
@@ -103,3 +104,13 @@ pre-upgrade messages ("Not encrypted"), but cannot forge encrypted or signed one
 E4 is split in two, run one after the other: E4a `e2ee-room-log` (encrypted rooms, the
 member log with managers, and refusing plaintext chat in encrypted rooms) and E4b
 `e2ee-room-chains` (sender chains, distribution, key requests, sealed room messages, epochs).
+
+E4a's decisions are listed in #62. The main ones: an encrypted room is created empty and the
+creator's client appends the signed `Create` once `ServerCreateRoom` arrives (the entry must
+name the server-assigned room ID); the server replays the whole stored log on every append
+under a row lock, with `users.public_key` standing in for pins; `room_log_managers` lets
+non-member managers fetch the log; `SetAccess` needs the admin role too and every signed
+entry's actor must be the sender; `ClientAddRoomMember`/`ClientLeaveRoom` are refused on
+encrypted rooms; an admin's `ClientRemoveRoomMember` becomes an unsigned `Remove` written by
+the server; plaintext chat and voice in encrypted rooms are refused; key store format 3.
+Known limitation: two clients on one profile directory overwrite each other's key store.
