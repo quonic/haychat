@@ -35,7 +35,9 @@ package client
 // under keyMutex, which the voice thread copies when keyVersion moved, like the speaker
 // controls. A send key is used by this engine only, and the engine refuses to seal a sequence
 // at or behind the last one it sealed under it. Every key is wiped when replaced, when the
-// engine closes and when it is destroyed. The encoder runs at constant bitrate there.
+// engine closes and when it is destroyed. The encoder keeps its constrained VBR there, but
+// every packet is capped at and padded to one size per bitrate (voiceE2EEPaddedOpusBytes), so
+// frame lengths do not follow the speech.
 
 import "../common"
 import "core:c"
@@ -77,6 +79,24 @@ VOICE_ERROR_BUFFER_SIZE :: 512
 VOICE_SPEAKER_CONTROL_CAPACITY :: 256
 // The highest per-speaker gain, 200 %. Linear, like the output volume.
 VOICE_SPEAKER_GAIN_MAX :: f32(2)
+
+// The size every Opus packet of an encrypted room is capped at and padded to, as a multiple of
+// the bitrate's nominal 20 ms frame (bitrate / 400 bytes), in fifths: 8 = 1.6 times. Measured
+// with libopus 1.6 (e2ee-voice-design.md 8): constrained VBR with HayChat's settings never
+// reached 1.6 times at any bitrate from 16 to 64 kbit/s, so the cap almost never changes the
+// audio. Constant bitrate, the first choice, dropped a steady tone by 40 to 50 dB for some
+// frames at 24 and 28 kbit/s with in-band FEC at 10 % loss.
+VOICE_E2EE_PADDED_FIFTHS :: 8
+// The smallest padded size, so a low bitrate still leaves the encoder a usable budget.
+VOICE_E2EE_PADDED_MIN_BYTES :: 40
+
+// The fixed Opus packet size of an encrypted room's frames at bitrate (bit/s), within
+// VOICE_E2EE_PADDED_MIN_BYTES and common.VOICE_E2EE_OPUS_MAX_BYTES.
+voiceE2EEPaddedOpusBytes :: proc(bitrate: int) -> int {
+	nominalFifths := max(bitrate, 0) * VOICE_E2EE_PADDED_FIFTHS
+	padded := (nominalFifths + 5 * 400 - 1) / (5 * 400)
+	return clamp(padded, VOICE_E2EE_PADDED_MIN_BYTES, common.VOICE_E2EE_OPUS_MAX_BYTES)
+}
 
 // Protocol 21: what an encrypted room's engine needs to build the voice frame AAD. Fixed for
 // the engine's life; the UI thread sets it from the room's encrypted flag, which never changes.
@@ -238,7 +258,7 @@ VoiceEngineConfig :: struct {
 	// Optional, for latency tests: every encoded and every played frame.
 	onFrameTiming:    VoiceFrameTimingProc,
 	timingUserdata:   rawptr,
-	// Protocol 21: set for an encrypted room's voice. Implies constant bitrate.
+	// Protocol 21: set for an encrypted room's voice. Implies fixed-size (padded) packets.
 	encryption:       VoiceEngineEncryption,
 }
 
@@ -448,10 +468,6 @@ VoiceEngine_create :: proc(
 	engine.encoderSettings = config.encoder
 	if engine.encoderSettings == {} {
 		engine.encoderSettings = opus.VOICE_ENCODER_SETTINGS
-	}
-	if config.encryption.enabled {
-		// Frame lengths must not follow the speech the server cannot read (design 8).
-		engine.encoderSettings.cbr = true
 	}
 	if engine.config.inputGain == 0 && !config.explicitLevels {
 		engine.config.inputGain = 1
@@ -1446,15 +1462,23 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		engine.stats.framesGated += 1
 		return
 	}
-	// An encrypted room's packets leave room for the sealed payload's overhead.
+	// An encrypted room's packets are capped at its padded size (which leaves room for the
+	// sealed payload's overhead) and then padded to exactly that size.
 	maxBytes := common.VOICE_OPUS_MAX_BYTES
 	if engine.config.encryption.enabled {
-		maxBytes = common.VOICE_E2EE_OPUS_MAX_BYTES
+		maxBytes = voiceE2EEPaddedOpusBytes(int(engine.encoderSettings.bitrate))
 	}
 	length := opus.encodeFloat(engine.encoder, frame, engine.encodeBuffer[:maxBytes])
 	if length <= 0 || int(length) > maxBytes {
 		engine.stats.encodeErrors += 1
 		return
+	}
+	if engine.config.encryption.enabled {
+		if opus.padPacket(engine.encodeBuffer[:], int(length), maxBytes) != opus.OK {
+			engine.stats.encodeErrors += 1
+			return
+		}
+		length = i32(maxBytes)
 	}
 	flags: u8
 	if result.endOfSpurt {

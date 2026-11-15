@@ -321,7 +321,8 @@ rooms keep their voice exactly as before.
   session, the generation, the sequence, the flags, the version and the key ID. The relay skips
   its Opus duration check there, drops a payload that is not sealed, applies
   `HAYCHAT_VOICE_MAX_FRAME_BYTES` to the Opus bytes inside, and forwards the payload unchanged.
-  Encrypted rooms encode at constant bitrate, so the packet lengths the server sees do not
+  In encrypted rooms every Opus packet is padded with Opus's own padding to one size per
+  bitrate (1.6 times the nominal 20 ms frame), so the packet lengths the server sees do not
   follow the speech.
 - **What the server still sees.** Who is in voice, who talks and when (nothing is sent in
   silence), and the bitrate. A member who controls or colludes with the server can speak under

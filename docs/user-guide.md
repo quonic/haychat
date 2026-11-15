@@ -213,8 +213,9 @@ unencrypted room is not: the server can hear it as it relays it.
   them); a participant whose key was refused for its time shows "clock" and **Clock out of
   sync**. Turn on automatic time synchronisation in your operating system.
 - **What stays visible.** The server still sees who is in voice, who talks and when, and for
-  how long. Encrypted rooms send audio at a constant bitrate, so the size of the voice packets
-  does not give away what is said.
+  how long. Encrypted rooms pad every voice packet to the same size, so the size of the
+  voice packets does not give away what is said. This uses somewhat more bandwidth while you
+  talk.
 
 ### Settings → Voice
 
