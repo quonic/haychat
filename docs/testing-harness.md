@@ -644,6 +644,27 @@ database before it reports readiness, which `dev/live-proof.sh` checks before an
 connects. If the sender is not a member of room 1 the server answers with
 `protocol_error "Not a room member"` and step 2 fails with a `[two-client]` message.
 
+### Step Timeouts
+
+`dev/live-proof.sh` runs every step under `timeout`, so a hung client, proof script or test
+binary (such as an SQL test runner that does not exit after a failed assertion) fails the run
+within minutes instead of using up CI's two-hour job limit. A step that runs out prints
+`[live] STEP timed out after N s` and the run fails with its status. The limits are several
+times a normal run, the compile included:
+
+| Step | Limit |
+| --- | --- |
+| Live client tests (startup auth, room chat, direct message, in-process voice) | 20 min |
+| `dev/harness-smoke.sh`, `dev/admin-proof.sh`, `dev/room-access-proof.sh` | 10 min each |
+| `dev/voice-proof.sh`, `dev/ui-smoke.sh` | 15 min each |
+| `dev/e2ee-proof.sh` | 20 min |
+| Server SQL proof (`HAYCHAT_DATABASE_SQL_TEST=1 odin test server`) | 20 min |
+| Failed startup exit check | 1 min |
+
+`HAYCHAT_LIVE_STEP_TIMEOUT_SECS` replaces every limit, for a slow machine or a short limit while
+debugging. `timeout` signals the step's whole process group (the clients a proof started
+included) and kills what is left 30 seconds later.
+
 ## GUI Automation
 
 The headless harness acts as a user without the window. Its sibling, `client --ui-script FILE`,

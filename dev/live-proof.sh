@@ -43,6 +43,15 @@ set -euo pipefail
 #                   user identity, direct message, and default room statements against this
 #                   database, and the check that a failed startup exits with status 1
 #   test_name...    the given client test procedures, e.g. client.testFoo
+#
+# Every step runs under `timeout` (run_step below), so a hung client, proof or test binary fails
+# the run within minutes instead of using up CI's job limit. The limits are generous (several
+# times a normal run, compile included): client tests 20 minutes, the harness, admin and access
+# proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof 20, and the
+# failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit (for a slow
+# machine, or a short one while debugging). A step that times out prints "[live] STEP timed out
+# after N s" and the run fails; timeout signals the step's whole process group, then kills it 30
+# seconds later if it is still there.
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
 ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
@@ -203,6 +212,18 @@ wait_for_server_ready() {
 	return 1
 }
 
+# run_step LIMIT_SECS LABEL COMMAND...: runs COMMAND under timeout (see the top of this file).
+run_step() {
+	local limit=$1 label=$2 status=0
+	shift 2
+	limit=${HAYCHAT_LIVE_STEP_TIMEOUT_SECS:-$limit}
+	timeout --kill-after=30 "$limit" "$@" || status=$?
+	if [[ $status -eq 124 || $status -eq 137 ]]; then
+		echo "[live] $label timed out after ${limit} s" >&2
+	fi
+	return "$status"
+}
+
 cd "$repo_dir"
 
 echo "==> [live] building server"
@@ -240,42 +261,44 @@ if [[ ${#tests[@]} -gt 0 ]]; then
 	test_names=$(IFS=,; echo "${tests[*]}")
 	echo "==> [live] running ${test_names}"
 	# The voice proof needs libopus; as in check.sh, a missing one fails instead of skipping.
-	HAYCHAT_LIVE_STARTUP_AUTH=1 HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1} odin test client \
+	run_step 1200 "client tests" env HAYCHAT_LIVE_STARTUP_AUTH=1 \
+		HAYCHAT_REQUIRE_OPUS="${HAYCHAT_REQUIRE_OPUS:-1}" odin test client \
 		-define:ODIN_TEST_FANCY=false \
 		-define:ODIN_TEST_NAMES="$test_names"
 fi
 
 if [[ "$run_harness" == true ]]; then
 	echo "==> [live] running dev/harness-smoke.sh"
-	dev/harness-smoke.sh 127.0.0.1:12345
+	run_step 600 "dev/harness-smoke.sh" dev/harness-smoke.sh 127.0.0.1:12345
 fi
 
 if [[ "$run_admin" == true ]]; then
 	echo "==> [live] running dev/admin-proof.sh"
-	HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1} dev/admin-proof.sh 127.0.0.1:12345
+	run_step 600 "dev/admin-proof.sh" env HAYCHAT_REQUIRE_OPUS="${HAYCHAT_REQUIRE_OPUS:-1}" \
+		dev/admin-proof.sh 127.0.0.1:12345
 fi
 
 if [[ "$run_voice" == true ]]; then
 	echo "==> [live] running dev/voice-proof.sh"
-	dev/voice-proof.sh 127.0.0.1:12345
+	run_step 900 "dev/voice-proof.sh" dev/voice-proof.sh 127.0.0.1:12345
 fi
 
 if [[ "$run_ui" == true ]]; then
 	echo "==> [live] running dev/ui-smoke.sh"
-	dev/ui-smoke.sh 127.0.0.1:12345
+	run_step 900 "dev/ui-smoke.sh" dev/ui-smoke.sh 127.0.0.1:12345
 fi
 
 # After the GUI proof, so the Admin section it scrolls through lists only the rooms the earlier
 # proofs made.
 if [[ "$run_access" == true ]]; then
 	echo "==> [live] running dev/room-access-proof.sh"
-	dev/room-access-proof.sh 127.0.0.1:12345
+	run_step 600 "dev/room-access-proof.sh" dev/room-access-proof.sh 127.0.0.1:12345
 fi
 
 # After the GUI proof too: its key swap leaves one account without an identity key.
 if [[ "$run_e2ee" == true ]]; then
 	echo "==> [live] running dev/e2ee-proof.sh"
-	dev/e2ee-proof.sh 127.0.0.1:12345
+	run_step 1200 "dev/e2ee-proof.sh" dev/e2ee-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares
@@ -284,7 +307,7 @@ fi
 # migration tests work in schemas of their own that they drop again.
 if [[ "$run_sql" == true ]]; then
 	echo "==> [live] running server SQL proof ${SQL_TESTS}"
-	HAYCHAT_DATABASE_SQL_TEST=1 odin test server \
+	run_step 1200 "the server SQL proof" env HAYCHAT_DATABASE_SQL_TEST=1 odin test server \
 		-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true \
 		-define:ODIN_TEST_FANCY=false \
 		-define:ODIN_TEST_THREADS=1 \
@@ -301,7 +324,7 @@ if [[ "$run_startup_failure" == true ]]; then
 	failed_log="$runtime_dir/failed-startup.log"
 	failed_status=0
 	HAYCHAT_DATABASE_PORT=1 HAYCHAT_LOG_DIR="$runtime_dir/failed-startup-logs" \
-		timeout 60 "$server_bin" >"$failed_log" 2>&1 || failed_status=$?
+		timeout --kill-after=10 60 "$server_bin" >"$failed_log" 2>&1 || failed_status=$?
 	if [[ $failed_status -ne 1 ]] || ! grep -aFq "[Startup]" "$failed_log"; then
 		echo "Expected a failed startup to print [Startup] and exit 1, got $failed_status" >&2
 		cat "$failed_log" >&2 || true
