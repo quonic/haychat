@@ -74,7 +74,7 @@ databaseSQLTestPostID :: proc(
 	response := databaseSQLTestPost(conn, senderID, recipientID, content)
 	defer IPC__database_query_response_deinit(response)
 	posted := response.result.(common.DatabasePostDirectMessageResult)
-	assert(posted.recipientExists, fmt.tprintf("expected %q to be stored", content))
+	assert(posted.outcome == .Stored, fmt.tprintf("expected %q to be stored", content))
 	return posted.storedMessage.id
 }
 
@@ -141,7 +141,7 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		posted := response.result.(common.DatabasePostDirectMessageResult)
 		stored := posted.storedMessage
 		assert(
-			posted.recipientExists &&
+			posted.outcome == .Stored &&
 			stored.id > 0 &&
 			stored.senderId == alice &&
 			stored.recipientId == bob &&
@@ -163,7 +163,7 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		defer IPC__database_query_response_deinit(response)
 		posted := response.result.(common.DatabasePostDirectMessageResult)
 		assert(
-			!posted.recipientExists && posted.storedMessage.id == 0,
+			posted.outcome == .UnknownRecipient && posted.storedMessage.id == 0,
 			fmt.tprintf("expected recipient %d to be refused, got %v", refusedRecipient, posted),
 		)
 	}

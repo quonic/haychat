@@ -122,10 +122,14 @@ below in the database for every request, in the same statement as the change.
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one
 server: they are stored in its `direct_messages` table, survive restarts, and are paged like room
-history. Like room chat, they are encrypted in transit to the server but not end-to-end, so the
-server and its operator can read them. A sent message is delivered to every connected session of
-both the sender and the recipient; a client shows its own message only when the server echoes it
-back with the stored ID and timestamp.
+history. Since protocol 17 they are end-to-end encrypted whenever both sides can: the server
+stores an envelope it cannot open, and verifies its signature against both accounts' identity
+keys before it does. A message to someone who cannot receive encrypted messages goes out only
+through **Send without encryption**; it is signed, and the server can read it, like every message
+from before protocol 17 (see [protocol.md](protocol.md#encrypted-direct-messages-protocol-17)
+and the [user guide](user-guide.md#encrypted-direct-messages)). A sent message is delivered to
+every connected session of both the sender and the recipient; a client shows its own message
+only when the server echoes it back with the stored ID and timestamp.
 
 ## Unread Counts
 
@@ -156,4 +160,5 @@ newest message.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
 - Account registration (`ClientRegister`) is not implemented.
-- Messages are not end-to-end encrypted (see [protocol.md](protocol.md)).
+- Room messages are not end-to-end encrypted, and direct messages only when both sides can (see
+  [protocol.md](protocol.md)). The server sees who writes to whom and when.

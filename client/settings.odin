@@ -415,7 +415,7 @@ State_reconfigureNetwork :: proc(state: ^State) {
 	if _, ok := State_serverConfig(state, state.selected_server_id); !ok {
 		state.selected_server_id = 0
 		state.selected_channel_id = 0
-		state.selected_dm_peer_id = 0
+		State_closeDirectConversation(state)
 		if len(state.config.servers) > 0 {
 			state.selected_server_id = state.config.servers[0].id
 			state.selected_channel_id = common.GENERAL_ROOM_ID

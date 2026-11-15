@@ -115,6 +115,14 @@ MainRouterState_authenticatedUserID :: proc(
 	return session.authenticatedUserID, true
 }
 
+// ClientDirectMessage, the signed plaintext fallback (protocol 17, e2ee-design.md 4.6): the
+// signature must verify against the session's own identity key over this server's identity
+// key, both user IDs, the client message ID and the content, so the server cannot be handed a
+// message the sender did not write, and the stored row can be checked by both clients later.
+// An unsigned message (every client before protocol 17) is refused: no such client can connect
+// after the protocol bump anyway.
+//
+// Fixed-size byte fields decode through CBOR's temporary allocator, so it is the heap here.
 MainRouterState_handleClientDirectMessage :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -122,7 +130,7 @@ MainRouterState_handleClientDirectMessage :: proc(
 	payload: []u8,
 ) {
 	req: common.ClientDirectMessagePayload
-	err := cbor.unmarshal(payload, &req)
+	err := cbor.unmarshal(payload, &req, temp_allocator = context.allocator)
 	defer delete(req.content)
 	if err != nil {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientDirectMessage payload")
@@ -130,7 +138,8 @@ MainRouterState_handleClientDirectMessage :: proc(
 	}
 	if req.recipientUserId <= 0 ||
 	   len(req.content) == 0 ||
-	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES {
+	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES ||
+	   !common.clientMessageIDIsSet(req.clientMessageId) {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid direct message")
 		return
 	}
@@ -152,6 +161,26 @@ MainRouterState_handleClientDirectMessage :: proc(
 		)
 		return
 	}
+	session, _ := MainRouterState_getPeerSession(state, peerID)
+	if !common.verifyPlaintextDirectMessage(
+		common.PlaintextDirectMessageFields {
+			serverIdentityPublicKey = state.serverIdentityPublicKey,
+			senderUserID = senderID,
+			recipientUserID = req.recipientUserId,
+			clientMessageID = req.clientMessageId,
+		},
+		req.content,
+		session.clientIdentityPublicKey,
+		req.signature,
+	) {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			common.DIRECT_MESSAGE_SIGNATURE_INVALID_MESSAGE,
+		)
+		return
+	}
 
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
@@ -161,7 +190,92 @@ MainRouterState_handleClientDirectMessage :: proc(
 			senderId = senderID,
 			recipientId = req.recipientUserId,
 			content = strings.clone(req.content),
+			clientMessageId = req.clientMessageId,
+			signature = req.signature,
 		},
+		PendingDBRequest{requestType = .PostDirectMessage, targetUserID = req.recipientUserId},
+	)
+}
+
+// ClientSealedDirectMessage (protocol 17, e2ee-design.md 4.5): the router checks what it can
+// without the database (the shape, the size and the envelope's structure), and the database
+// worker checks the signature against both accounts' identity keys before it stores the
+// envelope byte for byte (databaseCheckSealedDirectMessage). The recipient's key lives only in
+// the database, so that check runs there, next to the insert that requires the same key.
+MainRouterState_handleClientSealedDirectMessage :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientSealedDirectMessagePayload
+	err := cbor.unmarshal(payload, &req, temp_allocator = context.allocator)
+	defer common.ClientSealedDirectMessagePayload_deinit(&req)
+	if err != nil {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			"Invalid ClientSealedDirectMessage payload",
+		)
+		return
+	}
+	senderID, ok := MainRouterState_authenticatedUserID(
+		pm,
+		state,
+		peerID,
+		"Unauthenticated direct message",
+	)
+	if !ok {
+		return
+	}
+	if req.recipientUserId <= 0 ||
+	   !common.clientMessageIDIsSet(req.clientMessageId) ||
+	   len(req.envelope) == 0 ||
+	   len(req.envelope) > common.SEALED_ENVELOPE_MAX_BYTES {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE,
+		)
+		return
+	}
+	if req.recipientUserId == senderID {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			"Cannot send a direct message to yourself",
+		)
+		return
+	}
+	if envelope, decodeErr := common.decodeSealedEnvelope(req.envelope);
+	   decodeErr != .None || envelope.kind != .DirectMessage || envelope.wrapCount != 2 {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE,
+		)
+		return
+	}
+	session, _ := MainRouterState_getPeerSession(state, peerID)
+	request := common.DatabasePostDirectMessageRequest {
+		senderId                = senderID,
+		recipientId             = req.recipientUserId,
+		clientMessageId         = req.clientMessageId,
+		envelope                = req.envelope,
+		serverIdentityPublicKey = state.serverIdentityPublicKey,
+		senderIdentityPublicKey = session.clientIdentityPublicKey,
+	}
+	// The request takes the decoded envelope; the database side frees it.
+	req.envelope = nil
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		request,
 		PendingDBRequest{requestType = .PostDirectMessage, targetUserID = req.recipientUserId},
 	)
 }
@@ -277,7 +391,9 @@ MainRouterState_handleClientListUsers :: proc(
 }
 
 // The message is already stored, so it goes to every live session of both users, the sending
-// session included: that echo is how the sender learns the message ID and timestamp.
+// session included: that echo is how the sender learns the message ID and timestamp. An
+// encrypted message goes out as ServerSealedDirectMessage with the envelope exactly as stored,
+// a plaintext one as ServerDirectMessage with its signature.
 MainRouterState_handlePostDirectMessageResult :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -288,17 +404,22 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 	if MainRouterState_databaseFailed(pm, state, request.peerID, response, postedOK) {
 		return
 	}
-	if !posted.recipientExists {
-		MainRouterState_sendProtocolError(
-			pm,
-			state,
-			request.peerID,
-			"Unknown direct message recipient",
-		)
+	refusal := ""
+	switch posted.outcome {
+	case .Stored:
+	case .UnknownRecipient:
+		refusal = "Unknown direct message recipient"
+	case .InvalidEnvelope:
+		refusal = common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE
+	case .Duplicate:
+		refusal = common.DIRECT_MESSAGE_DUPLICATE_MESSAGE
+	}
+	if len(refusal) > 0 {
+		MainRouterState_sendProtocolError(pm, state, request.peerID, refusal)
 		return
 	}
 	stored := posted.storedMessage
-	directPayload := common.ServerDirectMessagePayload {
+	plainPayload := common.ServerDirectMessagePayload {
 		id                = stored.id,
 		senderId          = stored.senderId,
 		senderNickname    = stored.senderNickname,
@@ -306,17 +427,40 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 		recipientNickname = stored.recipientNickname,
 		timestamp         = stored.timestamp,
 		content           = stored.content,
+		clientMessageId   = stored.clientMessageId,
+		signature         = stored.signature,
+	}
+	sealedPayload := common.ServerSealedDirectMessagePayload {
+		id                = stored.id,
+		senderId          = stored.senderId,
+		senderNickname    = stored.senderNickname,
+		recipientId       = stored.recipientId,
+		recipientNickname = stored.recipientNickname,
+		timestamp         = stored.timestamp,
+		clientMessageId   = stored.clientMessageId,
+		envelope          = stored.envelope,
 	}
 	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated &&
-		   (recipientSession.authenticatedUserID == stored.senderId ||
-				   recipientSession.authenticatedUserID == stored.recipientId) {
+		if !recipientSession.isAuthenticated ||
+		   (recipientSession.authenticatedUserID != stored.senderId &&
+				   recipientSession.authenticatedUserID != stored.recipientId) {
+			continue
+		}
+		if len(stored.envelope) > 0 {
+			MainRouterState_sendPeerMessage(
+				pm,
+				state,
+				recipientPeerID,
+				.ServerSealedDirectMessage,
+				sealedPayload,
+			)
+		} else {
 			MainRouterState_sendPeerMessage(
 				pm,
 				state,
 				recipientPeerID,
 				.ServerDirectMessage,
-				directPayload,
+				plainPayload,
 			)
 		}
 	}

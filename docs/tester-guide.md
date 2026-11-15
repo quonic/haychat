@@ -27,9 +27,11 @@ What works today:
 | Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity))                                                                                                                       |
 
 > [!IMPORTANT]
-> Messages are encrypted between your computer and the server, but they are **not end-to-end
-> encrypted**. The server stores every message in plain text, and the maintainer can read
-> them. Do not send anything you would not want the maintainer to see.
+> Messages are encrypted between your computer and the server. Direct messages are also
+> **end-to-end encrypted** when both of you can receive encrypted messages (a 🔒 on each
+> message); room messages are **not**: the server stores them in plain text, and the maintainer
+> can read them, like any direct message marked "Unencrypted" or "Not encrypted". Do not send
+> anything in a room you would not want the maintainer to see.
 
 ## Getting the Client
 

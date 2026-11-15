@@ -765,61 +765,114 @@ testHeadlessConnectTimesOutWhileTheServerIsUnreachable :: proc(t: ^testing.T) {
 
 @(test)
 testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
+	// Direct message events are printed after State opened them (protocol 17), never from the
+	// raw event.
+	for kind in ([]ClientTransportRuntimeEventKind {
+			.DirectMessageReceived,
+			.DirectHistoryReceived,
+			.DirectConversationsReceived,
+		}) {
+		event := ClientTransportRuntimeEvent {
+			kind     = kind,
+			serverID = 1,
+		}
+		_, _, ok := headlessRenderRuntimeEvent(&event)
+		testing.expect(t, !ok, fmt.tprintf("expected %v to be printed after it is applied", kind))
+	}
+
+	builder := strings.builder_make()
+	harness := testHeadlessHarness(&builder, 1)
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+	testApplyConnected(&harness.state, 1, 4)
+	_ = testHeadlessTakeOutput(&builder)
 	direct := ClientTransportRuntimeEvent {
 		kind = .DirectMessageReceived,
 		serverID = 1,
 		directMessage = {
 			id = 12,
 			senderId = 3,
-			senderNickname = "alice",
+			senderNickname = strings.clone("alice"),
 			recipientId = 4,
-			recipientNickname = "bob",
-			timestamp = "t",
-			content = "hi bob",
+			recipientNickname = strings.clone("bob"),
+			timestamp = strings.clone("t"),
+			content = strings.clone("hi bob"),
 		},
 	}
-	line, kind, ok := headlessRenderRuntimeEvent(&direct)
-	testing.expect(t, ok && kind == .DirectMessage, "expected a direct_message event")
+	headlessHandleRuntimeEvent(&harness, &direct)
+	ClientTransportRuntimeEvent_deinit(&direct)
 	testExpectString(
 		t,
-		line,
+		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_message","serverID":1,"id":12,"senderID":3,"senderNickname":"alice",` +
-		`"recipientID":4,"recipientNickname":"bob","timestamp":"t","content":"hi bob"}`,
+		`"recipientID":4,"recipientNickname":"bob","timestamp":"t","encrypted":false,` +
+		`"signed":false,"decryptError":"","protection":"plain","content":"hi bob"}` +
+		"\n",
 		"the direct_message JSON",
 	)
-	delete(line)
 
 	history := ClientTransportRuntimeEvent {
 		kind       = .DirectHistoryReceived,
 		serverID   = 1,
-		peerUserID = 4,
+		peerUserID = 3,
 		hasOlder   = true,
 	}
 	append(
 		&history.directMessages,
 		common.StoredDirectMessage {
 			id = 9,
-			senderId = 4,
-			senderNickname = strings.clone("bob"),
-			recipientId = 3,
-			recipientNickname = strings.clone("alice"),
+			senderId = 3,
+			senderNickname = strings.clone("alice"),
+			recipientId = 4,
+			recipientNickname = strings.clone("bob"),
 			timestamp = strings.clone("t"),
 			content = strings.clone("old"),
 		},
 	)
-	defer ClientTransportRuntimeEvent_deinit(&history)
-	line, kind, ok = headlessRenderRuntimeEvent(&history)
-	testing.expect(t, ok && kind == .DirectHistory, "expected a direct_history event")
+	headlessHandleRuntimeEvent(&harness, &history)
+	ClientTransportRuntimeEvent_deinit(&history)
 	testExpectString(
 		t,
-		line,
-		`{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":true,"messages":[` +
-		`{"id":9,"senderID":4,"senderNickname":"bob","recipientID":3,` +
-		`"recipientNickname":"alice","timestamp":"t","content":"old"}]}`,
+		testHeadlessTakeOutput(&builder),
+		`{"event":"direct_history","serverID":1,"peerUserID":3,"hasOlder":true,"messages":[` +
+		`{"id":9,"senderID":3,"senderNickname":"alice","recipientID":4,` +
+		`"recipientNickname":"bob","timestamp":"t","encrypted":false,"signed":false,` +
+		`"decryptError":"","protection":"plain","content":"old"}]}` +
+		"\n",
 		"the direct_history JSON",
 	)
-	delete(line)
 
+	conversations := ClientTransportRuntimeEvent {
+		kind     = .DirectConversationsReceived,
+		serverID = 1,
+	}
+	append(
+		&conversations.conversations,
+		common.DirectConversationSummary {
+			peerUserId = 3,
+			peerNickname = strings.clone("alice"),
+			lastMessageID = 12,
+			lastSenderId = 3,
+			lastTimestamp = strings.clone("t"),
+			lastContent = strings.clone("hi bob"),
+		},
+	)
+	headlessHandleRuntimeEvent(&harness, &conversations)
+	ClientTransportRuntimeEvent_deinit(&conversations)
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"event":"conversations","serverID":1,"conversations":[{"peerUserID":3,` +
+		`"peerNickname":"alice","lastMessageID":12,"lastSenderID":3,"lastTimestamp":"t",` +
+		`"encrypted":false,"signed":false,"decryptError":"","protection":"plain",` +
+		`"conversationEncrypted":false,"lastContent":"hi bob","lastReadMessageId":0,` +
+		`"unreadCount":0}]}` +
+		"\n",
+		"the conversations JSON",
+	)
+
+	line: string
+	kind: HeadlessEventKind
+	ok: bool
 	users := ClientTransportRuntimeEvent {
 		kind     = .UserListReceived,
 		serverID = 1,
@@ -835,34 +888,6 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
 		`"isAdmin":false,"isBanned":false}]}`,
 		"the user_list JSON",
-	)
-	delete(line)
-
-	conversations := ClientTransportRuntimeEvent {
-		kind     = .DirectConversationsReceived,
-		serverID = 1,
-	}
-	append(
-		&conversations.conversations,
-		common.DirectConversationSummary {
-			peerUserId = 4,
-			peerNickname = strings.clone("bob"),
-			lastMessageID = 12,
-			lastSenderId = 3,
-			lastTimestamp = strings.clone("t"),
-			lastContent = strings.clone("hi bob"),
-		},
-	)
-	defer ClientTransportRuntimeEvent_deinit(&conversations)
-	line, kind, ok = headlessRenderRuntimeEvent(&conversations)
-	testing.expect(t, ok && kind == .Conversations, "expected a conversations event")
-	testExpectString(
-		t,
-		line,
-		`{"event":"conversations","serverID":1,"conversations":[{"peerUserID":4,` +
-		`"peerNickname":"bob","lastMessageID":12,"lastSenderID":3,"lastTimestamp":"t",` +
-		`"lastContent":"hi bob","lastReadMessageId":0,"unreadCount":0}]}`,
-		"the conversations JSON",
 	)
 	delete(line)
 
@@ -932,17 +957,31 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		"the dm usage error",
 	)
 
+	// bob's key was never checked, so the message waits for it (protocol 17).
 	headlessHandleLine(&harness, "dm 4 hello bob")
 	output := testHeadlessTakeOutput(&builder)
-	testing.expect(
+	testExpectString(
 		t,
-		strings.has_prefix(output, `{"ok":false,"cmd":"dm","error":`),
-		fmt.tprintf("expected a dm failure without a live session, got %s", output),
+		output,
+		`{"ok":true,"cmd":"dm","serverID":803,"peerUserID":4,"encrypted":false,"queued":true}` +
+		"\n",
+		"the queued dm result",
 	)
 	testing.expect(
 		t,
 		len(testDirectCache(&harness.state, 803, 4).draft) == 0,
-		"expected a failed dm to leave no draft behind",
+		"expected a queued dm to leave no draft behind",
+	)
+	// dm-plain is only for a peer that cannot be encrypted to; bob's key is still unknown.
+	headlessHandleLine(&harness, "dm-plain 4 hello")
+	output = testHeadlessTakeOutput(&builder)
+	testExpectString(
+		t,
+		output,
+		`{"ok":false,"cmd":"dm-plain","error":"the user's key is still being checked; ` +
+		`try again"}` +
+		"\n",
+		"the dm-plain refusal while the key is unknown",
 	)
 
 	headlessHandleLine(&harness, "dm-history x")

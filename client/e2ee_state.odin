@@ -193,7 +193,6 @@ State_e2eeEnsureStore :: proc(state: ^State, serverID: int) -> (^ServerE2EEState
 	return e2ee, true
 }
 
-@(private = "file")
 State_e2eeSaveStore :: proc(state: ^State, e2ee: ^ServerE2EEState) {
 	if ok, reason := KeyStore_save(&e2ee.store); !ok {
 		State_setChatStatus(state, fmt.tprintf("Could not save encryption pins: %s", reason))
@@ -687,6 +686,9 @@ State_e2eeTrustNewKey :: proc(state: ^State, serverID, userID: int, verified := 
 	user.hasOffered = false
 	user.notice = .None
 	State_e2eeSaveStore(state, e2ee)
+	// Messages that waited for a key open with the new pin; ones already opened or refused
+	// under the old one stay as they are (never retried with another key).
+	State_directKeysChanged(state, serverID)
 	return true
 }
 

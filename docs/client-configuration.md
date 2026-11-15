@@ -65,7 +65,7 @@ headless harness (`--config-dir`), never by tests.
 
 ```json
 {
-  "format": 1,
+  "format": 2,
   "server_public_key": "<the server's identity key, hex>",
   "users": [
     {
@@ -78,18 +78,23 @@ headless harness (`--config-dir`), never by tests.
     }
   ],
   "rooms": [],
-  "direct_conversations": []
+  "direct_conversations": [
+    {"peer_user_id": 4, "encrypted": true}
+  ]
 }
 ```
 
 | Key | Purpose |
 | --- | --- |
-| `format` | The file format, 1. A client that finds a newer format uses the file read-only and never writes it, so a newer client's data survives |
+| `format` | The file format, 2 (protocol 17 added `direct_conversations`; a format 1 file loads as is and is written back as 2). A client that finds a newer format uses the file read-only and never writes it, so a newer client's data survives |
 | `server_public_key` | The server the file belongs to; a file for another key is not used for writing |
 | `users[]` | One pin per account (see [Encryption keys](user-guide.md#encryption-keys)): the account's identity and encryption keys as first seen (or as last accepted or trusted), the encryption key's creation time (an older key is refused), whether you marked it verified, and when it was first seen |
-| `rooms[]`, `direct_conversations[]` | Reserved for encrypted rooms and direct messages in later versions; empty today |
+| `direct_conversations[]` | The accounts (`peer_user_id`) with whom an encrypted direct message was sent or opened on this server (`encrypted` true). Such a conversation is never treated as an ordinary unencrypted one again (no silent downgrade); entries are only ever added |
+| `rooms[]` | Reserved for encrypted rooms in a later version; empty today |
 
 Pins are security state: a file that does not parse, has an entry that does not validate, or
 belongs to another server key is used read-only for the session and left exactly as it is, and
 the client says so under the composer. Deleting the file (or the `keys` directory) only means the
-next contact with each account is a first contact again; it does not lose messages.
+next contact with each account is a first contact again, and the encrypted conversations are
+marked again as their messages open; it does not lose messages, because they are sealed to the
+encryption key in `config.json`.

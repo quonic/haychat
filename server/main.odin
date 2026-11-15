@@ -1230,6 +1230,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAdminListRooms(pm, state, peerID, packet.payload)
 	case .ClientDirectMessage:
 		MainRouterState_handleClientDirectMessage(pm, state, peerID, packet.payload)
+	case .ClientSealedDirectMessage:
+		MainRouterState_handleClientSealedDirectMessage(pm, state, peerID, packet.payload)
 	case .ClientFetchDirectHistory:
 		MainRouterState_handleClientFetchDirectHistory(pm, state, peerID, packet.payload)
 	case .ClientListDirectConversations:

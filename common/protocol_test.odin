@@ -76,6 +76,8 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientFetchUserKeys, 162},
 	{.ServerUserKeys, 163},
 	{.ServerUserKeyChanged, 164},
+	{.ClientSealedDirectMessage, 165},
+	{.ServerSealedDirectMessage, 166},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -409,7 +411,7 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 }
 
 @(test)
-testProtocolVersionIsSixteenForAccountEncryptionKeys :: proc(t: ^testing.T) {
+testProtocolVersionIsSeventeenForEncryptedDirectMessages :: proc(t: ^testing.T) {
 	_ = t
 	// 8 added ServerAuthSuccess.isAdmin; 9 changed the transport key schedule; 10 added the
 	// voice control messages and the kind-bound voice AAD; 11 added read markers; 12 added
@@ -419,14 +421,125 @@ testProtocolVersionIsSixteenForAccountEncryptionKeys :: proc(t: ^testing.T) {
 	// modes, history visibility, member fetches, leaving, and the admin room list; 16 added
 	// the account encryption keys (ClientPublishEncryptionKey, ClientFetchUserKeys,
 	// ServerUserKeys, ServerUserKeyChanged) and UserSummary.identityPublicKey and
-	// hasEncryptionKey, so peers on 15 or older cannot talk to this build.
+	// hasEncryptionKey; 17 added encrypted direct messages (ClientSealedDirectMessage,
+	// ServerSealedDirectMessage), the envelope, client message ID and signature fields of
+	// stored messages and conversation summaries, and the signed plaintext fallback, so peers
+	// on 16 or older cannot talk to this build.
 	assert(
-		protocolVersion == 16,
+		protocolVersion == 17,
 		fmt.tprintf(
-			"expected protocol version 16 for account encryption keys, got %d",
+			"expected protocol version 17 for encrypted direct messages, got %d",
 			protocolVersion,
 		),
 	)
+}
+
+// The protocol 17 payloads survive CBOR: the envelope is one byte string whose bytes appear
+// unchanged in the encoding (never re-encoded), and the fixed-size fields are byte strings.
+@(test)
+testDirectMessagePayloadsCarryEnvelopesAsByteStrings :: proc(t: ^testing.T) {
+	_ = t
+	envelope := make([]u8, 300)
+	defer delete(envelope)
+	for index in 0 ..< len(envelope) {
+		envelope[index] = u8(index * 7 + 3)
+	}
+	clientMessageID: ClientMessageID
+	for index in 0 ..< len(clientMessageID) {
+		clientMessageID[index] = u8(0xA0 + index)
+	}
+	{
+		original := ClientSealedDirectMessagePayload {
+			recipientUserId = 9,
+			clientMessageId = clientMessageID,
+			envelope        = envelope,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientSealedDirectMessagePayload encoding to succeed")
+		defer delete(encoded)
+		assert(
+			protocolTestContains(encoded, envelope) &&
+			protocolTestContains(encoded, clientMessageID[:]),
+			"expected the envelope and the client message ID verbatim in the encoding",
+		)
+		assert(
+			len(encoded) < len(envelope) + 80,
+			fmt.tprintf("expected byte strings, got %d bytes", len(encoded)),
+		)
+		decoded: ClientSealedDirectMessagePayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected sealed message decoding")
+		defer ClientSealedDirectMessagePayload_deinit(&decoded)
+		assert(
+			decoded.recipientUserId == 9 &&
+			decoded.clientMessageId == clientMessageID &&
+			string(decoded.envelope) == string(envelope),
+			fmt.tprintf("expected every field to survive, got %v", decoded),
+		)
+	}
+	{
+		original := ServerSealedDirectMessagePayload {
+			id                = 5,
+			senderId          = 2,
+			senderNickname    = "alice",
+			recipientId       = 3,
+			recipientNickname = "bob",
+			timestamp         = "2026-11-14 10:00:00+00",
+			clientMessageId   = clientMessageID,
+			envelope          = envelope,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerSealedDirectMessagePayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerSealedDirectMessagePayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected server sealed decoding")
+		defer ServerSealedDirectMessagePayload_deinit(&decoded)
+		assert(
+			decoded.id == 5 &&
+			decoded.senderNickname == "alice" &&
+			decoded.clientMessageId == clientMessageID &&
+			string(decoded.envelope) == string(envelope),
+			fmt.tprintf("expected every field to survive, got %v", decoded),
+		)
+	}
+	{
+		signature: SignatureBytes
+		for index in 0 ..< len(signature) {
+			signature[index] = u8(index + 1)
+		}
+		original := ClientDirectMessagePayload {
+			recipientUserId = 4,
+			content         = "plain",
+			clientMessageId = clientMessageID,
+			signature       = signature,
+		}
+		encoded, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientDirectMessagePayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ClientDirectMessagePayload
+		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected plaintext decoding")
+		defer delete(decoded.content)
+		assert(
+			decoded.content == "plain" &&
+			decoded.clientMessageId == clientMessageID &&
+			decoded.signature == signature,
+			fmt.tprintf("expected the signature fields to survive, got %v", decoded),
+		)
+	}
+	assert(!clientMessageIDIsSet({}), "expected the zero client message ID to mean none")
+	assert(clientMessageIDIsSet(clientMessageID), "expected a random ID to be set")
+}
+
+@(private = "file")
+protocolTestContains :: proc(haystack, needle: []u8) -> bool {
+	if len(needle) == 0 {
+		return true
+	}
+	for start in 0 ..= len(haystack) - len(needle) {
+		if string(haystack[start:start + len(needle)]) == string(needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // A bundle with every byte distinct, so a field moved into another one shows.
@@ -845,6 +958,7 @@ testDirectHistoryPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 			delete(message.recipientNickname)
 			delete(message.timestamp)
 			delete(message.content)
+			delete(message.envelope)
 		}
 		delete(decoded.messages)
 	}
@@ -955,6 +1069,7 @@ testDirectConversationsPayloadRoundTripsOverCBOR :: proc(t: ^testing.T) {
 			delete(conversation.peerNickname)
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
+			delete(conversation.lastEnvelope)
 		}
 		delete(decoded.conversations)
 	}

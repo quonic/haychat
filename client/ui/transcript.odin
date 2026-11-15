@@ -8,8 +8,9 @@ import SDL "vendor:sdl3"
 
 @(private = "file")
 UnitLayout :: struct {
-	text: Text,
-	y, h: f32,
+	text:  Text,
+	badge: Text,
+	y, h:  f32,
 }
 
 TRANSCRIPT_DRAG_SCROLL_STEP :: 12 // Logical points per frame while drag-selecting past an edge
@@ -45,9 +46,16 @@ transcript :: proc(
 	y := padding
 	for unit, index in units {
 		y += dp(ctx, unit.gapBefore)
-		text := textGet(ctx, hashInt(u64(id), int(unit.key)), unit.font, unit.text, wrapW)
-		height := textHeight(ctx, text)
-		layouts[index] = UnitLayout{text, y, height}
+		// A badge takes its width (and a gap) off the unit's wrap width.
+		badge: Text
+		unitWrapW := wrapW
+		if len(unit.badge) > 0 {
+			badge = textGet(ctx, 0, .Regular, unit.badge)
+			unitWrapW = max(1, wrapW - textSize(badge).x - padding)
+		}
+		text := textGet(ctx, hashInt(u64(id), int(unit.key)), unit.font, unit.text, unitWrapW)
+		height := max(textHeight(ctx, text), textHeight(ctx, badge))
+		layouts[index] = UnitLayout{text, badge, y, height}
 		items[index] = ScrollItem{unit.key, y, height}
 		y += height
 	}
@@ -167,6 +175,15 @@ transcript :: proc(
 		if ctx.automation != nil {
 			drawn := Rect{position.x, position.y, max(1, textSize(layout.text).x), layout.h}
 			automationText(ctx, drawn, unit.text)
+		}
+		if len(unit.badge) > 0 {
+			badgeSize := textSize(layout.badge)
+			badgePosition := Vec2{origin.x + wrapW - badgeSize.x, top}
+			drawText(ctx, layout.badge, badgePosition, unit.badgeColor)
+			if ctx.automation != nil {
+				drawn := Rect{badgePosition.x, top, max(1, badgeSize.x), badgeSize.y}
+				automationText(ctx, drawn, unit.badge)
+			}
 		}
 	}
 

@@ -69,7 +69,7 @@ State_directSummary :: proc(
 	cache := &state.serverDirectCaches[index]
 	if conversationIndex := ServerDirectCache_conversationIndex(cache^, peerUserID);
 	   conversationIndex >= 0 {
-		return &cache.conversations[conversationIndex]
+		return &cache.conversations[conversationIndex].summary
 	}
 	return nil
 }

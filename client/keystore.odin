@@ -14,17 +14,23 @@ import "core:strings"
 // atomically (writeFileAtomically). The fingerprint is the server's pinned key's, so a server
 // whose key changed and was trusted again gets a fresh store and its users are pinned again.
 //
-// Format 1, JSON:
+// Format 2, JSON (format 1 is the same without direct_conversations entries; a format 1 file
+// loads as is and is written back as format 2, which an E1 build reads only read-only, so it
+// never drops the flags):
 //
 //   {
-//     "format": 1,
+//     "format": 2,
 //     "server_public_key": "<hex identity key of the server>",
 //     "users": [{"user_id": 2, "identity_public_key": "<hex>", "encryption_public_key": "<hex>",
 //                "encryption_key_created_at": 1731600000, "verified": false,
 //                "first_seen": 1731600000}],
 //     "rooms": [],                 // reserved for E4: {"room_id": N, ...}
-//     "direct_conversations": []   // reserved for E2: {"peer_user_id": N, "encrypted": true}
+//     "direct_conversations": [{"peer_user_id": 2, "encrypted": true}]
 //   }
+//
+// direct_conversations (E2, design 4.5) lists the peers with whom an encrypted message was
+// sent or opened on this server. It only ever gains entries: once a conversation is encrypted
+// the client never treats a plaintext message in it as normal (no silent downgrade).
 //
 // Pins are security state and are never overwritten silently: a file that does not parse, has
 // an entry that does not validate, names another server, or has a newer format than this build
@@ -34,7 +40,7 @@ import "core:strings"
 //
 // The GUI and the headless harness both write it (State.keyStoreDir); tests keep it in memory.
 
-KEY_STORE_FORMAT :: 1
+KEY_STORE_FORMAT :: 2
 KEY_STORE_DIR_NAME :: "keys"
 
 // One pinned account (design 3.4): first seen with these keys, verified by comparing safety
@@ -64,7 +70,7 @@ KeyStoreFileRoom :: struct {
 	room_id: int,
 }
 
-// Reserved for E2: whether a direct conversation has been encrypted (no downgrade, design 4.5).
+// Whether a direct conversation has been encrypted (no downgrade, design 4.5).
 KeyStoreFileDirectConversation :: struct {
 	peer_user_id: int,
 	encrypted:    bool,
@@ -138,6 +144,38 @@ KeyStore_setPin :: proc(store: ^KeyStore, pin: KeyPin) {
 		return
 	}
 	append(&store.pins, pin)
+}
+
+// Whether an encrypted message was sent to or opened from peerUserID on this server.
+KeyStore_conversationEncrypted :: proc(store: KeyStore, peerUserID: int) -> bool {
+	for conversation in store.directConversations {
+		if conversation.peer_user_id == peerUserID {
+			return conversation.encrypted
+		}
+	}
+	return false
+}
+
+// Marks the conversation with peerUserID encrypted. Returns true when that changed something
+// (the caller saves the store then).
+KeyStore_markConversationEncrypted :: proc(store: ^KeyStore, peerUserID: int) -> bool {
+	if peerUserID <= 0 {
+		return false
+	}
+	for &conversation in store.directConversations {
+		if conversation.peer_user_id == peerUserID {
+			if conversation.encrypted {
+				return false
+			}
+			conversation.encrypted = true
+			return true
+		}
+	}
+	append(
+		&store.directConversations,
+		KeyStoreFileDirectConversation{peer_user_id = peerUserID, encrypted = true},
+	)
+	return true
 }
 
 // The key store file for a server fingerprint (64 hex characters) under dir, or "" when the
@@ -232,7 +270,15 @@ keyStoreParse :: proc(data: []u8, serverPublicKey: common.IdentityPublicKeyBytes
 		append(&store.pins, pin)
 	}
 	append(&store.rooms, ..file.rooms[:])
-	append(&store.directConversations, ..file.direct_conversations[:])
+	for conversation in file.direct_conversations {
+		if conversation.peer_user_id <= 0 {
+			KeyStore_refuseWrites(&store, "the key store file has an invalid conversation entry")
+			continue
+		}
+		if conversation.encrypted {
+			KeyStore_markConversationEncrypted(&store, conversation.peer_user_id)
+		}
+	}
 	return store
 }
 

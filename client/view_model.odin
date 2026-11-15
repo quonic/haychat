@@ -13,6 +13,12 @@ TranscriptLine :: struct {
 	senderLabel:  string, // Borrowed from the room cache, or allocated with the view allocator
 	isSelf:       bool,
 	content:      string, // Borrowed from the room cache
+	// Direct messages (protocol 17): the encryption badge drawn at the right of the message
+	// ("🔒", "Unencrypted", …; empty for none) and its tone, and whether content is a
+	// placeholder ("This message could not be decrypted") drawn muted.
+	badge:        string,
+	badgeTone:    E2EEIndicatorTone,
+	placeholder:  bool,
 }
 
 RoomView :: struct {
@@ -121,6 +127,9 @@ SidebarRow :: struct {
 	// Conversation and Member: this client's state for the account's encryption key
 	// (e2ee_state.odin), shown by e2eeKeyIndicator.
 	keyState:    E2EEKeyState,
+	// Conversation: the newest message is plaintext that deserves the Unencrypted badge
+	// (directPreviewUnencrypted), shown unless the key changed.
+	previewUnencrypted: bool,
 }
 
 // Fallback label for an account the client has no nickname for.
@@ -278,6 +287,11 @@ buildSidebarRows :: proc(
 				isOnline = ServerDirectCache_peerIsOnline(cache, peerUserID),
 				unreadCount = conversation.unreadCount,
 				keyState = State_e2eePeerKeyInfo(state, serverID, peerUserID).state,
+				previewUnencrypted = directPreviewUnencrypted(
+					conversation.security,
+					len(conversation.lastEnvelope) > 0,
+					State_directConversationEncrypted(state, serverID, peerUserID),
+				),
 			},
 		)
 		conversationCount += 1
@@ -314,10 +328,13 @@ DirectConversationView :: struct {
 	peerUserID:       int,
 	peerLabel:        string,
 	peerOnline:       bool,
+	// The header's second line: online state, and whether messages are end-to-end encrypted.
+	subtitle:         string,
 	hasOlder:         bool,
 	isLoadingHistory: bool,
 	lines:            []TranscriptLine,
 	status:           string, // Borrowed from State
+	composer:         DirectComposerView,
 }
 
 // Builds the open conversation's view without creating caches. Lines borrow from the cache,
@@ -339,6 +356,14 @@ buildDirectConversationView :: proc(
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		view.peerLabel = userLabel("", peerUserID, allocator)
+		view.composer = buildDirectComposerView(
+			state,
+			serverID,
+			peerUserID,
+			view.peerLabel,
+			allocator,
+		)
+		view.subtitle = "Offline"
 		return
 	}
 	cache := &state.serverDirectCaches[cacheIndex]
@@ -348,6 +373,21 @@ buildDirectConversationView :: proc(
 		allocator,
 	)
 	view.peerOnline = ServerDirectCache_peerIsOnline(cache, peerUserID)
+	view.composer = buildDirectComposerView(
+		state,
+		serverID,
+		peerUserID,
+		view.peerLabel,
+		allocator,
+	)
+	view.subtitle = view.peerOnline ? "Online" : "Offline"
+	if view.composer.encrypted {
+		view.subtitle = DIRECT_HEADER_OFFLINE_ENCRYPTED
+		if view.peerOnline {
+			view.subtitle = DIRECT_HEADER_ONLINE_ENCRYPTED
+		}
+	}
+	cache = &state.serverDirectCaches[cacheIndex]
 	conversationIndex := ServerDirectCache_conversationCacheIndex(cache^, peerUserID)
 	if conversationIndex < 0 {
 		return
@@ -364,12 +404,17 @@ buildDirectConversationView :: proc(
 		if !isSelf {
 			senderLabel = userLabel(message.senderNickname, message.senderId, allocator)
 		}
+		badge, tone := directMessageBadge(message.security, len(message.envelope) > 0)
+		content, placeholder := directMessageText(message)
 		lines[index] = TranscriptLine {
 			messageID    = message.id,
 			senderUserID = message.senderId,
 			senderLabel  = senderLabel,
 			isSelf       = isSelf,
-			content      = message.content,
+			content      = content,
+			badge        = badge,
+			badgeTone    = tone,
+			placeholder  = placeholder,
 		}
 	}
 	view.lines = lines

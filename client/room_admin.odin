@@ -387,7 +387,7 @@ State_openRoomCreator :: proc(state: ^State) {
 	if !State_isServerAdmin(state, serverID) {
 		return
 	}
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	State_closeServerSettings(state)
 	State_resetRoomEditor(state, .Create, serverID, 0)
 }
@@ -404,7 +404,7 @@ State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	if room == nil {
 		return
 	}
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	State_closeServerSettings(state)
 	State_resetRoomEditor(state, .Edit, serverID, roomID)
 	append(&state.roomEditor.name, room.name)

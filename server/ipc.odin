@@ -299,6 +299,7 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.description)
 	case common.DatabasePostDirectMessageRequest:
 		delete(r.content)
+		delete(r.envelope)
 	case common.DatabaseAdminUserRequest:
 		delete(r.nickname)
 		delete(r.reason)
@@ -331,6 +332,7 @@ IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
 	delete(message.recipientNickname)
 	delete(message.timestamp)
 	delete(message.content)
+	delete(message.envelope)
 }
 
 // Exhaustive on purpose: a new result variant must decide what it owns.
@@ -377,6 +379,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(conversation.peerNickname)
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
+			delete(conversation.lastEnvelope)
 		}
 		delete(r.conversations)
 	case common.DatabaseUserDirectoryResult:

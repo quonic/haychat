@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:crypto"
 import "core:strings"
 
 // Direct messages, the user directory, and presence, per configured server.
@@ -11,19 +12,58 @@ import "core:strings"
 // so every cache is keyed by (serverID, peerUserID), like room caches are keyed by
 // (serverID, roomID).
 
-DirectMessageSendBridge :: proc(
-	transport: ^ClientServerTransport,
-	recipientUserID: int,
-	content: string,
-) -> bool
+DirectMessageSendBridge :: proc(transport: ^ClientServerTransport, send: DirectMessageSend) -> bool
 
 // Tests swap this to observe sends without a live session.
 directMessageSendBridge: DirectMessageSendBridge = ClientServerTransport_sendDirectMessage
 
+// What the client concluded about one direct message (protocol 17, e2ee-design.md 4.5, 4.6;
+// direct_messages_e2ee.odin decides it).
+DirectMessageProtection :: enum u8 {
+	// Waiting for a pinned key to check it with (a fetch is on its way): an envelope shows a
+	// placeholder, a plaintext message its content marked Unencrypted.
+	Pending,
+	Plain, // Plaintext without a signature, from before protocol 17: "Not encrypted"
+	Signed, // Plaintext fallback signed by the sender's pinned key: "Unencrypted"
+	Unverified, // Plaintext whose signature does not verify: "Unencrypted, sender not verified"
+	Encrypted, // An envelope opened with the pinned keys: a lock
+	Failed, // An envelope that could not be opened: "This message could not be decrypted"
+}
+
+// Why a message is Failed, for the harness's decryptError and the tests.
+DirectMessageFailure :: enum u8 {
+	None,
+	NoKey, // The server has no key for the sender and none was ever pinned
+	OwnKey, // This profile has no valid encryption key
+	Envelope, // The envelope did not open (envelopeError says why)
+	Replayed, // Another message from the same sender carries the same client message ID
+}
+
+DirectMessageSecurity :: struct {
+	protection:    DirectMessageProtection,
+	failure:       DirectMessageFailure,
+	envelopeError: common.E2EEError,
+}
+
+// One cached direct message: the server's fields, with content holding the opened plaintext of
+// an encrypted message (empty when it could not be opened), and what the client checked. Every
+// string and the envelope are owned; content is wiped before it is freed.
+DirectMessageEntry :: struct {
+	using message: common.StoredDirectMessage,
+	security:      DirectMessageSecurity,
+}
+
+// A conversation list entry: the server's summary, with lastContent holding the opened preview
+// of an encrypted newest message, and what the client checked about that message.
+DirectConversationEntry :: struct {
+	using summary: common.DirectConversationSummary,
+	security:      DirectMessageSecurity,
+}
+
 // One conversation with one peer on one server.
 DirectConversationCache :: struct {
 	peerUserID:           int,
-	messages:             [dynamic]common.StoredDirectMessage, // Owned, ordered by ID
+	messages:             [dynamic]DirectMessageEntry, // Owned, ordered by ID
 	draft:                [dynamic]u8, // Client-local, edited in place by the composer
 	initialHistoryLoaded: bool,
 	isLoadingHistory:     bool,
@@ -32,6 +72,16 @@ DirectConversationCache :: struct {
 	// The conversation's last mark-read (read_state.odin). Its marker and unread count are
 	// the server's and live in the conversation's DirectConversationSummary.
 	readSend:             ReadMarkerSendState,
+	// Messages accepted while the peer's key was still being fetched (design 7.2): sent, in
+	// order, as soon as encryption is possible, or put back into the draft when it is not.
+	// Owned and wiped before they are freed.
+	queued:               [dynamic]string,
+	// The plaintext fallback (design 4.6): the "Send without encryption" switch, whether its
+	// first-time confirmation was accepted, and whether that confirmation is showing. Never
+	// saved; off again when the conversation closes or encryption becomes possible.
+	fallbackOn:           bool,
+	fallbackConfirmed:    bool,
+	fallbackConfirmOpen:  bool,
 }
 
 // Everything direct-message related for one server. Every string and array is owned.
@@ -44,21 +94,55 @@ ServerDirectCache :: struct {
 	usersLoading:         bool,
 	// Most recent first. The server's list is replaced on every fetch; a live message moves
 	// (or adds) its conversation to the top.
-	conversations:        [dynamic]common.DirectConversationSummary,
+	conversations:        [dynamic]DirectConversationEntry,
 	conversationsLoaded:  bool,
 	conversationsLoading: bool,
 	caches:               [dynamic]DirectConversationCache,
 }
 
+DirectMessageEntry_deinit :: proc(entry: ^DirectMessageEntry) {
+	wipeString(entry.content)
+	StoredDirectMessage_deinit(&entry.message)
+	entry^ = {}
+}
+
+DirectMessageEntries_deinit :: proc(entries: ^[dynamic]DirectMessageEntry) {
+	for index in 0 ..< len(entries) {
+		DirectMessageEntry_deinit(&entries[index])
+	}
+	delete(entries^)
+	entries^ = nil
+}
+
+DirectConversationEntry_deinit :: proc(entry: ^DirectConversationEntry) {
+	wipeString(entry.lastContent)
+	DirectConversationSummary_deinit(&entry.summary)
+	entry^ = {}
+}
+
+DirectConversationEntries_deinit :: proc(entries: ^[dynamic]DirectConversationEntry) {
+	for index in 0 ..< len(entries) {
+		DirectConversationEntry_deinit(&entries[index])
+	}
+	delete(entries^)
+	entries^ = nil
+}
+
 DirectConversationCache_deinit :: proc(cache: ^DirectConversationCache) {
-	StoredDirectMessages_deinit(&cache.messages)
+	DirectMessageEntries_deinit(&cache.messages)
+	wipeBytes(cache.draft[:])
 	delete(cache.draft)
+	for text in cache.queued {
+		wipeString(text)
+		delete(text)
+	}
+	delete(cache.queued)
 	cache^ = {}
 }
 
 ServerDirectCache_deinit :: proc(cache: ^ServerDirectCache) {
 	UserSummaries_deinit(&cache.users)
-	DirectConversationSummaries_deinit(&cache.conversations)
+	DirectConversationEntries_deinit(&cache.conversations)
 	for index in 0 ..< len(cache.caches) {
 		DirectConversationCache_deinit(&cache.caches[index])
 	}
@@ -154,41 +238,131 @@ ServerDirectCache_peerIsOnline :: proc(cache: ^ServerDirectCache, peerUserID: in
 	return index >= 0 && cache.users[index].isOnline
 }
 
-// Merges a borrowed message into the cache by ID, cloning its strings. Duplicates (a history
-// page overlapping a live echo, or two overlapping pages) are dropped. Returns true when the
-// message was new.
-DirectConversationCache_mergeMessage :: proc(
+// Merges an entry into the cache by ID, taking ownership of it when it is new (and clearing
+// the caller's copy); a duplicate (a history page overlapping a live echo, or two overlapping
+// pages) is left to the caller to free. Returns true when the entry was new.
+//
+// A message whose sender and client message ID repeat another cached message's (design 4.2:
+// the server replayed an envelope or a signed message under a new ID) marks the later of the
+// two Replayed and drops its content, whichever arrived first
+// (DirectConversationCache_checkReplay).
+DirectConversationCache_mergeEntry :: proc(
 	cache: ^DirectConversationCache,
-	message: common.StoredDirectMessage,
+	entry: ^DirectMessageEntry,
 ) -> bool {
-	if message.id <= 0 {
+	if entry.id <= 0 {
 		return false
 	}
 	insertIndex := len(cache.messages)
 	for index := len(cache.messages) - 1; index >= 0; index -= 1 {
 		existingID := cache.messages[index].id
-		if existingID == message.id {
+		if existingID == entry.id {
 			return false
 		}
-		if existingID < message.id {
+		if existingID < entry.id {
 			break
 		}
 		insertIndex = index
 	}
-	clone := common.StoredDirectMessage {
-		id                = message.id,
-		senderId          = message.senderId,
-		senderNickname    = strings.clone(message.senderNickname),
-		recipientId       = message.recipientId,
-		recipientNickname = strings.clone(message.recipientNickname),
-		timestamp         = strings.clone(message.timestamp),
-		content           = strings.clone(message.content),
+	inject_at(&cache.messages, insertIndex, entry^)
+	entry^ = {}
+	if cache.oldestMessageID == 0 || cache.messages[insertIndex].id < cache.oldestMessageID {
+		cache.oldestMessageID = cache.messages[insertIndex].id
 	}
-	inject_at(&cache.messages, insertIndex, clone)
-	if cache.oldestMessageID == 0 || message.id < cache.oldestMessageID {
-		cache.oldestMessageID = message.id
+	DirectConversationCache_checkReplay(cache, insertIndex)
+	return true
+}
+
+// Compares the entry at index with every other message of its sender: two that both opened (or
+// verified) with the same client message ID are a replay, and the later one is marked. A
+// message that failed or still waits for a key takes no part, so a forged copy cannot make the
+// real message look replayed; one that opens later is checked again (State_directReopenPending).
+DirectConversationCache_checkReplay :: proc(cache: ^DirectConversationCache, index: int) {
+	entry := &cache.messages[index]
+	if !common.clientMessageIDIsSet(entry.clientMessageId) ||
+	   !directMessageTakesPartInReplays(entry.security) {
+		return
+	}
+	for &existing, existingIndex in cache.messages {
+		if existingIndex == index ||
+		   existing.senderId != entry.senderId ||
+		   existing.clientMessageId != entry.clientMessageId ||
+		   !directMessageTakesPartInReplays(existing.security) {
+			continue
+		}
+		if existing.id > entry.id {
+			directMessageMarkReplayed(&existing)
+		} else {
+			directMessageMarkReplayed(entry)
+			return
+		}
+	}
+}
+
+@(private = "file")
+directMessageTakesPartInReplays :: proc(security: DirectMessageSecurity) -> bool {
+	#partial switch security.protection {
+	case .Encrypted, .Signed, .Unverified:
+		return true
+	}
+	return false
+}
+
+@(private = "file")
+directMessageMarkReplayed :: proc(entry: ^DirectMessageEntry) {
+	wipeString(entry.content)
+	delete(entry.content)
+	entry.content = ""
+	entry.security = {protection = .Failed, failure = .Replayed}
+}
+
+// Merges a borrowed plaintext message by ID, cloning its strings, as a message from before
+// protocol 17 (no check); tests and callers that already decided use it. Returns true when the
+// message was new.
+DirectConversationCache_mergeMessage :: proc(
+	cache: ^DirectConversationCache,
+	message: common.StoredDirectMessage,
+) -> bool {
+	entry := DirectMessageEntry {
+		message = StoredDirectMessage_clone(message),
+		security = {protection = .Plain},
+	}
+	if !DirectConversationCache_mergeEntry(cache, &entry) {
+		DirectMessageEntry_deinit(&entry)
+		return false
 	}
 	return true
+}
+
+// A deep copy of a borrowed message.
+StoredDirectMessage_clone :: proc(
+	message: common.StoredDirectMessage,
+) -> common.StoredDirectMessage {
+	clone := message
+	clone.senderNickname = strings.clone(message.senderNickname)
+	clone.recipientNickname = strings.clone(message.recipientNickname)
+	clone.timestamp = strings.clone(message.timestamp)
+	clone.content = strings.clone(message.content)
+	clone.envelope = nil
+	if len(message.envelope) > 0 {
+		clone.envelope = make([]u8, len(message.envelope))
+		copy(clone.envelope, message.envelope)
+	}
+	return clone
+}
+
+// Zeroes a string's bytes in place (decrypted text, drafts) before it is freed. Strings are
+// read-only to the language, but every one passed here is an owned heap allocation.
+wipeString :: proc(text: string) {
+	if len(text) > 0 {
+		crypto.zero_explicit(raw_data(text), len(text))
+	}
+}
+
+wipeBytes :: proc(data: []u8) {
+	if len(data) > 0 {
+		crypto.zero_explicit(raw_data(data), len(data))
+	}
 }
 
 // The other side of a message from the viewer's point of view, or 0 when the viewer is on
@@ -205,27 +379,30 @@ directMessagePeerUserID :: proc(message: common.StoredDirectMessage, selfUserID:
 	return 0
 }
 
-// Moves the peer's conversation to the top with message as its latest, adding it when the
-// list has none yet, and returns true. An older message than the one listed changes nothing
-// and returns false. The summary keeps its read state.
+// Moves the peer's conversation to the top with entry as its latest, adding it when the list
+// has none yet, and returns true. An older message than the one listed changes nothing and
+// returns false. The summary keeps its read state; the preview is the entry's (opened) content.
 ServerDirectCache_noteLatestMessage :: proc(
 	cache: ^ServerDirectCache,
 	peerUserID: int,
-	message: common.StoredDirectMessage,
+	entry: DirectMessageEntry,
 ) -> bool {
-	peerNickname := message.recipientNickname
-	if message.senderId == peerUserID {
-		peerNickname = message.senderNickname
+	peerNickname := entry.recipientNickname
+	if entry.senderId == peerUserID {
+		peerNickname = entry.senderNickname
 	}
-	summary: common.DirectConversationSummary
+	summary: DirectConversationEntry
 	if index := ServerDirectCache_conversationIndex(cache^, peerUserID); index >= 0 {
-		if cache.conversations[index].lastMessageID >= message.id {
+		if cache.conversations[index].lastMessageID >= entry.id {
 			return false
 		}
 		summary = cache.conversations[index]
 		ordered_remove(&cache.conversations, index)
 		delete(summary.lastTimestamp)
+		wipeString(summary.lastContent)
 		delete(summary.lastContent)
+		delete(summary.lastEnvelope)
+		summary.lastEnvelope = nil
 		if len(summary.peerNickname) == 0 {
 			delete(summary.peerNickname)
 			summary.peerNickname = strings.clone(peerNickname)
@@ -234,10 +411,17 @@ ServerDirectCache_noteLatestMessage :: proc(
 		summary.peerUserId = peerUserID
 		summary.peerNickname = strings.clone(peerNickname)
 	}
-	summary.lastMessageID = message.id
-	summary.lastSenderId = message.senderId
-	summary.lastTimestamp = strings.clone(message.timestamp)
-	summary.lastContent = strings.clone(message.content)
+	summary.lastMessageID = entry.id
+	summary.lastSenderId = entry.senderId
+	summary.lastTimestamp = strings.clone(entry.timestamp)
+	summary.lastContent = strings.clone(entry.content)
+	summary.lastClientMessageId = entry.clientMessageId
+	summary.lastSignature = entry.signature
+	if len(entry.envelope) > 0 {
+		summary.lastEnvelope = make([]u8, len(entry.envelope))
+		copy(summary.lastEnvelope, entry.envelope)
+	}
+	summary.security = entry.security
 	inject_at(&cache.conversations, 0, summary)
 	return true
 }
@@ -335,6 +519,10 @@ State_openDirectConversation :: proc(state: ^State, serverID, peerUserID: int) {
 	if peerUserID <= 0 || peerUserID == State_selfUserID(state, serverID) {
 		return
 	}
+	// Closing the other conversation turns its plaintext switch off (design 4.6).
+	if serverID != state.selected_server_id || state.selected_dm_peer_id != peerUserID {
+		State_closeDirectConversation(state)
+	}
 	if serverID != state.selected_server_id {
 		state.selected_server_id = serverID
 		state.selected_transport_index = State_selectedTransportIndexForServerID(
@@ -380,54 +568,6 @@ State_sendDirectMessage :: proc(state: ^State) {
 	State_sendDirectMessageTo(state, state.selected_server_id, state.selected_dm_peer_id)
 }
 
-// Sends the draft of the conversation with peerUserID on serverID. The draft is cleared only
-// once the transport accepted it, and nothing is added to the transcript: the message appears
-// when the server echoes it back with its ID and timestamp.
-State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
-	if peerUserID <= 0 {
-		State_setChatStatus(state, "No conversation selected")
-		return
-	}
-	if peerUserID == State_selfUserID(state, serverID) {
-		State_setChatStatus(state, "Cannot send a direct message to yourself")
-		return
-	}
-	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
-	if transportIndex < 0 {
-		State_setChatStatus(state, "No server transport selected")
-		return
-	}
-	cache := State_serverDirectCache(state, serverID)
-	draft := &ServerDirectCache_conversationCache(cache, peerUserID).draft
-	content := normalizeTabs(string(draft[:]))
-	defer delete(content)
-	if len(strings.trim_space(content)) == 0 {
-		State_setChatStatus(state, "Cannot send an empty message")
-		return
-	}
-	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
-		State_setChatStatus(state, "Message is too long")
-		return
-	}
-
-	transport := &state.serverTransports[transportIndex]
-	// The worker may replace lastError at any time, so copy it while holding the lock.
-	ClientNetworkWorker_lock(state.networkWorker)
-	sent := directMessageSendBridge(transport, peerUserID, content)
-	sendError := sent ? "" : strings.clone(transport.lastError)
-	ClientNetworkWorker_unlock(state.networkWorker)
-	defer if !sent do delete(sendError)
-
-	if sent {
-		clear(draft)
-		State_clearChatStatus(state)
-	} else if len(sendError) > 0 {
-		State_setChatStatus(state, sendError)
-	} else {
-		State_setChatStatus(state, "Failed to send direct message")
-	}
-}
-
 State_loadOlderDirectHistory :: proc(state: ^State) {
 	if state.selected_dm_peer_id == 0 {
 		return
@@ -447,9 +587,10 @@ State_loadOlderDirectHistory :: proc(state: ^State) {
 
 // ── Receive handlers ──────────────────────────────────────────────
 
-// The message is borrowed; the cache keeps its own copy. Every new message moves its
-// conversation to the top of the list, and one from the peer that is newer than the listed
-// latest and the marker counts as unread unless the conversation is viewed (read_state.odin).
+// The message is borrowed; the cache keeps its own, opened copy (direct_messages_e2ee.odin).
+// Every new message moves its conversation to the top of the list, and one from the peer that
+// is newer than the listed latest and the marker counts as unread unless the conversation is
+// viewed (read_state.odin).
 State_receiveDirectMessage :: proc(
 	state: ^State,
 	serverID: int,
@@ -463,13 +604,19 @@ State_receiveDirectMessage :: proc(
 	if peerUserID <= 0 {
 		return
 	}
+	keys := State_directOpenKeys(state, serverID)
+	defer DirectOpenKeys_wipe(&keys)
+	entry := State_openDirectEntry(state, serverID, keys, message)
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)
-	if !DirectConversationCache_mergeMessage(conversation, message) {
+	if !DirectConversationCache_mergeEntry(conversation, &entry) {
+		DirectMessageEntry_deinit(&entry)
 		return
 	}
+	merged := DirectConversationCache_entry(conversation, message.id)
+	State_directEntryOpened(state, serverID, peerUserID, merged.security)
 	// A message older than the listed latest was already in the list's count.
-	if !ServerDirectCache_noteLatestMessage(cache, peerUserID, message) {
+	if !ServerDirectCache_noteLatestMessage(cache, peerUserID, merged^) {
 		return
 	}
 	summary := &cache.conversations[0]
@@ -487,7 +634,20 @@ State_receiveDirectMessage :: proc(
 	}
 }
 
-// Messages are borrowed; each merged message is cloned into the conversation cache.
+// The cached entry with messageID, or nil. Valid until the conversation's messages change.
+DirectConversationCache_entry :: proc(
+	cache: ^DirectConversationCache,
+	messageID: int,
+) -> ^DirectMessageEntry {
+	for &entry in cache.messages {
+		if entry.id == messageID {
+			return &entry
+		}
+	}
+	return nil
+}
+
+// Messages are borrowed; each merged message is opened into the conversation cache.
 State_receiveDirectHistory :: proc(
 	state: ^State,
 	serverID, peerUserID: int,
@@ -497,10 +657,25 @@ State_receiveDirectHistory :: proc(
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 || peerUserID <= 0 {
 		return
 	}
+	keys := State_directOpenKeys(state, serverID)
+	defer DirectOpenKeys_wipe(&keys)
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)
 	for message in messages {
-		DirectConversationCache_mergeMessage(conversation, message)
+		if DirectConversationCache_entry(conversation, message.id) != nil {
+			continue
+		}
+		entry := State_openDirectEntry(state, serverID, keys, message)
+		security := entry.security
+		cache = State_serverDirectCache(state, serverID)
+		conversation = ServerDirectCache_conversationCache(cache, peerUserID)
+		if !DirectConversationCache_mergeEntry(conversation, &entry) {
+			DirectMessageEntry_deinit(&entry)
+			continue
+		}
+		State_directEntryOpened(state, serverID, peerUserID, security)
+		cache = State_serverDirectCache(state, serverID)
+		conversation = ServerDirectCache_conversationCache(cache, peerUserID)
 	}
 	// Only a page that reaches the oldest loaded message knows whether anything older exists;
 	// the newest page fetched again after a reconnect must not bring back "Load older" once
@@ -525,7 +700,8 @@ State_receiveUserList :: proc(state: ^State, serverID: int, users: ^[dynamic]com
 	cache.usersLoading = false
 }
 
-// Takes ownership of conversations and clears the caller's array.
+// Takes ownership of conversations and clears the caller's array. Each newest message is
+// opened for its preview (design 4.5) like a message.
 State_receiveDirectConversations :: proc(
 	state: ^State,
 	serverID: int,
@@ -534,12 +710,43 @@ State_receiveDirectConversations :: proc(
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		return
 	}
-	cache := State_serverDirectCache(state, serverID)
-	DirectConversationSummaries_deinit(&cache.conversations)
-	cache.conversations = conversations^
+	keys := State_directOpenKeys(state, serverID)
+	defer DirectOpenKeys_wipe(&keys)
+	entries := make([dynamic]DirectConversationEntry, 0, len(conversations))
+	for &summary in conversations {
+		entry := DirectConversationEntry {
+			summary = summary,
+		}
+		summary = {}
+		State_openDirectPreview(state, serverID, keys, &entry)
+		append(&entries, entry)
+	}
+	delete(conversations^)
 	conversations^ = nil
+	cache := State_serverDirectCache(state, serverID)
+	DirectConversationEntries_deinit(&cache.conversations)
+	cache.conversations = entries
 	cache.conversationsLoaded = true
 	cache.conversationsLoading = false
+	// One fetch for every preview that waits for a key; the rest only mark their conversation.
+	waiting := make([dynamic]int, 0, len(entries))
+	defer delete(waiting)
+	settle := false
+	for entry in entries {
+		if entry.security.protection != .Pending {
+			State_directEntryOpened(state, serverID, entry.peerUserId, entry.security)
+		} else if State_e2eePeerKeyInfo(state, serverID, entry.peerUserId).state == .Unknown {
+			append(&waiting, entry.peerUserId)
+		} else {
+			settle = true
+		}
+	}
+	if len(waiting) > 0 {
+		State_e2eeRequestUserKeys(state, serverID, waiting[:])
+	}
+	if settle {
+		State_directReopenPending(state, serverID)
+	}
 }
 
 // Updates the directory's online flag and, when the event carries a different nickname (the

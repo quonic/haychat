@@ -12,19 +12,34 @@ VERIFY_DIALOG_WIDTH :: 460
 // Draws a row's key indicator at the right of content and takes its width.
 viewKeyIndicator :: proc(ctx: ^ui.Context, content: ^ui.Rect, keyState: E2EEKeyState) {
 	text, tone := e2eeKeyIndicator(keyState)
-	if len(text) == 0 {
-		return
-	}
-	color := ctx.theme.fgMuted
+	viewIndicatorText(ctx, content, text, tone)
+}
+
+e2eeIndicatorColor :: proc(ctx: ^ui.Context, tone: E2EEIndicatorTone) -> ui.Color {
 	switch tone {
 	case .Muted:
 	case .Good:
-		color = ctx.theme.success
+		return ctx.theme.success
 	case .Warning:
-		color = ctx.theme.warning
+		return ctx.theme.warning
 	case .Danger:
-		color = ctx.theme.danger
+		return ctx.theme.danger
 	}
+	return ctx.theme.fgMuted
+}
+
+// Draws a short indicator at the right of content and takes its width; nothing when it would
+// take more than half of it.
+viewIndicatorText :: proc(
+	ctx: ^ui.Context,
+	content: ^ui.Rect,
+	text: string,
+	tone: E2EEIndicatorTone,
+) {
+	if len(text) == 0 {
+		return
+	}
+	color := e2eeIndicatorColor(ctx, tone)
 	width := ui.textSize(ui.textGet(ctx, 0, .Regular, text)).x + ui.dp(ctx, 6)
 	if width > content.w / 2 {
 		return

@@ -222,7 +222,7 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 State_switchToServer :: proc(state: ^State, serverID: int) {
 	State_closeRoomEditor(state)
 	State_closeServerSettings(state)
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
 	state.selected_channel_id = 0
@@ -234,7 +234,7 @@ State_switchToServer :: proc(state: ^State, serverID: int) {
 State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
 	State_closeRoomEditor(state)
 	State_closeServerSettings(state)
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
 	if roomID == 0 {
@@ -617,8 +617,10 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.userKeys[:],
 			event.missingUserIDs[:],
 		)
+		State_directKeysChanged(state, event.serverID)
 	case .UserKeyChanged:
 		State_e2eeUserKeyChanged(state, event.serverID, event.userKey)
+		State_directKeysChanged(state, event.serverID)
 	case .None:
 	}
 }

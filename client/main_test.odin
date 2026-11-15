@@ -1766,7 +1766,8 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 	State_applyRuntimeEvent(&stateA, &presence)
 	ClientTransportRuntimeEvent_deinit(&presence)
 
-	// A sends through the same actions as the GUI composer.
+	// A sends through the same actions as the GUI composer. Protocol 17: B's key is fetched
+	// first (the message waits for it), then the message goes out encrypted.
 	content := "live two-client direct message proof"
 	State_openDirectConversation(&stateA, serverID, userB)
 	testSetDraft(State_selectedDirectDraft(&stateA), content)
@@ -1777,21 +1778,36 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		"expected the accepted send to clear A's draft, status %q",
 		stateA.chat_status_message,
 	)
+	if len(testDirectCache(&stateA, serverID, userB).queued) > 0 {
+		keys, hasKeys := liveTestWaitForEvent(&stateA, .UserKeysReceived, 3 * time.Second)
+		testing.expect(t, hasKeys, "expected client A to get B's key")
+		if !hasKeys {
+			return
+		}
+		State_applyRuntimeEvent(&stateA, &keys)
+		ClientTransportRuntimeEvent_deinit(&keys)
+	}
+	testing.expectf(
+		t,
+		len(testDirectCache(&stateA, serverID, userB).queued) == 0,
+		"expected A's message to go out once B's key arrived, status %q",
+		stateA.chat_status_message,
+	)
 
-	messageWithContent :: proc(event: ^ClientTransportRuntimeEvent, _: int) -> bool {
-		return event.directMessage.content == "live two-client direct message proof"
+	encryptedFrom :: proc(event: ^ClientTransportRuntimeEvent, senderID: int) -> bool {
+		return event.directMessage.senderId == senderID && len(event.directMessage.envelope) > 0
 	}
 	received, hasReceived := liveTestWaitForMatchingEvent(
 		&stateB,
 		.DirectMessageReceived,
 		3 * time.Second,
-		messageWithContent,
-		0,
+		encryptedFrom,
+		userA,
 	)
 	testing.expectf(
 		t,
 		hasReceived,
-		"expected client B to receive the direct message, got %s",
+		"expected client B to receive the encrypted direct message, got %s",
 		liveTestConnectionStatus(&stateB, serverID),
 	)
 	if !hasReceived {
@@ -1804,6 +1820,7 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		received.directMessage.recipientId == userB &&
 		received.directMessage.senderNickname == configA.display_name &&
 		received.directMessage.recipientNickname == configB.display_name &&
+		received.directMessage.content == "" &&
 		messageID > 0,
 		"expected the message from %d (%q) to %d (%q), got %v",
 		userA,
@@ -1814,7 +1831,26 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 	)
 	State_applyRuntimeEvent(&stateB, &received)
 	ClientTransportRuntimeEvent_deinit(&received)
+	// B has not pinned A yet: the message waits for A's key, then opens.
 	conversationB := testDirectCache(&stateB, serverID, userA)
+	if entry := DirectConversationCache_entry(conversationB, messageID);
+	   entry != nil && entry.security.protection == .Pending {
+		keys, hasKeys := liveTestWaitForEvent(&stateB, .UserKeysReceived, 3 * time.Second)
+		testing.expect(t, hasKeys, "expected client B to get A's key")
+		if !hasKeys {
+			return
+		}
+		State_applyRuntimeEvent(&stateB, &keys)
+		ClientTransportRuntimeEvent_deinit(&keys)
+	}
+	conversationB = testDirectCache(&stateB, serverID, userA)
+	openedB := DirectConversationCache_entry(conversationB, messageID)
+	testing.expectf(
+		t,
+		openedB != nil && openedB.security.protection == .Encrypted && openedB.content == content,
+		"expected B to open A's message, got %v",
+		openedB,
+	)
 	cacheB := State_serverDirectCache(&stateB, serverID)
 	testing.expect(
 		t,
@@ -1829,13 +1865,14 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		"expected B's conversation with A to hold the message as unread",
 	)
 
-	// The sender sees its own message only through the server's echo.
+	// The sender sees its own message only through the server's echo, and opens it with its
+	// own wrap.
 	echo, hasEcho := liveTestWaitForMatchingEvent(
 		&stateA,
 		.DirectMessageReceived,
 		3 * time.Second,
-		messageWithContent,
-		0,
+		encryptedFrom,
+		userA,
 	)
 	testing.expect(t, hasEcho, "expected client A to receive the echo of its own message")
 	if hasEcho {
@@ -1844,10 +1881,17 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		ClientTransportRuntimeEvent_deinit(&echo)
 		conversationA := testDirectCache(&stateA, serverID, userB)
 		summaryA := State_directSummary(&stateA, serverID, userB)
+		openedA := DirectConversationCache_entry(conversationA, messageID)
 		testing.expect(
 			t,
 			len(conversationA.messages) == 1 && summaryA != nil && summaryA.unreadCount == 0,
 			"expected A's own message never to count as unread",
+		)
+		testing.expectf(
+			t,
+			openedA != nil && openedA.security.protection == .Encrypted && openedA.content == content,
+			"expected A to open its own message, got %v",
+			openedA,
 		)
 	}
 

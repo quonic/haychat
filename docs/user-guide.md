@@ -202,10 +202,11 @@ before that.
 
 ## Encryption Keys
 
-HayChat is preparing end-to-end encryption. Messages are **not** encrypted end to end yet: the
-server can still read them (see [protocol.md](protocol.md)). What exists already is each
-profile's encryption key and the way you check other people's keys, so that encrypted messages
-can later reach only the people you mean.
+Direct messages are end-to-end encrypted whenever both people can receive encrypted messages
+(see [Encrypted direct messages](#encrypted-direct-messages)); room chat is not yet, and the
+server can still read it (see [protocol.md](protocol.md)). This section is about the keys that
+make that work: each profile's encryption key and the way you check other people's keys, so
+encrypted messages reach only the people you mean.
 
 - **Your key.** The client makes an encryption key on first start, keeps it in `config.json`
   next to your identity key, and gives it to every server you sign in to. You do nothing.
@@ -230,9 +231,41 @@ can later reach only the people you mean.
   client accepts it, but it is no longer marked verified: compare the safety number again.
 - **Losing `config.json`.** Your encryption key exists only in your `config.json`, next to your
   identity key. If you lose the file you get a new identity, which every server treats as a new
-  account, and you will not be able to read your encrypted messages again. Keep a copy of the
-  file somewhere safe (it is a secret: never share it). Losing a key store file only means each
-  person is pinned again on first contact.
+  account, and you will not be able to read your encrypted messages again: not the ones you
+  received, and not the ones you sent. Keep a copy of the file somewhere safe (it is a secret:
+  never share it). Losing a key store file only means each person is pinned again on first
+  contact; your encrypted messages open again from the server's copies, because they are
+  sealed to the key in `config.json`.
+
+### Encrypted Direct Messages
+
+- **When it happens.** A direct message is encrypted whenever the client has a key for the
+  other person that it trusts (pinned, not changed). You do nothing. The conversation's header
+  says "🔒 End-to-end encrypted", and each encrypted message carries a 🔒. The server stores
+  and forwards it without being able to read it; it still sees who wrote to whom and when.
+- **"Setting up encryption…".** The first time you write to someone the client fetches their
+  key. A message you send meanwhile waits and goes out as soon as the key is there.
+- **When encryption is not possible.** If the other person has not set up encryption yet (they
+  have not signed in since their server was updated), their key changed, or the server stops
+  providing a key it gave before, the composer is replaced by a banner saying why. Once a
+  conversation was encrypted, it is never quietly sent without encryption again.
+- **Send without encryption.** The banner has a **Send without encryption** switch, off by
+  default, for when you must reach the person anyway (for example to ask them to update their
+  client). The first time you turn it on in a conversation, HayChat asks you to confirm that the
+  server and its operator can read these messages. While it is on, the composer says
+  "Unencrypted: the server can read this" in red and the button reads **Send unencrypted**. It
+  turns itself off when you close the conversation, when you restart HayChat, and as soon as
+  encryption works again. Messages sent this way are still signed, so nobody can change them
+  or send them in your name.
+- **Badges.** Each message shows how it was sent: 🔒 (encrypted); **Unencrypted** (sent with the
+  switch: the server could read it); **Unencrypted, sender not verified** (unencrypted, and its
+  signature does not match the sender's key: treat it as possibly forged); **Not encrypted**
+  (sent before encryption existed on this server). A conversation whose newest message is
+  unencrypted shows **unencrypted** in the Direct Messages list.
+- **"This message could not be decrypted".** The message could not be opened with the keys your
+  client trusts: it was changed, sealed for someone else, sent under another key, or repeated by
+  the server. The client never tries it again with other keys. "Opening encrypted message…"
+  means the client is still fetching the sender's key.
 
 ## Administration
 

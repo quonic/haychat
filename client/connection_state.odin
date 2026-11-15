@@ -206,6 +206,8 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_requestRoomList(state, event.serverID)
 	State_requestDirectStateAfterConnect(state, event.serverID)
 	State_e2eeConnected(state, event.serverID)
+	// After the key store is loaded: messages queued for a key fetch again (protocol 17).
+	State_directRequestQueuedKeys(state, event.serverID)
 	State_voiceConnected(state, event.serverID)
 }
 

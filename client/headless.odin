@@ -12,6 +12,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:io"
 import "core:os"
+import "core:reflect"
 import "core:strconv"
 import "core:strings"
 import "core:sync"
@@ -251,6 +252,10 @@ HeadlessEventKind :: enum {
 	// Account encryption keys (protocol 16): one per account a ServerUserKeys or
 	// ServerUserKeyChanged told this client about, after it was applied.
 	UserKeys,
+	// Encrypted direct messages (protocol 17): a message from history that waited for a key and
+	// is now opened (or settled), and queued messages that went out or back into the draft.
+	DirectOpened,
+	DirectQueue,
 	// Derived by the harness (headless_voice.odin), not runtime events.
 	VoiceSpeaking,
 	VoiceStatus,
@@ -286,6 +291,8 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.AdminRooms     = "admin_rooms",
 	.RoomMemberResult = "room_member_result",
 	.UserKeys       = "user_keys",
+	.DirectOpened   = "direct_opened",
+	.DirectQueue    = "direct_queue",
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 }
@@ -593,6 +600,13 @@ HeadlessRoomEventJSON :: struct {
 
 // A direct message, live or from history. The conversation's peer is recipientID when
 // senderID is the viewer's own userID (from `connected`), otherwise senderID.
+//
+// Protocol 17: printed after State opened it (content is the plaintext of an encrypted
+// message). encrypted: it is an envelope; signed: its signature verified against the sender's
+// pin (every opened envelope, and a valid plaintext fallback); decryptError: why an envelope
+// could not be opened ("no_key", "own_key", "replayed", or the E2EEError), otherwise "";
+// protection: pending, plain (from before protocol 17), signed, unverified, encrypted or
+// failed. A live message waiting for its sender's key is printed once it opened.
 HeadlessDirectMessageJSON :: struct {
 	event:             string,
 	serverID:          int,
@@ -602,6 +616,10 @@ HeadlessDirectMessageJSON :: struct {
 	recipientID:       int,
 	recipientNickname: string,
 	timestamp:         string,
+	encrypted:         bool,
+	signed:            bool,
+	decryptError:      string,
+	protection:        string,
 	content:           string,
 }
 
@@ -612,7 +630,22 @@ HeadlessDirectHistoryMessageJSON :: struct {
 	recipientID:       int,
 	recipientNickname: string,
 	timestamp:         string,
+	encrypted:         bool,
+	signed:            bool,
+	decryptError:      string,
+	protection:        string,
 	content:           string,
+}
+
+// Queued messages (protocol 17): state "sent" (count of them went out encrypted) or
+// "refused" (they went back into the draft; reason says why).
+HeadlessDirectQueueJSON :: struct {
+	event:      string,
+	serverID:   int,
+	peerUserID: int,
+	state:      string,
+	count:      int,
+	reason:     string,
 }
 
 HeadlessDirectHistoryJSON :: struct {
@@ -631,15 +664,24 @@ HeadlessUserListJSON :: struct {
 
 // unreadCount and lastReadMessageId are the read state (protocol 11): from the server's list,
 // moved by read_marker events, plus the peer's live messages counted since.
+//
+// Protocol 17: lastContent is the opened preview; encrypted, signed, decryptError and
+// protection describe the newest message as in direct_message, and conversationEncrypted is
+// the key store's no-downgrade flag for the peer.
 HeadlessConversationJSON :: struct {
-	peerUserID:        int,
-	peerNickname:      string,
-	lastMessageID:     int,
-	lastSenderID:      int,
-	lastTimestamp:     string,
-	lastContent:       string,
-	lastReadMessageId: int,
-	unreadCount:       int,
+	peerUserID:            int,
+	peerNickname:          string,
+	lastMessageID:         int,
+	lastSenderID:          int,
+	lastTimestamp:         string,
+	encrypted:             bool,
+	signed:                bool,
+	decryptError:          string,
+	protection:            string,
+	conversationEncrypted: bool,
+	lastContent:           string,
+	lastReadMessageId:     int,
+	unreadCount:           int,
 }
 
 HeadlessConversationsJSON :: struct {
@@ -700,26 +742,148 @@ HeadlessPresenceJSON :: struct {
 	isOnline: bool,
 }
 
-// Converts conversation summaries to their JSON shape. Strings stay borrowed; free the slice
-// with allocator.
+// Converts conversation entries to their JSON shape. Strings stay borrowed; free the slice
+// with allocator. state (optional) gives the no-downgrade flag.
 headlessConversationsJSON :: proc(
-	conversations: []common.DirectConversationSummary,
+	conversations: []DirectConversationEntry,
+	state: ^State = nil,
+	serverID := 0,
 	allocator := context.allocator,
 ) -> []HeadlessConversationJSON {
 	result := make([]HeadlessConversationJSON, len(conversations), allocator)
 	for conversation, index in conversations {
+		fields := headlessDirectSecurity(conversation.security, len(conversation.lastEnvelope) > 0)
 		result[index] = {
-			peerUserID    = conversation.peerUserId,
-			peerNickname  = conversation.peerNickname,
-			lastMessageID = conversation.lastMessageID,
-			lastSenderID  = conversation.lastSenderId,
+			peerUserID        = conversation.peerUserId,
+			peerNickname      = conversation.peerNickname,
+			lastMessageID     = conversation.lastMessageID,
+			lastSenderID      = conversation.lastSenderId,
 			lastTimestamp     = conversation.lastTimestamp,
 			lastContent       = conversation.lastContent,
+			encrypted         = fields.encrypted,
+			signed            = fields.signed,
+			decryptError      = fields.decryptError,
+			protection        = fields.protection,
 			lastReadMessageId = conversation.lastReadMessageId,
 			unreadCount       = conversation.unreadCount,
 		}
+		if state != nil {
+			result[index].conversationEncrypted = State_directConversationEncrypted(
+				state,
+				serverID,
+				conversation.peerUserId,
+			)
+		}
 	}
 	return result
+}
+
+HeadlessDirectSecurityFields :: struct {
+	encrypted:    bool,
+	signed:       bool,
+	decryptError: string,
+	protection:   string,
+}
+
+HEADLESS_DIRECT_PROTECTION_NAMES := [DirectMessageProtection]string {
+	.Pending    = "pending",
+	.Plain      = "plain",
+	.Signed     = "signed",
+	.Unverified = "unverified",
+	.Encrypted  = "encrypted",
+	.Failed     = "failed",
+}
+
+// The harness fields for what the client concluded about a message. Strings are static.
+headlessDirectSecurity :: proc(
+	security: DirectMessageSecurity,
+	hasEnvelope: bool,
+) -> HeadlessDirectSecurityFields {
+	fields := HeadlessDirectSecurityFields {
+		encrypted  = hasEnvelope,
+		signed     = security.protection == .Signed || security.protection == .Encrypted,
+		protection = HEADLESS_DIRECT_PROTECTION_NAMES[security.protection],
+	}
+	if security.protection == .Failed {
+		switch security.failure {
+		case .None, .Envelope:
+			fields.decryptError = headlessE2EEErrorName(security.envelopeError)
+		case .NoKey:
+			fields.decryptError = "no_key"
+		case .OwnKey:
+			fields.decryptError = "own_key"
+		case .Replayed:
+			fields.decryptError = "replayed"
+		}
+	}
+	return fields
+}
+
+headlessE2EEErrorName :: proc(err: common.E2EEError) -> string {
+	names := reflect.enum_field_names(common.E2EEError)
+	values := reflect.enum_field_values(common.E2EEError)
+	for value, index in values {
+		if common.E2EEError(value) == err {
+			return names[index]
+		}
+	}
+	return "unknown"
+}
+
+// The JSON of a direct message as State holds it: the cached entry when there is one (opened
+// content and what was checked), otherwise the message as it came. Strings stay borrowed.
+headlessDirectMessageFields :: proc(
+	state: ^State,
+	serverID: int,
+	message: common.StoredDirectMessage,
+) -> HeadlessDirectHistoryMessageJSON {
+	entry := DirectMessageEntry {
+		message = message,
+		security = {protection = .Pending},
+	}
+	if len(message.envelope) == 0 && message.signature == {} {
+		entry.security.protection = .Plain
+	}
+	if cached := headlessCachedDirectEntry(state, serverID, message); cached != nil {
+		entry = cached^
+	} else if len(message.envelope) > 0 {
+		entry.content = ""
+	}
+	fields := headlessDirectSecurity(entry.security, len(entry.envelope) > 0)
+	return HeadlessDirectHistoryMessageJSON {
+		id = entry.id,
+		senderID = entry.senderId,
+		senderNickname = entry.senderNickname,
+		recipientID = entry.recipientId,
+		recipientNickname = entry.recipientNickname,
+		timestamp = entry.timestamp,
+		encrypted = fields.encrypted,
+		signed = fields.signed,
+		decryptError = fields.decryptError,
+		protection = fields.protection,
+		content = entry.content,
+	}
+}
+
+headlessCachedDirectEntry :: proc(
+	state: ^State,
+	serverID: int,
+	message: common.StoredDirectMessage,
+) -> ^DirectMessageEntry {
+	if state == nil {
+		return nil
+	}
+	index := State_serverDirectCacheIndex(state^, serverID)
+	peerUserID := directMessagePeerUserID(message, State_selfUserID(state, serverID))
+	if index < 0 || peerUserID <= 0 {
+		return nil
+	}
+	cache := &state.serverDirectCaches[index]
+	conversationIndex := ServerDirectCache_conversationCacheIndex(cache^, peerUserID)
+	if conversationIndex < 0 {
+		return nil
+	}
+	return DirectConversationCache_entry(&cache.caches[conversationIndex], message.id)
 }
 
 // What rendering needs beyond the event itself. The harness fills it in; zero values are fine
@@ -973,48 +1137,10 @@ headlessRenderRuntimeEvent :: proc(
 			},
 			allocator,
 		)
-	case .DirectMessageReceived:
-		kind = .DirectMessage
-		message := event.directMessage
-		line = headlessMarshal(
-			HeadlessDirectMessageJSON {
-				event = HEADLESS_EVENT_NAMES[kind],
-				serverID = event.serverID,
-				id = message.id,
-				senderID = message.senderId,
-				senderNickname = message.senderNickname,
-				recipientID = message.recipientId,
-				recipientNickname = message.recipientNickname,
-				timestamp = message.timestamp,
-				content = message.content,
-			},
-			allocator,
-		)
-	case .DirectHistoryReceived:
-		kind = .DirectHistory
-		messages := make([]HeadlessDirectHistoryMessageJSON, len(event.directMessages), allocator)
-		defer delete(messages, allocator)
-		for message, index in event.directMessages {
-			messages[index] = {
-				id                = message.id,
-				senderID          = message.senderId,
-				senderNickname    = message.senderNickname,
-				recipientID       = message.recipientId,
-				recipientNickname = message.recipientNickname,
-				timestamp         = message.timestamp,
-				content           = message.content,
-			}
-		}
-		line = headlessMarshal(
-			HeadlessDirectHistoryJSON {
-				event = HEADLESS_EVENT_NAMES[kind],
-				serverID = event.serverID,
-				peerUserID = event.peerUserID,
-				hasOlder = event.hasOlder,
-				messages = messages,
-			},
-			allocator,
-		)
+	case .DirectMessageReceived, .DirectHistoryReceived, .DirectConversationsReceived:
+		// Printed after State opened them (headlessHandleRuntimeEvent): what matters is the
+		// plaintext and what the client checked, not the envelope the server sent.
+		return "", {}, false
 	case .UserListReceived:
 		kind = .UserList
 		users := make([]HeadlessDirectoryUserJSON, len(event.users), context.temp_allocator)
@@ -1031,18 +1157,6 @@ headlessRenderRuntimeEvent :: proc(
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
 				users = users,
-			},
-			allocator,
-		)
-	case .DirectConversationsReceived:
-		kind = .Conversations
-		conversations := headlessConversationsJSON(event.conversations[:], allocator)
-		defer delete(conversations, allocator)
-		line = headlessMarshal(
-			HeadlessConversationsJSON {
-				event = HEADLESS_EVENT_NAMES[kind],
-				serverID = event.serverID,
-				conversations = conversations,
 			},
 			allocator,
 		)
@@ -1302,11 +1416,16 @@ HeadlessAdminRequestJSON :: struct {
 	userID:   int,
 }
 
+// dm and dm-plain: the message went out (encrypted says how) or, for dm while the peer's key
+// is still being fetched, was queued; a queued message is sent, or refused, with a
+// direct_queue event once the key state is known.
 HeadlessDirectSendJSON :: struct {
 	ok:         bool,
 	cmd:        string,
 	serverID:   int,
 	peerUserID: int,
+	encrypted:  bool,
+	queued:     bool,
 }
 
 HeadlessDirectHistoryRequestJSON :: struct {
@@ -1395,7 +1514,11 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"recent direct conversations, newest first; requests them if not loaded",
 		headlessCommandConversations},
 	{"dm", 1, 0, .Required, "dm USER_ID TEXT...",
-		"sends the rest of the line as a direct message", headlessCommandDirectMessage},
+		"sends the rest of the line as an encrypted direct message (queued while the key is " +
+		"fetched, refused when encryption is not possible)", headlessCommandDirectMessage},
+	{"dm-plain", 1, 0, .Required, "dm-plain USER_ID TEXT...",
+		"sends a signed plaintext direct message through the Send without encryption switch, " +
+		"only when encryption is not possible", headlessCommandDirectPlain},
 	{"dm-history", 1, 1, .None, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
@@ -1588,12 +1711,17 @@ HeadlessHarness :: struct {
 	running:         bool,
 	// Where the key stores go (keystore.odin); empty keeps them in memory (tests). Borrowed.
 	keyStoreDir:     string,
+	// Live direct messages (server ID, message ID) still waiting for their sender's key, to be
+	// printed as direct_message once they open.
+	owedDirectMessages: map[[2]int]bool,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
 	State_deinit(&harness.state)
 	delete(harness.connectAttempts)
 	harness.connectAttempts = nil
+	delete(harness.owedDirectMessages)
+	harness.owedDirectMessages = nil
 }
 
 // Writes one line followed by a newline in a single write, so lines never interleave.
@@ -1644,9 +1772,16 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		headlessRecordEvent(harness, kind)
 	}
 	State_applyRuntimeEvent(&harness.state, event)
-	// Key events are reported from State after they were applied: what matters is what the
-	// client concluded (pinned, changed, refused), not what the server sent.
+	// Key and direct message events are reported from State after they were applied: what
+	// matters is what the client concluded (pinned, changed, refused, opened), not what the
+	// server sent.
 	#partial switch event.kind {
+	case .DirectMessageReceived:
+		headlessWriteDirectMessageEvent(harness, event.serverID, event.directMessage)
+	case .DirectHistoryReceived:
+		headlessWriteDirectHistoryEvent(harness, event)
+	case .DirectConversationsReceived:
+		headlessWriteConversationsEvent(harness, event.serverID)
 	case .UserKeysReceived:
 		for bundle in event.userKeys {
 			headlessWriteUserKeysEvent(harness, event.serverID, bundle.userId)
@@ -1657,8 +1792,142 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 	case .UserKeyChanged:
 		headlessWriteUserKeysEvent(harness, event.serverID, event.userKey.userId)
 	}
+	headlessWriteDirectNotes(harness)
 	// Applying a voice event can start or stop the engine; report that right after it.
 	headlessPollVoice(harness)
+}
+
+// A live direct message, once it is open: one still waiting for its sender's key is owed and
+// printed when it opens (headlessWriteDirectNotes).
+headlessWriteDirectMessageEvent :: proc(
+	harness: ^HeadlessHarness,
+	serverID: int,
+	message: common.StoredDirectMessage,
+) {
+	if cached := headlessCachedDirectEntry(&harness.state, serverID, message);
+	   cached != nil && cached.security.protection == .Pending {
+		harness.owedDirectMessages[{serverID, message.id}] = true
+		return
+	}
+	headlessWriteDirectMessageLine(harness, .DirectMessage, serverID, message)
+}
+
+headlessWriteDirectMessageLine :: proc(
+	harness: ^HeadlessHarness,
+	kind: HeadlessEventKind,
+	serverID: int,
+	message: common.StoredDirectMessage,
+) {
+	fields := headlessDirectMessageFields(&harness.state, serverID, message)
+	headlessWriteJSON(
+		harness,
+		HeadlessDirectMessageJSON {
+			event = HEADLESS_EVENT_NAMES[kind],
+			serverID = serverID,
+			id = fields.id,
+			senderID = fields.senderID,
+			senderNickname = fields.senderNickname,
+			recipientID = fields.recipientID,
+			recipientNickname = fields.recipientNickname,
+			timestamp = fields.timestamp,
+			encrypted = fields.encrypted,
+			signed = fields.signed,
+			decryptError = fields.decryptError,
+			protection = fields.protection,
+			content = fields.content,
+		},
+	)
+	headlessRecordEvent(harness, kind)
+}
+
+headlessWriteDirectHistoryEvent :: proc(
+	harness: ^HeadlessHarness,
+	event: ^ClientTransportRuntimeEvent,
+) {
+	messages := make([]HeadlessDirectHistoryMessageJSON, len(event.directMessages))
+	defer delete(messages)
+	for message, index in event.directMessages {
+		messages[index] = headlessDirectMessageFields(&harness.state, event.serverID, message)
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessDirectHistoryJSON {
+			event = HEADLESS_EVENT_NAMES[.DirectHistory],
+			serverID = event.serverID,
+			peerUserID = event.peerUserID,
+			hasOlder = event.hasOlder,
+			messages = messages,
+		},
+	)
+	headlessRecordEvent(harness, .DirectHistory)
+}
+
+headlessWriteConversationsEvent :: proc(harness: ^HeadlessHarness, serverID: int) {
+	cache := State_serverDirectCache(&harness.state, serverID)
+	conversations := headlessConversationsJSON(cache.conversations[:], &harness.state, serverID)
+	defer delete(conversations)
+	headlessWriteJSON(
+		harness,
+		HeadlessConversationsJSON {
+			event = HEADLESS_EVENT_NAMES[.Conversations],
+			serverID = serverID,
+			conversations = conversations,
+		},
+	)
+	headlessRecordEvent(harness, .Conversations)
+}
+
+// Prints what State recorded after the event or command that caused it: messages opened once
+// their key arrived (an owed live message as direct_message, a history one as direct_opened),
+// and what became of queued messages (direct_queue).
+headlessWriteDirectNotes :: proc(harness: ^HeadlessHarness) {
+	state := &harness.state
+	for note in state.directNotes {
+		switch note.kind {
+		case .Opened:
+			entry := headlessNoteEntry(state, note)
+			if entry == nil {
+				continue
+			}
+			kind := HeadlessEventKind.DirectOpened
+			if harness.owedDirectMessages[{note.serverID, note.messageID}] {
+				delete_key(&harness.owedDirectMessages, [2]int{note.serverID, note.messageID})
+				kind = .DirectMessage
+			}
+			headlessWriteDirectMessageLine(harness, kind, note.serverID, entry.message)
+		case .Queued:
+		case .QueueSent, .QueueRefused:
+			value := HeadlessDirectQueueJSON {
+				event      = HEADLESS_EVENT_NAMES[.DirectQueue],
+				serverID   = note.serverID,
+				peerUserID = note.peerUserID,
+				state      = "sent",
+				count      = note.messageID,
+			}
+			if note.kind == .QueueRefused {
+				value.state = "refused"
+				value.count = 0
+				value.reason = state.chat_status_message
+			}
+			headlessWriteJSON(harness, value)
+			headlessRecordEvent(harness, .DirectQueue)
+		}
+	}
+	clear(&state.directNotes)
+}
+
+@(private = "file")
+headlessNoteEntry :: proc(state: ^State, note: DirectNote) -> ^DirectMessageEntry {
+	index := State_serverDirectCacheIndex(state^, note.serverID)
+	if index < 0 {
+		return nil
+	}
+	cache := &state.serverDirectCaches[index]
+	conversationIndex := ServerDirectCache_conversationCacheIndex(cache^, note.peerUserID)
+	if conversationIndex < 0 {
+		return nil
+	}
+	return DirectConversationCache_entry(&cache.caches[conversationIndex], note.messageID)
 }
 
 // The user_keys shape for userID on serverID, from State. Strings in the temp allocator.
@@ -1827,6 +2096,7 @@ headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {
 		headlessWriteError(harness, parsed.name, message)
 	case .None:
 		parsed.command.run(harness, &parsed)
+		headlessWriteDirectNotes(harness)
 	}
 }
 
@@ -1863,6 +2133,7 @@ headlessConnectAndWait :: proc(
 ) -> bool {
 	harness.state = State_initFromConfig(config)
 	state := &harness.state
+	state.recordDirectNotes = true
 	// The key store is written like the GUI writes it (keystore.odin), so a profile run twice
 	// keeps its pins.
 	if len(harness.keyStoreDir) > 0 {
@@ -2083,7 +2354,7 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 		return
 	}
 	state := &harness.state
-	state.selected_dm_peer_id = 0
+	State_closeDirectConversation(state)
 	state.selected_channel_id = roomID
 	draft := State_selectedRoomDraft(state)
 	clear(draft)
@@ -2163,7 +2434,7 @@ headlessCommandConversations :: proc(
 		State_requestDirectConversations(state, serverID)
 		cache = State_serverDirectCache(state, serverID)
 	}
-	conversations := headlessConversationsJSON(cache.conversations[:])
+	conversations := headlessConversationsJSON(cache.conversations[:], state, serverID)
 	defer delete(conversations)
 	headlessWriteJSON(
 		harness,
@@ -2179,28 +2450,69 @@ headlessCommandConversations :: proc(
 }
 
 // Sends through State_sendDirectMessageTo, the action behind the GUI's DM composer: the text
-// goes into that conversation's draft. The open conversation does not change.
+// goes into that conversation's draft. The open conversation does not change. Like the GUI it
+// encrypts, queues while the peer's key is being fetched, and is refused when encryption is not
+// possible (the plaintext fallback is dm-plain).
 headlessCommandDirectMessage :: proc(
 	harness: ^HeadlessHarness,
 	command: ^HeadlessParsedCommand,
 ) {
+	headlessSendDirect(harness, command, plaintext = false)
+}
+
+// dm-plain USER_ID TEXT...: the plaintext fallback (design 4.6) through the same actions as
+// the GUI's "Send without encryption" switch: it turns the switch on (accepting the first-time
+// confirmation), sends, and turns it off again, as closing the conversation would. Refused
+// while encryption to the peer is possible or its key is still being checked.
+headlessCommandDirectPlain :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	headlessSendDirect(harness, command, plaintext = true)
+}
+
+@(private = "file")
+headlessSendDirect :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	plaintext: bool,
+) {
+	usage := plaintext ? "usage: dm-plain USER_ID TEXT..." : "usage: dm USER_ID TEXT..."
 	peerUserID, peerOK := headlessParseNumber(command.args[0])
 	if !peerOK || peerUserID == 0 {
-		headlessWriteError(harness, command.name, "usage: dm USER_ID TEXT...")
+		headlessWriteError(harness, command.name, usage)
 		return
 	}
 	state := &harness.state
 	serverID := state.selected_server_id
-	draft := &ServerDirectCache_conversationCache(
+	if plaintext {
+		result := State_setDirectFallback(state, serverID, peerUserID, true)
+		if result == .NeedsConfirmation {
+			State_confirmDirectFallback(state, serverID, peerUserID)
+		} else if result == .Unavailable {
+			info := State_e2eePeerKeyInfo(state, serverID, peerUserID)
+			message := "encryption to this user is possible; use dm"
+			if info.blockReason == .Pending {
+				message = "the user's key is still being checked; try again"
+			}
+			headlessWriteError(harness, command.name, message)
+			return
+		}
+	}
+	defer if plaintext {
+		State_setDirectFallback(state, serverID, peerUserID, false)
+	}
+	conversation := ServerDirectCache_conversationCache(
 		State_serverDirectCache(state, serverID),
 		peerUserID,
-	).draft
-	clear(draft)
-	append(draft, ..transmute([]u8)command.args[1])
+	)
+	mode := directSendMode(
+		State_e2eePeerKeyInfo(state, serverID, peerUserID),
+		conversation.fallbackOn,
+	)
+	clear(&conversation.draft)
+	append(&conversation.draft, ..transmute([]u8)command.args[1])
 	State_clearChatStatus(state)
 	State_sendDirectMessageTo(state, serverID, peerUserID)
 
-	draft = &ServerDirectCache_conversationCache(
+	draft := &ServerDirectCache_conversationCache(
 		State_serverDirectCache(state, serverID),
 		peerUserID,
 	).draft
@@ -2221,6 +2533,8 @@ headlessCommandDirectMessage :: proc(
 			cmd = command.name,
 			serverID = serverID,
 			peerUserID = peerUserID,
+			encrypted = mode == .Encrypt,
+			queued = mode == .Queue,
 		},
 	)
 }
