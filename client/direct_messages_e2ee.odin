@@ -340,6 +340,8 @@ State_directKeysChanged :: proc(state: ^State, serverID: int) {
 	// Encrypted rooms (room_log.odin): verified logs are checked against the new pins, and
 	// changes and creates that waited for a key go out.
 	State_roomLogsPinsChanged(state, serverID)
+	// Sender chains (room_chains.odin): distributions and key answers that waited for keys.
+	State_roomChainsKeysChanged(state, serverID)
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return

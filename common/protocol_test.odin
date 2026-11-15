@@ -81,6 +81,12 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientAppendRoomLog, 167},
 	{.ClientFetchRoomLog, 168},
 	{.ServerRoomLog, 169},
+	{.ClientRoomKeyEnvelope, 170},
+	{.ServerRoomKeyEnvelope, 171},
+	{.ClientFetchRoomKeys, 172},
+	{.ServerRoomKeys, 173},
+	{.ClientRequestRoomKey, 174},
+	{.ServerRoomKeyRequest, 175},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -401,11 +407,7 @@ testStoredChatMessageCarriesSenderNicknameOverCBOR :: proc(t: ^testing.T) {
 
 	decoded: ServerChatMessagePayload
 	assert(cbor.unmarshal(encoded, &decoded) == nil, "expected chat payload decoding to succeed")
-	defer {
-		delete(decoded.senderNickname)
-		delete(decoded.timestamp)
-		delete(decoded.content)
-	}
+	defer ServerChatMessagePayload_deinit(&decoded)
 	assert(
 		decoded.senderNickname == original.senderNickname,
 		fmt.tprintf("expected nickname %q, got %q", original.senderNickname, decoded.senderNickname),
@@ -429,14 +431,78 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// stored messages and conversation summaries, and the signed plaintext fallback; 18 added
 	// encrypted rooms and their member log (ClientAppendRoomLog, ClientFetchRoomLog,
 	// ServerRoomLog, RoomSummary.encrypted and logVersion, ClientCreateRoomPayload.encrypted,
-	// ClientEditRoomPayload.encrypted), so peers on 17 or older cannot talk to this build.
+	// ClientEditRoomPayload.encrypted); 19 added sender chains in encrypted rooms (sealed and
+	// clientMessageId on chat messages, ClientRoomKeyEnvelope, ServerRoomKeyEnvelope,
+	// ClientFetchRoomKeys, ServerRoomKeys, ClientRequestRoomKey, ServerRoomKeyRequest), so peers
+	// on 18 or older cannot talk to this build.
 	assert(
-		protocolVersion == 18,
+		protocolVersion == 19,
 		fmt.tprintf(
-			"expected protocol version 18 for encrypted room logs, got %d",
+			"expected protocol version 19 for room sender chains, got %d",
 			protocolVersion,
 		),
 	)
+}
+
+// Protocol 19: sealed chat messages and key envelopes carry their bytes as byte strings,
+// unchanged, and own them once decoded.
+@(test)
+testRoomChainPayloadsCarryBytesUnchanged :: proc(t: ^testing.T) {
+	sealed := []u8{1, 2, 3, 0xff}
+	id: ClientMessageID
+	id[0] = 7
+	{
+		original := ServerChatMessagePayload {
+			id = 5,
+			roomId = 3,
+			senderId = 2,
+			clientMessageId = id,
+			sealed = sealed,
+		}
+		data, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerChatMessagePayload encoding to succeed")
+		defer delete(data)
+		decoded: ServerChatMessagePayload
+		assert(cbor.unmarshal(data, &decoded) == nil, "expected chat payload to decode")
+		defer ServerChatMessagePayload_deinit(&decoded)
+		assert(string(decoded.sealed) == string(sealed), "expected sealed bytes unchanged")
+		assert(decoded.clientMessageId == id, "expected the client message ID unchanged")
+	}
+	{
+		chainID: ChainID
+		chainID[15] = 9
+		original := ServerRoomKeysPayload {
+			roomId    = 3,
+			envelopes = make([dynamic]RoomKeyEnvelope, 0, 1),
+			hasMore   = true,
+		}
+		defer delete(original.envelopes)
+		append(
+			&original.envelopes,
+			RoomKeyEnvelope {
+				id = 11,
+				roomId = 3,
+				epoch = 2,
+				senderId = 4,
+				chainId = chainID,
+				envelope = sealed,
+			},
+		)
+		data, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerRoomKeysPayload encoding to succeed")
+		defer delete(data)
+		decoded: ServerRoomKeysPayload
+		assert(cbor.unmarshal(data, &decoded) == nil, "expected room keys payload to decode")
+		defer ServerRoomKeysPayload_deinit(&decoded)
+		assert(len(decoded.envelopes) == 1, "expected one envelope")
+		got := decoded.envelopes[0]
+		assert(
+			got.id == 11 && got.epoch == 2 && got.senderId == 4 && got.chainId == chainID,
+			"expected the envelope's fields unchanged",
+		)
+		assert(string(got.envelope) == string(sealed), "expected envelope bytes unchanged")
+		assert(decoded.hasMore, "expected hasMore unchanged")
+	}
 }
 
 // The protocol 18 log payloads carry entries as byte strings, unchanged, and own them once

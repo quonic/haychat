@@ -943,7 +943,7 @@ testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.
 	chatPayload: common.ClientChatMessagePayload
 	chatPayloadErr := cbor.unmarshal(innerPacket.payload, &chatPayload)
 	assert(chatPayloadErr == nil, "expected room chat payload decode to succeed")
-	defer delete(chatPayload.content)
+	defer common.ClientChatMessagePayload_deinit(&chatPayload)
 	assert(
 		chatPayload.roomId == common.GENERAL_ROOM_ID,
 		"expected room chat payload roomId to match the shared room contract",

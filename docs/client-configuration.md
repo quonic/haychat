@@ -65,7 +65,7 @@ headless harness (`--config-dir`), never by tests.
 
 ```json
 {
-  "format": 3,
+  "format": 4,
   "server_public_key": "<the server's identity key, hex>",
   "users": [
     {
@@ -80,6 +80,10 @@ headless harness (`--config-dir`), never by tests.
   "rooms": [
     {"room_id": 5, "log_version": 3, "log_head_hash": "<hex SHA-256 of entry 3>"}
   ],
+  "room_chains": [
+    {"room_id": 5, "epoch": 3, "sender_user_id": 4, "chain_id": "<hex, 16 bytes>",
+     "start_index": 0, "chain_key": "<hex, 32 bytes>"}
+  ],
   "direct_conversations": [
     {"peer_user_id": 4, "encrypted": true}
   ]
@@ -88,11 +92,13 @@ headless harness (`--config-dir`), never by tests.
 
 | Key | Purpose |
 | --- | --- |
-| `format` | The file format, 3 (protocol 17 added `direct_conversations`, protocol 18 `rooms` entries; an older file loads as is and is written back as 3). A client that finds a newer format uses the file read-only and never writes it, so a newer client's data survives |
+| `format` | The file format, 4 (protocol 17 added `direct_conversations`, protocol 18 `rooms` entries, protocol 19 `room_chains`; an older file loads as is and is written back as 4). A client that finds a newer format uses the file read-only and never writes it, so a newer client's data survives |
 | `server_public_key` | The server the file belongs to; a file for another key is not used for writing |
 | `users[]` | One pin per account (see [Encryption keys](user-guide.md#encryption-keys)): the account's identity and encryption keys as first seen (or as last accepted or trusted), the encryption key's creation time (an older key is refused), whether you marked it verified, and when it was first seen |
 | `direct_conversations[]` | The accounts (`peer_user_id`) with whom an encrypted direct message was sent or opened on this server (`encrypted` true). Such a conversation is never treated as an ordinary unencrypted one again (no silent downgrade); entries are only ever added |
 | `rooms[]` | One entry per encrypted room whose member log this profile verified: the newest verified entry's version (`log_version`) and SHA-256 (`log_head_hash`). A log the server later serves without that exact entry (a fork) or ending before it (a rollback) is refused with "This room's member list was changed on the server". Heads only move forward and are never removed, even when the room is deleted |
+
+| `room_chains[]` | The sender chains of encrypted rooms this profile holds (protocol 19): for a room, an epoch (member log version), a sender and a chain ID, the chain key at `start_index`, from which every later message key of that chain is derived. They come from verified key distributions (this profile's own chains included) and are secret like the private keys in `config.json`. This section is a cache: the server keeps every distribution sealed to its recipients, so a lost file is rebuilt by fetching them again, and old room messages open again. The sending side of a chain is never stored: every run of the client starts new chains, so a message index is never used twice |
 
 Two clients running on the same profile directory at the same time each keep their own copy of
 the key store in memory, and the last one to save wins: a pin, a verification or a room head
@@ -101,6 +107,7 @@ one of them recorded can be lost. Run one client per profile directory at a time
 Pins are security state: a file that does not parse, has an entry that does not validate, or
 belongs to another server key is used read-only for the session and left exactly as it is, and
 the client says so under the composer. Deleting the file (or the `keys` directory) only means the
-next contact with each account is a first contact again, and the encrypted conversations are
-marked again as their messages open; it does not lose messages, because they are sealed to the
-encryption key in `config.json`.
+next contact with each account is a first contact again, the encrypted conversations are
+marked again as their messages open, and encrypted rooms' member logs are verified again from
+the start and their chains fetched again; it does not lose messages, because they are sealed to
+the encryption key in `config.json`.

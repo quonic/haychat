@@ -196,10 +196,11 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 	assert(ok, "expected the store to encode")
 	defer delete(data)
 	assert(
-		strings.contains(string(data), `"format": 3`) &&
+		strings.contains(string(data), `"format": 4`) &&
 		strings.contains(string(data), `"log_head_hash"`) &&
 		strings.contains(string(data), `"users"`) &&
 		strings.contains(string(data), `"rooms"`) &&
+		strings.contains(string(data), `"room_chains"`) &&
 		strings.contains(string(data), `"direct_conversations"`),
 		fmt.tprintf("expected the format and every section, got %s", string(data)),
 	)
@@ -227,7 +228,7 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 	// A format 1 file (E1) loads as is and stays writable.
 	formatOne, _ := strings.replace(
 		string(data),
-		`"format": 3`,
+		`"format": 4`,
 		`"format": 1`,
 		1,
 		context.temp_allocator,
@@ -242,7 +243,7 @@ testKeyStoreRoundTripsAndRefusesToOverwriteWhatItCannotRead :: proc(t: ^testing.
 	// A store for another server key, a newer format, bad JSON, and a damaged entry are all
 	// used read-only and never written back.
 	text := string(data)
-	newer, _ := strings.replace(text, `"format": 3`, `"format": 4`, 1, context.temp_allocator)
+	newer, _ := strings.replace(text, `"format": 4`, `"format": 5`, 1, context.temp_allocator)
 	badRoom, _ := strings.replace(
 		text,
 		`"room_id": 7`,

@@ -32,10 +32,8 @@ State_selectedTransport :: proc(state: ^State) -> (^ClientServerTransport, bool)
 }
 
 RoomCache_deinit :: proc(cache: ^RoomCache) {
-	for message in cache.messages {
-		delete(message.senderNickname)
-		delete(message.timestamp)
-		delete(message.content)
+	for &entry in cache.messages {
+		RoomMessageEntry_deinit(&entry)
 	}
 	delete(cache.messages)
 	delete(cache.draft)
@@ -131,13 +129,23 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 			return false
 		}
 	}
-	clone := common.StoredChatMessage {
-		id             = message.id,
-		senderId       = message.senderId,
-		senderNickname = strings.clone(message.senderNickname),
-		roomId         = message.roomId,
-		timestamp      = strings.clone(message.timestamp),
-		content        = strings.clone(message.content),
+	clone := RoomMessageEntry {
+		message = common.StoredChatMessage {
+			id = message.id,
+			senderId = message.senderId,
+			senderNickname = strings.clone(message.senderNickname),
+			roomId = message.roomId,
+			timestamp = strings.clone(message.timestamp),
+			content = strings.clone(message.content),
+			clientMessageId = message.clientMessageId,
+		},
+		// A sealed message is opened by room_chains.odin after the merge.
+		security = {protection = .Plain},
+	}
+	if len(message.sealed) > 0 {
+		clone.sealed = make([]u8, len(message.sealed))
+		copy(clone.sealed, message.sealed)
+		clone.security.protection = .Pending
 	}
 	insertIndex := len(cache.messages)
 	for index in 0 ..< len(cache.messages) {
@@ -270,6 +278,36 @@ State_sendChannelChat :: proc(state: ^State) {
 		State_setChatStatus(state, "Selected transport does not match the active server")
 		return
 	}
+	// Protocol 19: an encrypted room's message is sealed with this session's sender chain, and
+	// waits for it ("Setting up encryption…") when the chain is not set up yet.
+	if State_roomIsEncrypted(state, state.selected_server_id, state.selected_channel_id) {
+		if len(strings.trim_space(newMessage)) == 0 {
+			State_setChatStatus(state, "Cannot send an empty message")
+			return
+		}
+		if len(newMessage) > common.CHAT_MESSAGE_MAX_BYTES {
+			State_setChatStatus(state, "Message is too long")
+			return
+		}
+		ok, queued, errorMessage := State_roomChainsSend(
+			state,
+			state.selected_server_id,
+			state.selected_channel_id,
+			newMessage,
+		)
+		wipeString(newMessage)
+		if !ok {
+			State_setChatStatus(state, errorMessage)
+			return
+		}
+		draft = State_selectedRoomDraft(state)
+		wipeBytes(draft[:])
+		clear(draft)
+		if !queued {
+			State_clearChatStatus(state)
+		}
+		return
+	}
 	// The worker may replace lastError at any time, so copy it while holding the lock.
 	ClientNetworkWorker_lock(state.networkWorker)
 	sent := roomChatSendBridge(transport, state.selected_channel_id, newMessage)
@@ -304,11 +342,14 @@ State_loadOlderRoomHistory :: proc(state: ^State) {
 }
 
 // Strings are borrowed; the room cache keeps its own copies. A new message from someone else
-// above the room's marker counts as unread unless the room is viewed (read_state.odin).
+// above the room's marker counts as unread unless the room is viewed (read_state.odin). A sealed
+// message (protocol 19) is opened once merged (room_chains.odin).
 State_receiveRoomChat :: proc(
 	state: ^State,
 	serverID, roomID, senderID, messageID: int,
 	senderNickname, timestamp, content: string,
+	clientMessageID := common.ClientMessageID{},
+	sealed: []u8 = nil,
 ) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		return
@@ -324,8 +365,14 @@ State_receiveRoomChat :: proc(
 			roomId = roomID,
 			timestamp = timestamp,
 			content = content,
+			clientMessageId = clientMessageID,
+			sealed = sealed,
 		},
 	)
+	State_roomChainsMessageEchoed(state, serverID, roomID, senderID, clientMessageID)
+	if merged && (len(sealed) > 0 || State_roomIsEncrypted(state, serverID, roomID)) {
+		State_roomChainsOpenMessage(state, serverID, roomID, messageID)
+	}
 	if summary := State_roomSummary(state, serverID, roomID);
 	   merged &&
 	   summary != nil &&
@@ -395,6 +442,8 @@ State_receiveRoomHistory :: proc(
 	roomCache.initialHistoryLoaded = true
 	roomCache.isLoadingHistory = false
 	roomCache.hasOlder = hasOlder
+	// Sealed messages (protocol 19) are opened once the page is merged.
+	State_roomChainsOpenNew(state, serverID, roomID)
 }
 
 // Falls back to another joined room when the selected room goes away: #general while it
@@ -498,6 +547,8 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_e2eeProtocolError(state, serverID)
 	State_roomLogsProtocolError(state, serverID)
 	State_setChatStatus(state, message)
+	// After the status: a refused sealed message puts its own reason there.
+	State_roomChainsProtocolError(state, serverID, message)
 }
 
 // Applies one decoded runtime event. Fields whose ownership moves into State are cleared on
@@ -514,6 +565,19 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.senderNickname,
 			event.timestamp,
 			event.message,
+			event.clientMessageID,
+			event.sealed,
+		)
+	case .RoomKeyEnvelopeReceived, .RoomKeysReceived:
+		State_receiveRoomKeys(state, event)
+	case .RoomKeyRequested:
+		State_receiveRoomKeyRequest(
+			state,
+			event.serverID,
+			event.roomID,
+			event.roomKeyEpoch,
+			event.peerUserID,
+			event.roomKeyChainID,
 		)
 	case .RoomListReceived:
 		State_receiveRoomList(state, event.serverID, &event.rooms)

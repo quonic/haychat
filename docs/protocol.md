@@ -15,17 +15,22 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   carries CBOR packets and keeps a strict sequence counter; the voice channel (ENet channel 2)
   carries binary voice datagrams with a 64-packet replay window, and each datagram's kind byte
   is bound into its authentication tag.
-- **End-to-end only for direct messages.** Since protocol 17 a direct message is end-to-end
-  encrypted whenever both sides can: the sender's client seals it to the recipient's pinned
-  key, and the server stores and forwards an envelope it cannot open
+- **End-to-end for direct messages and encrypted rooms.** Since protocol 17 a direct message is
+  end-to-end encrypted whenever both sides can: the sender's client seals it to the recipient's
+  pinned key, and the server stores and forwards an envelope it cannot open
   ([below](#encrypted-direct-messages-protocol-17)). When the recipient cannot receive
   encrypted messages, sending is refused unless the user turns on **Send without encryption**
   for that conversation; such a message is signed but the server can read it, and both
-  clients mark it "Unencrypted". Room chat is not end-to-end encrypted yet: the server decrypts
-  it and stores it unencrypted in its PostgreSQL database, so the server and its operator can
-  read it, and direct messages from before protocol 17. Voice is relayed and never stored or
-  logged. Invite-only rooms (protocol 15) limit which accounts the server lets read a room;
-  they do not hide it from the server. The server always sees who writes to whom and when.
+  clients mark it "Unencrypted". Since protocol 19 every message in an encrypted room is
+  end-to-end encrypted with its sender's chain key, which only the members the room's signed
+  member list names receive ([below](#sender-chains-in-encrypted-rooms-protocol-19)); the
+  server stores sealed bytes only. Unencrypted rooms (every Public room, and invite rooms
+  created without **Encrypt this room**) are not end-to-end encrypted: the server decrypts
+  their messages and stores them unencrypted in its PostgreSQL database, so the server and its
+  operator can read them, and direct messages from before protocol 17. Voice is relayed and
+  never stored or logged; it is not available in encrypted rooms yet. Invite-only rooms
+  (protocol 15) limit which accounts the server lets read a room; without encryption they do
+  not hide it from the server. The server always sees who writes to whom and when.
 
 No TLS certificate is involved: the pinned identity key takes its place.
 
@@ -49,6 +54,7 @@ version below therefore needs clients and servers rebuilt together.
 | 16 | Account encryption keys (end-to-end encryption, part 1): `ClientPublishEncryptionKey` (each profile's X25519 key, signed by its identity key, sent once per session), `ClientFetchUserKeys`/`ServerUserKeys` (at most 64 accounts per request; accounts without a key are listed as missing), `ServerUserKeyChanged` (an account stored a new key), and `UserSummary.identityPublicKey`/`hasEncryptionKey`, with schema migration 5 (`user_encryption_keys`). No message is encrypted yet |
 | 17 | Encrypted direct messages (end-to-end encryption, part 2): `ClientSealedDirectMessage`/`ServerSealedDirectMessage` (an envelope the sender sealed for itself and the recipient, carried byte for byte), the envelope, client message ID and signature fields of `StoredDirectMessage` and `DirectConversationSummary`, and the signed plaintext fallback (`ClientDirectMessage` now needs `clientMessageId` and `signature`; unsigned messages are refused), with schema migration 6 |
 | 18 | Encrypted rooms and their signed member log (end-to-end encryption, part 3a): `ClientAppendRoomLog`, `ClientFetchRoomLog`, `ServerRoomLog`, `RoomSummary.encrypted`/`logVersion`, `ClientCreateRoomPayload.encrypted` and `ClientEditRoomPayload.encrypted`, with schema migration 7 (`rooms.encrypted`, `rooms.log_version`, `room_log_entries`, `room_log_managers`). Encrypted rooms take no message and no voice yet |
+| 19 | Sender chains in encrypted rooms (end-to-end encryption, part 3b): sealed room messages (`ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `clientMessageId` and `sealed`), `ClientRoomKeyEnvelope`/`ServerRoomKeyEnvelope`, `ClientFetchRoomKeys`/`ServerRoomKeys`, `ClientRequestRoomKey`/`ServerRoomKeyRequest`, with schema migration 8 (sealed `chat_messages` columns, `room_key_envelopes`). Plaintext in an encrypted room is refused |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -131,11 +137,10 @@ The second part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design
 ## Encrypted rooms and the member log (protocol 18)
 
 The third part of end-to-end encryption, first half ([plan/e2ee-design.md](plan/e2ee-design.md),
-sections 6.1, 6.2 and 6.7): encrypted rooms exist and their membership is a signed log, but
-their messages (sender chains, part 3b) do not exist yet, so the server refuses every message
-to an encrypted room ("Encrypted room messages arrive in a later update") and stores nothing
-readable in one. Voice joins are refused too ("voice is not available in encrypted rooms
-yet").
+sections 6.1, 6.2 and 6.7): encrypted rooms and their membership as a signed log. Their
+messages are sealed with sender chains since protocol 19
+([below](#sender-chains-in-encrypted-rooms-protocol-19)); the server never stores anything
+readable in one. Voice joins are refused ("voice is not available in encrypted rooms yet").
 
 - **Creating one.** An admin creates an encrypted room with `ClientCreateRoom{encrypted}`; it
   must be Member invite or Admin invite ("Public rooms cannot be encrypted"). The server
@@ -178,12 +183,61 @@ yet").
   withhold entries (a client then sees an older log, or a rollback once it has seen a newer
   one). It cannot add a member or a manager to a log that clients accept.
 
+## Sender chains in encrypted rooms (protocol 19)
+
+The third part of end-to-end encryption, second half ([plan/e2ee-design.md](plan/e2ee-design.md),
+sections 6.3 to 6.6): the messages of encrypted rooms. Full history for new members (6.6,
+forwarding older chains) is a later part; a Full history encrypted room behaves like a From
+join one for now.
+
+- **Chains.** Each member that sends in an epoch (the member log's version) has a sender chain:
+  a random 32-byte chain key and a 16-byte chain ID. Message `i` is sealed with the key derived
+  from the chain at index `i` (HKDF-SHA256), and a chain ends after 1000 messages, after seven
+  days, or with its epoch. A client keeps the sending side of a chain only in memory and starts
+  a new chain in every run, so no index is ever used twice (a restart, a crash or a copy of the
+  profile cannot reuse one); the server refuses a reused `(sender, chain, index)` as well.
+- **Distribution.** Before its first message with a chain the sender seals it in one
+  `SenderKey` envelope with a wrap for every member of the epoch as its verified member log
+  shows them, itself included, each to the encryption key it pinned, and signs it
+  (`ClientRoomKeyEnvelope`). The server checks the envelope's structure and its signature
+  against the sender's identity key, that the sender is a member, that every wrap names a
+  member, and that the epoch is the room's current log version (an older epoch only for a chain
+  it already stores, which is how key requests are answered), and stores it once. It sends it
+  as `ServerRoomKeyEnvelope` to the accounts its wraps name. A message waits on the sender's
+  side ("Setting up encryption…") until the server stored the distribution.
+- **Messages.** A sealed message is `common/e2ee.odin`'s `SealedRoomMessage` in
+  `ClientChatMessagePayload.sealed` with an empty `content` and a random `clientMessageId`: the
+  epoch, chain ID and index, the body sealed with the message key, and the sender's signature
+  over the AAD (this server, the room, the sender, the chain position and the client message
+  ID) and the bytes. The server checks the structure and the signature, membership, and that
+  the epoch is the room's current log version; a stale one is refused with "Room key is out of
+  date", and the client then fetches the member log, starts a chain in the new epoch and sends
+  again. Every removal therefore takes effect at the server: nothing sent after it is sealed to
+  the removed member. The server stores the bytes unchanged and serves them in history, which
+  for a From join member starts when they joined.
+- **Receiving.** A client opens a distribution only when its verified log shows the sender as
+  a member of that epoch, with the sender's pinned identity key, and keeps the chain key in its
+  [key store](client-configuration.md#key-store). The key store is a cache: `ClientFetchRoomKeys`
+  returns the envelopes with a wrap for the requester (members only), so a lost key store is
+  rebuilt from the server. A message whose chain the client lacks shows "Waiting for this
+  message's key from <name>"; after a fetch the client asks the sender with
+  `ClientRequestRoomKey`, which the server relays to the sender's online sessions as
+  `ServerRoomKeyRequest` when both are members and the chain is stored. The sender re-seals the
+  chain to the requester only if the requester was a member of that epoch in its verified log.
+  Every other failure (a bad signature, a sender who was not a member, plaintext in an encrypted
+  room, a replayed message) shows "This message could not be decrypted" and is never retried.
+- **What the server still can do.** Withhold, delay or delete messages and envelopes, refuse
+  sends, and see who sends how much and when (lengths in 256-byte steps). A row it inserts
+  into `room_members` behind the log gives that account the history's sealed bytes but no key
+  to open them.
+
 ## End-to-end encryption primitives
 
 `common/e2ee.odin` holds the building blocks of the end-to-end encryption design
 ([plan/e2ee-design.md](plan/e2ee-design.md)). Protocol 16 uses the encryption key bundle and
-safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback; the
-sender chains and the member log are not on the wire yet.
+safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback,
+protocol 18 the member log, and protocol 19 the sender chains, their distributions and sealed
+room messages.
 
 - **What is there.** The signed encryption key bundle (X25519 key, signed by the identity key),
   sealed envelopes (one random message key wrapped per recipient, the body sealed with

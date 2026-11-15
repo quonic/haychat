@@ -82,6 +82,14 @@ ClientTransportRuntimeEventKind :: enum {
 	// the entries after logAfterVersion in logEntries (owned), the server's head version in
 	// logHeadVersion, and hasOlder set when the server has more entries after these.
 	RoomLogReceived,
+	// Sender chains (protocol 19, room_chains.odin). RoomKeyEnvelopeReceived is a live
+	// ServerRoomKeyEnvelope and RoomKeysReceived one page of ServerRoomKeys (roomID, hasOlder
+	// when more follow); both carry the envelopes in roomKeyEnvelopes (owned). RoomKeyRequested
+	// is ServerRoomKeyRequest: roomID, roomKeyEpoch, roomKeyChainID and the requester in
+	// peerUserID. RoomChatReceived carries a sealed message's clientMessageID and sealed (owned).
+	RoomKeyEnvelopeReceived,
+	RoomKeysReceived,
+	RoomKeyRequested,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -151,6 +159,12 @@ ClientTransportRuntimeEvent :: struct {
 	logEntries:        [dynamic][]u8,
 	logAfterVersion:   int,
 	logHeadVersion:    int,
+	// Protocol 19.
+	clientMessageID:   common.ClientMessageID,
+	sealed:            []u8,
+	roomKeyEnvelopes:  [dynamic]common.RoomKeyEnvelope,
+	roomKeyEpoch:      int,
+	roomKeyChainID:    common.ChainID,
 }
 
 ClientServerTransport :: struct {
@@ -299,12 +313,15 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 		delete(room.description)
 	}
 	delete(event.rooms)
-	for message in event.messages {
-		delete(message.senderNickname)
-		delete(message.timestamp)
-		delete(message.content)
+	for &message in event.messages {
+		common.StoredChatMessage_deinit(&message)
 	}
 	delete(event.messages)
+	delete(event.sealed)
+	for &envelope in event.roomKeyEnvelopes {
+		common.RoomKeyEnvelope_deinit(&envelope)
+	}
+	delete(event.roomKeyEnvelopes)
 	delete(event.room.name)
 	delete(event.room.description)
 	delete(event.nickname)
@@ -1210,6 +1227,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	case .ServerChatMessage:
 		chatPayload: common.ServerChatMessagePayload
 		if cbor.unmarshal(innerPacket.payload, &chatPayload) != nil {
+			common.ServerChatMessagePayload_deinit(&chatPayload)
 			ClientServerTransport_runtimeProtocolError(transport, "invalid server chat payload")
 			return ClientServerTransport_makeRuntimeEvent(
 					transport,
@@ -1227,6 +1245,70 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				messageID = chatPayload.id,
 				timestamp = chatPayload.timestamp,
 				message = chatPayload.content,
+				clientMessageID = chatPayload.clientMessageId,
+				sealed = chatPayload.sealed,
+			},
+			true
+
+	// Protocol 19: SenderKey envelopes and key requests (room_chains.odin).
+	case .ServerRoomKeyEnvelope:
+		payload: common.ServerRoomKeyEnvelopePayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.envelope.roomId <= 0 ||
+		   len(payload.envelope.envelope) == 0 {
+			common.ServerRoomKeyEnvelopePayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room key envelope payload",
+				),
+				true
+		}
+		event := ClientTransportRuntimeEvent {
+			kind     = .RoomKeyEnvelopeReceived,
+			serverID = transport.serverID,
+			roomID   = payload.envelope.roomId,
+		}
+		append(&event.roomKeyEnvelopes, payload.envelope)
+		return event, true
+
+	case .ServerRoomKeys:
+		payload: common.ServerRoomKeysPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.roomId <= 0 {
+			common.ServerRoomKeysPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room keys payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoomKeysReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				roomKeyEnvelopes = payload.envelopes,
+				hasOlder = payload.hasMore,
+			},
+			true
+
+	case .ServerRoomKeyRequest:
+		payload: common.ServerRoomKeyRequestPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.roomId <= 0 ||
+		   payload.epoch <= 0 ||
+		   payload.requesterId <= 0 {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room key request payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoomKeyRequested,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				roomKeyEpoch = payload.epoch,
+				roomKeyChainID = payload.chainId,
+				peerUserID = payload.requesterId,
 			},
 			true
 
@@ -1251,6 +1333,10 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	case .ServerRoomHistory:
 		payload: common.ServerRoomHistoryPayload
 		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			for &message in payload.messages {
+				common.StoredChatMessage_deinit(&message)
+			}
+			delete(payload.messages)
 			ClientServerTransport_runtimeProtocolError(transport, "invalid room history payload")
 			return ClientServerTransport_makeRuntimeEvent(
 					transport,

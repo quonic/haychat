@@ -29,7 +29,7 @@ RoomView :: struct {
 	// False for a voice-only room (protocol 14): no composer, voiceOnlyNote instead.
 	allowsChat:       bool,
 	voiceOnlyNote:    string,
-	// Protocol 18: an encrypted room (no composer yet), and whether its member log failed.
+	// Protocol 18: an encrypted room, and whether its member log failed.
 	encrypted:        bool,
 	logFailed:        bool,
 	hasOlder:         bool,
@@ -59,32 +59,38 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	if !view.allowsChat {
 		view.voiceOnlyNote = ROOM_VOICE_ONLY_NOTE
 	}
-	// Protocol 18: an encrypted room shows its verified member list changes as event lines and
-	// takes no message until sender chains exist (E4b); a log that failed verification says so
-	// where the composer would be.
+	// Protocol 18: an encrypted room shows its verified member list changes as event lines,
+	// placed among the messages by time. Protocol 19: its messages are sealed; the composer
+	// gives way to a note when this account cannot send there (a failed log, a log not set up,
+	// not a member of the log).
 	logLines: []TranscriptLine
-	if view.hasSelectedRoom &&
-	   State_roomIsEncrypted(state, state.selected_server_id, state.selected_channel_id) {
+	logTimes: []i64
+	serverID := state.selected_server_id
+	if view.hasSelectedRoom && State_roomIsEncrypted(state, serverID, state.selected_channel_id) {
 		view.encrypted = true
-		view.voiceOnlyNote = ENCRYPTED_ROOM_PENDING_NOTE
-		log := State_findRoomLog(state, state.selected_server_id, state.selected_channel_id)
+		log := State_findRoomLog(state, serverID, state.selected_channel_id)
+		if note := State_roomChainsComposerNote(state, serverID, state.selected_channel_id);
+		   len(note) > 0 && view.allowsChat {
+			view.allowsChat = false
+			view.voiceOnlyNote = note
+		}
 		if log != nil && log.status == .Failed {
-			view.voiceOnlyNote = ROOM_LOG_CHANGED_WARNING
 			view.logFailed = true
 		}
 		if log != nil {
 			logLines = make([]TranscriptLine, len(log.events), allocator)
+			logTimes = make([]i64, len(log.events), allocator)
 			for line, index in log.events {
 				logLines[index] = TranscriptLine {
 					messageID   = -line.version,
 					senderLabel = "Member list",
 					content     = strings.clone(
-						State_roomLogEventText(state, state.selected_server_id, line),
+						State_roomLogEventText(state, serverID, line),
 						allocator,
 					),
-					badge       = "🔒",
 					placeholder = true,
 				}
+				logTimes[index] = i64(line.createdAt)
 			}
 		}
 	}
@@ -98,12 +104,18 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	view.isLoadingHistory = roomCache.isLoadingHistory
 
 	// The worker writes the transport's user ID, so read the UI thread's copy instead.
-	selfUserID := State_selfUserID(state, state.selected_server_id)
+	selfUserID := State_selfUserID(state, serverID)
 
-	lines := make([]TranscriptLine, len(logLines) + len(roomCache.messages), allocator)
-	copy(lines, logLines)
-	for message, messageIndex in roomCache.messages {
-		index := len(logLines) + messageIndex
+	lines := make([dynamic]TranscriptLine, 0, len(logLines) + len(roomCache.messages), allocator)
+	nextLog := 0
+	for message in roomCache.messages {
+		// Member list changes made before this message come first.
+		if seconds, ok := parseServerTimestampUnix(message.timestamp); ok {
+			for nextLog < len(logLines) && logTimes[nextLog] <= seconds {
+				append(&lines, logLines[nextLog])
+				nextLog += 1
+			}
+		}
 		isSelf := selfUserID != 0 && message.senderId == selfUserID
 		// A sender without a user row has no nickname; fall back to the user ID.
 		senderLabel := "You"
@@ -113,15 +125,25 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 				senderLabel = fmt.aprintf("User %d", message.senderId, allocator = allocator)
 			}
 		}
-		lines[index] = TranscriptLine {
-			messageID    = message.id,
-			senderUserID = message.senderId,
-			senderLabel  = senderLabel,
-			isSelf       = isSelf,
-			content      = message.content,
-		}
+		text, placeholder, badge := roomMessageDisplay(state, serverID, message, allocator)
+		append(
+			&lines,
+			TranscriptLine {
+				messageID = message.id,
+				senderUserID = message.senderId,
+				senderLabel = senderLabel,
+				isSelf = isSelf,
+				content = text,
+				badge = badge,
+				placeholder = placeholder,
+			},
+		)
 	}
-	view.lines = lines
+	for nextLog < len(logLines) {
+		append(&lines, logLines[nextLog])
+		nextLog += 1
+	}
+	view.lines = lines[:]
 	return
 }
 

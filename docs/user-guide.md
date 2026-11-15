@@ -101,9 +101,21 @@ Each room has an access mode, chosen when it is created:
   history.
 - Unencrypted rooms are readable by the server: access modes decide who the server lets read
   a room, and the server and its operator can still read every unencrypted room.
-- **Encrypted rooms** (invite rooms an admin created with **Encrypt this room**) carry a
-  signed member list. For now they take no messages and no voice: the composer says
-  "Encrypted room messages arrive in a later update". Their **Members** page lists the
+- **Encrypted rooms** (invite rooms an admin created with **Encrypt this room**, shown with a
+  🔒 before the room's name in its header) are end-to-end encrypted: every message is sealed by
+  its sender's client for the members the room's signed member list names, the server stores
+  only sealed bytes, and each opened message carries a 🔒. Your first message in a session
+  (and the first after the member list changed) waits a moment under "Setting up
+  encryption…" while your client hands its new room key to the members. A message whose key
+  has not reached you yet shows **Waiting for this message's key from <name>**: your client
+  asks the sender, whose client answers when it is online and you were a member when the
+  message was sent; it opens by itself once the key arrives. A message that fails its checks
+  shows **This message could not be decrypted** and stays that way. Someone removed from the
+  room keeps what they could already read but gets no key for anything sent after the
+  removal; someone added reads what is sent from then on (From join; Full history encrypted
+  rooms behave the same for now). Losing your key store file does not lose the room's
+  messages: your client fetches the keys again from the server. Voice is not available in
+  encrypted rooms yet. Their **Members** page lists the
   members, the **managers** (who sign who joins, add and remove people and other managers)
   and the server's **admins** separately, each with their key state ("Verified", "Not
   verified", "Key changed", "No key"). A manager can **Make manager** / **Remove manager**, and

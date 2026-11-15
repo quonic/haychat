@@ -394,11 +394,11 @@ testRoomLogCreateAddAndReplay :: proc(t: ^testing.T) {
 		fmt.tprintf("expected bob to leave but not add, got %v", rights),
 	)
 
-	// The encrypted room takes no plaintext message and no voice yet.
+	// The encrypted room takes sealed messages (protocol 19) and no voice yet.
 	assert(
-		!State_roomAllowsChat(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM) &&
+		State_roomAllowsChat(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM) &&
 		!State_roomAllowsVoice(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM),
-		"expected chat and voice off in an encrypted room",
+		"expected chat on and voice off in an encrypted room",
 	)
 }
 

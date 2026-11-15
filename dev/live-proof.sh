@@ -82,6 +82,8 @@ SQL_TESTS+=,server.testEncryptedDirectMessagesMigrationUpgradesVersion5AgainstPo
 SQL_TESTS+=,server.testRoomLogAppendRulesAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomLogFullRoomAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomLogMigrationUpgradesVersion6AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomSenderChainStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRoomSenderChainsMigrationUpgradesVersion7AgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

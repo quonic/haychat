@@ -35,12 +35,12 @@ import "core:time"
 // signed with this profile's identity key over the pinned server key, and sent. Nothing changes
 // locally until the server's ServerRoomLog echo arrives and verifies like any other entry.
 //
-// For E4b (sender chains): State_roomLogVerified gives the verified RoomLogState of a room
-// (members per epoch = its version), State_roomLogEpoch its current epoch, and
-// State.roomLogChanged is called after every verified change (nil by default).
+// Sender chains (room_chains.odin, E4b) use State_roomLogVerified (the members of the current
+// epoch = its version), State_roomLogEpoch, State_roomLogWasMember (members of earlier epochs)
+// and are told about every verified change or failure (State_roomChainsLogChanged);
+// State.roomLogChanged is a hook for tests (nil by default).
 
 ROOM_LOG_CHANGED_WARNING :: "This room's member list was changed on the server"
-ENCRYPTED_ROOM_PENDING_NOTE :: "Encrypted room messages arrive in a later update"
 ROOM_LOG_NOT_SET_UP_NOTE :: "This encrypted room's member list has not been set up yet"
 
 RoomLogStatus :: enum u8 {
@@ -63,10 +63,21 @@ RoomLogEventLine :: struct {
 	createdAt:       u64,
 }
 
+// One stretch of epochs during which userID was a member: fromEpoch <= epoch < untilEpoch
+// (untilEpoch 0 while still a member). Sender chains (room_chains.odin) check a distribution's
+// sender, and a key request's requester, against it.
+RoomLogMembership :: struct {
+	userID:     int,
+	fromEpoch:  int,
+	untilEpoch: int,
+}
+
 RoomLogRoom :: struct {
 	roomID:        int,
 	status:        RoomLogStatus,
 	state:         common.RoomLogState,
+	// Who was a member in which epochs, from the verified entries (E4b).
+	memberships:   [dynamic]RoomLogMembership,
 	failure:       common.RoomLogError,
 	failedVersion: int,
 	events:        [dynamic]RoomLogEventLine,
@@ -79,6 +90,7 @@ RoomLogRoom :: struct {
 RoomLogRoom_deinit :: proc(room: ^RoomLogRoom) {
 	common.RoomLogState_deinit(&room.state)
 	delete(room.events)
+	delete(room.memberships)
 	RoomLogRoom_clearCollecting(room)
 	delete(room.collecting)
 	room^ = {}
@@ -260,6 +272,54 @@ State_roomLogVerified :: proc(state: ^State, serverID, roomID: int) -> ^common.R
 		return nil
 	}
 	return &room.state
+}
+
+// Whether userID was a member of roomID in epoch, as the verified log shows (false unless
+// Verified, and for an epoch the verified log has not reached).
+State_roomLogWasMember :: proc(state: ^State, serverID, roomID, userID, epoch: int) -> bool {
+	room := State_findRoomLog(state, serverID, roomID)
+	if room == nil || room.status != .Verified || epoch <= 0 || epoch > room.state.version {
+		return false
+	}
+	return roomLogMembershipsInclude(room.memberships[:], userID, epoch)
+}
+
+roomLogMembershipsInclude :: proc(memberships: []RoomLogMembership, userID, epoch: int) -> bool {
+	for membership in memberships {
+		if membership.userID == userID &&
+		   membership.fromEpoch <= epoch &&
+		   (membership.untilEpoch == 0 || epoch < membership.untilEpoch) {
+			return true
+		}
+	}
+	return false
+}
+
+// After an entry was applied to state: opens or closes the stretches of the users it named.
+@(private = "file")
+roomLogNoteMemberships :: proc(
+	memberships: ^[dynamic]RoomLogMembership,
+	state: ^common.RoomLogState,
+	line: RoomLogEventLine,
+) {
+	users := [2]int{line.actorUserID, line.targetUserID}
+	for userID in users {
+		if userID == 0 {
+			continue
+		}
+		open := -1
+		for membership, index in memberships {
+			if membership.userID == userID && membership.untilEpoch == 0 {
+				open = index
+			}
+		}
+		isMember := userID in state.members
+		if open < 0 && isMember {
+			append(memberships, RoomLogMembership{userID = userID, fromEpoch = line.version})
+		} else if open >= 0 && !isMember {
+			memberships[open].untilEpoch = line.version
+		}
+	}
 }
 
 // The room's current epoch (its verified log version), 0 unless Verified.
@@ -501,6 +561,7 @@ State_receiveRoomLog :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	if room != nil && room.status == .Verified && room.state.version < room.serverHead {
 		State_requestRoomLog(state, serverID, roomID)
 	}
+	State_roomChainsPump(state, serverID, roomID)
 }
 
 // The next page of a whole-log fetch.
@@ -560,6 +621,7 @@ State_roomLogReplayCollected :: proc(state: ^State, serverID: int, room: ^RoomLo
 	known := KeyStore_roomHead(state.e2ee[e2eeIndex].store, room.roomID)
 	replayed := common.RoomLogState_init(room.roomID)
 	events := make([dynamic]RoomLogEventLine, 0, len(room.collecting))
+	memberships := make([dynamic]RoomLogMembership, 0, len(room.collecting))
 	failure := common.RoomLogError.None
 	failedVersion := 0
 	for data, index in room.collecting {
@@ -570,6 +632,7 @@ State_roomLogReplayCollected :: proc(state: ^State, serverID: int, room: ^RoomLo
 			break
 		}
 		append(&events, line)
+		roomLogNoteMemberships(&memberships, &replayed, line)
 		if known.version > 0 &&
 		   replayed.version == known.version &&
 		   replayed.headHash != known.hash {
@@ -586,13 +649,16 @@ State_roomLogReplayCollected :: proc(state: ^State, serverID: int, room: ^RoomLo
 	if failure != .None {
 		common.RoomLogState_deinit(&replayed)
 		delete(events)
+		delete(memberships)
 		State_roomLogFail(state, serverID, room, failure, failedVersion)
 		return
 	}
 	common.RoomLogState_deinit(&room.state)
 	delete(room.events)
+	delete(room.memberships)
 	room.state = replayed
 	room.events = events
+	room.memberships = memberships
 	room.status = .Verified
 	room.failure = .None
 	State_roomLogVerifiedChanged(state, serverID, room.roomID)
@@ -639,6 +705,7 @@ State_roomLogApplyEntries :: proc(
 			return
 		}
 		append(&room.events, line)
+		roomLogNoteMemberships(&room.memberships, &room.state, line)
 		changed = true
 	}
 	if changed {
@@ -677,6 +744,8 @@ State_roomLogVerifiedChanged :: proc(state: ^State, serverID, roomID: int) {
 	State_roomMembersChanged(state, serverID, roomID)
 	State_roomLogRunPendingActions(state, serverID)
 	State_roomLogNote(state, serverID, roomID)
+	// Sender chains: what waited for this epoch opens, sends start a chain in it.
+	State_roomChainsLogChanged(state, serverID, roomID)
 	if state.roomLogChanged != nil {
 		state.roomLogChanged(state, serverID, roomID)
 	}
@@ -700,6 +769,7 @@ State_roomLogFail :: proc(
 	State_setChatStatus(state, ROOM_LOG_CHANGED_WARNING)
 	State_roomLogNote(state, serverID, roomID)
 	State_roomMembersChanged(state, serverID, roomID)
+	State_roomChainsLogChanged(state, serverID, roomID)
 	if state.roomLogChanged != nil {
 		state.roomLogChanged(state, serverID, roomID)
 	}

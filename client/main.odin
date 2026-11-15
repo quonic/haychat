@@ -17,7 +17,8 @@ roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessa
 
 RoomCache :: struct {
 	roomID:               int,
-	messages:             [dynamic]common.StoredChatMessage,
+	// Ordered by message ID. Sealed messages (protocol 19) hold their opened text in content.
+	messages:             [dynamic]RoomMessageEntry,
 	draft:                [dynamic]u8, // Client-local, edited in place by the chat input
 	initialHistoryLoaded: bool,
 	isLoadingHistory:     bool,
@@ -113,6 +114,12 @@ State :: struct {
 	recordRoomLogNotes:             bool,
 	roomLogNotes:                   [dynamic]RoomLogNote,
 	roomLogChanged:                 RoomLogChangedProc,
+	// Sender chains in encrypted rooms per server (room_chains.odin): the chain this session
+	// sends with, queued messages, key fetches and requests; and what the harness prints after
+	// the event that caused it (recordRoomChainNotes).
+	roomChains:                     [dynamic]ServerRoomChains,
+	recordRoomChainNotes:           bool,
+	roomChainNotes:                 [dynamic]RoomChainNote,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -244,6 +251,7 @@ State_deinit :: proc(state: ^State) {
 	ContextMenuState_deinit(&state.contextMenu)
 	State_e2eeDeinit(state)
 	State_roomLogDeinit(state)
+	State_roomChainsDeinit(state)
 	delete(state.directNotes)
 	state^ = {}
 }

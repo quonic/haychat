@@ -291,6 +291,10 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.nickname)
 	case common.DatabasePostRoomChatMessageRequest:
 		delete(r.content)
+		delete(r.sealed)
+	case common.DatabaseStoreRoomKeyEnvelopeRequest:
+		delete(r.envelope)
+		delete(r.recipientUserIDs)
 	case common.DatabaseCreateRoomRequest:
 		delete(r.name)
 		delete(r.description)
@@ -319,7 +323,9 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseUserDirectoryRequest,
 	     common.DatabaseMarkReadRequest,
 	     common.DatabasePublishEncryptionKeyRequest,
-	     common.DatabaseFetchRoomLogRequest:
+	     common.DatabaseFetchRoomLogRequest,
+	     common.DatabaseFetchRoomKeysRequest,
+	     common.DatabaseRoomKeyRequestCheckRequest:
 	case nil:
 	}
 }
@@ -328,6 +334,7 @@ IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
 	delete(message.senderNickname)
 	delete(message.timestamp)
 	delete(message.content)
+	delete(message.sealed)
 }
 
 IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
@@ -411,9 +418,18 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(entry)
 		}
 		delete(r.entries)
+	case common.DatabaseStoreRoomKeyEnvelopeResult:
+		delete(r.stored.envelope)
+		delete(r.recipientUserIDs)
+	case common.DatabaseFetchRoomKeysResult:
+		for envelope in r.envelopes {
+			delete(envelope.envelope)
+		}
+		delete(r.envelopes)
 	case common.DatabaseUserServerAdminResult,
 	     common.DatabaseMarkReadResult,
-	     common.DatabasePublishEncryptionKeyResult:
+	     common.DatabasePublishEncryptionKeyResult,
+	     common.DatabaseRoomKeyRequestCheckResult:
 	case nil:
 	}
 }
