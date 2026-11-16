@@ -183,6 +183,8 @@ ENVELOPE_SIGNATURE_DOMAIN :: "haychat-e2ee-envelope-v1"
 ENVELOPE_WRAP_INFO :: "haychat-e2ee-wrap-v1"
 DIRECT_MESSAGE_AAD_DOMAIN :: "haychat-dm-v1"
 PLAINTEXT_DIRECT_MESSAGE_DOMAIN :: "haychat-dm-plain-v1"
+// Protocol 22 (#90): a plaintext room message's signature. Prefix-free against every label.
+PLAINTEXT_ROOM_MESSAGE_DOMAIN :: "haychat-room-plain-v1"
 ROOM_KEY_AAD_DOMAIN :: "haychat-room-key-v1"
 // Its own label (E0's note): no AAD label is a prefix of another.
 ROOM_KEY_FORWARD_AAD_DOMAIN :: "haychat-room-key-forward-v1"
@@ -1311,6 +1313,93 @@ verifyPlaintextDirectMessage :: proc(
 		signature,
 	)
 	return result == .None
+}
+
+// ---------------------------------------------------------------------------------------------
+// Signed plaintext room messages (protocol 22, #90): every message in an unencrypted room is
+// signed by its sender, so a server cannot write one in anyone's name.
+
+PlaintextRoomMessageFields :: struct {
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	roomID:                  int,
+	senderUserID:            int,
+	clientMessageID:         ClientMessageID,
+}
+
+PLAINTEXT_ROOM_MESSAGE_FIELDS_SIZE :: AUTH_IDENTITY_PUBLIC_KEY_SIZE + 8 + 8 +
+	CLIENT_MESSAGE_ID_SIZE
+
+// Signs "haychat-room-plain-v1" || serverIdentityPublicKey (32) || roomId (i64)
+// || senderUserId (i64) || clientMessageId (16) || content. content must be
+// 1..CHAT_MESSAGE_MAX_BYTES bytes, the room ID and sender positive and clientMessageId set.
+signPlaintextRoomMessage :: proc(
+	fields: PlaintextRoomMessageFields,
+	content: string,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	if !plaintextRoomMessageInputsValid(fields, content) {
+		return {}, false
+	}
+	prefix := makePlaintextRoomMessagePrefix(fields)
+	return signWithDomain(
+		senderIdentityPrivateKey,
+		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
+		prefix[:],
+		transmute([]u8)content,
+	)
+}
+
+// True when signature is the sender's (senderIdentityPublicKey: the session's for the server,
+// the pin for a client) over these fields and content.
+verifyPlaintextRoomMessage :: proc(
+	fields: PlaintextRoomMessageFields,
+	content: string,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	if !plaintextRoomMessageInputsValid(fields, content) {
+		return false
+	}
+	prefix := makePlaintextRoomMessagePrefix(fields)
+	result := verifyWithDomain(
+		senderIdentityPublicKey,
+		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
+		prefix[:],
+		transmute([]u8)content,
+		signature,
+	)
+	return result == .None
+}
+
+@(private = "file")
+plaintextRoomMessageInputsValid :: proc(
+	fields: PlaintextRoomMessageFields,
+	content: string,
+) -> bool {
+	return(
+		len(content) > 0 &&
+		len(content) <= CHAT_MESSAGE_MAX_BYTES &&
+		fields.roomID > 0 &&
+		fields.senderUserID > 0 &&
+		clientMessageIDIsSet(fields.clientMessageID) \
+	)
+}
+
+@(private = "file")
+makePlaintextRoomMessagePrefix :: proc(
+	fields: PlaintextRoomMessageFields,
+) -> [PLAINTEXT_ROOM_MESSAGE_FIELDS_SIZE]u8 {
+	fields := fields
+	prefix: [PLAINTEXT_ROOM_MESSAGE_FIELDS_SIZE]u8
+	writer := e2eeWriter(prefix[:])
+	e2eeWriteBytes(&writer, fields.serverIdentityPublicKey[:])
+	e2eeWriteInt(&writer, fields.roomID)
+	e2eeWriteInt(&writer, fields.senderUserID)
+	e2eeWriteBytes(&writer, fields.clientMessageID[:])
+	return prefix
 }
 
 // ---------------------------------------------------------------------------------------------

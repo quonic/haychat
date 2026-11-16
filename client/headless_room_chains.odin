@@ -14,6 +14,7 @@ HEADLESS_ROOM_PROTECTION_NAMES := [RoomMessageProtection]string {
 	.Pending   = "pending",
 	.Encrypted = "encrypted",
 	.Failed    = "failed",
+	.Hidden    = "hidden",
 }
 
 HeadlessRoomSecurityFields :: struct {
@@ -40,9 +41,11 @@ headlessRoomSecurity :: proc(
 			fields.decryptError = "no_key"
 		case .Log:
 			fields.decryptError = "log"
+		case .Sender:
+			fields.decryptError = "sender_key"
 		case .None:
 		}
-	case .Failed:
+	case .Failed, .Hidden:
 		switch security.failure {
 		case .Sealed, .None:
 			fields.decryptError = headlessE2EEErrorName(security.sealedError)
@@ -56,10 +59,25 @@ headlessRoomSecurity :: proc(
 			fields.decryptError = "log_failed"
 		case .Replayed:
 			fields.decryptError = "replayed"
+		case .Unsigned:
+			fields.decryptError = "unsigned"
+		case .BadSignature:
+			fields.decryptError = "bad_signature"
+		case .NoKey:
+			fields.decryptError = "no_sender_key"
 		}
 	case .Plain, .Encrypted:
 	}
 	return fields
+}
+
+// The text the harness prints for a room message: only what the window shows as content.
+headlessRoomContent :: proc(entry: RoomMessageEntry) -> string {
+	#partial switch entry.security.protection {
+	case .Plain, .Encrypted:
+		return entry.content
+	}
+	return ""
 }
 
 // The cached entry of message, or nil.
@@ -96,14 +114,13 @@ headlessRoomMessageFields :: proc(
 	serverID: int,
 	message: common.StoredChatMessage,
 ) -> HeadlessHistoryMessageJSON {
+	// Not cached: nothing was checked, so nothing of it is printed as content.
 	entry := RoomMessageEntry {
 		message = message,
-		security = {protection = len(message.sealed) > 0 ? .Pending : .Plain},
+		security = {protection = .Pending},
 	}
 	if cached := headlessCachedRoomEntry(state, serverID, message); cached != nil {
 		entry = cached^
-	} else if len(message.sealed) > 0 {
-		entry.content = ""
 	}
 	fields := headlessRoomSecurity(entry.security, len(entry.sealed) > 0)
 	return HeadlessHistoryMessageJSON {
@@ -115,7 +132,7 @@ headlessRoomMessageFields :: proc(
 		decryptError = fields.decryptError,
 		epoch = fields.epoch,
 		protection = fields.protection,
-		content = entry.content,
+		content = headlessRoomContent(entry),
 	}
 }
 
@@ -157,6 +174,7 @@ headlessWriteRoomChat :: proc(harness: ^HeadlessHarness, event: ^ClientTransport
 		content         = event.message,
 		clientMessageId = event.clientMessageID,
 		sealed          = event.sealed,
+		signature       = event.signature,
 	}
 	if cached := headlessCachedRoomEntry(&harness.state, event.serverID, message);
 	   cached != nil && cached.security.protection == .Pending {

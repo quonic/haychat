@@ -111,6 +111,18 @@ create_room() {
 	created_room=${BASH_REMATCH[1]}
 }
 
+# pin_keys CLIENT USER_ID...: the client fetches and pins each account's keys.
+pin_keys() {
+	local client=$1 user start
+	shift
+	for user in "$@"; do
+		start=$(lines "$client")
+		expect_ok "$client" user-keys "$user"
+		expect_event "$client" "^\\{\"event\":\"user_keys\",.*\"userID\":$user," "$start" \
+			"client $client got no user_keys for user $user"
+	done
+}
+
 # history_of CLIENT ROOM: the client's room_history line for ROOM in history_line.
 history_of() {
 	local client=$1 room=$2 start
@@ -153,6 +165,14 @@ user_b=${BASH_REMATCH[1]}
 [[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_c\", ]] ||
 	fail "client a's users do not list $nickname_c"
 user_c=${BASH_REMATCH[1]}
+[[ "$last_result" =~ \{\"id\":([0-9]+),\"nickname\":\"$nickname_a\", ]] ||
+	fail "client a's users do not list $nickname_a"
+user_a=${BASH_REMATCH[1]}
+# Every room message is signed by its sender (protocol 22), and a client shows one only once it
+# checked the signature against the sender's pinned key. B and C pin the others' keys now, so
+# the history pages below open at once instead of waiting for a key fetch.
+pin_keys b "$user_a" "$user_c"
+pin_keys c "$user_a" "$user_b"
 
 echo "==> [access] admin invite: A adds B; C cannot see the room, its history, or its members"
 create_room a both,admin-invite "acc-admin-$run_tag"

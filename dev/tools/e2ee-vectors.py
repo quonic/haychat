@@ -3,9 +3,10 @@
 
 This rebuilds every layout of docs/plan/e2ee-design.md that common/e2ee_test.odin pins
 (the encryption key bundle, a direct message envelope and its wrap key, the sender chain, a
-sealed room message, a member log Create entry, the plaintext fallback signature, the
-safety number, a RoomKeyForward envelope, and, for encrypted voice, a VoiceKey envelope and a
-sealed voice payload) with Python's `cryptography` package (OpenSSL), not with the Odin code.
+sealed room message, a member log Create entry, the plaintext fallback signature, a signed
+plaintext room message, the safety number, a RoomKeyForward envelope, and, for encrypted voice,
+a VoiceKey envelope and a sealed voice payload) with Python's `cryptography` package (OpenSSL),
+not with the Odin code.
 The Odin tests (common/e2ee_test.odin and common/voice_e2ee_test.odin) compare their own
 output byte for byte with the values printed here.
 
@@ -284,6 +285,20 @@ def fallback_vector():
     show("KAT_PLAIN_SIGNATURE", ALICE_PRIVATE.sign(signed))
 
 
+def room_plain_vector():
+    """alice's signed plaintext room message (protocol 22, #90)."""
+    client_message_id = label_bytes("haychat-e2ee-test-room-plain-client-message-id", 16)
+    signed = (
+        b"haychat-room-plain-v1"
+        + SERVER_PUBLIC
+        + i64(ROOM_ID)
+        + i64(ALICE_ID)
+        + client_message_id
+        + "room hello".encode()
+    )
+    show("KAT_ROOM_PLAIN_SIGNATURE", ALICE_PRIVATE.sign(signed))
+
+
 def safety_number_vector():
     first, second = sorted([ALICE_PUBLIC, BOB_PUBLIC])
     digest = hashlib.sha512(b"haychat-safety-number-v1" + first + second).digest()
@@ -416,6 +431,7 @@ def main():
     room_message_vector(message_keys)
     room_log_vector()
     fallback_vector()
+    room_plain_vector()
     safety_number_vector()
     room_key_forward_vector()
     voice_key_vector()

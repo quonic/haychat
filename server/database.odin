@@ -449,8 +449,9 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 //
 // Protocol 19: a plaintext message ($4 '') is stored only in an unencrypted room and a sealed
 // one ($4 the SealedRoomMessage as hex) only in an encrypted room whose log version is the
-// message's epoch ($6), with its client message ID ($5), chain ID ($7) and index ($8). The
-// unique indexes on (sender, client message ID) and (sender, chain ID, index) make a reused
+// message's epoch ($6), with its chain ID ($7) and index ($8). Both carry their client message
+// ID ($5); a plaintext message also its signature ($9, protocol 22), which the router checked.
+// The unique indexes on (sender, client message ID) and (sender, chain ID, index) make a reused
 // one store nothing (ON CONFLICT DO NOTHING). It always returns exactly one row: membership,
 // the message ID and time, recipients, nickname, whether chat is allowed, whether the room is
 // encrypted, and its log version.
@@ -460,13 +461,14 @@ DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND encrypted = ($4::text <> '') " +
 	"AND (NOT encrypted OR log_version = $6::bigint)), " +
 	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content, sealed, " +
-	"client_message_id, epoch, chain_id, chain_index) " +
+	"client_message_id, epoch, chain_id, chain_index, signature) " +
 	"SELECT $1, $2, $3, " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE decode($4::text, 'hex') END, " +
-	"CASE WHEN $4::text = '' THEN NULL ELSE decode($5::text, 'hex') END, " +
+	"decode($5::text, 'hex'), " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE $6::bigint END, " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE decode($7::text, 'hex') END, " +
-	"CASE WHEN $4::text = '' THEN NULL ELSE $8::integer END " +
+	"CASE WHEN $4::text = '' THEN NULL ELSE $8::integer END, " +
+	"CASE WHEN $4::text = '' THEN decode($9::text, 'hex') ELSE NULL END " +
 	"WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
 	"ON CONFLICT DO NOTHING RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
@@ -488,21 +490,25 @@ databaseExecutePostRoomChatMessage :: proc(
 	contentCString, _ := strings.clone_to_cstring(request.content)
 	defer delete(contentCString)
 	sealedHex := ""
-	clientMessageIDHex := ""
 	chainIDHex := ""
 	sealed := len(request.sealed) > 0
 	if sealed {
-		clientMessageID := request.clientMessageId
 		chainID := request.chainId
 		sealedHex = common.encodeBytesToHex(request.sealed)
-		clientMessageIDHex = common.encodeBytesToHex(clientMessageID[:])
 		chainIDHex = common.encodeBytesToHex(chainID[:])
 	}
 	defer if sealed {
 		delete(sealedHex)
-		delete(clientMessageIDHex)
 		delete(chainIDHex)
 	}
+	clientMessageID := request.clientMessageId
+	clientMessageIDHex := common.encodeBytesToHex(clientMessageID[:])
+	defer delete(clientMessageIDHex)
+	signature := request.signature
+	signatureHex := common.encodeBytesToHex(signature[:])
+	defer delete(signatureHex)
+	signatureParam, _ := strings.clone_to_cstring(signatureHex)
+	defer delete(signatureParam)
 	sealedParam, _ := strings.clone_to_cstring(sealedHex)
 	defer delete(sealedParam)
 	clientMessageIDParam, _ := strings.clone_to_cstring(clientMessageIDHex)
@@ -522,6 +528,7 @@ databaseExecutePostRoomChatMessage :: proc(
 		transmute([^]byte)epochParam,
 		transmute([^]byte)chainIDParam,
 		transmute([^]byte)chainIndexParam,
+		transmute([^]byte)signatureParam,
 	}
 	result := databaseExecParams(conn, DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, params[:])
 	if result == nil {
@@ -585,6 +592,7 @@ databaseExecutePostRoomChatMessage :: proc(
 				content = strings.clone(request.content),
 				clientMessageId = request.clientMessageId,
 				sealed = storedSealed,
+				signature = sealed ? {} : request.signature,
 			},
 			recipientUserIDs = databaseParseIDList(recipientsText),
 		},
@@ -612,10 +620,10 @@ DATABASE_GET_ROOM_HISTORY_SQL ::
 	"ORDER BY cm.created_at, cm.id LIMIT 1), 9223372036854775807) END AS id FROM member m) " +
 	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
 	"c.nickname, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
-	"COALESCE(encode(c.sealed, 'hex'), '') FROM member m CROSS JOIN first_visible f " +
-	"LEFT JOIN LATERAL (" +
+	"COALESCE(encode(c.sealed, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), '') " +
+	"FROM member m CROSS JOIN first_visible f LEFT JOIN LATERAL (" +
 	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname, " +
-	"cm.client_message_id, cm.sealed " +
+	"cm.client_message_id, cm.sealed, cm.signature " +
 	"FROM chat_messages cm JOIN users u ON u.id = cm.sender_user_id " +
 	"WHERE m.ok AND cm.room_id = $1 AND ($3::bigint = 0 OR cm.id < $3::bigint) " +
 	"AND cm.id >= f.id AND (m.since IS NULL OR cm.created_at > m.since) " +
@@ -697,11 +705,15 @@ databaseExecuteGetRoomHistory :: proc(
 			timestamp      = databaseGetText(result, row, 3),
 			content        = databaseGetText(result, row, 4),
 		}
-		// Protocol 19: a sealed message's client message ID and bytes; malformed reads as none.
+		// The client message ID, a sealed message's bytes (protocol 19) and a plaintext
+		// message's signature (protocol 22); malformed reads as none, which clients refuse.
 		if !databaseGetHexBytes(result, row, 6, message.clientMessageId[:]) {
 			message.clientMessageId = {}
 		}
 		message.sealed = databaseGetOwnedHexBytes(result, row, 7)
+		if !databaseGetHexBytes(result, row, 8, message.signature[:]) {
+			message.signature = {}
+		}
 		append(&messages, message)
 	}
 	return databaseSuccess(

@@ -116,6 +116,10 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 				nextLog += 1
 			}
 		}
+		// A message without its sender's valid signature leaves no line at all (#90).
+		if !roomMessageShown(message.security) {
+			continue
+		}
 		isSelf := selfUserID != 0 && message.senderId == selfUserID
 		// A sender without a user row has no nickname; fall back to the user ID.
 		senderLabel := "You"
@@ -348,7 +352,6 @@ buildSidebarRows :: proc(
 				previewUnencrypted = directPreviewUnencrypted(
 					conversation.security,
 					len(conversation.lastEnvelope) > 0,
-					State_directConversationEncrypted(state, serverID, peerUserID),
 				),
 			},
 		)
@@ -455,8 +458,12 @@ buildDirectConversationView :: proc(
 	view.isLoadingHistory = conversation.isLoadingHistory
 
 	selfUserID := State_selfUserID(state, serverID)
-	lines := make([]TranscriptLine, len(conversation.messages), allocator)
-	for message, index in conversation.messages {
+	// Messages that are not shown (#82) leave no line at all.
+	lines := make([dynamic]TranscriptLine, 0, len(conversation.messages), allocator)
+	for message in conversation.messages {
+		if !directMessageShown(message.security) {
+			continue
+		}
 		isSelf := selfUserID != 0 && message.senderId == selfUserID
 		senderLabel := "You"
 		if !isSelf {
@@ -464,7 +471,7 @@ buildDirectConversationView :: proc(
 		}
 		badge, tone := directMessageBadge(message.security, len(message.envelope) > 0)
 		content, placeholder := directMessageText(message)
-		lines[index] = TranscriptLine {
+		append(&lines, TranscriptLine {
 			messageID    = message.id,
 			senderUserID = message.senderId,
 			senderLabel  = senderLabel,
@@ -473,9 +480,9 @@ buildDirectConversationView :: proc(
 			badge        = badge,
 			badgeTone    = tone,
 			placeholder  = placeholder,
-		}
+		})
 	}
-	view.lines = lines
+	view.lines = lines[:]
 	return
 }
 

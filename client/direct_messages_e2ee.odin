@@ -96,7 +96,11 @@ State_directIdentityFor :: proc(
 }
 
 // Opens or checks one message (pure). content is owned (allocator): the opened plaintext of an
-// envelope (empty unless Encrypted), or a copy of a plaintext message's content.
+// envelope, a copy of a verified plaintext message's content, or a copy of a plaintext
+// message's content still Pending (kept to be checked once the pin arrives, never shown), and
+// empty for Failed and Hidden messages and waiting envelopes. Every message must be signed by
+// its sender (#82): an unsigned one, one whose signature does not verify against the pin, and
+// an envelope that fails at or before its signature check are Hidden.
 openDirectMessageContent :: proc(
 	keys: DirectOpenKeys,
 	senderIdentity, recipientIdentity: Maybe(common.IdentityPublicKeyBytes),
@@ -112,34 +116,40 @@ openDirectMessageContent :: proc(
 		if !keys.ready || !hasSender || !hasRecipient {
 			return "", {protection = .Pending}
 		}
+		aadFields := common.DirectMessageAADFields {
+			serverIdentityPublicKey    = keys.serverIdentityPublicKey,
+			senderUserID               = message.senderId,
+			recipientUserID            = message.recipientId,
+			senderIdentityPublicKey    = sender,
+			recipientIdentityPublicKey = recipient,
+			clientMessageID            = message.clientMessageId,
+		}
 		if !keys.hasOwnKeyPair {
+			// Without a key of its own the client cannot open anything, but it still tells a
+			// message its sender signed from one the server made up.
+			verifyErr := common.verifyDirectMessageEnvelope(message.envelope, aadFields)
+			if verifyErr != .None {
+				return "", directEnvelopeSecurity(verifyErr)
+			}
 			return "", {protection = .Failed, failure = .OwnKey}
 		}
 		plaintext, err := common.openDirectMessage(
 			message.envelope,
-			common.DirectMessageAADFields {
-				serverIdentityPublicKey = keys.serverIdentityPublicKey,
-				senderUserID = message.senderId,
-				recipientUserID = message.recipientId,
-				senderIdentityPublicKey = sender,
-				recipientIdentityPublicKey = recipient,
-				clientMessageID = message.clientMessageId,
-			},
+			aadFields,
 			keys.ownUserID,
 			keys.ownKeyPair,
 			allocator,
 		)
 		if err != .None {
-			return "", {protection = .Failed, failure = .Envelope, envelopeError = err}
+			return "", directEnvelopeSecurity(err)
 		}
 		return plaintext.content, {protection = .Encrypted}
 	}
-	content = strings.clone(message.content, allocator)
 	if message.signature == {} {
-		return content, {protection = .Plain}
+		return "", {protection = .Hidden, failure = .Unsigned}
 	}
 	if !keys.ready || !hasSender {
-		return content, {protection = .Pending}
+		return strings.clone(message.content, allocator), {protection = .Pending}
 	}
 	verified := common.verifyPlaintextDirectMessage(
 		common.PlaintextDirectMessageFields {
@@ -152,7 +162,22 @@ openDirectMessageContent :: proc(
 		sender,
 		message.signature,
 	)
-	return content, {protection = verified ? .Signed : .Unverified}
+	if !verified {
+		return "", {protection = .Hidden, failure = .BadSignature}
+	}
+	return strings.clone(message.content, allocator), {protection = .Signed}
+}
+
+// What an envelope that did not open is (#82): Failed ("could not be decrypted") only when
+// openDirectMessage got past the signature, which verified, and the shape checks that follow
+// it; Hidden for every error at or before them, since then nobody is known to have sent it.
+directEnvelopeSecurity :: proc(err: common.E2EEError) -> DirectMessageSecurity {
+	#partial switch err {
+	case .NoWrapForRecipient, .BadEphemeralKey, .BadWrap, .BadCiphertext, .BadPadding,
+	     .BadPlaintext:
+		return {protection = .Failed, failure = .Envelope, envelopeError = err}
+	}
+	return {protection = .Hidden, failure = .Envelope, envelopeError = err}
 }
 
 // A cache entry for a borrowed message, opened with keys.
@@ -248,8 +273,8 @@ State_directMarkEncrypted :: proc(state: ^State, serverID, peerUserID: int) {
 }
 
 // Opens every message still waiting for a key (after keys arrived). A message whose key can
-// no longer come (the server has none and none was ever pinned) is settled: an envelope
-// cannot be opened, and a signed plaintext message cannot be checked.
+// no longer come (the server has none and none was ever pinned) is settled: its signature
+// cannot be checked, so it is Hidden.
 State_directReopenPending :: proc(state: ^State, serverID: int) {
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
@@ -273,12 +298,10 @@ State_directReopenPending :: proc(state: ^State, serverID: int) {
 			)
 			if security.protection == .Pending &&
 			   !State_directKeyMayArrive(state, serverID, peerUserID) {
-				security = directSettleWithoutKey(entry.message)
-				if security.protection == .Failed {
-					wipeString(content)
-					delete(content)
-					content = ""
-				}
+				security = DIRECT_SETTLED_WITHOUT_KEY
+				wipeString(content)
+				delete(content)
+				content = ""
 			}
 			if security.protection == .Pending {
 				wipeString(content)
@@ -303,11 +326,10 @@ State_directReopenPending :: proc(state: ^State, serverID: int) {
 		State_openDirectPreview(state, serverID, keys, &entry)
 		if entry.security.protection == .Pending &&
 		   !State_directKeyMayArrive(state, serverID, entry.peerUserId) {
-			message := common.StoredDirectMessage {
-				envelope  = entry.lastEnvelope,
-				signature = entry.lastSignature,
-			}
-			entry.security = directSettleWithoutKey(message)
+			wipeString(entry.lastContent)
+			delete(entry.lastContent)
+			entry.lastContent = ""
+			entry.security = DIRECT_SETTLED_WITHOUT_KEY
 		}
 		if entry.security.protection == .Encrypted {
 			State_directMarkEncrypted(state, serverID, entry.peerUserId)
@@ -315,13 +337,11 @@ State_directReopenPending :: proc(state: ^State, serverID: int) {
 	}
 }
 
-// What a message is when its sender's key can never be checked.
-@(private = "file")
-directSettleWithoutKey :: proc(message: common.StoredDirectMessage) -> DirectMessageSecurity {
-	if len(message.envelope) > 0 {
-		return {protection = .Failed, failure = .NoKey}
-	}
-	return {protection = .Unverified}
+// What a message is when its sender's key can never be checked: its signature cannot be
+// verified, so it is not shown (#82).
+DIRECT_SETTLED_WITHOUT_KEY :: DirectMessageSecurity {
+	protection = .Hidden,
+	failure    = .NoKey,
 }
 
 // Whether a pin for userID may still arrive: the client has none and has not heard from the
@@ -342,6 +362,8 @@ State_directKeysChanged :: proc(state: ^State, serverID: int) {
 	State_roomLogsPinsChanged(state, serverID)
 	// Sender chains (room_chains.odin): distributions and key answers that waited for keys.
 	State_roomChainsKeysChanged(state, serverID)
+	// Plaintext room messages (room_signatures.odin) that waited for their senders' keys.
+	State_roomMessagesKeysChanged(state, serverID)
 	// Encrypted voice (voice_e2ee.odin): rotations and voice keys that waited for pins.
 	State_voiceE2EEKeysChanged(state, serverID)
 	cacheIndex := State_serverDirectCacheIndex(state^, serverID)

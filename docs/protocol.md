@@ -29,7 +29,8 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
   Unencrypted rooms (every Public room, and invite rooms
   created without **Encrypt this room**) are not end-to-end encrypted: the server decrypts
   their messages and stores them unencrypted in its PostgreSQL database, so the server and its
-  operator can read them, and direct messages from before protocol 17. Voice is relayed and
+  operator can read them; since protocol 22 each one is signed by its sender, so the server
+  cannot forge one ([below](#signed-messages-protocol-22)). Voice is relayed and
   never stored or logged; since protocol 21 voice in an encrypted room is end-to-end encrypted
   too ([below](#encrypted-voice-protocol-21)), while voice in an unencrypted room is readable
   by the server as it relays it. Invite-only rooms
@@ -61,6 +62,7 @@ version below therefore needs clients and servers rebuilt together.
 | 19 | Sender chains in encrypted rooms (end-to-end encryption, part 3b): sealed room messages (`ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `clientMessageId` and `sealed`), `ClientRoomKeyEnvelope`/`ServerRoomKeyEnvelope`, `ClientFetchRoomKeys`/`ServerRoomKeys`, `ClientRequestRoomKey`/`ServerRoomKeyRequest`, with schema migration 8 (sealed `chat_messages` columns, `room_key_envelopes`). Plaintext in an encrypted room is refused |
 | 20 | Full history in encrypted rooms (end-to-end encryption, part 4): `RoomKeyForward` envelopes (`ClientRoomKeyEnvelopePayload.senderId` names the chain's sender, `RoomKeyEnvelope.forwarderId` the forwarding account), `ServerRoomKeyRequest.senderId`, and key requests relayed to every member of a Full history room, with schema migration 9 (`room_key_envelopes.forwarder_user_id`) |
 | 21 | Encrypted voice in encrypted rooms (end-to-end encryption, part 5): voice joins of encrypted rooms are accepted, `ClientVoiceKey`/`ServerVoiceKey` (a participant's `VoiceKey` envelope, kind 4), `ClientRequestVoiceKey`/`ServerVoiceKeyRequest`, and sealed voice payloads in the frames of encrypted rooms. No schema migration: voice keys are never stored |
+| 22 | Signed room messages (#90): `ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `signature`, and every plaintext room message carries a random `clientMessageId` and its sender's signature (`signPlaintextRoomMessage`); the server refuses unsigned plaintext ("Invalid room message signature") and a reused client message ID, and clients show no room or direct message without its sender's valid signature (#82). Schema migration 10 deletes every unsigned message ([below](#signed-messages-protocol-22)) |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
@@ -131,14 +133,42 @@ The second part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design
   sender's signature (`signPlaintextDirectMessage`: the server's identity key, both user IDs,
   the client message ID and the text); the server verifies it against the session's identity
   key and refuses a message without a valid one ("Invalid direct message signature"). Both
-  clients check it against the sender's pin. Badges: a lock on encrypted messages,
-  "Unencrypted" on signed plaintext, "Unencrypted, sender not verified" when the signature
-  does not verify, and "Not encrypted" on messages from before protocol 17, which carry no
-  signature. See the [user guide](user-guide.md#encrypted-direct-messages).
+  clients check it against the sender's pin. Badges: a lock on encrypted messages and
+  "Unencrypted" on signed plaintext. See the [user guide](user-guide.md#encrypted-direct-messages).
+- **Only signed messages are shown** (protocol 22, #82). A client never shows a direct message
+  whose sender's signature it did not verify against its pin: one without a signature, one
+  whose signature does not verify, one whose sender has no key to check it with, and an
+  envelope that fails at or before its signature check are left out of the conversation, its
+  preview and its unread count. An envelope whose signature verified but which does not open
+  still shows "This message could not be decrypted". Migration 10 deleted the unsigned
+  messages from before protocol 17.
 - **What the server still learns.** Who writes to whom, when, and each message's length in
-  256-byte steps. It can also withhold or delete messages, and it can insert an unsigned
-  message that looks like one from before protocol 17 ("Not encrypted"); it cannot read,
-  change or forge an encrypted or signed one.
+  256-byte steps. It can also withhold or delete messages; it cannot read, change, forge or
+  insert one a client shows.
+
+## Signed messages (protocol 22)
+
+Every message a client shows is signed by its sender (#82, #90), so a server can no longer
+write a message in anyone's name.
+
+- **Room messages.** A plaintext room message carries a random, non-zero client message ID and
+  the sender's signature (`signPlaintextRoomMessage`: `"haychat-room-plain-v1"`, the server's
+  identity key, the room ID, the sender's user ID, the client message ID and the text). The
+  server checks it against the session's identity key and refuses a message without a valid
+  one ("Invalid room message signature") and a client message ID the sender used before
+  ("Duplicate room message"). It stores the signature with the message and sends it with the
+  live message and in history pages.
+- **What clients show.** A client checks every room message against the sender's pinned
+  identity key (its own key for its own messages); a sender it has not pinned yet is fetched
+  first, and the message shows "Checking who sent this message…" meanwhile, never its text.
+  A message without a signature, with one that does not verify, or from a sender who has no
+  key is not shown at all: no line, no unread count. The same holds for direct messages, and
+  for sealed messages in encrypted rooms, where a message that fails at or before its
+  signature check is left out and one whose signature verified but which cannot be opened
+  shows "This message could not be decrypted".
+- **Migration 10** deleted every unsigned message: every plaintext room message (none had a
+  signature before protocol 22) and every direct message from before protocol 17. Clients
+  would never show them again.
 
 ## Encrypted rooms and the member log (protocol 18)
 
@@ -336,13 +366,15 @@ rooms keep their voice exactly as before.
 ([plan/e2ee-design.md](plan/e2ee-design.md)). Protocol 16 uses the encryption key bundle and
 safety numbers, protocol 17 the direct message envelopes and the signed plaintext fallback,
 protocol 18 the member log, protocol 19 the sender chains, their distributions and sealed
-room messages, protocol 20 the forwarded chains of Full history rooms, and protocol 21 the
-voice key envelopes (sealed voice payloads are in `common/voice_e2ee.odin`).
+room messages, protocol 20 the forwarded chains of Full history rooms, protocol 21 the
+voice key envelopes (sealed voice payloads are in `common/voice_e2ee.odin`), and protocol 22
+the signed plaintext room messages.
 
 - **What is there.** The signed encryption key bundle (X25519 key, signed by the identity key),
   sealed envelopes (one random message key wrapped per recipient, the body sealed with
   XChaCha20-Poly1305, the whole envelope signed with Ed25519), the AAD builders for direct
-  messages, room key distributions and room messages, the signed plaintext fallback, padding to
+  messages, room key distributions and room messages, the signed plaintext fallback and signed
+  plaintext room messages, padding to
   256-byte blocks, sender chains, sealed room messages, the signed member log with its replay
   rules, and safety numbers.
 - **Byte layouts.** Every structure has a fixed, versioned, little-endian layout, documented byte

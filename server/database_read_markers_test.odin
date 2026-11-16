@@ -26,11 +26,7 @@ databaseReadMarkerTestOpen :: proc(label: string) -> (pg.Conn, string) {
 databaseReadMarkerTestPostRoom :: proc(conn: pg.Conn, roomID, senderID: int) -> int {
 	response := databaseExecuteRequest(
 		conn,
-		common.DatabasePostRoomChatMessageRequest {
-			roomId = roomID,
-			senderId = senderID,
-			content = "read state",
-		},
+		databaseTestPlainRoomPost(roomID, senderID, "read state"),
 	)
 	defer IPC__database_query_response_deinit(response)
 	posted, postedOK := response.result.(common.DatabasePostRoomChatMessageResult)
@@ -166,10 +162,11 @@ testRoomUnreadRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		conn,
 		"post many messages",
 		fmt.tprintf(
-			"INSERT INTO chat_messages (room_id, sender_user_id, content) " +
-			"SELECT %d, %d, 'bulk' FROM generate_series(1, 105)",
+			"INSERT INTO chat_messages (room_id, sender_user_id, content, " +
+			"client_message_id, signature) SELECT %d, %d, 'bulk', %s FROM generate_series(1, 105)",
 			room,
 			alice,
+			DATABASE_TEST_PLAIN_COLUMNS_SQL,
 		),
 	)
 	unread, _ = databaseReadMarkerTestRoom(conn, bob, room)

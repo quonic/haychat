@@ -12,9 +12,11 @@ import "core:testing"
 // transport of the peer it is addressed to (routerVoiceTestDrain).
 
 RouterVoiceTestClient :: struct {
-	peerID:    u32,
-	userID:    int,
-	transport: common.TransportState,
+	peerID:      u32,
+	userID:      int,
+	transport:   common.TransportState,
+	// The session's identity key, for tests that sign as the client (protocol 22).
+	identityKey: common.IdentityPrivateKeyBytes,
 }
 
 RouterVoiceTestPacket :: struct {
@@ -96,6 +98,7 @@ routerVoiceTestConnect :: proc(h: ^RouterTestHarness, clients: []RouterVoiceTest
 			client.peerID,
 			client.userID,
 			fmt.tprintf("voice-user-%d", client.userID),
+			identityPrivateKeyOut = &client.identityKey,
 		)
 		drain := routerVoiceTestDrain(h, clients)
 		RouterVoiceTestDrain_deinit(&drain)

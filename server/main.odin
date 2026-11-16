@@ -938,6 +938,11 @@ MainRouterState_handleClientAuthRequest :: proc(
 // the room type in the same statement as membership and the insert.
 CHAT_DISABLED_MESSAGE :: "Chat is disabled in this room"
 
+// Protocol 22 (#90): a plaintext message must carry a set client message ID and a signature by
+// the session's identity key over this server, the room, the session's account, that ID and
+// the content (ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE otherwise); the database refuses a reused
+// ID.
+//
 // Protocol 19 (e2ee-design.md 6.5): a sealed message is checked here for what needs no database:
 // its shape, its structure (decodeSealedRoomMessage) and its signature against the session's
 // identity key, which is the account's users.public_key, with every AAD field known (this
@@ -1009,6 +1014,27 @@ MainRouterState_handleClientChatMessage :: proc(
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room chat message")
 		return
 	}
+	// Protocol 22 (#90): a plaintext message is signed by the session's identity key, so no
+	// one, the server included, can write one in another account's name.
+	if !common.verifyPlaintextRoomMessage(
+		common.PlaintextRoomMessageFields {
+			serverIdentityPublicKey = state.serverIdentityPublicKey,
+			roomID = req.roomId,
+			senderUserID = session.authenticatedUserID,
+			clientMessageID = req.clientMessageId,
+		},
+		req.content,
+		session.clientIdentityPublicKey,
+		req.signature,
+	) {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			common.ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE,
+		)
+		return
+	}
 
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
@@ -1018,6 +1044,8 @@ MainRouterState_handleClientChatMessage :: proc(
 			roomId = req.roomId,
 			senderId = session.authenticatedUserID,
 			content = strings.clone(req.content),
+			clientMessageId = req.clientMessageId,
+			signature = req.signature,
 		},
 		PendingDBRequest{requestType = .PostChatMessage, roomID = req.roomId},
 	)
@@ -1678,6 +1706,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			content         = posted.storedMessage.content,
 			clientMessageId = posted.storedMessage.clientMessageId,
 			sealed          = posted.storedMessage.sealed,
+			signature       = posted.storedMessage.signature,
 		}
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if recipientSession.isAuthenticated &&

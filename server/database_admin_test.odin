@@ -568,11 +568,7 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	post :: proc(conn: pg.Conn, roomID, senderID: int) -> common.DatabasePostRoomChatMessageResult {
 		response := databaseExecuteRequest(
 			conn,
-			common.DatabasePostRoomChatMessageRequest {
-				roomId = roomID,
-				senderId = senderID,
-				content = "hello",
-			},
+			databaseTestPlainRoomPost(roomID, senderID, "hello"),
 		)
 		result, ok := response.result.(common.DatabasePostRoomChatMessageResult)
 		assert(response.success && ok, fmt.tprintf("expected the post to run: %v", response))

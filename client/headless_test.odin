@@ -237,6 +237,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		timestamp      = "2026-11-05T10:00:00Z",
 		message        = "say \"hi\"\n\\o/",
 	}
+	// Without a State nothing was checked (protocol 22): pending, and no content.
 	line, kind, ok := headlessRenderRuntimeEvent(&chat)
 	testing.expect(t, ok && kind == .RoomChat, "expected a room_chat event")
 	testExpectString(
@@ -244,7 +245,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,` +
 		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z","encrypted":false,` +
-		`"decryptError":"","epoch":0,"protection":"plain","content":"say \"hi\"\n\\o/"}`,
+		`"decryptError":"","epoch":0,"protection":"pending","content":""}`,
 		"the room_chat JSON",
 	)
 	delete(line)
@@ -295,7 +296,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_history","serverID":1,"roomID":4,"hasOlder":true,` +
 		`"messages":[{"id":9,"senderID":2,"senderNickname":"","timestamp":"t",` +
-		`"encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"old"}]}`,
+		`"encrypted":false,"decryptError":"","epoch":0,"protection":"pending","content":""}]}`,
 		"the room_history JSON",
 	)
 	delete(line)
@@ -800,6 +801,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 			content = strings.clone("hi bob"),
 		},
 	}
+	// Unsigned (#82): printed as hidden, without its content.
 	headlessHandleRuntimeEvent(&harness, &direct)
 	ClientTransportRuntimeEvent_deinit(&direct)
 	testExpectString(
@@ -807,7 +809,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_message","serverID":1,"id":12,"senderID":3,"senderNickname":"alice",` +
 		`"recipientID":4,"recipientNickname":"bob","timestamp":"t","encrypted":false,` +
-		`"signed":false,"decryptError":"","protection":"plain","content":"hi bob"}` +
+		`"signed":false,"decryptError":"unsigned","protection":"hidden","content":""}` +
 		"\n",
 		"the direct_message JSON",
 	)
@@ -830,6 +832,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 			content = strings.clone("old"),
 		},
 	)
+	testSignDirectMessage(&harness.state, 1, &history.directMessages[0])
 	headlessHandleRuntimeEvent(&harness, &history)
 	ClientTransportRuntimeEvent_deinit(&history)
 	testExpectString(
@@ -837,8 +840,8 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_history","serverID":1,"peerUserID":3,"hasOlder":true,"messages":[` +
 		`{"id":9,"senderID":3,"senderNickname":"alice","recipientID":4,` +
-		`"recipientNickname":"bob","timestamp":"t","encrypted":false,"signed":false,` +
-		`"decryptError":"","protection":"plain","content":"old"}]}` +
+		`"recipientNickname":"bob","timestamp":"t","encrypted":false,"signed":true,` +
+		`"decryptError":"","protection":"signed","content":"old"}]}` +
 		"\n",
 		"the direct_history JSON",
 	)
@@ -858,6 +861,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 			lastContent = strings.clone("hi bob"),
 		},
 	)
+	testSignDirectPreview(&harness.state, 1, &conversations.conversations[0])
 	headlessHandleRuntimeEvent(&harness, &conversations)
 	ClientTransportRuntimeEvent_deinit(&conversations)
 	testExpectString(
@@ -865,7 +869,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"conversations","serverID":1,"conversations":[{"peerUserID":3,` +
 		`"peerNickname":"alice","lastMessageID":12,"lastSenderID":3,"lastTimestamp":"t",` +
-		`"encrypted":false,"signed":false,"decryptError":"","protection":"plain",` +
+		`"encrypted":false,"signed":true,"decryptError":"","protection":"signed",` +
 		`"conversationEncrypted":false,"lastContent":"hi bob","lastReadMessageId":0,` +
 		`"unreadCount":0}]}` +
 		"\n",

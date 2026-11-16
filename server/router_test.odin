@@ -206,6 +206,36 @@ routerDecodePacketBytes :: proc(packetBytes: []u8) -> common.Packet {
 	return packet
 }
 
+// A plaintext room message as a client sends it (protocol 22): a random client message ID and
+// the signature of identityKey, the session's, over this server, the room and userID.
+routerTestSignedChat :: proc(
+	h: ^RouterTestHarness,
+	identityKey: common.IdentityPrivateKeyBytes,
+	roomID, userID: int,
+	content: string,
+) -> common.ClientChatMessagePayload {
+	clientMessageID: common.ClientMessageID
+	assert(common.generateRandomBytes(clientMessageID[:]), "expected a random message ID")
+	clientMessageID[0] |= 1
+	signature, ok := common.signPlaintextRoomMessage(
+		common.PlaintextRoomMessageFields {
+			serverIdentityPublicKey = h.state.serverIdentityPublicKey,
+			roomID = roomID,
+			senderUserID = userID,
+			clientMessageID = clientMessageID,
+		},
+		content,
+		identityKey,
+	)
+	assert(ok, "expected the test room message to sign")
+	return common.ClientChatMessagePayload {
+		roomId = roomID,
+		content = content,
+		clientMessageId = clientMessageID,
+		signature = signature,
+	}
+}
+
 routerEncodePacketBytes :: proc(packet: common.Packet) -> []u8 {
 	packetBytes, err := cbor.marshal(packet)
 	assert(err == nil, "expected packet CBOR encode to succeed")
@@ -667,16 +697,24 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 	recipientPeerID := u32(2)
 	h.state.connectedPeers[recipientPeerID] = true
 
-	senderTransport := routerCompleteHandshake(&h, senderPeerID)
+	senderKey: common.IdentityPrivateKeyBytes
+	senderTransport := routerCompleteHandshake(&h, senderPeerID, identityPrivateKeyOut = &senderKey)
 	recipientTransport := routerCompleteHandshake(&h, recipientPeerID)
 
 	senderSession, senderOK := MainRouterState_getPeerSession(&h.state, senderPeerID)
 	assert(senderOK, "expected sender router peer session to exist")
 
+	chat := routerTestSignedChat(
+		&h,
+		senderKey,
+		1,
+		senderSession.authenticatedUserID,
+		"hello haychat",
+	)
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&senderTransport,
 		.ClientChatMessage,
-		common.ClientChatMessagePayload{roomId = 1, content = "hello haychat"},
+		chat,
 	)
 	assert(sealOK, "expected encrypted client chat packet sealing to succeed")
 	defer delete(sealedPacket.payload)
@@ -699,6 +737,11 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 	)
 	assert(postRequest.roomId == 1, "expected chat post to target the requested room")
 	assert(postRequest.content == "hello haychat", "expected chat post to carry the content")
+	assert(
+		postRequest.clientMessageId == chat.clientMessageId &&
+		postRequest.signature == chat.signature,
+		"expected chat post to carry the client message ID and signature (protocol 22)",
+	)
 
 	recipientUserIDs := make([dynamic]int)
 	append(&recipientUserIDs, senderSession.authenticatedUserID)
@@ -791,6 +834,60 @@ testMainRouterBroadcastsChatToAuthenticatedPeers :: proc(t: ^testing.T) {
 	assert(networkErr != nil, "expected only two chat broadcast messages to be queued")
 }
 
+// Protocol 22 (#90): a plaintext room message without its sender's valid signature never
+// reaches the database.
+@(test)
+testMainRouterRefusesUnsignedRoomChat :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	senderKey: common.IdentityPrivateKeyBytes
+	transport := routerCompleteHandshake(&h, peerID, 42, identityPrivateKeyOut = &senderKey)
+	defer common.TransportState_deinit(&transport)
+	peers := [?]RouterTestPeer{{peerID, &transport}}
+	otherKey, _, otherOK := common.generateIdentityKeyPair()
+	assert(otherOK, "expected another identity key")
+
+	signed := routerTestSignedChat(&h, senderKey, 1, 42, "hello")
+	unsigned := signed
+	unsigned.signature = {}
+	noID := signed
+	noID.clientMessageId = {}
+	edited := signed
+	edited.content = "hellO"
+	otherRoom := signed
+	otherRoom.roomId = 2
+	cases := [?]common.ClientChatMessagePayload {
+		unsigned,
+		noID,
+		edited,
+		otherRoom,
+		// Signed for another account, and by a key that is not the session's.
+		routerTestSignedChat(&h, senderKey, 1, 43, "hello"),
+		routerTestSignedChat(&h, otherKey, 1, 42, "hello"),
+		{roomId = 1, content = "no signature at all"},
+	}
+	for refused in cases {
+		routerTestSendSealed(&h, &transport, peerID, .ClientChatMessage, refused)
+		routerTestExpectProtocolError(
+			&h,
+			peers[:],
+			common.ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE,
+		)
+		routerTestExpectNoDatabaseQuery(&h, "expected an unsigned room message to stay local")
+	}
+	// The signed one goes on to the database.
+	routerTestSendSealed(&h, &transport, peerID, .ClientChatMessage, signed)
+	query := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(query.request)
+	_, isPost := query.request.(common.DatabasePostRoomChatMessageRequest)
+	assert(isPost, "expected the signed message to reach the database")
+}
+
 @(test)
 testMainRouterRejectsChatFromNonMember :: proc(t: ^testing.T) {
 	_ = t
@@ -802,12 +899,13 @@ testMainRouterRejectsChatFromNonMember :: proc(t: ^testing.T) {
 	defer routerTestHarness_deinit(&h)
 
 	peerID := u32(1)
-	clientTransport := routerCompleteHandshake(&h, peerID)
+	clientKey: common.IdentityPrivateKeyBytes
+	clientTransport := routerCompleteHandshake(&h, peerID, identityPrivateKeyOut = &clientKey)
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
 		.ClientChatMessage,
-		common.ClientChatMessagePayload{roomId = 2, content = "wrong room"},
+		routerTestSignedChat(&h, clientKey, 2, 42, "wrong room"),
 	)
 	assert(sealOK, "expected encrypted client chat packet sealing to succeed")
 	defer delete(sealedPacket.payload)

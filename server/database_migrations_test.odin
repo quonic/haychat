@@ -298,6 +298,20 @@ DATABASE_MIGRATION_TEST_FINGERPRINT_SQL ::
 	"(SELECT string_agg(id || ':' || sender_user_id || ':' || recipient_user_id || ':' || " +
 	"content || ':' || created_at, ',' ORDER BY id) FROM direct_messages))"
 
+// The fingerprint without the message tables: migration 10 deletes every unsigned message,
+// which is every message an rc1 database holds.
+DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL ::
+	"SELECT concat_ws(' | ', " +
+	"(SELECT string_agg(id || ':' || nickname || ':' || " +
+	"COALESCE(encode(public_key, 'hex'), '-'), ',' ORDER BY id) FROM users), " +
+	"(SELECT string_agg(id || ':' || name, ',' ORDER BY id) FROM server_roles), " +
+	"(SELECT string_agg(user_id || ':' || role_id, ',' ORDER BY user_id, role_id) " +
+	"FROM user_server_roles), " +
+	"(SELECT string_agg(id || ':' || name || ':' || description || ':' || " +
+	"COALESCE(created_by_user_id::text, '-') || ':' || created_at, ',' ORDER BY id) FROM rooms), " +
+	"(SELECT string_agg(room_id || ':' || user_id || ':' || joined_at, ',' " +
+	"ORDER BY room_id, user_id) FROM room_members))"
+
 DATABASE_MIGRATION_TEST_COUNTS_SQL ::
 	"SELECT concat_ws('/', (SELECT count(*) FROM users), (SELECT count(*) FROM server_roles), " +
 	"(SELECT count(*) FROM user_server_roles), (SELECT count(*) FROM rooms), " +
@@ -318,6 +332,25 @@ DATABASE_MIGRATION_TEST_RC1_ROWS_SQL ::
 	"(1, 1, 'hello general'), (2, 2, 'hello lounge'); " +
 	"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content) VALUES " +
 	"(1, 2, 'hi bob'), (2, 1, 'hi alice')"
+
+// The rc1 rows for a newest schema: since migration 10 every plaintext message carries a client
+// message ID and a signature.
+DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL ::
+	"INSERT INTO users (nickname, public_key) VALUES ('mig-alice', '\\x01'), " +
+	"('mig-bob', '\\x02'), ('mig-carol', NULL); " +
+	"INSERT INTO server_roles (name) VALUES ('admin'); " +
+	"INSERT INTO user_server_roles (user_id, role_id) VALUES (1, 1); " +
+	"INSERT INTO rooms (name, description) VALUES ('general', 'General discussion'); " +
+	"INSERT INTO rooms (name, description, created_by_user_id) VALUES ('lounge', 'Chat', 1); " +
+	"INSERT INTO room_members (room_id, user_id) VALUES (1, 1), (1, 2), (1, 3), (2, 1), (2, 2); " +
+	"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, signature) " +
+	"VALUES (1, 1, 'hello general', decode(repeat('01', 16), 'hex'), " +
+	"decode(repeat('ab', 64), 'hex')), (2, 2, 'hello lounge', decode(repeat('02', 16), 'hex'), " +
+	"decode(repeat('ab', 64), 'hex')); " +
+	"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, client_message_id, " +
+	"signature) VALUES (1, 2, 'hi bob', decode(repeat('03', 16), 'hex'), " +
+	"decode(repeat('ab', 64), 'hex')), (2, 1, 'hi alice', decode(repeat('04', 16), 'hex'), " +
+	"decode(repeat('ab', 64), 'hex'))"
 
 @(test)
 testMigrationsCreateFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
@@ -368,7 +401,7 @@ testMigrationsAdoptRC1SchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	databaseDefaultRoomTestExec(conn, "fill rc1 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
 	counts := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_COUNTS_SQL)
 	assert(counts == "3/1/1/2/5/2/2", fmt.tprintf("expected the rc1 rows, got %q", counts))
-	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
 
 	newest := len(DATABASE_MIGRATIONS)
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
@@ -383,10 +416,16 @@ testMigrationsAdoptRC1SchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 		recorded == expected,
 		fmt.tprintf("expected schema_migrations to hold %q, got %q", expected, recorded),
 	)
-	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
 	assert(
 		after == before,
 		fmt.tprintf("expected every rc1 row intact:\nbefore %q\nafter  %q", before, after),
+	)
+	// rc1's messages are unsigned, so migration 10 deleted them (#82, #90).
+	countsAfter := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_COUNTS_SQL)
+	assert(
+		countsAfter == "3/1/1/2/5/0/0",
+		fmt.tprintf("expected only the unsigned messages gone, got %q", countsAfter),
 	)
 
 	// A second start changes nothing, not even applied_at.
@@ -404,7 +443,7 @@ testMigrationsAdoptRC1SchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 		"SELECT string_agg(applied_at::text, ',' ORDER BY version) FROM schema_migrations",
 	)
 	assert(appliedAtAgain == appliedAt, "expected the second run to leave schema_migrations alone")
-	afterAgain := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
+	afterAgain := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
 	assert(afterAgain == before, "expected the second run to leave every row intact")
 
 	// The identity sequences carry on after the adopted rows.
@@ -427,13 +466,15 @@ testMigrationsAdoptRC1SchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 			"3:4",
 		},
 		{
-			"INSERT INTO chat_messages (room_id, sender_user_id, content) " +
-			"VALUES (3, 4, 'after the upgrade') RETURNING id::text",
+			"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+			"signature) VALUES (3, 4, 'after the upgrade', decode(repeat('ab', 16), 'hex'), " +
+			"decode(repeat('cd', 64), 'hex')) RETURNING id::text",
 			"3",
 		},
 		{
-			"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content) " +
-			"VALUES (4, 1, 'after the upgrade') RETURNING id::text",
+			"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
+			"client_message_id, signature) VALUES (4, 1, 'after the upgrade', " +
+			"decode(repeat('ab', 16), 'hex'), decode(repeat('cd', 64), 'hex')) RETURNING id::text",
 			"3",
 		},
 	}
@@ -758,6 +799,16 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 	return strings.to_string(builder)
 }
 
+// The read marker backfill tests stop before migration 10, which deletes the unsigned messages
+// their markers point at.
+@(private = "file")
+READ_MARKERS_TEST_VERSION :: 9
+
+@(private = "file")
+databaseMigrationTestMaxRecorded :: proc(conn: pg.Conn) -> string {
+	return databaseMigrationTestValue(conn, "SELECT max(version)::text FROM schema_migrations")
+}
+
 @(test)
 testReadMarkersMigrationOnFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	_ = t
@@ -827,17 +878,19 @@ testReadMarkersMigrationBackfillsRC1AgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 	assert(unreadBefore == "4", fmt.tprintf("expected four room messages, got %q", unreadBefore))
 
-	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	// Up to version 9: migration 10 deletes every unsigned message, which is every message
+	// here, and the markers are what this test is about.
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:READ_MARKERS_TEST_VERSION])
 	assert(
 		outcome ==
 		DatabaseMigrationOutcome {
 			previousVersion = 0,
-			version = len(DATABASE_MIGRATIONS),
+			version = READ_MARKERS_TEST_VERSION,
 			adopted = true,
 		},
-		fmt.tprintf("expected rc1 adopted and migrated to the newest version, got %v", outcome),
+		fmt.tprintf("expected rc1 adopted and migrated to version 9, got %v", outcome),
 	)
-	databaseMigrationTestValidationPasses(conn)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:READ_MARKERS_TEST_VERSION])
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	assert(
 		after == before,
@@ -871,17 +924,16 @@ testReadMarkersMigrationUpgradesVersion1AgainstPostgreSQL :: proc(t: ^testing.T)
 	databaseDefaultRoomTestExec(conn, "fill version 1 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
 	before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 
-	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	// Up to version 9, as above.
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:READ_MARKERS_TEST_VERSION])
 	assert(
 		outcome ==
-		DatabaseMigrationOutcome{previousVersion = 1, version = len(DATABASE_MIGRATIONS)},
-		fmt.tprintf("expected every migration after 1 to run, got %v", outcome),
+		DatabaseMigrationOutcome{previousVersion = 1, version = READ_MARKERS_TEST_VERSION},
+		fmt.tprintf("expected every migration from 2 to 9 to run, got %v", outcome),
 	)
-	recorded := databaseMigrationTestRecorded(conn)
-	expectedRecorded := databaseMigrationTestExpectedRecorded()
 	assert(
-		recorded == expectedRecorded,
-		fmt.tprintf("expected %q recorded, got %q", expectedRecorded, recorded),
+		databaseMigrationTestMaxRecorded(conn) == "9",
+		"expected version 9 recorded",
 	)
 	after := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 	assert(after == before, "expected every version 1 row intact")
@@ -931,7 +983,7 @@ testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL :: proc(t: ^testing.T)
 		defer databaseMigrationTestClose(conn, schema)
 
 		databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
-		databaseDefaultRoomTestExec(conn, "fill schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+		databaseDefaultRoomTestExec(conn, "fill schema", DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL)
 		databaseDefaultRoomTestExec(conn, "damage schema_migrations", testCase.damage)
 		before := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_FINGERPRINT_SQL)
 		recordedBefore := databaseMigrationTestRecorded(conn)
@@ -956,4 +1008,132 @@ testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL :: proc(t: ^testing.T)
 		)
 		assert(markersAfter == markersBefore, "expected the refusal to leave the markers alone")
 	}
+}
+
+// Migration 10 (protocol 22, #82, #90): unsigned messages are deleted, signed and sealed ones
+// kept, and from then on every plaintext message needs a client message ID and a signature.
+@(test)
+testSignedMessagesMigrationUpgradesVersion9AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen("signed_v9")
+	defer databaseMigrationTestClose(conn, schema)
+
+	// A version 9 database: the rc1 rows (unsigned), plus a signed direct message and a sealed
+	// room message.
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:9])
+	databaseDefaultRoomTestExec(conn, "fill version 9 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
+	databaseDefaultRoomTestExec(
+		conn,
+		"add signed and sealed messages",
+		"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
+		"client_message_id, signature) VALUES (1, 2, 'signed', " +
+		"decode(repeat('aa', 16), 'hex'), decode(repeat('bb', 64), 'hex')); " +
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, sealed, " +
+		"client_message_id, epoch, chain_id, chain_index) VALUES (2, 1, '', '\\x01', " +
+		"decode(repeat('cc', 16), 'hex'), 1, decode(repeat('dd', 16), 'hex'), 0)",
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:10])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 9, version = 10},
+		fmt.tprintf("expected only migration 10 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:10])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept,
+		"expected every row but the unsigned messages intact",
+	)
+	left := databaseMigrationTestValue(
+		conn,
+		"SELECT (SELECT string_agg(content, ',') FROM direct_messages) || '/' || " +
+		"(SELECT count(*) FROM chat_messages WHERE sealed IS NOT NULL) || '/' || " +
+		"(SELECT count(*) FROM chat_messages)",
+	)
+	assert(
+		left == "signed/1/1",
+		fmt.tprintf("expected only the signed and sealed messages left, got %q", left),
+	)
+
+	// The checks: a plaintext row needs a client message ID and a 64-byte signature, a sealed
+	// row has no signature column, and a direct message is an envelope or signed.
+	probes := [?]string {
+		"INSERT INTO chat_messages (room_id, sender_user_id, content) VALUES (1, 1, 'unsigned')",
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id) " +
+		"VALUES (1, 1, 'no signature', decode(repeat('a1', 16), 'hex'))",
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+		"signature) VALUES (1, 1, 'short', decode(repeat('a2', 16), 'hex'), " +
+		"decode(repeat('bb', 63), 'hex'))",
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, sealed, " +
+		"client_message_id, epoch, chain_id, chain_index, signature) VALUES (2, 1, '', " +
+		"'\\x01', decode(repeat('a3', 16), 'hex'), 1, decode(repeat('dd', 16), 'hex'), 1, " +
+		"decode(repeat('bb', 64), 'hex'))",
+		"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content) " +
+		"VALUES (1, 2, 'unsigned')",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+	accepted := databaseMigrationTestValue(
+		conn,
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+		"signature) VALUES (1, 1, 'signed', decode(repeat('a4', 16), 'hex'), " +
+		"decode(repeat('bb', 64), 'hex')) RETURNING 'stored'",
+	)
+	assert(accepted == "stored", "expected a signed plaintext row accepted")
+	databaseDefaultRoomTestExec(
+		conn,
+		"probe the unique client message ID after migration 10",
+		"DO $$ BEGIN INSERT INTO chat_messages (room_id, sender_user_id, content, " +
+		"client_message_id, signature) VALUES (1, 1, 'again', decode(repeat('a4', 16), 'hex'), " +
+		"decode(repeat('bb', 64), 'hex')); RAISE EXCEPTION 'duplicate ID accepted'; " +
+		"EXCEPTION WHEN unique_violation THEN NULL; END $$",
+	)
+}
+
+@(test)
+testSignedMessagesMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[9]
+	assert(
+		migration.version == 10 && migration.name == "signed messages",
+		fmt.tprintf("expected migration 10 to be signed messages, got %v", migration),
+	)
+	for required in ([]string {
+			"DELETE FROM chat_messages WHERE sealed IS NULL",
+			"DELETE FROM direct_messages WHERE envelope IS NULL AND signature IS NULL",
+			"ADD COLUMN signature BYTEA NULL",
+			"octet_length(signature) = 64",
+			"ADD CONSTRAINT chat_messages_sealed_fields",
+			"ADD CONSTRAINT direct_messages_signed",
+		}) {
+		assert(
+			strings.contains(migration.sql, required),
+			fmt.tprintf("expected migration 10 to contain %q", required),
+		)
+	}
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN"),
+		"expected migration 10 to drop no table or column",
+	)
+	assert(
+		common.AUTH_SIGNATURE_SIZE == 64 && common.CLIENT_MESSAGE_ID_SIZE == 16,
+		"expected the column checks to match the signature and ID sizes",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "chat messages signed fields"),
+		"expected schema validation to require migration 10's checks",
+	)
 }

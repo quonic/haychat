@@ -18,25 +18,32 @@ DirectMessageSendBridge :: proc(transport: ^ClientServerTransport, send: DirectM
 directMessageSendBridge: DirectMessageSendBridge = ClientServerTransport_sendDirectMessage
 
 // What the client concluded about one direct message (protocol 17, e2ee-design.md 4.5, 4.6;
-// direct_messages_e2ee.odin decides it).
+// direct_messages_e2ee.odin decides it). Every message must be signed by its sender (#82): one
+// whose signature was not verified against the sender's pin (or this profile's own key) is
+// Hidden and never shown, whatever the reason.
 DirectMessageProtection :: enum u8 {
-	// Waiting for a pinned key to check it with (a fetch is on its way): an envelope shows a
-	// placeholder, a plaintext message its content marked Unencrypted.
+	// Waiting for a pinned key to check it with (a fetch is on its way): a placeholder, never
+	// the content, until the signature is checked.
 	Pending,
-	Plain, // Plaintext without a signature, from before protocol 17: "Not encrypted"
 	Signed, // Plaintext fallback signed by the sender's pinned key: "Unencrypted"
-	Unverified, // Plaintext whose signature does not verify: "Unencrypted, sender not verified"
 	Encrypted, // An envelope opened with the pinned keys: a lock
-	Failed, // An envelope that could not be opened: "This message could not be decrypted"
+	// An envelope whose signature verified but which could not be opened, or a replay: "This
+	// message could not be decrypted"
+	Failed,
+	// Not shown: no signature, a signature that does not verify, no pin to verify it with, or
+	// an envelope that failed at or before its signature check (failure says why)
+	Hidden,
 }
 
-// Why a message is Failed, for the harness's decryptError and the tests.
+// Why a message is Failed or Hidden, for the harness's decryptError and the tests.
 DirectMessageFailure :: enum u8 {
 	None,
-	NoKey, // The server has no key for the sender and none was ever pinned
-	OwnKey, // This profile has no valid encryption key
-	Envelope, // The envelope did not open (envelopeError says why)
-	Replayed, // Another message from the same sender carries the same client message ID
+	NoKey, // Hidden: the server has no key for the sender and none was ever pinned
+	OwnKey, // Failed: this profile has no valid encryption key (the signature verified)
+	Envelope, // The envelope did not verify (Hidden) or open (Failed); envelopeError says why
+	Replayed, // Failed: another message from the same sender carries the same client message ID
+	Unsigned, // Hidden: plaintext without a signature (from before protocol 17, or inserted)
+	BadSignature, // Hidden: plaintext whose signature does not verify against the pin
 }
 
 DirectMessageSecurity :: struct {
@@ -302,7 +309,7 @@ DirectConversationCache_checkReplay :: proc(cache: ^DirectConversationCache, ind
 @(private = "file")
 directMessageTakesPartInReplays :: proc(security: DirectMessageSecurity) -> bool {
 	#partial switch security.protection {
-	case .Encrypted, .Signed, .Unverified:
+	case .Encrypted, .Signed:
 		return true
 	}
 	return false
@@ -314,24 +321,6 @@ directMessageMarkReplayed :: proc(entry: ^DirectMessageEntry) {
 	delete(entry.content)
 	entry.content = ""
 	entry.security = {protection = .Failed, failure = .Replayed}
-}
-
-// Merges a borrowed plaintext message by ID, cloning its strings, as a message from before
-// protocol 17 (no check); tests and callers that already decided use it. Returns true when the
-// message was new.
-DirectConversationCache_mergeMessage :: proc(
-	cache: ^DirectConversationCache,
-	message: common.StoredDirectMessage,
-) -> bool {
-	entry := DirectMessageEntry {
-		message = StoredDirectMessage_clone(message),
-		security = {protection = .Plain},
-	}
-	if !DirectConversationCache_mergeEntry(cache, &entry) {
-		DirectMessageEntry_deinit(&entry)
-		return false
-	}
-	return true
 }
 
 // A deep copy of a borrowed message.
@@ -615,8 +604,10 @@ State_receiveDirectMessage :: proc(
 	}
 	merged := DirectConversationCache_entry(conversation, message.id)
 	State_directEntryOpened(state, serverID, peerUserID, merged.security)
+	// A message that is not shown (#82) neither moves its conversation nor counts as unread.
 	// A message older than the listed latest was already in the list's count.
-	if !ServerDirectCache_noteLatestMessage(cache, peerUserID, merged^) {
+	if merged.security.protection == .Hidden ||
+	   !ServerDirectCache_noteLatestMessage(cache, peerUserID, merged^) {
 		return
 	}
 	summary := &cache.conversations[0]

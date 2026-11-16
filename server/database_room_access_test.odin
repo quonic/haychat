@@ -582,17 +582,21 @@ testRoomAccessFromJoinHistoryAgainstPostgreSQL :: proc(t: ^testing.T) {
 			fmt.tprintf(
 				"UPDATE room_members SET joined_at = now() - interval '1 hour' " +
 				"WHERE room_id = %d; " +
-				"INSERT INTO chat_messages (room_id, sender_user_id, content, created_at) VALUES " +
-				"(%d, %d, 'before', now() - interval '10 minutes'), " +
-				"(%d, %d, 'after', now() - interval '5 minutes'), " +
-				"(%d, %d, 'latest', now())",
+				"INSERT INTO chat_messages (room_id, sender_user_id, content, created_at, " +
+				"client_message_id, signature) VALUES " +
+				"(%d, %d, 'before', now() - interval '10 minutes', %s), " +
+				"(%d, %d, 'after', now() - interval '5 minutes', %s), " +
+				"(%d, %d, 'latest', now(), %s)",
 				roomID,
 				roomID,
 				admin,
+				DATABASE_TEST_PLAIN_COLUMNS_SQL,
 				roomID,
 				admin,
+				DATABASE_TEST_PLAIN_COLUMNS_SQL,
 				roomID,
 				admin,
+				DATABASE_TEST_PLAIN_COLUMNS_SQL,
 			),
 		)
 		databaseRoomAccessTestExpect(conn, .Add, admin, roomID, bob, .Applied, true, "add bob")

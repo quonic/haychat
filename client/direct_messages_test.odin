@@ -75,6 +75,8 @@ testApplyDirectMessage :: proc(
 			content = strings.clone(content),
 		},
 	}
+	// Signed by its sender, as every direct message is (#82); unsigned ones are not shown.
+	testSignDirectMessage(state, serverID, &event.directMessage)
 	State_applyRuntimeEvent(state, &event)
 	ClientTransportRuntimeEvent_deinit(&event)
 }
@@ -109,6 +111,7 @@ testApplyDirectHistory :: proc(
 				content = fmt.aprintf("message %d", id),
 			},
 		)
+		testSignDirectMessage(state, serverID, &event.directMessages[len(event.directMessages) - 1])
 	}
 	State_applyRuntimeEvent(state, &event)
 	ClientTransportRuntimeEvent_deinit(&event)
@@ -154,6 +157,7 @@ testApplyConversations :: proc(state: ^State, serverID: int, peers: ..common.Use
 				lastContent = strings.clone("last"),
 			},
 		)
+		testSignDirectPreview(state, serverID, &event.conversations[len(event.conversations) - 1])
 	}
 	State_applyRuntimeEvent(state, &event)
 	ClientTransportRuntimeEvent_deinit(&event)

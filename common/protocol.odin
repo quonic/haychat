@@ -7,7 +7,7 @@ import "core:time/datetime"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 21
+protocolVersion: ProtocolVersion = 22
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -499,12 +499,17 @@ Message :: struct {
 	content:   string,
 }
 
-// A room message. In an unencrypted room it is content (1..CHAT_MESSAGE_MAX_BYTES bytes) with
-// an all-zero clientMessageId and no sealed bytes. In an encrypted room (protocol 19,
-// e2ee-design.md 6.5) content is empty and sealed is a common/e2ee.odin SealedRoomMessage
+// A room message. Every room message is signed by its sender (protocol 22, #90). In an
+// unencrypted room it is content (1..CHAT_MESSAGE_MAX_BYTES bytes), a clientMessageId (16
+// random bytes, never all zero) and signature, signPlaintextRoomMessage over this server's
+// identity key, the room, the sender and clientMessageId, with no sealed bytes. The server
+// refuses a plaintext message without a valid signature by the session's identity key
+// (ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE) and a clientMessageId the sender used before
+// (ROOM_MESSAGE_DUPLICATE_MESSAGE). In an encrypted room (protocol 19, e2ee-design.md 6.5)
+// content is empty, signature is zero and sealed is a common/e2ee.odin SealedRoomMessage
 // (at most SEALED_ROOM_MESSAGE_MAX_BYTES), carried as a CBOR byte string and stored byte for
 // byte, whose AAD names this server, the room, the sender, its chain position and
-// clientMessageId (16 random bytes, never all zero). The server refuses a sealed message
+// clientMessageId, and which carries its own signature. The server refuses a sealed message
 // whose epoch is not the room's current log version (ROOM_KEY_OUT_OF_DATE_MESSAGE), whose
 // signature does not verify against the sender's identity key, or whose clientMessageId or
 // chain index the sender used before (ROOM_MESSAGE_DUPLICATE_MESSAGE); plaintext in an
@@ -514,6 +519,7 @@ ClientChatMessagePayload :: struct {
 	content:         string,
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
+	signature:       SignatureBytes, // Protocol 22: a plaintext message's; zero when sealed
 }
 
 ClientChatMessagePayload_deinit :: proc(payload: ^ClientChatMessagePayload) {
@@ -530,9 +536,11 @@ ServerChatMessagePayload :: struct {
 	roomId:          int,
 	timestamp:       string,
 	content:         string,
-	// Protocol 19: as in ClientChatMessagePayload; zeros and nil for a plaintext message.
+	// As in ClientChatMessagePayload (protocol 19, 22). Clients show a message only when its
+	// signature verifies against the sender's pinned identity key.
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
+	signature:       SignatureBytes,
 }
 
 ServerChatMessagePayload_deinit :: proc(payload: ^ServerChatMessagePayload) {
@@ -590,9 +598,12 @@ StoredChatMessage :: struct {
 	roomId:          int,
 	timestamp:       string,
 	content:         string,
-	// Protocol 19: a sealed message has these and an empty content (ClientChatMessagePayload).
+	// As in ClientChatMessagePayload: a plaintext message has content, clientMessageId and
+	// signature (protocol 22); a sealed one has clientMessageId, sealed and an empty content
+	// (protocol 19).
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
+	signature:       SignatureBytes,
 }
 
 StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
@@ -945,6 +956,8 @@ ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
 ROOM_KEY_OUT_OF_DATE_MESSAGE :: "Room key is out of date"
 SEALED_ROOM_MESSAGE_INVALID_MESSAGE :: "Invalid encrypted room message"
 ROOM_MESSAGE_DUPLICATE_MESSAGE :: "Duplicate room message"
+// Protocol 22 (#90): a plaintext room message without a valid signature.
+ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE :: "Invalid room message signature"
 // Protocol 20: a RoomKeyForward envelope in a room whose history is not Full.
 ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE :: "This room does not share its history with new members"
 ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
@@ -1019,8 +1032,9 @@ VOICE_KEY_INVALID_MESSAGE :: "Invalid voice key"
 // Direct messages are per server, between any two accounts. Since protocol 17 (e2ee-design.md
 // 4.5, 4.6) a message is either end-to-end encrypted (an envelope of common/e2ee.odin's binary
 // layout, carried as a CBOR byte string and stored byte for byte) or a signed plaintext
-// fallback the server can read; messages from before protocol 17 are plaintext without a
-// signature. Every string, byte string and dynamic array below is an owned CBOR allocation once
+// fallback the server can read. Messages from before protocol 17 had no signature; migration 10
+// deleted them, and clients never show a direct message without its sender's valid signature
+// (#82). Every string, byte string and dynamic array below is an owned CBOR allocation once
 // decoded; free it or transfer it, as with room chat. Fixed-size byte fields (client message
 // IDs, signatures) decode through CBOR's temporary allocator.
 
@@ -1053,9 +1067,8 @@ ClientSealedDirectMessagePayload :: struct {
 // users when the message is stored or read. timestamp is PostgreSQL timestamptz text.
 //
 // Protocol 17: an encrypted message has its envelope and an empty content; a plaintext one has
-// content, no envelope, and the sender's signature (all zeros for a message from before
-// protocol 17, which has none). clientMessageId is the sender's ID for the message (all zeros
-// before protocol 17).
+// content, no envelope, and the sender's signature. clientMessageId is the sender's ID for the
+// message. (Rows from before protocol 17, with neither, were deleted by migration 10.)
 StoredDirectMessage :: struct {
 	id:                int, // Stable, increasing, and the history pagination cursor
 	senderId:          int,
@@ -1655,6 +1668,7 @@ DatabasePostRoomChatMessageRequest :: struct {
 	epoch:           int,
 	chainId:         ChainID,
 	chainIndex:      int,
+	signature:       SignatureBytes, // Protocol 22: a plaintext message's, checked by the router
 }
 
 // Protocol 19: one SenderKey envelope (owned) the router checked, with the user IDs its wraps

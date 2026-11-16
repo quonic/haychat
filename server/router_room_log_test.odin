@@ -344,7 +344,7 @@ testRoomLogRouterRefusesPlaintextInEncryptedRooms :: proc(t: ^testing.T) {
 		&clients[1].transport,
 		2,
 		.ClientChatMessage,
-		common.ClientChatMessagePayload{roomId = 9, content = "hello"},
+		routerTestSignedChat(&h, clients[1].identityKey, 9, clients[1].userID, "hello"),
 	)
 	query := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(query.request)

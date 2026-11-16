@@ -584,6 +584,53 @@ DATABASE_ROOM_KEY_FORWARDS_CHECKS ::
 	"WHERE conrelid = to_regclass('room_key_envelopes') AND contype = 'c' " +
 	"AND conname = 'room_key_envelopes_forward_check'))"
 
+// Migration 10 (protocol 22, #82, #90): every message is signed by its sender.
+//
+// - Unsigned rows are deleted: every plaintext room message (none had a signature before
+//   protocol 22) and every direct message from before protocol 17 (plaintext without a
+//   signature). Clients never show a message without its sender's valid signature, so these
+//   rows could never be read again; deleting them keeps the server's unread counts and
+//   conversation list in step with what clients show. Read markers are message IDs and stay
+//   valid.
+// - chat_messages.signature: the sender's Ed25519 signature over a plaintext message
+//   (signPlaintextRoomMessage, 64 bytes, chat_messages_signature_size); NULL for a sealed one,
+//   which carries its own. chat_messages_sealed_fields is replaced under the same name: a
+//   plaintext row has a client message ID and a signature and no chain fields, a sealed row a
+//   client message ID, its chain fields and no signature column. The unique index on
+//   (sender_user_id, client_message_id) now refuses a reused ID for plaintext too.
+// - direct_messages_signed: a direct message is an envelope or carries a signature.
+//
+// Never edit it; append a migration instead.
+DATABASE_MIGRATION_10_SIGNED_MESSAGES_SQL ::
+	"DELETE FROM chat_messages WHERE sealed IS NULL; " +
+	"DELETE FROM direct_messages WHERE envelope IS NULL AND signature IS NULL; " +
+	"ALTER TABLE chat_messages ADD COLUMN signature BYTEA NULL; " +
+	"ALTER TABLE chat_messages DROP CONSTRAINT chat_messages_sealed_fields; " +
+	"ALTER TABLE chat_messages ADD CONSTRAINT chat_messages_sealed_fields CHECK (" +
+	"(sealed IS NULL AND client_message_id IS NOT NULL AND signature IS NOT NULL " +
+	"AND epoch IS NULL AND chain_id IS NULL AND chain_index IS NULL) OR " +
+	"(sealed IS NOT NULL AND client_message_id IS NOT NULL AND signature IS NULL " +
+	"AND epoch IS NOT NULL AND chain_id IS NOT NULL AND chain_index IS NOT NULL)), " +
+	"ADD CONSTRAINT chat_messages_signature_size CHECK (octet_length(signature) = 64); " +
+	"ALTER TABLE direct_messages ADD CONSTRAINT direct_messages_signed " +
+	"CHECK (envelope IS NOT NULL OR signature IS NOT NULL);"
+
+// What migration 10 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_SIGNED_MESSAGES_CHECKS ::
+	"('chat_messages signature', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'chat_messages' " +
+	"AND column_name = 'signature' AND data_type = 'bytea' AND is_nullable = 'YES')), " +
+	"('chat messages signed fields', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('chat_messages') AND contype = 'c' " +
+	"AND conname = 'chat_messages_sealed_fields' " +
+	"AND pg_get_constraintdef(oid) LIKE '%signature IS NOT NULL%')), " +
+	"('chat messages signature size', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('chat_messages') AND contype = 'c' " +
+	"AND conname = 'chat_messages_signature_size')), " +
+	"('direct messages signed', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_messages') AND contype = 'c' " +
+	"AND conname = 'direct_messages_signed'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -634,6 +681,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "room key forwards",
 		sql = DATABASE_MIGRATION_9_ROOM_KEY_FORWARDS_SQL,
 		checks = DATABASE_ROOM_KEY_FORWARDS_CHECKS,
+	},
+	{
+		version = 10,
+		name = "signed messages",
+		sql = DATABASE_MIGRATION_10_SIGNED_MESSAGES_SQL,
+		checks = DATABASE_SIGNED_MESSAGES_CHECKS,
 	},
 }
 
@@ -751,6 +804,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ROOM_SENDER_CHAINS_CHECKS +
 	", " +
 	DATABASE_ROOM_KEY_FORWARDS_CHECKS +
+	", " +
+	DATABASE_SIGNED_MESSAGES_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

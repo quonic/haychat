@@ -315,10 +315,15 @@ encrypted messages reach only the people you mean.
   encryption works again. Messages sent this way are still signed, so nobody can change them
   or send them in your name.
 - **Badges.** Each message shows how it was sent: 🔒 (encrypted); **Unencrypted** (sent with the
-  switch: the server could read it); **Unencrypted, sender not verified** (unencrypted, and its
-  signature does not match the sender's key: treat it as possibly forged); **Not encrypted**
-  (sent before encryption existed on this server). A conversation whose newest message is
-  unencrypted shows **unencrypted** in the Direct Messages list.
+  switch: the server could read it). A conversation whose newest message is unencrypted shows
+  **unencrypted** in the Direct Messages list.
+- **Only messages their sender signed.** Every message, in a room or a conversation, is signed
+  by the person who sent it, and HayChat shows it only once it checked that signature against
+  the key it trusts for that person. A message that fails the check (one the server made up,
+  changed, or put under someone else's name) is not shown at all. "Checking who sent this
+  message…" means HayChat is still fetching the sender's key. Messages from before this was
+  added (direct messages from before encryption, and every room message from before the
+  update) were removed from the server.
 - **"This message could not be decrypted".** The message could not be opened with the keys your
   client trusts: it was changed, sealed for someone else, sent under another key, or repeated by
   the server. The client never tries it again with other keys. "Opening encrypted message…"

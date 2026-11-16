@@ -85,6 +85,13 @@ roomKeysTestPost :: proc(
 		chainId         = chainID,
 		chainIndex      = chainIndex,
 	}
+	// A plaintext message is signed (protocol 22) and has a client message ID of its own.
+	if len(owned) == 0 {
+		request.signature = DATABASE_TEST_SIGNATURE
+		if !common.clientMessageIDIsSet(request.clientMessageId) {
+			request.clientMessageId = databaseTestClientMessageID()
+		}
+	}
 	defer IPC__database_query_request_deinit(request)
 	response := databaseExecuteRequest(conn, request)
 	defer IPC__database_query_response_deinit(response)
@@ -309,7 +316,8 @@ testRoomSenderChainStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 			fmt.tprintf("expected the sealed message unchanged in history, got %v", first),
 		)
 	}
-	// Plaintext rows in other rooms carry neither.
+	// Plaintext rows in other rooms carry no sealed bytes, but a client message ID and their
+	// sender's signature (protocol 22).
 	plainStored := roomKeysTestPost(conn, plain, bob, "hello")
 	assert(plainStored.storedMessage.id > 0, "expected a plaintext message stored")
 	{
@@ -323,8 +331,9 @@ testRoomSenderChainStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 			len(history.messages) == 1 &&
 			history.messages[0].content == "hello" &&
 			history.messages[0].sealed == nil &&
-			history.messages[0].clientMessageId == {},
-			"expected the plaintext message without sealed fields",
+			common.clientMessageIDIsSet(history.messages[0].clientMessageId) &&
+			history.messages[0].signature == DATABASE_TEST_SIGNATURE,
+			"expected the plaintext message with its ID and signature and no sealed fields",
 		)
 	}
 

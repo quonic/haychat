@@ -30,8 +30,9 @@ What works today:
 > Messages are encrypted between your computer and the server. Direct messages are also
 > **end-to-end encrypted** when both of you can receive encrypted messages (a 🔒 on each
 > message); room messages are **not**: the server stores them in plain text, and the maintainer
-> can read them, like any direct message marked "Unencrypted" or "Not encrypted". Do not send
-> anything in a room you would not want the maintainer to see.
+> can read them, like any direct message marked "Unencrypted". Do not send anything in a room
+> you would not want the maintainer to see. Every message is signed by its sender, so the
+> server cannot make one up in your name.
 
 ## Getting the Client
 

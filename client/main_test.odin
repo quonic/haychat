@@ -16,16 +16,17 @@ roomChatSendBridgeTestRoomID: int
 roomChatSendBridgeTestContent: string
 roomChatSendBridgeTestReturnValue: bool
 
-roomChatSendBridgeTestStub :: proc(
-	transport: ^ClientServerTransport,
-	roomID: int,
-	content: string,
-) -> bool {
+// The last send's client message ID and signature (protocol 22).
+roomChatSendBridgeTestSend: RoomChatSend
+
+roomChatSendBridgeTestStub :: proc(transport: ^ClientServerTransport, send: RoomChatSend) -> bool {
 	roomChatSendBridgeTestServerID = transport.serverID
-	roomChatSendBridgeTestRoomID = roomID
+	roomChatSendBridgeTestRoomID = send.roomID
 	// The sender frees the message after sending, so keep a copy for assertions.
 	delete(roomChatSendBridgeTestContent)
-	roomChatSendBridgeTestContent = strings.clone(content)
+	roomChatSendBridgeTestContent = strings.clone(send.content)
+	roomChatSendBridgeTestSend = send
+	roomChatSendBridgeTestSend.content = ""
 	return roomChatSendBridgeTestReturnValue
 }
 
@@ -173,6 +174,16 @@ testApplyRoomChat :: proc(
 		timestamp      = strings.clone("t"),
 		message        = strings.clone(content),
 	}
+	// Signed by its sender, as every plaintext room message is (protocol 22); the state pins
+	// the sender's test identity.
+	event.clientMessageID, event.signature = testRoomMessageSignature(
+		state,
+		serverID,
+		roomID,
+		senderID,
+		messageID,
+		content,
+	)
 	State_applyRuntimeEvent(state, &event)
 	ClientTransportRuntimeEvent_deinit(&event)
 }
@@ -308,6 +319,7 @@ testSendChannelChatDoesNotAppendVisibleChatOnSubmit :: proc(t: ^testing.T) {
 	}
 	state := testUpdateStateForServer(server)
 	defer State_deinit(&state)
+	testPrepareRoomSend(&state, server.id, 70)
 	testSetDraft(State_selectedRoomDraft(&state), "hello\thaychat")
 
 	originalRoomChatSendBridge := roomChatSendBridge
@@ -348,6 +360,14 @@ testSendChannelChatDoesNotAppendVisibleChatOnSubmit :: proc(t: ^testing.T) {
 		"expected the tab-normalized draft to reach the transport bridge, got %q",
 		roomChatSendBridgeTestContent,
 	)
+	signedSend := roomChatSendBridgeTestSend
+	signedSend.content = roomChatSendBridgeTestContent
+	testing.expect(
+		t,
+		common.clientMessageIDIsSet(signedSend.clientMessageID) &&
+		testRoomSendVerifies(&state, server.id, 70, signedSend),
+		"expected the message signed by this profile (protocol 22)",
+	)
 	testing.expect(
 		t,
 		len(state.chat_status_message) == 0,
@@ -371,6 +391,7 @@ testSendChannelChatKeepsDraftWhenTransportRejects :: proc(t: ^testing.T) {
 	}
 	state := testUpdateStateForServer(server)
 	defer State_deinit(&state)
+	testPrepareRoomSend(&state, server.id, 70)
 
 	originalRoomChatSendBridge := roomChatSendBridge
 	roomChatSendBridgeTestReturnValue = false
@@ -597,6 +618,7 @@ testRoomDraftsAreScopedByRoom :: proc(t: ^testing.T) {
 	}
 	state := testUpdateStateForServer(server)
 	defer State_deinit(&state)
+	testPrepareRoomSend(&state, server.id, 70)
 
 	otherRoomID := common.GENERAL_ROOM_ID + 1
 	State_switchToChannel(&state, server.id, otherRoomID)
@@ -915,10 +937,16 @@ testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.
 	assert(ok, "expected transport pair setup to succeed")
 	defer ClientServerTransport_deinit(&transport)
 
+	clientMessageID := common.ClientMessageID{0 = 5}
+	signature := common.SignatureBytes{0 = 1, 63 = 2}
 	packetBytes, packetOK := ClientServerTransport_buildRoomChatPacketBytes(
 		&transport,
-		common.GENERAL_ROOM_ID,
-		"hello haychat",
+		RoomChatSend {
+			roomID = common.GENERAL_ROOM_ID,
+			content = "hello haychat",
+			clientMessageID = clientMessageID,
+			signature = signature,
+		},
 	)
 	assert(packetOK, "expected established transport to build room chat packet bytes")
 	defer delete(packetBytes)
@@ -951,6 +979,10 @@ testClientServerTransportBuildsEncryptedRoomChatPacketBytes :: proc(t: ^testing.
 	assert(
 		chatPayload.content == "hello haychat",
 		"expected room chat payload content to remain intact",
+	)
+	assert(
+		chatPayload.clientMessageId == clientMessageID && chatPayload.signature == signature,
+		"expected the client message ID and signature carried (protocol 22)",
 	)
 
 	_ = t
@@ -1584,12 +1616,16 @@ testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients :: pr
 	senderUserID := State_selfUserID(&stateA, liveServer.id)
 
 	messageContent := "live two-client room chat proof"
-	ClientNetworkWorker_lock(stateA.networkWorker)
-	sendOK := ClientServerTransport_sendRoomChatMessage(
-		&stateA.serverTransports[0],
+	// Signed by A (protocol 22): the server refuses unsigned room messages.
+	send, signError := State_signRoomChat(
+		&stateA,
+		liveServer.id,
 		common.GENERAL_ROOM_ID,
 		messageContent,
 	)
+	testing.expectf(t, len(signError) == 0, "expected client A to sign: %q", signError)
+	ClientNetworkWorker_lock(stateA.networkWorker)
+	sendOK := ClientServerTransport_sendRoomChatMessage(&stateA.serverTransports[0], send)
 	sendError := strings.clone(stateA.serverTransports[0].lastError, context.temp_allocator)
 	ClientNetworkWorker_unlock(stateA.networkWorker)
 	testing.expectf(t, sendOK, "expected client A to send a live room chat message: %q", sendError)
@@ -1778,7 +1814,10 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		"expected the accepted send to clear A's draft, status %q",
 		stateA.chat_status_message,
 	)
-	if len(testDirectCache(&stateA, serverID, userB).queued) > 0 {
+	// A may fetch other accounts' keys too (the senders of #general's history, protocol 22).
+	for attempt := 0;
+	    attempt < 8 && len(testDirectCache(&stateA, serverID, userB).queued) > 0;
+	    attempt += 1 {
 		keys, hasKeys := liveTestWaitForEvent(&stateA, .UserKeysReceived, 3 * time.Second)
 		testing.expect(t, hasKeys, "expected client A to get B's key")
 		if !hasKeys {
@@ -1831,10 +1870,15 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 	)
 	State_applyRuntimeEvent(&stateB, &received)
 	ClientTransportRuntimeEvent_deinit(&received)
-	// B has not pinned A yet: the message waits for A's key, then opens.
-	conversationB := testDirectCache(&stateB, serverID, userA)
-	if entry := DirectConversationCache_entry(conversationB, messageID);
-	   entry != nil && entry.security.protection == .Pending {
+	// B has not pinned A yet: the message waits for A's key, then opens. B may fetch other
+	// accounts' keys too (the senders of #general's history, protocol 22), so it applies key
+	// answers until A's message is settled.
+	for attempt := 0; attempt < 8; attempt += 1 {
+		conversationB := testDirectCache(&stateB, serverID, userA)
+		entry := DirectConversationCache_entry(conversationB, messageID)
+		if entry == nil || entry.security.protection != .Pending {
+			break
+		}
 		keys, hasKeys := liveTestWaitForEvent(&stateB, .UserKeysReceived, 3 * time.Second)
 		testing.expect(t, hasKeys, "expected client B to get A's key")
 		if !hasKeys {
@@ -1843,7 +1887,7 @@ testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients :: proc(
 		State_applyRuntimeEvent(&stateB, &keys)
 		ClientTransportRuntimeEvent_deinit(&keys)
 	}
-	conversationB = testDirectCache(&stateB, serverID, userA)
+	conversationB := testDirectCache(&stateB, serverID, userA)
 	openedB := DirectConversationCache_entry(conversationB, messageID)
 	testing.expectf(
 		t,

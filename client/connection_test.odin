@@ -568,7 +568,10 @@ testSendingWhileDisconnectedKeepsTheTransport :: proc(t: ^testing.T) {
 	defer State_deinit(&state)
 	transport := &state.serverTransports[0]
 
-	sent := ClientServerTransport_sendRoomChatMessage(transport, common.GENERAL_ROOM_ID, "hi")
+	sent := ClientServerTransport_sendRoomChatMessage(
+		transport,
+		RoomChatSend{roomID = common.GENERAL_ROOM_ID, content = "hi"},
+	)
 	testing.expect(t, !sent, "expected no send before connecting")
 	testing.expect(
 		t,

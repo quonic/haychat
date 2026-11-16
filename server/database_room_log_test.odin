@@ -462,11 +462,7 @@ testRoomLogAppendRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	{
 		response := databaseExecuteRequest(
 			conn,
-			common.DatabasePostRoomChatMessageRequest {
-				roomId = roomID,
-				senderId = alice.userID,
-				content = "plain",
-			},
+			databaseTestPlainRoomPost(roomID, alice.userID, "plain"),
 		)
 		defer IPC__database_query_response_deinit(response)
 		posted, ok := response.result.(common.DatabasePostRoomChatMessageResult)
