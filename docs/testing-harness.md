@@ -949,9 +949,11 @@ manager, and creates the room; its Members page opens with her as member and man
 Managers section, and SQL must find the room encrypted at log version 1. Then (protocol 19) she
 sends a message in it: the header shows "🔒 # room", the message carries the 🔒 badge, and SQL
 must find one sealed row without its text. alice takes 38 screenshots on the way (`01-…` to
-`37-…` and `06b-server-settings.bmp`); the script prints the paths of the 37 numbered
-`NN-*.bmp` ones and checks that all 37 exist. They stay in `HAYCHAT_UI_SCREENSHOT_DIR` when set and
-otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
+`37-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
+lines of the GUI script it generates, deletes any files with those names before the window
+opens, and at the end prints every path and fails naming each one that was not written, so a
+new shot needs no count to update and leftovers from an earlier run never count. They stay in
+`HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
 `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.
 

@@ -430,6 +430,17 @@ screenshot $screenshot_dir/37-encrypted-room-message.bmp
 quit
 EOF
 
+# The screenshots the run must write, taken from the GUI script itself so the final check
+# cannot drift from it. Any left in a reused HAYCHAT_UI_SCREENSHOT_DIR are removed first, so
+# a shot this run failed to write is reported as missing.
+expected_shots=()
+while IFS= read -r line; do
+	[[ "$line" == "screenshot "* ]] || continue
+	expected_shots+=("${line#screenshot }")
+done <"$script"
+[[ ${#expected_shots[@]} -gt 0 ]] || fail "the GUI script takes no screenshots"
+rm -f -- "${expected_shots[@]}"
+
 # Anything bob printed before the window opens cannot be about alice's new room.
 admin_start=$(wc -l <"$work_dir/bob.out")
 echo "==> [ui] starting the GUI as alice (SDL_VIDEO_DRIVER=${SDL_VIDEO_DRIVER:-offscreen})"
@@ -604,11 +615,14 @@ stop_client bob
 stop_client dave
 
 echo "==> [ui] screenshots written:"
-written=0
-for shot in "$screenshot_dir"/[0-9][0-9]-*.bmp; do
-	[[ -f "$shot" ]] || continue
-	echo "    $shot"
-	written=$((written + 1))
+missing=()
+for shot in "${expected_shots[@]}"; do
+	if [[ -f "$shot" ]]; then
+		echo "    $shot"
+	else
+		missing+=("$shot")
+	fi
 done
-[[ $written -eq 37 ]] || fail "expected 37 screenshots in $screenshot_dir, found $written"
+[[ ${#missing[@]} -eq 0 ]] ||
+	fail "${#missing[@]} of ${#expected_shots[@]} screenshots are missing: ${missing[*]}"
 echo "==> [ui] passed"
