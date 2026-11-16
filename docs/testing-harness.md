@@ -147,9 +147,9 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false}` (`isAdmin`: the account holds the server's `admin` role; `nickname` is the account's name on the server, which an admin may have set and locked, `nicknameLocked`) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0,"roomType":3}]}` (`roomType`: 1 text, 2 voice, 3 both) |
-| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}` (printed after the client opened it: in an encrypted room `encrypted` true, `epoch` the chain's, `protection` `encrypted` with the opened `content`, or `failed` with `decryptError` such as `BadSignature`, `not_sealed`, `not_member`, `replayed`; a live message that waits for its key or the log is printed once it opens) |
-| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}]}` (messages as for `room_chat`; one that waits shows `protection` `pending` with `decryptError` `no_key` or `log`) |
-| `room_opened` | Same shape as `room_chat`: a message from a history page that waited for its key or the member log and is now opened or settled |
+| `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}` (printed after the client opened it: `protection` `plain` once the sender's signature verified against its pin (protocol 22); in an encrypted room `encrypted` true, `epoch` the chain's, `protection` `encrypted` with the opened `content`, or `failed` with `decryptError` such as `not_member`, `replayed` when the signature verified; `hidden` with empty `content` for a message the window does not show (no valid signature: `decryptError` `unsigned`, `bad_signature`, `no_sender_key`, `not_sealed`, `BadSignature`, …); a live message that waits for its sender's key, its chain key or the log is printed once it opens) |
+| `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}]}` (messages as for `room_chat`; one that waits shows `protection` `pending`, empty `content`, and `decryptError` `sender_key` (its sender's key is being fetched), `no_key` or `log`, and is printed again as `room_opened`) |
+| `room_opened` | Same shape as `room_chat`: a message from a history page that waited for its sender's key, its chain key or the member log and is now opened or settled |
 | `room_key` | `{"event":"room_key","serverID":1,"roomID":5,"epoch":2,"senderID":3,"chainID":"<hex>","requesterID":0,"outcome":"stored","error":""}` (a key envelope this client handled: `stored`, `duplicate`, `not_for_me` (no wrap for this account), `pending` (waits for the log), `not_member` (the sender was not a member of that epoch), `failed` with `error`) |
 | `room_key_request` | Same shape as `room_key`: another member asked for this account's chain (`requesterID`); `outcome` `stored` when it was re-sealed for them, `refused` when they were not a member of that epoch in the verified log |
 | `room_queue` | `{"event":"room_queue","serverID":1,"roomID":5,"state":"sent","count":1,"reason":""}` (messages `send` queued for the sender chain went out; `state` `refused` with `reason` when they went back into the draft) |
@@ -482,15 +482,17 @@ opened them, from what it concluded, never from the raw envelope:
 
 - **`encrypted`** the message is an envelope; **`signed`** its signature verified against the
   sender's pinned key (every opened envelope, and a valid plaintext fallback);
-  **`decryptError`** why an envelope could not be opened: `no_key` (the server has no key for
-  the sender and none was ever pinned), `own_key` (this profile has no valid encryption key),
-  `replayed` (another message from the same sender carries the same client message ID), or the
-  `E2EEError` from `common/e2ee.odin` (`BadSignature`, `NoWrapForRecipient`, …), else `""`.
+  **`decryptError`** why a message failed or is hidden: `no_key` (the server has no key for the
+  sender and none was ever pinned), `own_key` (this profile has no valid encryption key),
+  `replayed` (another message from the same sender carries the same client message ID),
+  `unsigned`, `bad_signature`, or the `E2EEError` from `common/e2ee.odin` (`BadSignature`,
+  `NoWrapForRecipient`, …), else `""`.
 - **`protection`** `encrypted`; `signed` (plaintext sent through the fallback, the GUI's
-  "Unencrypted"); `unverified` (plaintext whose signature does not verify: "Unencrypted, sender
-  not verified"); `plain` (from before protocol 17, no signature: "Not encrypted"); `failed`
-  (`content` empty: "This message could not be decrypted"); `pending` (waiting for the sender's
-  key; `content` empty for an envelope).
+  "Unencrypted"); `failed` (`content` empty: "This message could not be decrypted", only when
+  the sender's signature verified); `pending` (waiting for the sender's key; `content` empty);
+  `hidden` (`content` empty: a message the window does not show, because its sender's
+  signature was not verified (#82): no signature, a bad one, no key to check it with, or an
+  envelope that failed at or before its signature check).
 - **Waiting for a key.** A live message from someone this profile has not pinned yet waits while
   the client fetches the key, and its `direct_message` is printed once it opened. A message in a
   history page that waits is listed as `pending` and printed again as `direct_opened`.
@@ -528,6 +530,9 @@ in a session (and in each epoch) answers `"queued":true` and goes out once the s
 chain's distribution (`room_queue` with `state` `sent`). Room messages are printed after the
 client opened them, with `encrypted`, `decryptError`, `epoch` and `protection`; one that waits
 for its key is printed when it opens (`room_chat` for a live one, `room_opened` for history).
+The same holds for plaintext rooms since protocol 22: `send` signs every message, and a
+message from a sender this profile has not pinned yet waits for the sender's key (fetch it
+first with `user-keys` to read a history page at once).
 `room_key` and `room_key_request` show what happened to key envelopes and key requests, and
 (protocol 20, Full history rooms) carry `forwarderID`: on `room_key` the account that forwarded
 a `RoomKeyForward` envelope, on `room_key_request` this account when it forwarded one, 0 for a

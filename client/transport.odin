@@ -168,6 +168,8 @@ ClientTransportRuntimeEvent :: struct {
 	// Protocol 19.
 	clientMessageID:   common.ClientMessageID,
 	sealed:            []u8,
+	// Protocol 22: RoomChatReceived's plaintext message signature.
+	signature:         common.SignatureBytes,
 	roomKeyEnvelopes:  [dynamic]common.RoomKeyEnvelope,
 	roomKeyEpoch:      int,
 	roomKeyChainID:    common.ChainID,
@@ -794,10 +796,19 @@ ClientServerTransport_buildEncryptedPacketBytes :: proc(
 	return packetBytes, true
 }
 
+// A plaintext room message to send (protocol 22): every one carries a fresh client message ID
+// and this profile's signature over the server's identity key, the room, its account and the
+// content (State_signRoomChat). Borrowed for the send.
+RoomChatSend :: struct {
+	roomID:          int,
+	content:         string,
+	clientMessageID: common.ClientMessageID,
+	signature:       common.SignatureBytes,
+}
+
 ClientServerTransport_buildRoomChatPacketBytes :: proc(
 	transport: ^ClientServerTransport,
-	roomID: int,
-	content: string,
+	send: RoomChatSend,
 ) -> (
 	[]u8,
 	bool,
@@ -806,16 +817,17 @@ ClientServerTransport_buildRoomChatPacketBytes :: proc(
 		transport,
 		.ClientChatMessage,
 		common.ClientChatMessagePayload {
-			roomId = ClientServerTransport_runtimeRoomID(roomID),
-			content = content,
+			roomId = ClientServerTransport_runtimeRoomID(send.roomID),
+			content = send.content,
+			clientMessageId = send.clientMessageID,
+			signature = send.signature,
 		},
 	)
 }
 
 ClientServerTransport_sendRoomChatMessage :: proc(
 	transport: ^ClientServerTransport,
-	roomID: int,
-	content: string,
+	send: RoomChatSend,
 ) -> bool {
 	// Not being connected yet is normal while the worker connects or reconnects, so it only
 	// reports an error instead of failing (and tearing down) the session.
@@ -824,7 +836,7 @@ ClientServerTransport_sendRoomChatMessage :: proc(
 		return false
 	}
 
-	packetBytes, ok := ClientServerTransport_buildRoomChatPacketBytes(transport, roomID, content)
+	packetBytes, ok := ClientServerTransport_buildRoomChatPacketBytes(transport, send)
 	if !ok {
 		return false
 	}
@@ -1256,6 +1268,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				message = chatPayload.content,
 				clientMessageID = chatPayload.clientMessageId,
 				sealed = chatPayload.sealed,
+				signature = chatPayload.signature,
 			},
 			true
 

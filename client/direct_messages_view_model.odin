@@ -10,17 +10,21 @@ import "core:fmt"
 
 DIRECT_BADGE_ENCRYPTED :: "🔒"
 DIRECT_BADGE_UNENCRYPTED :: "Unencrypted"
-DIRECT_BADGE_NOT_VERIFIED :: "Unencrypted, sender not verified"
-DIRECT_BADGE_NOT_ENCRYPTED :: "Not encrypted"
 DIRECT_HEADER_ONLINE_ENCRYPTED :: "Online · 🔒 End-to-end encrypted"
 DIRECT_HEADER_OFFLINE_ENCRYPTED :: "Offline · 🔒 End-to-end encrypted"
 DIRECT_ROW_UNENCRYPTED :: "unencrypted"
 DIRECT_ROW_UNENCRYPTED_TOOLTIP :: "The newest message is not encrypted"
+DIRECT_CHECKING_TEXT :: "Checking who sent this message…"
+
+// Whether a message is shown at all (#82): every message must be signed by its sender, so a
+// Hidden one is left out of the transcript, the conversation preview and the unread count.
+directMessageShown :: proc(security: DirectMessageSecurity) -> bool {
+	return security.protection != .Hidden
+}
 
 // The badge for one message (design 4.5, 4.6): a lock on an opened envelope, "Unencrypted" (a
-// warning) on a signed plaintext fallback or one still being checked, "Unencrypted, sender not
-// verified" (danger) when its signature does not verify, "Not encrypted" (muted) on a message
-// from before protocol 17. An envelope that has not opened has no badge: its text says why.
+// warning) on a signed plaintext fallback or one still being checked. An envelope that has not
+// opened has no badge: its text says why.
 directMessageBadge :: proc(
 	security: DirectMessageSecurity,
 	hasEnvelope: bool,
@@ -33,21 +37,19 @@ directMessageBadge :: proc(
 		return DIRECT_BADGE_ENCRYPTED, .Good
 	case .Signed:
 		return DIRECT_BADGE_UNENCRYPTED, .Warning
-	case .Unverified:
-		return DIRECT_BADGE_NOT_VERIFIED, .Danger
-	case .Plain:
-		return DIRECT_BADGE_NOT_ENCRYPTED, .Muted
 	case .Pending:
 		if !hasEnvelope {
 			return DIRECT_BADGE_UNENCRYPTED, .Warning
 		}
-	case .Failed:
+	case .Failed, .Hidden:
 	}
 	return "", .Muted
 }
 
 // The text shown for a message: its content, or a placeholder for an envelope that could not
-// be opened (never retried) or is waiting for its sender's key.
+// be opened (never retried) or a message waiting for its sender's key. A plaintext message
+// waiting for the key keeps its text in content but shows only the placeholder until its
+// signature is checked.
 directMessageText :: proc(entry: DirectMessageEntry) -> (text: string, placeholder: bool) {
 	switch entry.security.protection {
 	case .Failed:
@@ -56,26 +58,23 @@ directMessageText :: proc(entry: DirectMessageEntry) -> (text: string, placehold
 		if len(entry.envelope) > 0 {
 			return DIRECT_OPENING_TEXT, true
 		}
-	case .Plain, .Signed, .Unverified, .Encrypted:
+		return DIRECT_CHECKING_TEXT, true
+	case .Hidden:
+		return "", true
+	case .Signed, .Encrypted:
 	}
 	return entry.content, false
 }
 
-// Whether a conversation row gets the Unencrypted badge for its newest message: a plaintext
-// fallback (signed or not verified), or plaintext in a conversation that was encrypted before.
-directPreviewUnencrypted :: proc(
-	security: DirectMessageSecurity,
-	hasEnvelope: bool,
-	conversationEncrypted: bool,
-) -> bool {
+// Whether a conversation row gets the Unencrypted badge for its newest message: a signed
+// plaintext fallback, or one still being checked.
+directPreviewUnencrypted :: proc(security: DirectMessageSecurity, hasEnvelope: bool) -> bool {
 	switch security.protection {
-	case .Signed, .Unverified:
+	case .Signed:
 		return true
-	case .Plain:
-		return conversationEncrypted
 	case .Pending:
 		return !hasEnvelope
-	case .Encrypted, .Failed:
+	case .Encrypted, .Failed, .Hidden:
 	}
 	return false
 }

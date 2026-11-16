@@ -340,16 +340,16 @@ testDirectMessageWaitsForTheSendersKeyThenOpens :: proc(t: ^testing.T) {
 		fmt.tprintf("expected an Opened note for the harness, got %v", bob.directNotes),
 	)
 
-	// A message from someone the server has no key for, and never had, is settled: it cannot
-	// be opened, and nothing is retried.
+	// A message from someone the server has no key for, and never had, is settled: nobody can
+	// check who sent it, so it is not shown (#82), and nothing is retried.
 	carolEnvelope := envelope
 	dmTestApplyMessage(&bob, 201, DM_E2EE_TEST_CAROL, DM_E2EE_TEST_BOB, {9 = 9}, carolEnvelope)
 	missing := [1]int{DM_E2EE_TEST_CAROL}
 	dmTestApplyKeys(&bob, nil, missing[:])
 	settled := dmTestEntry(&bob, DM_E2EE_TEST_CAROL, 201)
 	assert(
-		settled.security.protection == .Failed && settled.security.failure == .NoKey,
-		fmt.tprintf("expected a message without a key settled as failed, got %v", settled),
+		settled.security.protection == .Hidden && settled.security.failure == .NoKey,
+		fmt.tprintf("expected a message without a key settled as hidden, got %v", settled),
 	)
 }
 
@@ -367,8 +367,8 @@ testDirectMessageFailuresAreFinalAndReplaysAreCaught :: proc(t: ^testing.T) {
 	dmTestApplyKeys(&bob, aliceBundle[:])
 	send, envelope, _ := dmTestSend(&alice, DM_E2EE_TEST_BOB, "once")
 
-	// A flipped bit, another client message ID, and another sender ID all fail, shown with
-	// the placeholder.
+	// A flipped bit and another client message ID fail the signature: nobody is known to have
+	// sent them, so they are not shown (#82).
 	flipped := make([]u8, len(envelope), context.temp_allocator)
 	copy(flipped, envelope)
 	flipped[len(flipped) - 10] ~= 0x01
@@ -386,14 +386,13 @@ testDirectMessageFailuresAreFinalAndReplaysAreCaught :: proc(t: ^testing.T) {
 	for id in ([]int{300, 301}) {
 		entry := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, id)
 		assert(
-			entry.security.protection == .Failed &&
+			entry.security.protection == .Hidden &&
 			entry.security.failure == .Envelope &&
 			entry.security.envelopeError == .BadSignature &&
-			entry.content == "",
-			fmt.tprintf("expected message %d to fail its signature, got %v", id, entry),
+			entry.content == "" &&
+			!directMessageShown(entry.security),
+			fmt.tprintf("expected message %d hidden for its signature, got %v", id, entry),
 		)
-		text, placeholder := directMessageText(entry^)
-		assert(text == DIRECT_UNDECRYPTABLE_TEXT && placeholder, "expected the placeholder")
 	}
 	assert(
 		!State_directConversationEncrypted(&bob, DM_E2EE_TEST_SERVER, DM_E2EE_TEST_ALICE),
@@ -470,9 +469,9 @@ testDirectMessageFailuresAreFinalAndReplaysAreCaught :: proc(t: ^testing.T) {
 	)
 	forgedEntry := dmTestEntry(&alice, DM_E2EE_TEST_BOB, 420)
 	assert(
-		forgedEntry.security.protection == .Failed &&
+		forgedEntry.security.protection == .Hidden &&
 		forgedEntry.security.envelopeError == .BadSignature,
-		fmt.tprintf("expected an envelope by another identity key to fail, got %v", forgedEntry),
+		fmt.tprintf("expected an envelope by another identity key hidden, got %v", forgedEntry),
 	)
 	carolAsBob := [1]common.UserKeyBundle{dmTestBundle(&carol, DM_E2EE_TEST_BOB)}
 	dmTestApplyKeys(&alice, carolAsBob[:])
@@ -485,8 +484,71 @@ testDirectMessageFailuresAreFinalAndReplaysAreCaught :: proc(t: ^testing.T) {
 		"expected trust to pin the new key",
 	)
 	assert(
-		dmTestEntry(&alice, DM_E2EE_TEST_BOB, 420).security.protection == .Failed,
-		"expected a failed message never to be retried with another key",
+		dmTestEntry(&alice, DM_E2EE_TEST_BOB, 420).security.protection == .Hidden,
+		"expected a refused message never to be retried with another key",
+	)
+}
+
+// #82: an envelope is shown as "could not be decrypted" only when its sender's signature
+// verified; every error at or before the signature check hides it.
+@(test)
+testDirectEnvelopeFailuresAreShownOnlyAfterTheSignature :: proc(t: ^testing.T) {
+	for err in common.E2EEError {
+		security := directEnvelopeSecurity(err)
+		#partial switch err {
+		case .NoWrapForRecipient, .BadEphemeralKey, .BadWrap, .BadCiphertext, .BadPadding,
+		     .BadPlaintext:
+			assert(
+				security.protection == .Failed && security.envelopeError == err,
+				fmt.tprintf("expected %v after the signature shown as failed", err),
+			)
+		case:
+			assert(
+				security.protection == .Hidden && security.envelopeError == err,
+				fmt.tprintf("expected %v hidden, got %v", err, security),
+			)
+		}
+	}
+
+	// A profile without an encryption key still checks the signature first: its sender's
+	// message is "could not be decrypted", a forged one is not shown.
+	dmTestBegin()
+	defer dmTestEnd()
+	defer free_all(context.temp_allocator)
+	alice, bob, _ := dmTestPair()
+	defer State_deinit(&alice)
+	defer State_deinit(&bob)
+	bobBundle := [1]common.UserKeyBundle{dmTestBundle(&bob, DM_E2EE_TEST_BOB)}
+	aliceBundle := [1]common.UserKeyBundle{dmTestBundle(&alice, DM_E2EE_TEST_ALICE)}
+	dmTestApplyKeys(&alice, bobBundle[:])
+	dmTestApplyKeys(&bob, aliceBundle[:])
+	send, envelope, _ := dmTestSend(&alice, DM_E2EE_TEST_BOB, "no key here")
+	delete(bob.config.encryption_private_key)
+	bob.config.encryption_private_key = ""
+	flipped := make([]u8, len(envelope), context.temp_allocator)
+	copy(flipped, envelope)
+	flipped[len(flipped) - 10] ~= 0x01
+	for message, index in ([][]u8{envelope, flipped}) {
+		dmTestApplyMessage(
+			&bob,
+			500 + index,
+			DM_E2EE_TEST_ALICE,
+			DM_E2EE_TEST_BOB,
+			send.clientMessageID,
+			message,
+		)
+	}
+	signed := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 500)
+	assert(
+		signed.security == {protection = .Failed, failure = .OwnKey},
+		fmt.tprintf("expected alice's envelope failed for the missing key, got %v", signed),
+	)
+	text, placeholder := directMessageText(signed^)
+	assert(text == DIRECT_UNDECRYPTABLE_TEXT && placeholder, "expected the placeholder")
+	forged := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 501)
+	assert(
+		forged.security.protection == .Hidden && forged.security.envelopeError == .BadSignature,
+		fmt.tprintf("expected the forged envelope hidden, got %v", forged),
 	)
 }
 
@@ -647,11 +709,12 @@ testDirectPlaintextFallbackSwitchAndBadges :: proc(t: ^testing.T) {
 		)
 		summary := State_serverDirectCache(state, DM_E2EE_TEST_SERVER).conversations[0]
 		assert(
-			directPreviewUnencrypted(summary.security, false, false),
+			directPreviewUnencrypted(summary.security, false),
 			"expected the preview badge on a fallback message",
 		)
 	}
-	// A changed text fails the signature; an unsigned message is from before the upgrade.
+	// A changed text fails the signature, and an unsigned message (from before the upgrade, or
+	// made up by the server) has none: neither is shown (#82).
 	dmTestApplyMessage(
 		&bob,
 		501,
@@ -662,19 +725,28 @@ testDirectPlaintextFallbackSwitchAndBadges :: proc(t: ^testing.T) {
 		signature = send.signature,
 	)
 	dmTestApplyMessage(&bob, 400, DM_E2EE_TEST_ALICE, DM_E2EE_TEST_BOB, {}, content = "old")
-	unverified := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 501)
-	badge, tone := directMessageBadge(unverified.security, false)
+	forged := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 501)
 	assert(
-		unverified.security.protection == .Unverified &&
-		badge == DIRECT_BADGE_NOT_VERIFIED &&
-		tone == .Danger,
-		fmt.tprintf("expected sender not verified, got %v", unverified),
+		forged.security == {protection = .Hidden, failure = .BadSignature} &&
+		forged.content == "" &&
+		!directMessageShown(forged.security),
+		fmt.tprintf("expected a bad signature hidden, got %v", forged),
 	)
 	old := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 400)
-	badge, tone = directMessageBadge(old.security, false)
 	assert(
-		old.security.protection == .Plain && badge == DIRECT_BADGE_NOT_ENCRYPTED && tone == .Muted,
-		fmt.tprintf("expected Not encrypted, got %v", old),
+		old.security == {protection = .Hidden, failure = .Unsigned} && old.content == "",
+		fmt.tprintf("expected an unsigned message hidden, got %v", old),
+	)
+	bobSummary := State_serverDirectCache(&bob, DM_E2EE_TEST_SERVER).conversations[0]
+	assert(
+		bobSummary.lastMessageID == 500 && bobSummary.unreadCount == 1,
+		fmt.tprintf("expected hidden messages neither listed nor counted, got %v", bobSummary),
+	)
+	State_openDirectConversation(&bob, DM_E2EE_TEST_SERVER, DM_E2EE_TEST_ALICE)
+	bobView := buildDirectConversationView(&bob)
+	assert(
+		len(bobView.lines) == 1 && bobView.lines[0].messageID == 500,
+		fmt.tprintf("expected only the signed message in the transcript, got %v", bobView.lines),
 	)
 
 	// Closing the conversation turns the switch off; the confirmation is not asked again.
@@ -757,9 +829,10 @@ testDirectPreviewsOpenFromTheConversationList :: proc(t: ^testing.T) {
 		}
 	}
 	assert(
-		directPreviewUnencrypted({protection = .Plain}, false, true) &&
-		!directPreviewUnencrypted({protection = .Plain}, false, false),
-		"expected plaintext in an encrypted conversation to get the badge, old plaintext not",
+		directPreviewUnencrypted({protection = .Signed}, false) &&
+		directPreviewUnencrypted({protection = .Pending}, false) &&
+		!directPreviewUnencrypted({protection = .Hidden, failure = .Unsigned}, false),
+		"expected a fallback preview to get the badge, a hidden one not",
 	)
 }
 

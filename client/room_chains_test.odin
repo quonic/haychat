@@ -696,7 +696,8 @@ testRoomChainsFailuresAreFinal :: proc(t: ^testing.T) {
 	roomChainTestDeliverEnvelope(bob, distribution, 1)
 	message := roomChainTestLast(.SealedMessage)
 
-	// A flipped byte in the body fails the signature for good.
+	// A flipped byte in the body fails the signature for good: nobody is known to have sent
+	// it, so it is not shown at all (#90).
 	tampered := message
 	tampered.request.bytes = make([]u8, len(message.request.bytes), context.temp_allocator)
 	copy(tampered.request.bytes, message.request.bytes)
@@ -704,21 +705,24 @@ testRoomChainsFailuresAreFinal :: proc(t: ^testing.T) {
 	roomChainTestDeliverMessage(bob, tampered, 400)
 	failed := roomChainTestEntry(bob, 400)
 	assert(
-		failed.security.protection == .Failed &&
+		failed.security.protection == .Hidden &&
 		failed.security.failure == .Sealed &&
-		failed.security.sealedError == .BadSignature,
-		fmt.tprintf("expected a bad signature, got %v", failed.security),
+		failed.security.sealedError == .BadSignature &&
+		!roomMessageShown(failed.security),
+		fmt.tprintf("expected a bad signature hidden, got %v", failed.security),
 	)
-	text, placeholder, _ := roomMessageDisplay(bob, ROOM_CHAIN_TEST_SERVER, failed^)
-	assert(placeholder && text == DIRECT_UNDECRYPTABLE_TEXT, "expected the failure shown")
+	State_switchToChannel(bob, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
+	for line in buildRoomView(bob).lines {
+		assert(line.messageID != 400, "expected the hidden message left out of the transcript")
+	}
 
 	// The same bytes under bob's name: signed by alice, so they do not verify as his.
 	asBob := message
 	asBob.userID = ROOM_CHAIN_TEST_BOB
 	roomChainTestDeliverMessage(alice, asBob, 401)
 	assert(
-		roomChainTestEntry(alice, 401).security.protection != .Encrypted,
-		"expected a message moved to another sender to stay closed",
+		roomChainTestEntry(alice, 401).security.protection == .Hidden,
+		"expected a message moved to another sender hidden",
 	)
 
 	// Plaintext in an encrypted room is never shown as a message.
@@ -735,13 +739,15 @@ testRoomChainsFailuresAreFinal :: proc(t: ^testing.T) {
 	roomChainTestApply(bob, &plain)
 	notSealed := roomChainTestEntry(bob, 402)
 	assert(
-		notSealed.security.failure == .NotSealed && notSealed.content == "",
-		"expected plaintext in an encrypted room refused",
+		notSealed.security.protection == .Hidden &&
+		notSealed.security.failure == .NotSealed &&
+		notSealed.content == "",
+		"expected plaintext in an encrypted room hidden",
 	)
 
-	// Reopening never changes a failure.
+	// Reopening never changes a refusal.
 	State_roomChainsReopenPending(bob, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
-	assert(roomChainTestEntry(bob, 400).security.protection == .Failed, "expected it final")
+	assert(roomChainTestEntry(bob, 400).security.protection == .Hidden, "expected it final")
 }
 
 @(test)

@@ -22,35 +22,39 @@ set -euo pipefail
 #               and dan has an envelope, an empty content, and no marker text in the envelope.
 #   6. rebuild: (step 6) dan's key store is deleted and his client restarted: his history waits
 #               for carol's key, which he pins again, and his old messages open again.
-#   7. dave:    (step 7) dave's bundle is removed behind the server's back (he published one when
+#   7. signed:  (protocol 22, #82, #90) carol's signed plaintext room message reaches dan as
+#               plain; then SQL writes a room message and a direct message in carol's name, each
+#               once under a signature that is not hers and once with an all-zero one: dan's
+#               client shows none of them (hidden, no content) and never prints their text.
+#   8. dave:    (step 7) dave's bundle is removed behind the server's back (he published one when
 #               he signed in, and stays signed in so his client does not publish again): carol's
 #               `dm` to him is refused, and `dm-plain` reaches him with encrypted false and a
 #               valid signature on both sides; SQL finds that text, as it should.
-#   8. room:    (protocol 18, design 12.4 step 3) admin ra creates an encrypted Admin invite
+#   9. room:    (protocol 18, design 12.4 step 3) admin ra creates an encrypted Admin invite
 #               room (its Create entry signed by ra) and adds rb: both verify the member log
 #               with ra as manager and both as members. rc, not a member, cannot fetch its log
 #               or history, and a message to the room is stored sealed, never readable.
-#   9. forged:  (step 5, second half) an unsigned Add of rc inserted into room_log_entries by
+#  10. forged:  (step 5, second half) an unsigned Add of rc inserted into room_log_entries by
 #               SQL: ra's and rb's clients refuse the log with the member-list warning.
-#  10. managed: (step 9) ra creates a second encrypted room without joining it, adds rb and
+#  11. managed: (step 9) ra creates a second encrypted room without joining it, adds rb and
 #               makes rb a manager; admin re, who is not a manager, is refused by the server
 #               when adding rc, removes rb through the server (rb sees "the server removed"),
 #               and an add signed by re and inserted by SQL is refused by ra's log check.
-#  11. chains:  (protocol 19, step 3) ra and rb exchange sealed messages in a new encrypted
+#  12. chains:  (protocol 19, step 3) ra and rb exchange sealed messages in a new encrypted
 #               room: ra's first one waits for her chain's distribution; rc, not a member, is
 #               refused the room's keys and history. A restart of ra's client starts a new chain:
 #               every stored message has its own (sender, chain, index), ra's in two chains.
-#  12. sql:     (step 2 for rooms) every chat_messages row of the room is sealed with an empty
+#  13. sql:     (step 2 for rooms) every chat_messages row of the room is sealed with an empty
 #               content and no marker text, and its envelopes hold no marker either.
-#  13. rebuild: (step 6 for rooms) rb's key store is deleted and his client restarted: the
+#  14. rebuild: (step 6 for rooms) rb's key store is deleted and his client restarted: the
 #               room's history opens again from the envelopes the server keeps.
-#  14. join:    (step 8, From join) rb invites rc to a Member invite room: rc reads only what
+#  15. join:    (step 8, From join) rb invites rc to a Member invite room: rc reads only what
 #               is sent after, and holds no chain from before.
-#  15. removal: (step 4) ra removes rb: rb shows the removal, ra's next message is sealed in a
+#  16. removal: (step 4) ra removes rb: rb shows the removal, ra's next message is sealed in a
 #               chain with no wrap for rb, and rb cannot read the room any more.
-#  16. inserted:(step 5, first half) rc is added to room_members by SQL: she fetches the history
+#  17. inserted:(step 5, first half) rc is added to room_members by SQL: she fetches the history
 #               but holds no chain and opens nothing, and ra refuses her key request.
-#  17. full:    (protocol 20, step 8, Full history) ra creates a Full history Member invite
+#  18. full:    (protocol 20, step 8, Full history) ra creates a Full history Member invite
 #               room with rb; both send. ra is offline while rb (restarted, so in a new chain)
 #               sends again: a chain ra never held. ra invites rc and forwards the two chains
 #               she holds; rc reads all three messages, rb's newest chain re-sealed by rb on
@@ -58,7 +62,7 @@ set -euo pipefail
 #               invites re: rc, not its sender, forwards rb's newest chain on request. SQL:
 #               forward envelopes exist only in the Full history room (none in step 14's From
 #               join room, where nothing older opened for rc).
-#  18. secrets: no client ever printed its encryption private key, and no client wrote the
+#  19. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -307,6 +311,51 @@ for marker in "$marker_one" "$marker_two"; do
 	pattern+="\"content\":\"$marker\""
 	expect_event d2 "$pattern" "$start" "dan's history did not open $marker again" >/dev/null
 done
+
+echo "==> [e2ee] signed: messages the server writes in carol's name are never shown"
+genuine_text="e2ee-genuine-room-$run_tag"
+forged_text="e2ee-forged-$run_tag"
+dstart=$(lines d2)
+expect_ok c2 send 1 "$genuine_text"
+plain_room_pattern="^\\{\"event\":\"room_(chat|opened)\",\"serverID\":[0-9]+,\"roomID\":1,.*"
+plain_room_pattern+="\"protection\":\"plain\",\"content\":\"$genuine_text\"\\}$"
+expect_event d2 "$plain_room_pattern" "$dstart" \
+	"dan did not read carol's signed room message" >/dev/null
+run_sql "INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id,
+		signature) VALUES
+	(1, $carol_id, '$forged_text-room-bad', decode(md5('room-bad-$run_tag'), 'hex'),
+		decode(repeat('ab', 64), 'hex')),
+	(1, $carol_id, '$forged_text-room-none', decode(md5('room-none-$run_tag'), 'hex'),
+		decode(repeat('00', 64), 'hex'));
+	INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, client_message_id,
+		signature) VALUES
+	($carol_id, $dan_id, '$forged_text-dm-bad', decode(md5('dm-bad-$run_tag'), 'hex'),
+		decode(repeat('ab', 64), 'hex')),
+	($carol_id, $dan_id, '$forged_text-dm-none', decode(md5('dm-none-$run_tag'), 'hex'),
+		decode(repeat('00', 64), 'hex'))" >/dev/null
+dstart=$(lines d2)
+expect_ok d2 history 1
+history=$(expect_event d2 "^\\{\"event\":\"room_history\",\"serverID\":[0-9]+,\"roomID\":1," \
+	"$dstart" "dan got no history page of #general")
+[[ "$history" == *"\"protection\":\"plain\",\"content\":\"$genuine_text\""* ]] ||
+	fail "dan's history does not show carol's signed message: $history"
+for reason in bad_signature unsigned; do
+	hidden="\"decryptError\":\"$reason\",\"epoch\":0,\"protection\":\"hidden\",\"content\":\"\""
+	[[ "$history" == *"$hidden"* ]] ||
+		fail "dan's history does not hide the forged room message ($reason): $history"
+done
+dstart=$(lines d2)
+expect_ok d2 dm-history "$carol_id"
+history=$(expect_event d2 "^\\{\"event\":\"direct_history\",.*\"peerUserID\":$carol_id," \
+	"$dstart" "dan got no direct history with carol")
+for reason in bad_signature unsigned; do
+	hidden="\"decryptError\":\"$reason\",\"protection\":\"hidden\",\"content\":\"\""
+	[[ "$history" == *"$hidden"* ]] ||
+		fail "dan's history does not hide the forged direct message ($reason): $history"
+done
+if grep -qF -- "$forged_text" "$work_dir/d2.out"; then
+	fail "dan's client printed the text of a forged message"
+fi
 
 echo "==> [e2ee] dave: no key, so dm is refused and dm-plain arrives signed"
 start_client v "$dave"

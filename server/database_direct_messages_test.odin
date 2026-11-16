@@ -53,17 +53,53 @@ databaseSQLTestPost :: proc(
 	recipientID: int,
 	content: string,
 ) -> common.DatabaseQueryResponse {
+	// Signed as the router requires (protocol 17); the database stores the signature it was
+	// given without checking it, so a placeholder is enough here.
 	response := databaseExecuteRequest(
 		conn,
 		common.DatabasePostDirectMessageRequest {
 			senderId = senderID,
 			recipientId = recipientID,
 			content = content,
+			clientMessageId = databaseTestClientMessageID(),
+			signature = DATABASE_TEST_SIGNATURE,
 		},
 	)
 	assert(response.success, fmt.tprintf("expected the post to run: %s", response.message))
 	return response
 }
+
+// A placeholder signature for messages a database test stores: the router checks signatures
+// (protocol 17, 22), the database only stores them.
+DATABASE_TEST_SIGNATURE :: common.SignatureBytes{0 = 0xab, 63 = 0xcd}
+
+// A fresh random client message ID, as a client makes one.
+databaseTestClientMessageID :: proc() -> common.ClientMessageID {
+	id: common.ClientMessageID
+	assert(common.generateRandomBytes(id[:]), "expected a random client message ID")
+	id[0] |= 1
+	return id
+}
+
+// A plaintext room message as the router passes it on (protocol 22): a fresh client message ID
+// and a placeholder signature. content is borrowed.
+databaseTestPlainRoomPost :: proc(
+	roomID, senderID: int,
+	content: string,
+) -> common.DatabasePostRoomChatMessageRequest {
+	return common.DatabasePostRoomChatMessageRequest {
+		roomId = roomID,
+		senderId = senderID,
+		content = content,
+		clientMessageId = databaseTestClientMessageID(),
+		signature = DATABASE_TEST_SIGNATURE,
+	}
+}
+
+// SQL values for a plaintext row's client_message_id and signature columns.
+DATABASE_TEST_PLAIN_COLUMNS_SQL ::
+	"decode(md5(random()::text || clock_timestamp()::text), 'hex'), " +
+	"decode(repeat('ab', 64), 'hex')"
 
 databaseSQLTestPostID :: proc(
 	conn: pg.Conn,

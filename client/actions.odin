@@ -138,14 +138,16 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 			timestamp = strings.clone(message.timestamp),
 			content = strings.clone(message.content),
 			clientMessageId = message.clientMessageId,
+			signature = message.signature,
 		},
-		// A sealed message is opened by room_chains.odin after the merge.
-		security = {protection = .Plain},
+		// Every message is opened or checked by room_chains.odin after the merge: a sealed one
+		// is opened, a plaintext one's signature checked (protocol 22). Until then it is
+		// Pending with no reason, and never shown.
+		security = {protection = .Pending},
 	}
 	if len(message.sealed) > 0 {
 		clone.sealed = make([]u8, len(message.sealed))
 		copy(clone.sealed, message.sealed)
-		clone.security.protection = .Pending
 	}
 	insertIndex := len(cache.messages)
 	for index in 0 ..< len(cache.messages) {
@@ -308,9 +310,20 @@ State_sendChannelChat :: proc(state: ^State) {
 		}
 		return
 	}
+	// Protocol 22 (#90): every plaintext message is signed by this profile.
+	send, signError := State_signRoomChat(
+		state,
+		state.selected_server_id,
+		state.selected_channel_id,
+		newMessage,
+	)
+	if len(signError) > 0 {
+		State_setChatStatus(state, signError)
+		return
+	}
 	// The worker may replace lastError at any time, so copy it while holding the lock.
 	ClientNetworkWorker_lock(state.networkWorker)
-	sent := roomChatSendBridge(transport, state.selected_channel_id, newMessage)
+	sent := roomChatSendBridge(transport, send)
 	sendError := sent ? "" : strings.clone(transport.lastError)
 	ClientNetworkWorker_unlock(state.networkWorker)
 	defer if !sent do delete(sendError)
@@ -350,6 +363,7 @@ State_receiveRoomChat :: proc(
 	senderNickname, timestamp, content: string,
 	clientMessageID := common.ClientMessageID{},
 	sealed: []u8 = nil,
+	signature := common.SignatureBytes{},
 ) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		return
@@ -367,15 +381,18 @@ State_receiveRoomChat :: proc(
 			content = content,
 			clientMessageId = clientMessageID,
 			sealed = sealed,
+			signature = signature,
 		},
 	)
 	State_roomChainsMessageEchoed(state, serverID, roomID, senderID, clientMessageID)
-	if merged && (len(sealed) > 0 || State_roomIsEncrypted(state, serverID, roomID)) {
+	if merged {
 		State_roomChainsOpenMessage(state, serverID, roomID, messageID)
 	}
+	// A message that is not shown (#90) does not count as unread.
 	if summary := State_roomSummary(state, serverID, roomID);
 	   merged &&
 	   summary != nil &&
+	   State_roomMessageShown(state, serverID, roomID, messageID) &&
 	   readStateCountsMessage(
 		   state,
 		   .Room,
@@ -568,6 +585,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.message,
 			event.clientMessageID,
 			event.sealed,
+			event.signature,
 		)
 	case .RoomKeyEnvelopeReceived, .RoomKeysReceived:
 		State_receiveRoomKeys(state, event)

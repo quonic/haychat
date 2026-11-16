@@ -11,7 +11,7 @@ import "hotkey"
 
 CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
 
-RoomChatSendBridge :: proc(transport: ^ClientServerTransport, roomID: int, content: string) -> bool
+RoomChatSendBridge :: proc(transport: ^ClientServerTransport, send: RoomChatSend) -> bool
 
 roomChatSendBridge: RoomChatSendBridge = ClientServerTransport_sendRoomChatMessage
 

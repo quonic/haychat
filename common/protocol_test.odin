@@ -442,14 +442,112 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// RoomKeyEnvelope.forwarderId, ServerRoomKeyRequest.senderId, and key requests relayed to
 	// every member); 21 added end-to-end encrypted voice in encrypted rooms (ClientVoiceKey,
 	// ServerVoiceKey, ClientRequestVoiceKey, ServerVoiceKeyRequest, the VoiceKey envelope kind and
-	// sealed voice payloads), so peers on 20 or older cannot talk to this build.
+	// sealed voice payloads); 22 signs every plaintext room message (signature in
+	// ClientChatMessage, ServerChatMessage and StoredChatMessage, #90), so peers on 21 or older
+	// cannot talk to this build.
 	assert(
-		protocolVersion == 21,
+		protocolVersion == 22,
 		fmt.tprintf(
-			"expected protocol version 21 for encrypted voice, got %d",
+			"expected protocol version 22 for signed room messages, got %d",
 			protocolVersion,
 		),
 	)
+}
+
+// Protocol 22 (#90): a plaintext room message carries its client message ID and signature in
+// both directions and in history pages.
+@(test)
+testSignedRoomMessagePayloadsRoundTrip :: proc(t: ^testing.T) {
+	_ = t
+	id: ClientMessageID
+	id[3] = 9
+	signature: SignatureBytes
+	signature[0] = 1
+	signature[63] = 0xfe
+	{
+		original := ClientChatMessagePayload {
+			roomId          = 3,
+			content         = "hello",
+			clientMessageId = id,
+			signature       = signature,
+		}
+		data, err := cbor.marshal(original)
+		assert(err == nil, "expected ClientChatMessagePayload encoding to succeed")
+		defer delete(data)
+		decoded: ClientChatMessagePayload
+		assert(
+			cbor.unmarshal(data, &decoded, temp_allocator = context.allocator) == nil,
+			"expected the client chat payload to decode",
+		)
+		defer ClientChatMessagePayload_deinit(&decoded)
+		assert(
+			decoded.content == "hello" &&
+			decoded.clientMessageId == id &&
+			decoded.signature == signature,
+			fmt.tprintf("expected the signed client message unchanged, got %v", decoded),
+		)
+	}
+	{
+		original := ServerChatMessagePayload {
+			id              = 5,
+			roomId          = 3,
+			senderId        = 2,
+			content         = "hello",
+			clientMessageId = id,
+			signature       = signature,
+		}
+		data, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerChatMessagePayload encoding to succeed")
+		defer delete(data)
+		decoded: ServerChatMessagePayload
+		assert(
+			cbor.unmarshal(data, &decoded, temp_allocator = context.allocator) == nil,
+			"expected the server chat payload to decode",
+		)
+		defer ServerChatMessagePayload_deinit(&decoded)
+		assert(
+			decoded.clientMessageId == id && decoded.signature == signature,
+			fmt.tprintf("expected the signed server message unchanged, got %v", decoded),
+		)
+	}
+	{
+		original := ServerRoomHistoryPayload {
+			roomId   = 3,
+			messages = make([dynamic]StoredChatMessage, 0, 1),
+		}
+		defer delete(original.messages)
+		append(
+			&original.messages,
+			StoredChatMessage {
+				id = 5,
+				senderId = 2,
+				roomId = 3,
+				content = "hello",
+				clientMessageId = id,
+				signature = signature,
+			},
+		)
+		data, err := cbor.marshal(original)
+		assert(err == nil, "expected ServerRoomHistoryPayload encoding to succeed")
+		defer delete(data)
+		decoded: ServerRoomHistoryPayload
+		assert(
+			cbor.unmarshal(data, &decoded, temp_allocator = context.allocator) == nil,
+			"expected the history page to decode",
+		)
+		defer {
+			for &message in decoded.messages {
+				StoredChatMessage_deinit(&message)
+			}
+			delete(decoded.messages)
+		}
+		assert(
+			len(decoded.messages) == 1 &&
+			decoded.messages[0].clientMessageId == id &&
+			decoded.messages[0].signature == signature,
+			"expected the stored message's signature unchanged",
+		)
+	}
 }
 
 // Protocol 19: sealed chat messages and key envelopes carry their bytes as byte strings,

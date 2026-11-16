@@ -60,10 +60,21 @@ testDrainNetworkEventsDeliversEveryServer :: proc(t: ^testing.T) {
 				kind = .RoomChatReceived,
 				serverID = server.id,
 				roomID = common.GENERAL_ROOM_ID,
+				senderID = 5,
 				messageID = server.id,
 				message = strings.clone("background message"),
 				timestamp = strings.clone("t"),
 			},
+		)
+		// Signed by its sender (protocol 22).
+		event := &state.networkWorker.events[len(state.networkWorker.events) - 1]
+		event.clientMessageID, event.signature = testRoomMessageSignature(
+			&state,
+			server.id,
+			common.GENERAL_ROOM_ID,
+			event.senderID,
+			event.messageID,
+			"background message",
 		)
 	}
 

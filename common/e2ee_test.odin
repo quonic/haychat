@@ -82,6 +82,10 @@ KAT_PLAIN_SIGNATURE ::
 	"5e9e8eb05f0eb2d3cb66253afc06c1057983c2469369a72997cb8863fa8da686d6a9b2135fcebf0c" +
 	"2663d19e7fb528283ed758b947b9cd9f044dce9b480c6605"
 @(private = "file")
+KAT_ROOM_PLAIN_SIGNATURE ::
+	"f3f4a68990f887cafab9bea8f40c2c101ced56240e5ea879c53651b8e08c5d2cccd8aafefef3b2aa" +
+	"05960e04be9d8d22b29f2f23ca1e9f16699a8c7b3e9e1100"
+@(private = "file")
 KAT_SAFETY_NUMBER :: "63169 33002 55097 54173 25823 15407 58924 75444 38904 85841 67880 39441"
 
 @(private = "file")
@@ -1055,6 +1059,82 @@ testDirectMessageSealOpenAndServerCheck :: proc(t: ^testing.T) {
 		buffer[:],
 	)
 	assert(err == .BadPlaintext, fmt.tprintf("expected empty content refused, got %v", err))
+}
+
+@(test)
+testPlaintextRoomMessageSignature :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	label := testLabel("haychat-e2ee-test-room-plain-client-message-id")
+	fields := PlaintextRoomMessageFields {
+		serverIdentityPublicKey = testServerPublicKey(),
+		roomID                  = TEST_ROOM_ID,
+		senderUserID            = TEST_ALICE_ID,
+	}
+	copy(fields.clientMessageID[:], label[:CLIENT_MESSAGE_ID_SIZE])
+	signature, ok := signPlaintextRoomMessage(fields, "room hello", alice.privateKey)
+	assert(ok, "expected the room message to sign")
+	assert(
+		testHexEqual(signature[:], KAT_ROOM_PLAIN_SIGNATURE),
+		"expected the vector signature",
+	)
+	assert(
+		verifyPlaintextRoomMessage(fields, "room hello", alice.publicKey, signature),
+		"expected the signature to verify",
+	)
+	changes: [4]PlaintextRoomMessageFields
+	for &change in changes {
+		change = fields
+	}
+	changes[0].serverIdentityPublicKey = bob.publicKey
+	changes[1].roomID = TEST_ROOM_ID + 1
+	changes[2].senderUserID = TEST_BOB_ID
+	changes[3].clientMessageID[5] ~= 0x01
+	for change, index in changes {
+		assert(
+			!verifyPlaintextRoomMessage(change, "room hello", alice.publicKey, signature),
+			fmt.tprintf("expected changed field %d to fail", index),
+		)
+	}
+	assert(
+		!verifyPlaintextRoomMessage(fields, "room hellO", alice.publicKey, signature),
+		"expected changed content to fail",
+	)
+	assert(
+		!verifyPlaintextRoomMessage(fields, "room hello", bob.publicKey, signature),
+		"expected another sender key to fail",
+	)
+	// A direct message's signature over the same bytes is not a room message's.
+	directFields := PlaintextDirectMessageFields {
+		serverIdentityPublicKey = fields.serverIdentityPublicKey,
+		senderUserID            = TEST_ALICE_ID,
+		recipientUserID         = TEST_ROOM_ID,
+		clientMessageID         = fields.clientMessageID,
+	}
+	directSignature, directOK := signPlaintextDirectMessage(
+		directFields,
+		"room hello",
+		alice.privateKey,
+	)
+	assert(directOK, "expected the direct message to sign")
+	assert(
+		!verifyPlaintextRoomMessage(fields, "room hello", alice.publicKey, directSignature),
+		"expected a direct message signature refused",
+	)
+	unset := fields
+	unset.clientMessageID = {}
+	_, ok = signPlaintextRoomMessage(unset, "room hello", alice.privateKey)
+	assert(!ok, "expected an unset client message ID to be refused")
+	assert(
+		!verifyPlaintextRoomMessage(unset, "room hello", alice.publicKey, signature),
+		"expected an unset client message ID never to verify",
+	)
+	_, ok = signPlaintextRoomMessage(fields, "", alice.privateKey)
+	assert(!ok, "expected empty content to be refused")
+	long: [CHAT_MESSAGE_MAX_BYTES + 1]u8
+	_, ok = signPlaintextRoomMessage(fields, string(long[:]), alice.privateKey)
+	assert(!ok, "expected over-long content to be refused")
 }
 
 @(private = "file")

@@ -527,8 +527,10 @@ HeadlessMessageEventJSON :: struct {
 }
 
 // Protocol 19: encrypted is whether the message is sealed, protection what the client
-// concluded (plain, pending, encrypted, failed), decryptError why it failed (or waits: "log",
-// "no_key"), epoch its chain's epoch (0 for plaintext); content the opened text or empty.
+// concluded (plain, pending, encrypted, failed, hidden), decryptError why it failed, is hidden
+// or waits ("log", "no_key", "sender_key"), epoch its chain's epoch (0 for plaintext); content
+// the opened or verified text, empty otherwise. Protocol 22 (#90): plain means the sender's
+// signature verified; a hidden message (no valid signature) is one the window does not show.
 HeadlessRoomChatJSON :: struct {
 	event:          string,
 	serverID:       int,
@@ -671,9 +673,11 @@ HeadlessRoomEventJSON :: struct {
 // Protocol 17: printed after State opened it (content is the plaintext of an encrypted
 // message). encrypted: it is an envelope; signed: its signature verified against the sender's
 // pin (every opened envelope, and a valid plaintext fallback); decryptError: why an envelope
-// could not be opened ("no_key", "own_key", "replayed", or the E2EEError), otherwise "";
-// protection: pending, plain (from before protocol 17), signed, unverified, encrypted or
-// failed. A live message waiting for its sender's key is printed once it opened.
+// could not be opened or why it is hidden ("no_key", "own_key", "replayed", "unsigned",
+// "bad_signature", or the E2EEError), otherwise ""; protection: pending, signed, encrypted,
+// failed or hidden. A hidden message (#82: its sender's signature was not verified) is one the
+// window does not show; its content is always empty, as is a pending one's. A live message
+// waiting for its sender's key is printed once it opened.
 HeadlessDirectMessageJSON :: struct {
 	event:             string,
 	serverID:          int,
@@ -826,7 +830,10 @@ headlessConversationsJSON :: proc(
 			lastMessageID     = conversation.lastMessageID,
 			lastSenderID      = conversation.lastSenderId,
 			lastTimestamp     = conversation.lastTimestamp,
-			lastContent       = conversation.lastContent,
+			lastContent       = headlessDirectContent(
+				conversation.security,
+				conversation.lastContent,
+			),
 			encrypted         = fields.encrypted,
 			signed            = fields.signed,
 			decryptError      = fields.decryptError,
@@ -853,12 +860,11 @@ HeadlessDirectSecurityFields :: struct {
 }
 
 HEADLESS_DIRECT_PROTECTION_NAMES := [DirectMessageProtection]string {
-	.Pending    = "pending",
-	.Plain      = "plain",
-	.Signed     = "signed",
-	.Unverified = "unverified",
-	.Encrypted  = "encrypted",
-	.Failed     = "failed",
+	.Pending   = "pending",
+	.Signed    = "signed",
+	.Encrypted = "encrypted",
+	.Failed    = "failed",
+	.Hidden    = "hidden",
 }
 
 // The harness fields for what the client concluded about a message. Strings are static.
@@ -871,7 +877,7 @@ headlessDirectSecurity :: proc(
 		signed     = security.protection == .Signed || security.protection == .Encrypted,
 		protection = HEADLESS_DIRECT_PROTECTION_NAMES[security.protection],
 	}
-	if security.protection == .Failed {
+	if security.protection == .Failed || security.protection == .Hidden {
 		switch security.failure {
 		case .None, .Envelope:
 			fields.decryptError = headlessE2EEErrorName(security.envelopeError)
@@ -881,9 +887,22 @@ headlessDirectSecurity :: proc(
 			fields.decryptError = "own_key"
 		case .Replayed:
 			fields.decryptError = "replayed"
+		case .Unsigned:
+			fields.decryptError = "unsigned"
+		case .BadSignature:
+			fields.decryptError = "bad_signature"
 		}
 	}
 	return fields
+}
+
+// The text the harness prints for a message: only what the window would show as content.
+headlessDirectContent :: proc(security: DirectMessageSecurity, content: string) -> string {
+	#partial switch security.protection {
+	case .Signed, .Encrypted:
+		return content
+	}
+	return ""
 }
 
 headlessE2EEErrorName :: proc(err: common.E2EEError) -> string {
@@ -909,12 +928,10 @@ headlessDirectMessageFields :: proc(
 		security = {protection = .Pending},
 	}
 	if len(message.envelope) == 0 && message.signature == {} {
-		entry.security.protection = .Plain
+		entry.security = {protection = .Hidden, failure = .Unsigned}
 	}
 	if cached := headlessCachedDirectEntry(state, serverID, message); cached != nil {
 		entry = cached^
-	} else if len(message.envelope) > 0 {
-		entry.content = ""
 	}
 	fields := headlessDirectSecurity(entry.security, len(entry.envelope) > 0)
 	return HeadlessDirectHistoryMessageJSON {
@@ -928,7 +945,7 @@ headlessDirectMessageFields :: proc(
 		signed = fields.signed,
 		decryptError = fields.decryptError,
 		protection = fields.protection,
-		content = entry.content,
+		content = headlessDirectContent(entry.security, entry.content),
 	}
 }
 
@@ -1017,11 +1034,9 @@ headlessRenderRuntimeEvent :: proc(
 		if info.state != nil {
 			return "", {}, false
 		}
+		// Without a State nothing was checked (protocol 22): pending, with no content.
 		kind = .RoomChat
 		fields := headlessRoomSecurity({protection = .Pending}, len(event.sealed) > 0)
-		if len(event.sealed) == 0 {
-			fields = headlessRoomSecurity({protection = .Plain}, false)
-		}
 		line = headlessMarshal(
 			HeadlessRoomChatJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
@@ -1034,7 +1049,7 @@ headlessRenderRuntimeEvent :: proc(
 				encrypted = fields.encrypted,
 				decryptError = fields.decryptError,
 				protection = fields.protection,
-				content = len(event.sealed) > 0 ? "" : event.message,
+				content = "",
 			},
 			allocator,
 		)

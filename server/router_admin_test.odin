@@ -797,7 +797,7 @@ testMainRouterRoomTypesAreValidatedAndEnforced :: proc(t: ^testing.T) {
 		&clients[1].transport,
 		2,
 		.ClientChatMessage,
-		common.ClientChatMessagePayload{roomId = 7, content = "hello"},
+		routerTestSignedChat(&h, clients[1].identityKey, 7, clients[1].userID, "hello"),
 	)
 	post := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(post.request)

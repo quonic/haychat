@@ -64,17 +64,25 @@ ROOM_WAITING_FOR_KEY_FORMAT :: "Waiting for this message's key from %s"
 ROOM_NOT_A_LOG_MEMBER_NOTE :: "You are not a member of this room's member list"
 ROOM_NO_ENCRYPTION_KEY_NOTE :: "This profile has no valid encryption key"
 
+// Every room message must be signed by its sender (#90): one whose signature was not verified
+// against the sender's pin (or this profile's own key, or for a sealed message the identity
+// the verified log names) is Hidden and never shown. Failed is shown ("This message could not
+// be decrypted") only for a sealed message whose signature verified.
 RoomMessageProtection :: enum u8 {
-	Plain, // An unencrypted room's message
-	Pending, // Waiting for the log (wait Log) or the chain's key (wait Key)
+	Plain, // An unencrypted room's message, its signature verified (protocol 22)
+	// Waiting for the log (wait Log), the chain's key (wait Key) or the sender's pin (wait
+	// Sender); just merged and not looked at yet (wait None). Never shown with its content.
+	Pending,
 	Encrypted, // Opened and verified
-	Failed, // Final: failure says why
+	Failed, // Final, its signature verified: failure says why
+	Hidden, // Final and not shown: failure says why
 }
 
 RoomMessageWait :: enum u8 {
 	None,
 	Log, // The verified log has not reached the message's epoch yet
 	Key, // No chain key for it yet
+	Sender, // A plaintext message whose sender's identity key is being fetched
 }
 
 RoomMessageFailure :: enum u8 {
@@ -85,6 +93,11 @@ RoomMessageFailure :: enum u8 {
 	BadIndex, // The index is before the chain's start or past its end
 	LogFailed, // The room's member log failed verification
 	Replayed, // A copy of an earlier message
+	// Protocol 22: a plaintext message without a signature or client message ID, one whose
+	// signature does not verify against the pin, and one whose sender has no key to check.
+	Unsigned,
+	BadSignature,
+	NoKey,
 }
 
 RoomMessageSecurity :: struct {
@@ -509,17 +522,21 @@ State_roomOpenEntry :: proc(
 	if len(entry.sealed) == 0 {
 		if encrypted {
 			// Only sealed messages are stored in an encrypted room; anything else is the server's.
-			delete(entry.content)
-			entry.content = ""
-			entry.security = {protection = .Failed, failure = .NotSealed}
+			roomEntryHide(entry, {protection = .Hidden, failure = .NotSealed})
 			return
 		}
-		entry.security = {protection = .Plain}
+		entry.security = State_roomCheckPlain(state, serverID, roomID, keys, entry^)
+		if entry.security.protection == .Hidden {
+			roomEntryHide(entry, entry.security)
+		}
 		return
 	}
 	decoded, decodeErr := common.decodeSealedRoomMessage(entry.sealed)
 	if decodeErr != .None {
-		entry.security = {protection = .Failed, failure = .Sealed, sealedError = decodeErr}
+		roomEntryHide(
+			entry,
+			{protection = .Hidden, failure = .Sealed, sealedError = decodeErr},
+		)
 		return
 	}
 	security := RoomMessageSecurity {
@@ -537,6 +554,11 @@ State_roomOpenEntry :: proc(
 	case !roomLogMembershipsInclude(log.memberships[:], entry.senderId, header.epoch):
 		security.protection = .Failed
 		security.failure = .NotMember
+	}
+	if security.protection == .Failed {
+		// Failed before the signature was checked: shown only when the sender signed it.
+		State_roomSettleSealed(state, serverID, roomID, keys, entry, decoded, security)
+		return
 	}
 	if security.protection != .Plain {
 		entry.security = security
@@ -562,7 +584,24 @@ State_roomOpenEntry :: proc(
 		)
 	}
 	if !identityOK {
-		entry.security = {protection = .Failed, failure = .NotMember, header = header}
+		// No identity to check the signature with: nobody is known to have sent it.
+		roomEntryHide(entry, {protection = .Hidden, failure = .NoKey, header = header})
+		return
+	}
+	// The signature needs no chain key: a message its sender did not sign is not shown, and
+	// never waits for (or asks anyone for) a key.
+	roomContext := common.RoomMessageContext {
+		serverIdentityPublicKey = keys.serverIdentityPublicKey,
+		roomID                  = roomID,
+		senderUserID            = entry.senderId,
+		clientMessageID         = entry.clientMessageId,
+	}
+	if verifyErr := common.verifyRoomMessageSignature(decoded, roomContext, senderIdentity);
+	   verifyErr != .None {
+		roomEntryHide(
+			entry,
+			{protection = .Hidden, failure = .Sealed, sealedError = verifyErr, header = header},
+		)
 		return
 	}
 	if !chainOK {
@@ -576,29 +615,42 @@ State_roomOpenEntry :: proc(
 	)
 	defer crypto.zero_explicit(&messageKey, size_of(messageKey))
 	if !indexOK {
-		entry.security = {protection = .Failed, failure = .BadIndex, header = header}
+		State_roomSettleSealed(
+			state,
+			serverID,
+			roomID,
+			keys,
+			entry,
+			decoded,
+			{protection = .Failed, failure = .BadIndex, header = header},
+		)
 		return
 	}
 	buffer: [common.SEALED_ROOM_MESSAGE_MAX_BYTES]u8
 	defer crypto.zero_explicit(&buffer, size_of(buffer))
 	plaintext, openErr := common.openRoomMessage(
 		decoded,
-		common.RoomMessageContext {
-			serverIdentityPublicKey = keys.serverIdentityPublicKey,
-			roomID = roomID,
-			senderUserID = entry.senderId,
-			clientMessageID = entry.clientMessageId,
-		},
+		roomContext,
 		senderIdentity,
 		messageKey,
 		buffer[:],
 	)
 	if openErr != .None {
+		// openRoomMessage checks the signature before the body: a failure at or before it is
+		// not shown, one after it (the body or its padding) is.
+		protection := RoomMessageProtection.Hidden
+		#partial switch openErr {
+		case .BadCiphertext, .BadPadding:
+			protection = .Failed
+		}
 		entry.security = {
-			protection  = .Failed,
+			protection  = protection,
 			failure     = .Sealed,
 			sealedError = openErr,
 			header      = header,
+		}
+		if protection == .Hidden {
+			roomEntryHide(entry, entry.security)
 		}
 		return
 	}
@@ -619,19 +671,23 @@ State_roomOpenEntry :: proc(
 
 // Marks the later of two opened messages from one sender with the same client message ID or
 // the same chain index a replay (the server refuses both; this catches one that did not).
+//
+// Protocol 22: a verified plaintext message with the same sender and client message ID as an
+// earlier one is a replay too (a server repeating a signed message).
 RoomCache_checkReplay :: proc(cache: ^RoomCache, index: int) {
 	entry := &cache.messages[index]
-	if entry.security.protection != .Encrypted {
+	if entry.security.protection != .Encrypted && entry.security.protection != .Plain {
 		return
 	}
 	for &other, otherIndex in cache.messages {
 		if otherIndex == index ||
-		   other.security.protection != .Encrypted ||
+		   other.security.protection != entry.security.protection ||
 		   other.senderId != entry.senderId {
 			continue
 		}
 		sameID := other.clientMessageId == entry.clientMessageId
 		samePosition :=
+			entry.security.protection == .Encrypted &&
 			other.security.header.chainID == entry.security.header.chainID &&
 			other.security.header.epoch == entry.security.header.epoch &&
 			other.security.header.index == entry.security.header.index
@@ -739,12 +795,20 @@ State_roomChainsFollowUp :: proc(state: ^State, serverID, roomID: int) {
 		return
 	}
 	waitsForLog, waitsForKey := false, false
+	senders := make([dynamic]int, 0, 4, context.temp_allocator)
 	for entry in cache.messages {
 		if entry.security.protection != .Pending {
 			continue
 		}
 		waitsForLog = waitsForLog || entry.security.wait == .Log
 		waitsForKey = waitsForKey || entry.security.wait == .Key
+		if entry.security.wait == .Sender && !slice.contains(senders[:], entry.senderId) {
+			append(&senders, entry.senderId)
+		}
+	}
+	// Plaintext messages whose senders' identity keys are not pinned yet (protocol 22).
+	if len(senders) > 0 {
+		State_e2eeRequestUserKeys(state, serverID, senders[:])
 	}
 	if waitsForLog {
 		State_requestRoomLog(state, serverID, roomID)
@@ -1822,7 +1886,13 @@ roomMessageDisplay :: proc(
 		return entry.content, false, "🔒"
 	case .Failed:
 		return DIRECT_UNDECRYPTABLE_TEXT, true, ""
+	case .Hidden:
+		// Never drawn (roomMessageShown); nothing of it is shown if it were.
+		return "", true, ""
 	case .Pending:
+		if len(entry.sealed) == 0 {
+			return DIRECT_CHECKING_TEXT, true, ""
+		}
 		if entry.security.wait == .Key {
 			name := entry.senderNickname
 			if len(name) == 0 {
@@ -1895,4 +1965,46 @@ parseServerTimestampUnix :: proc(text: string) -> (seconds: i64, ok: bool) {
 	dayOfEra := yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
 	days := era * 146097 + dayOfEra - 719468
 	return i64(days * 86400 + hour * 3600 + minute * 60 + second - offset), true
+}
+
+// A sealed message that failed before its signature was checked (log failed, sender not a
+// member, index out of range): shown as "could not be decrypted" only when its signature
+// verifies against the sender's identity (#90), otherwise not shown at all.
+@(private = "file")
+State_roomSettleSealed :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	keys: RoomChainKeys,
+	entry: ^RoomMessageEntry,
+	decoded: common.SealedRoomMessage,
+	security: RoomMessageSecurity,
+) {
+	identity, identityOK := State_roomChainIdentityFor(
+		state,
+		serverID,
+		roomID,
+		keys,
+		entry.senderId,
+	)
+	verified :=
+		keys.ready &&
+		identityOK &&
+		common.verifyRoomMessageSignature(
+			decoded,
+			common.RoomMessageContext {
+				serverIdentityPublicKey = keys.serverIdentityPublicKey,
+				roomID = roomID,
+				senderUserID = entry.senderId,
+				clientMessageID = entry.clientMessageId,
+			},
+			identity,
+		) ==
+			.None
+	settled := security
+	if !verified {
+		settled.protection = .Hidden
+		roomEntryHide(entry, settled)
+		return
+	}
+	entry.security = settled
 }
