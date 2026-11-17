@@ -64,6 +64,16 @@ routerVoiceKeysTestJoin :: proc(
 	roomID := VOICE_KEYS_TEST_ROOM,
 ) -> RouterVoiceTestDrain {
 	routerVoiceTestSendJoin(&test.h, &test.clients[index], roomID)
+	return routerVoiceKeysTestAnswerJoin(test, encrypted, logVersion)
+}
+
+// Answers the pending join's membership check, as routerVoiceKeysTestJoin does.
+@(private = "file")
+routerVoiceKeysTestAnswerJoin :: proc(
+	test: ^RouterVoiceKeysTest,
+	encrypted := true,
+	logVersion := VOICE_KEYS_TEST_EPOCH,
+) -> RouterVoiceTestDrain {
 	query := routerPollDatabaseQuery(&test.h)
 	defer IPC__database_query_request_deinit(query.request)
 	userIDs := make([dynamic]int, 0, 3)
@@ -472,6 +482,79 @@ testVoiceKeysRouterForgetsKeys :: proc(t: ^testing.T) {
 	drain = routerVoiceTestDrain(&test.h, test.clients[:])
 	RouterVoiceTestDrain_deinit(&drain)
 	assert(storedKeys(&test) == 0, "expected alice's key forgotten when her session went")
+}
+
+// #77: a member log append that the router applies while a room's first voice join is still in
+// its database check must not be lost. The join's answer carries the older version it read; the
+// voice room still takes the newer one, so a key at the new epoch is accepted.
+@(test)
+testVoiceKeysRouterKeepsAppendDuringFirstJoin :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	test: RouterVoiceKeysTest
+	routerVoiceKeysTestInit(&test)
+	defer routerVoiceKeysTestDeinit(&test)
+	defer free_all(context.temp_allocator)
+	newEpoch := VOICE_KEYS_TEST_EPOCH + 1
+
+	// alice asks to join; before the database answers, an append moves the log to epoch 4.
+	routerVoiceTestSendJoin(&test.h, &test.clients[0], VOICE_KEYS_TEST_ROOM)
+	assert(
+		VOICE_KEYS_TEST_ROOM not_in test.h.state.voiceRooms,
+		"expected no voice room while the join check is pending",
+	)
+	entry := [4]u8{1, 2, 3, 4}
+	members := [3]int{42, 43, 44}
+	MainRouterState_sendRoomLogEntry(
+		&test.h.pm,
+		&test.h.state,
+		VOICE_KEYS_TEST_ROOM,
+		newEpoch,
+		entry[:],
+		members[:],
+		nil,
+		0,
+		0,
+	)
+	drain := routerVoiceTestDrain(&test.h, test.clients[:])
+	RouterVoiceTestDrain_deinit(&drain)
+
+	// The check read epoch 3 before the append.
+	drain = routerVoiceKeysTestAnswerJoin(&test, logVersion = VOICE_KEYS_TEST_EPOCH)
+	_, rejected, wasRejected := routerVoiceTestReason(&drain, 1, .ServerVoiceJoinRejected)
+	assert(!wasRejected, fmt.tprintf("expected the join accepted, got %q", rejected))
+	RouterVoiceTestDrain_deinit(&drain)
+	room := test.h.state.voiceRooms[VOICE_KEYS_TEST_ROOM]
+	assert(
+		room.logVersion == newEpoch,
+		fmt.tprintf("expected the voice room at log version %d, got %d", newEpoch, room.logVersion),
+	)
+
+	// A key at the new epoch is accepted; one at the old epoch is out of date.
+	payload := routerVoiceKeysTestPayload(&test, test.keys[0], 42, 0, {43, 44}, epoch = newEpoch)
+	drain = routerVoiceKeysTestSend(&test, 0, &payload)
+	got := routerVoiceKeysTestError(&drain, 1)
+	assert(got == "", fmt.tprintf("expected the epoch %d key accepted, got %q", newEpoch, got))
+	RouterVoiceTestDrain_deinit(&drain)
+	payload = routerVoiceKeysTestPayload(&test, test.keys[0], 42, 1, {43, 44})
+	drain = routerVoiceKeysTestSend(&test, 0, &payload)
+	got = routerVoiceKeysTestError(&drain, 1)
+	assert(
+		got == common.VOICE_KEY_OUT_OF_DATE_MESSAGE,
+		fmt.tprintf("expected an epoch %d key out of date, got %q", VOICE_KEYS_TEST_EPOCH, got),
+	)
+	RouterVoiceTestDrain_deinit(&drain)
+
+	// bob joins with a check that read the new epoch: alice's key reaches him.
+	drain = routerVoiceKeysTestJoin(&test, 1, logVersion = newEpoch)
+	keys := routerVoiceKeysTestKeysFor(&drain, 2)
+	assert(
+		len(keys) == 1 && keys[0].senderId == 42 && keys[0].epoch == newEpoch,
+		fmt.tprintf("expected alice's epoch %d key for bob, got %v", newEpoch, keys[:]),
+	)
+	routerVoiceKeysTestFreeKeys(&keys)
+	RouterVoiceTestDrain_deinit(&drain)
 }
 
 @(test)
