@@ -14,10 +14,9 @@ import "shared:pg"
 // inside one transaction in a schema of its own that is rolled back.
 
 // Opens a connection inside a transaction whose search_path is a new, migrated schema. The
-// caller defers databaseAdminTestClose, which rolls everything back.
-databaseAdminTestOpen :: proc(label: string) -> pg.Conn {
-	conn, openErr := databaseOpenRuntimeConnection(databaseSQLTestConfig())
-	assert(len(openErr) == 0, openErr)
+// test's cleanup (databaseSQLTestOpen) rolls everything back, a failed assertion included.
+databaseAdminTestOpen :: proc(t: ^testing.T, label: string) -> pg.Conn {
+	conn := databaseSQLTestOpen(t)
 	schema := fmt.tprintf("haychat_%s_test_%d", label, time.time_to_unix_nano(time.now()))
 	databaseDefaultRoomTestExec(conn, "begin admin test", "BEGIN")
 	databaseDefaultRoomTestExec(
@@ -33,11 +32,6 @@ databaseAdminTestOpen :: proc(label: string) -> pg.Conn {
 	_, migrateErr := databaseApplyMigrations(conn, DATABASE_MIGRATIONS[:])
 	assert(len(migrateErr) == 0, migrateErr)
 	return conn
-}
-
-databaseAdminTestClose :: proc(conn: pg.Conn) {
-	databaseDefaultRoomTestExec(conn, "roll back admin test", "ROLLBACK")
-	pg.finish(conn)
 }
 
 // Column 0 of a one-row query, in the temp allocator.
@@ -121,8 +115,7 @@ testAdminIdentityLockAndBanAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("admin_identity")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "admin_identity")
 
 	aliceKey := databaseIdentityTestKey()
 	alice := databaseIdentityTestResolve(conn, "lock-alice", aliceKey)
@@ -240,8 +233,7 @@ testAdminActionStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("admin_actions")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "admin_actions")
 
 	admin := databaseAdminTestUser(conn, "act-admin")
 	bob := databaseAdminTestUser(conn, "act-bob")
@@ -541,8 +533,7 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_types")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_types")
 
 	member := databaseAdminTestUser(conn, "type-member")
 	created := databaseExecuteRequest(
@@ -694,8 +685,7 @@ testAdminMigrationUpgradesVersion2AgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("admin_v2")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "admin_v2")
 
 	// A database a version 2 server migrated and used.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:2])

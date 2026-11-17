@@ -310,8 +310,7 @@ testRoomLogAppendRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_log")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_log")
 	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
 	assert(serverKeyOK, "expected a server key")
 
@@ -681,8 +680,7 @@ testRoomLogFullRoomAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_log_full")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_log_full")
 	_, serverKey, _ := common.generateIdentityKeyPair()
 	alice := roomLogTestAccount(conn, "full-alice")
 	databaseAdminTestGrant(conn, alice.userID)
@@ -727,8 +725,7 @@ testRoomLogMigrationUpgradesVersion6AgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("room_log_v6")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "room_log_v6")
 
 	// A database a version 6 server migrated and used, with an invite room.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:6])

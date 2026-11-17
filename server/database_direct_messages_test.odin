@@ -144,9 +144,7 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		return
 	}
 
-	conn, openErr := databaseOpenRuntimeConnection(databaseSQLTestConfig())
-	assert(len(openErr) == 0, openErr)
-	defer pg.finish(conn)
+	conn := databaseSQLTestOpen(t)
 	// The running server already migrated this database, so this changes nothing.
 	_, schemaErr := databaseMigrateSchema(conn, DATABASE_MIGRATIONS[:])
 	assert(len(schemaErr) == 0, schemaErr)

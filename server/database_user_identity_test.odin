@@ -70,9 +70,7 @@ testUserIdentityStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		return
 	}
 
-	conn, openErr := databaseOpenRuntimeConnection(databaseSQLTestConfig())
-	assert(len(openErr) == 0, openErr)
-	defer pg.finish(conn)
+	conn := databaseSQLTestOpen(t)
 
 	schema := fmt.tprintf("haychat_identity_test_%d", time.time_to_unix_nano(time.now()))
 	databaseDefaultRoomTestExec(conn, "begin identity test", "BEGIN")

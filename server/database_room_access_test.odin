@@ -147,8 +147,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_access")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_access")
 
 	admin := databaseAdminTestUser(conn, "acc-admin")
 	databaseAdminTestGrant(conn, admin)
@@ -557,8 +556,7 @@ testRoomAccessFromJoinHistoryAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_history")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_history")
 
 	admin := databaseAdminTestUser(conn, "his-admin")
 	databaseAdminTestGrant(conn, admin)
@@ -719,8 +717,7 @@ testRoomAccessMigrationUpgradesVersion3AgainstPostgreSQL :: proc(t: ^testing.T) 
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("room_access_v3")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "room_access_v3")
 
 	// A database a version 3 server migrated and used.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:3])

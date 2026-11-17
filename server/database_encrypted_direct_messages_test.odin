@@ -198,8 +198,7 @@ testEncryptedDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("sealed_dm")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "sealed_dm")
 	_, serverKey, serverOK := common.generateIdentityKeyPair()
 	assert(serverOK, "expected server key generation to succeed")
 
@@ -482,8 +481,7 @@ testEncryptedDirectMessagesMigrationUpgradesVersion5AgainstPostgreSQL :: proc(t:
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("sealed_dm_v5")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "sealed_dm_v5")
 
 	// A database a version 5 server migrated and used.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:5])

@@ -173,12 +173,11 @@ testDatabaseMigrationListErrorRejectsBadLists :: proc(t: ^testing.T) {
 	assert(len(okErr) == 0, fmt.tprintf("expected a gapless list to pass, got %q", okErr))
 }
 
-// Opens a connection whose search_path is a new, empty schema. The caller defers
-// databaseMigrationTestClose, which drops the schema again.
-databaseMigrationTestOpen :: proc(label: string) -> (pg.Conn, string) {
-	conn, openErr := databaseOpenRuntimeConnection(databaseSQLTestConfig())
-	assert(len(openErr) == 0, openErr)
+// Opens a connection whose search_path is a new, empty schema. The test's cleanup
+// (databaseSQLTestOpen) drops the schema again, a failed assertion included.
+databaseMigrationTestOpen :: proc(t: ^testing.T, label: string) -> (pg.Conn, string) {
 	schema := fmt.tprintf("haychat_migration_%s_%d", label, time.time_to_unix_nano(time.now()))
+	conn := databaseSQLTestOpen(t, schema)
 	databaseDefaultRoomTestExec(
 		conn,
 		"isolate migration test",
@@ -189,15 +188,6 @@ databaseMigrationTestOpen :: proc(label: string) -> (pg.Conn, string) {
 		),
 	)
 	return conn, schema
-}
-
-databaseMigrationTestClose :: proc(conn: pg.Conn, schema: string) {
-	databaseDefaultRoomTestExec(
-		conn,
-		"drop migration test schema",
-		fmt.tprintf("DROP SCHEMA %s CASCADE", schema),
-	)
-	pg.finish(conn)
 }
 
 // Runs databaseMigrateSchema and requires it to succeed.
@@ -358,8 +348,7 @@ testMigrationsCreateFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("fresh")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "fresh")
 
 	newest := len(DATABASE_MIGRATIONS)
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
@@ -394,8 +383,7 @@ testMigrationsAdoptRC1SchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("rc1")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "rc1")
 
 	databaseDefaultRoomTestExec(conn, "create rc1 schema", DATABASE_MIGRATION_TEST_RC1_CREATE_SQL)
 	databaseDefaultRoomTestExec(conn, "fill rc1 schema", DATABASE_MIGRATION_TEST_RC1_ROWS_SQL)
@@ -493,8 +481,7 @@ testMigrationsAdoptProtocol7RoomsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("protocol7")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "protocol7")
 
 	// The rc1 schema with the protocol 7 rooms table, whose creator column is NOT NULL.
 	databaseDefaultRoomTestExec(
@@ -537,8 +524,7 @@ testMigrationsRefuseNewerSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("newer")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "newer")
 
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 	databaseDefaultRoomTestExec(
@@ -573,8 +559,7 @@ testMigrationsRefuseUnrecognisedSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("unrecognised")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "unrecognised")
 
 	// An rc1 schema whose chat_messages lost a column, with accounts in it.
 	databaseDefaultRoomTestExec(
@@ -622,8 +607,7 @@ testMigrationsRollBackFailedMigrationAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("failed")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "failed")
 
 	databaseMigrationTestMigrate(conn, databaseMigrationTestList())
 	// Its first statements succeed and its last fails, so only a rollback undoes them.
@@ -661,8 +645,7 @@ testMigrationsApplyNewMigrationOnceAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("applied")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "applied")
 
 	databaseMigrationTestMigrate(conn, databaseMigrationTestList())
 	// Not idempotent on purpose: a second run of its SQL would fail or add a row.
@@ -815,8 +798,7 @@ testReadMarkersMigrationOnFreshSchemaAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("markers_fresh")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "markers_fresh")
 
 	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 	assert(
@@ -855,8 +837,7 @@ testReadMarkersMigrationBackfillsRC1AgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("markers_rc1")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "markers_rc1")
 
 	// The rc1 rows plus more history, so a marker at the newest message is distinguishable
 	// from one at the first: room 1 holds messages 1, 3, 4 and room 2 message 2; alice and bob
@@ -915,8 +896,7 @@ testReadMarkersMigrationUpgradesVersion1AgainstPostgreSQL :: proc(t: ^testing.T)
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("markers_v1")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "markers_v1")
 
 	// A database a version 1 server migrated: the baseline, recorded, with rows.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:1])
@@ -979,8 +959,7 @@ testMigrationsRefuseInconsistentVersionsAgainstPostgreSQL :: proc(t: ^testing.T)
 		{"no_baseline", "DELETE FROM schema_migrations WHERE version = 1", DATABASE_MIGRATIONS[:]},
 	}
 	for testCase in cases {
-		conn, schema := databaseMigrationTestOpen(testCase.label)
-		defer databaseMigrationTestClose(conn, schema)
+		conn, schema := databaseMigrationTestOpen(t, testCase.label)
 
 		databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 		databaseDefaultRoomTestExec(conn, "fill schema", DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL)
@@ -1018,8 +997,7 @@ testSignedMessagesMigrationUpgradesVersion9AgainstPostgreSQL :: proc(t: ^testing
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("signed_v9")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "signed_v9")
 
 	// A version 9 database: the rc1 rows (unsigned), plus a signed direct message and a sealed
 	// room message.
