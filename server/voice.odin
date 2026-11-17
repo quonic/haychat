@@ -621,8 +621,11 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 	clear(&room.memberUserIDs)
 	append(&room.memberUserIDs, ..members.userIDs[:])
 	room.encrypted = members.encrypted
-	if members.logVersion > room.logVersion {
-		room.logVersion = members.logVersion
+	// The join check read the log version before any append the router applied since, so
+	// take the newest of the two (#77): a key at the epoch the members have seen must pass.
+	logVersion := max(members.logVersion, state.roomLogVersions[roomID])
+	if logVersion > room.logVersion {
+		room.logVersion = logVersion
 		VoiceRoomState_dropStaleKeys(room)
 	}
 	MainRouterState_voiceRoomChanged(pm, state, roomID)
@@ -851,8 +854,12 @@ MainRouterState_voiceSendKey :: proc(
 }
 
 // A member log entry of roomID was applied (ServerRoomLog fan-out): the epoch a voice key must
-// name is now version, and keys of older epochs go.
+// name is now version, and keys of older epochs go. The version is kept for rooms without a
+// voice session too, for a join whose check is still in the database (#77).
 MainRouterState_voiceLogAdvanced :: proc(state: ^MainRouterState, roomID, version: int) {
+	if version > state.roomLogVersions[roomID] {
+		state.roomLogVersions[roomID] = version
+	}
 	room, ok := &state.voiceRooms[roomID]
 	if !ok || version <= room.logVersion {
 		return

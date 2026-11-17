@@ -163,6 +163,12 @@ MainRouterState :: struct {
 	// peerID -> the room that session is in.
 	voiceRooms:               map[int]VoiceRoomState,
 	peerVoiceRoom:            map[u32]int,
+	// roomID -> the newest member log version the router has seen applied (ServerRoomLog
+	// fan-out), kept whether or not the room has a voice session. A room's first voice join
+	// seeds its log version from the larger of this and the join check's, so an append that
+	// lands while that check is in the database is not lost (#77). Removed when a room is
+	// deleted.
+	roomLogVersions:          map[int]int,
 	// Voice datagrams that reached the router. The network thread's relay consumes channel 2,
 	// so this stays 0 unless something routes voice here by mistake.
 	unexpectedVoiceDatagrams: u64,
@@ -176,6 +182,7 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 		nextRequestID           = 1,
 		voiceRooms              = make(map[int]VoiceRoomState),
 		peerVoiceRoom           = make(map[u32]int),
+		roomLogVersions         = make(map[int]int),
 	}
 
 	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
@@ -208,6 +215,7 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
+	delete(state.roomLogVersions)
 	MainRouterState_voiceFreeState(state)
 }
 
@@ -1962,6 +1970,7 @@ MainRouterState_handleDatabaseResult :: proc(
 		}
 		// Voice first, so a client leaves the room's voice session before it drops the room.
 		MainRouterState_voiceEvictRoom(pm, state, request.roomID, VOICE_LEFT_ROOM_DELETED)
+		delete_key(&state.roomLogVersions, request.roomID)
 		deletePayload := common.ServerRoomMutationPayload {
 			roomId  = request.roomID,
 			changed = true,
