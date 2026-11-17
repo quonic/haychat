@@ -21,7 +21,7 @@ a server you run yourself, with a lightweight native client for Windows and Linu
   grant the admin role, rename, kick, ban and unban accounts.
 - **Encrypted transport:** Ed25519 identities, X25519 key exchange and XChaCha20-Poly1305, with
   the server's key pinned on first connect. No passwords: your identity key is your account.
-  Messages are not end-to-end encrypted; the server can read them (see
+  Direct messages are end-to-end encrypted. (see
   [docs/protocol.md](docs/protocol.md)).
 - **Small footprint:** written in [Odin](https://odin-lang.org/), with its own immediate-mode UI
   on SDL3, a single-process server, and PostgreSQL for storage.
