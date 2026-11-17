@@ -68,8 +68,7 @@ testUserEncryptionKeyStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("encryption_keys")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "encryption_keys")
 
 	aliceKey := databaseIdentityTestKey()
 	alice := databaseIdentityTestResolve(conn, "keys-alice", aliceKey)
@@ -228,8 +227,7 @@ testUserEncryptionKeysMigrationUpgradesVersion4AgainstPostgreSQL :: proc(t: ^tes
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("keys_v4")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "keys_v4")
 
 	// A database a version 4 server migrated and used.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:4])

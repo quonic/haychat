@@ -702,8 +702,8 @@ connects. If the sender is not a member of room 1 the server answers with
 ### Step Timeouts
 
 `dev/live-proof.sh` runs every step under `timeout`, so a hung client, proof script or test
-binary (such as an SQL test runner that does not exit after a failed assertion) fails the run
-within minutes instead of using up CI's two-hour job limit. A step that runs out prints
+binary fails the run within minutes instead of using up CI's two-hour job limit. The limits
+are a safety net: a failing test names itself and exits on its own. A step that runs out prints
 `[live] STEP timed out after N s` and the run fails with its status. The limits are several
 times a normal run, the compile included:
 
@@ -714,11 +714,22 @@ times a normal run, the compile included:
 | `dev/voice-proof.sh`, `dev/ui-smoke.sh` | 15 min each |
 | `dev/e2ee-proof.sh` | 20 min |
 | Server SQL proof (`HAYCHAT_DATABASE_SQL_TEST=1 odin test server`) | 20 min |
+| The same SQL test binary with one test failing on purpose (below) | 2 min |
 | Failed startup exit check | 1 min |
 
 `HAYCHAT_LIVE_STEP_TIMEOUT_SECS` replaces every limit, for a slow machine or a short limit while
-debugging. `timeout` signals the step's whole process group (the clients a proof started
-included) and kills what is left 30 seconds later.
+debugging (`./dev.sh live` and `ci` pass it into the container). `timeout` signals the step's
+whole process group (the clients a proof started included) and kills what is left 30 seconds
+later.
+
+After the SQL proof passes, `dev/live-proof.sh` runs the same test binary again with
+`HAYCHAT_DATABASE_SQL_TEST_FAIL=1`. That makes the first SQL test,
+`testAbandonedSQLTestReleasesItsConnectionAgainstPostgreSQL`, fail an assertion while its
+connection holds the migration lock, and the run must exit non-zero, report `1 test failed.`
+with that test's name, and pass every other SQL test, each of which takes the same lock. Before
+#80 such a failure left the connection open (a failed assertion skips the test's `defer`s), so
+the next test waited for the lock forever; SQL tests now close their connections with
+`testing.cleanup` (see `server/AGENTS.md`).
 
 ## GUI Automation
 

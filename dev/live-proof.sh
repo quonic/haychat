@@ -43,17 +43,19 @@ set -euo pipefail
 #                   HAYCHAT_UI_SCREENSHOT_DIR when it is set
 #   --sql           only the server proofs: database-backed server tests that run the
 #                   user identity, direct message, and default room statements against this
-#                   database, and the check that a failed startup exits with status 1
+#                   database, the same tests with the first failing on purpose (only it may
+#                   fail, and the run must exit), and the check that a failed startup exits
+#                   with status 1
 #   test_name...    the given client test procedures, e.g. client.testFoo
 #
 # Every step runs under `timeout` (run_step below), so a hung client, proof or test binary fails
 # the run within minutes instead of using up CI's job limit. The limits are generous (several
 # times a normal run, compile included): client tests 20 minutes, the harness, admin and access
-# proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof 20, and the
-# failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit (for a slow
-# machine, or a short one while debugging). A step that times out prints "[live] STEP timed out
-# after N s" and the run fails; timeout signals the step's whole process group, then kills it 30
-# seconds later if it is still there.
+# proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof 20, its failing
+# run 2, and the failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit
+# (for a slow machine, or a short one while debugging). A step that times out prints "[live]
+# STEP timed out after N s" and the run fails; timeout signals the step's whole process group,
+# then kills it 30 seconds later if it is still there.
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
 ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
@@ -62,7 +64,10 @@ STARTUP_AUTH_TEST=client.testClientServerTransportCanEstablishLiveStartupAuthOve
 ROOM_CHAT_TEST=client.testClientServerTransportCanSendLiveRoomChatBetweenTwoAuthenticatedClients
 DIRECT_MESSAGE_TEST=client.testClientServerTransportCanExchangeLiveDirectMessagesBetweenTwoClients
 VOICE_TEST=client.testClientVoiceLiveToneReachesSecondClientThroughServer
-SQL_TESTS=server.testDirectMessageStatementsAgainstPostgreSQL
+# The first SQL test fails on purpose in a second run (see the SQL proof below).
+SQL_FAILURE_TEST=server.testAbandonedSQLTestReleasesItsConnectionAgainstPostgreSQL
+SQL_TESTS=$SQL_FAILURE_TEST
+SQL_TESTS+=,server.testDirectMessageStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testDefaultRoomStatementAgainstPostgreSQL
 SQL_TESTS+=,server.testUserIdentityStatementAgainstPostgreSQL
 SQL_TESTS+=,server.testMigrationsCreateFreshSchemaAgainstPostgreSQL
@@ -312,12 +317,43 @@ fi
 # migration tests work in schemas of their own that they drop again.
 if [[ "$run_sql" == true ]]; then
 	echo "==> [live] running server SQL proof ${SQL_TESTS}"
+	sql_test_bin="$runtime_dir/server-sql-test"
 	run_step 1200 "the server SQL proof" env HAYCHAT_DATABASE_SQL_TEST=1 odin test server \
 		-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true \
 		-define:ODIN_TEST_FANCY=false \
 		-define:ODIN_TEST_THREADS=1 \
 		-define:ODIN_TEST_NAMES="$SQL_TESTS" \
-		-out:"$runtime_dir/server-sql-test"
+		-keep-executable \
+		-out:"$sql_test_bin"
+
+	# A failed assertion ends its test, not the run (#80): the same binary again, with its first
+	# test failing while it holds the migration lock, must exit non-zero within seconds, name
+	# that test as the only failure, and still pass every later test (each takes the lock). The
+	# runner orders tests by name, so the failing one must sort first.
+	echo "==> [live] checking that a failed SQL test fails the run and names itself"
+	first_sql_test=$(tr ',' '\n' <<<"$SQL_TESTS" | LC_ALL=C sort | head -n 1)
+	if [[ "$first_sql_test" != "$SQL_FAILURE_TEST" ]]; then
+		echo "Expected $SQL_FAILURE_TEST to sort first, found $first_sql_test" >&2
+		exit 1
+	fi
+	sql_failure_log="$runtime_dir/sql-failure.log"
+	sql_failure_status=0
+	run_step 120 "the failing SQL test check" env HAYCHAT_DATABASE_SQL_TEST=1 \
+		HAYCHAT_DATABASE_SQL_TEST_FAIL=1 "$sql_test_bin" >"$sql_failure_log" 2>&1 ||
+		sql_failure_status=$?
+	if [[ $sql_failure_status -eq 0 || $sql_failure_status -eq 124 ||
+		$sql_failure_status -eq 137 ]] ||
+		! grep -Fq " 1 test failed." "$sql_failure_log" ||
+		! grep -Eq "^ - ${SQL_FAILURE_TEST}[[:space:]]" "$sql_failure_log" ||
+		! grep -Fq "failing on purpose" "$sql_failure_log" ||
+		grep -Fq "left undone" "$sql_failure_log"; then
+		echo "Expected only $SQL_FAILURE_TEST to fail, and the run to exit (status" \
+			"$sql_failure_status):" >&2
+		cat "$sql_failure_log" >&2
+		exit 1
+	fi
+	echo "==> [live] the failed SQL test ended only itself (status $sql_failure_status):" \
+		"$(grep -F "Finished " "$sql_failure_log")"
 fi
 
 # A server that cannot start must exit non-zero (systemd Restart=on-failure and scripts depend

@@ -10,9 +10,9 @@ import "shared:pg"
 // real PostgreSQL when HAYCHAT_DATABASE_SQL_TEST=1. Each test migrates a schema of its own
 // (databaseMigrationTestOpen) and drops it at the end, so only a throwaway database is touched.
 
-// Opens a migrated schema with #general. The caller defers databaseMigrationTestClose.
-databaseReadMarkerTestOpen :: proc(label: string) -> (pg.Conn, string) {
-	conn, schema := databaseMigrationTestOpen(label)
+// Opens a migrated schema with #general, dropped again by the test's cleanup.
+databaseReadMarkerTestOpen :: proc(t: ^testing.T, label: string) -> (pg.Conn, string) {
+	conn, schema := databaseMigrationTestOpen(t, label)
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
 	roomID, roomErr := databaseEnsureDefaultRoom(conn)
 	assert(len(roomErr) == 0, roomErr)
@@ -102,8 +102,7 @@ testRoomUnreadRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseReadMarkerTestOpen("unread_rooms")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseReadMarkerTestOpen(t, "unread_rooms")
 	room := common.GENERAL_ROOM_ID
 
 	alice := databaseSQLTestCreateUser(conn, "read-alice")
@@ -215,8 +214,7 @@ testMarkRoomReadMovesForwardClampsAndChecksMembershipAgainstPostgreSQL :: proc(t
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseReadMarkerTestOpen("mark_rooms")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseReadMarkerTestOpen(t, "mark_rooms")
 	room := common.GENERAL_ROOM_ID
 
 	alice := databaseSQLTestCreateUser(conn, "mark-alice")
@@ -311,8 +309,7 @@ testDirectUnreadAndMarkReadAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseReadMarkerTestOpen("mark_direct")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseReadMarkerTestOpen(t, "mark_direct")
 
 	alice := databaseSQLTestCreateUser(conn, "dmread-alice")
 	bob := databaseSQLTestCreateUser(conn, "dmread-bob")

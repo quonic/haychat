@@ -241,8 +241,7 @@ testRoomSenderChainStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_keys")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_keys")
 	alice := databaseAdminTestUser(conn, "keys-alice")
 	bob := databaseAdminTestUser(conn, "keys-bob")
 	carol := databaseAdminTestUser(conn, "keys-carol")
@@ -451,8 +450,7 @@ testRoomSenderChainsMigrationUpgradesVersion7AgainstPostgreSQL :: proc(t: ^testi
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("room_keys_v7")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "room_keys_v7")
 
 	// A database a version 7 server migrated and used.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:7])
@@ -561,8 +559,7 @@ testRoomKeyForwardStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn := databaseAdminTestOpen("room_key_forwards")
-	defer databaseAdminTestClose(conn)
+	conn := databaseAdminTestOpen(t, "room_key_forwards")
 	alice := databaseAdminTestUser(conn, "fwd-alice")
 	bob := databaseAdminTestUser(conn, "fwd-bob")
 	carol := databaseAdminTestUser(conn, "fwd-carol")
@@ -710,8 +707,7 @@ testRoomKeyForwardsMigrationUpgradesVersion8AgainstPostgreSQL :: proc(t: ^testin
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
 	}
-	conn, schema := databaseMigrationTestOpen("room_keys_v8")
-	defer databaseMigrationTestClose(conn, schema)
+	conn, schema := databaseMigrationTestOpen(t, "room_keys_v8")
 
 	// A database a version 8 server migrated and used, with one stored distribution.
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:8])
