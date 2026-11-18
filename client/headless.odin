@@ -2576,7 +2576,8 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 	draft := State_selectedRoomDraft(state)
 	clear(draft)
 	append(draft, ..transmute([]u8)command.args[1])
-	State_sendChannelChat(state)
+	// Protocol 24: the server, not the harness, refuses a room without SendMessages.
+	State_sendChannelChat(state, checkPermission = false)
 
 	draft = State_selectedRoomDraft(state)
 	if len(draft) > 0 {

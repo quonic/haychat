@@ -22,6 +22,12 @@ set -euo pipefail
 #               account_updated with the permission, and creates a room. A deletes the role:
 #               B sees role_deleted and account_updated without it, and its next room-create is
 #               refused again.
+#   7. room permissions: (protocol 24) A makes a Public room read-only (everyone may only
+#               speak): B's room_list shows myPermissions ["speak"] and the server refuses B's
+#               message. A grants a role SendMessages there and gives it to B: B's room_list
+#               shows send again and its message reaches A. A creates a Role room for that role:
+#               B joins it without being added, cannot leave it, and leaves it when A takes the
+#               role away.
 #
 # dev/live-proof.sh --admin (and --all) runs it against its throwaway server. It needs bash,
 # coreutils, psql (for make-admin.sql through the HAYCHAT_DATABASE_* variables), and libopus
@@ -261,6 +267,85 @@ expect_ok b room-create text "adm-refused-again-$run_tag"
 expect_event b '^\{"event":"protocol_error",.*"message":"Room management permission required"' \
 	"$start_b" "client b still created a room after the role was deleted"
 echo "==> [admin] roles passed"
+
+echo "==> [admin] room permissions: a read-only room, a role that may send, a role room"
+quiet_room="adm-quiet-$run_tag"
+start_a=$(lines a)
+start_b=$(lines b)
+expect_ok a room-create both "$quiet_room" "read only"
+quiet_pattern="^\\{\"event\":\"room_created\",.*\"name\":\"$quiet_room\","
+created_line=$(wait_for_match a "$quiet_pattern" "$start_a") ||
+	fail "client a did not receive room_created for $quiet_room"
+[[ "$created_line" =~ \"roomID\":([0-9]+), ]] || fail "room_created has no roomID"
+quiet=${BASH_REMATCH[1]}
+expect_event b "^\\{\"event\":\"room_list\",.*\"name\":\"$quiet_room\"" "$start_b" \
+	"client b's room list never listed $quiet_room"
+start_a=$(lines a)
+start_b=$(lines b)
+expect_ok a room-permissions-set "$quiet" speak
+stored_pattern="^\\{\"event\":\"room_permissions\",\"serverID\":1,\"roomID\":$quiet,"
+stored_pattern+="\"everyone\":\\[\"speak\"\\],"
+expect_event a "$stored_pattern" "$start_a" "client a did not see the read-only grants stored"
+quiet_listed="\"name\":\"$quiet_room\",[^}]*\"myPermissions\":\\[\"speak\"\\]"
+expect_event b "^\\{\"event\":\"room_list\",.*$quiet_listed" "$start_b" \
+	"client b's room list did not show $quiet_room read-only"
+start_b=$(lines b)
+expect_ok b send "$quiet" "not allowed here"
+expect_event b '^\{"event":"protocol_error",.*"message":"You cannot send messages in this room"' \
+	"$start_b" "the server took b's message in a read-only room"
+speaker_role="adm-speakers-$run_tag"
+start_a=$(lines a)
+expect_ok a roles-save 0 none "$speaker_role"
+save_pattern="^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\","
+role_line=$(wait_for_match a "$save_pattern" "$start_a") ||
+	fail "client a got no admin_result for the speakers role"
+[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the speakers role has no roleID"
+speakers=${BASH_REMATCH[1]}
+start_a=$(lines a)
+expect_ok a room-permissions-set "$quiet" speak "$speakers=send"
+grant_pattern="^\\{\"event\":\"room_permissions\",.*\"roleID\":$speakers,"
+grant_pattern+="\"permissions\":\\[\"send\"\\]"
+expect_event a "$grant_pattern" "$start_a" "client a did not see the speakers' grant stored"
+start_b=$(lines b)
+expect_ok a roles-assign "$user_b" "$speakers"
+speaking_listed="\"name\":\"$quiet_room\",[^}]*"
+speaking_listed+="\"myPermissions\":\\[\"send\",\"speak\"\\]"
+expect_event b "^\\{\"event\":\"room_list\",.*$speaking_listed" "$start_b" \
+	"client b's room list did not show it may send with the role"
+start_a=$(lines a)
+expect_ok b send "$quiet" "allowed with the role"
+chat_pattern="^\\{\"event\":\"room_chat\",.*\"roomID\":$quiet,.*"
+chat_pattern+="\"content\":\"allowed with the role\""
+expect_event a "$chat_pattern" "$start_a" "client a did not get b's message once b held the role"
+crew_room="adm-crew-$run_tag"
+start_a=$(lines a)
+start_b=$(lines b)
+expect_ok a room-create "text,roles=$speakers" "$crew_room" "role room"
+crew_pattern="^\\{\"event\":\"room_created\",.*\"name\":\"$crew_room\","
+crew_line=$(wait_for_match a "$crew_pattern" "$start_a") ||
+	fail "client a did not receive room_created for the role room"
+echo "    a< $crew_line"
+[[ "$crew_line" =~ \"roomID\":([0-9]+), ]] || fail "the role room has no roomID"
+crew=${BASH_REMATCH[1]}
+[[ "$crew_line" == *'"access":4,'* && "$crew_line" == *'"isMember":false,'* ]] ||
+	fail "the role room is not a Role room without its creator: $crew_line"
+joined_pattern="^\\{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":$crew,"
+joined_pattern+="\"joined\":true,\"userID\":$user_b\\}$"
+expect_event b "$joined_pattern" "$start_b" "client b did not join the role room through its role"
+expect_event b "^\\{\"event\":\"room_list\",.*\"name\":\"$crew_room\"" "$start_b" \
+	"client b's room list never listed the role room"
+start_b=$(lines b)
+expect_ok b room-leave "$crew"
+role_refusal='^\{"event":"protocol_error",.*"message":"This room.s members come from its '
+role_refusal+='access roles"'
+expect_event b "$role_refusal" "$start_b" "client b left a role room by hand"
+start_b=$(lines b)
+expect_ok a roles-assign "$user_b" none
+left_pattern="^\\{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":$crew,"
+left_pattern+="\"joined\":false,\"userID\":$user_b\\}$"
+expect_event b "$left_pattern" "$start_b" "client b did not leave the role room when the role went"
+expect_ok a roles-delete "$speakers"
+echo "==> [admin] room permissions passed"
 
 stop_client b
 stop_client a

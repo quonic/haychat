@@ -744,8 +744,10 @@ DATABASE_MIGRATION_TEST_MARKERS_SQL ::
 	"COALESCE((SELECT string_agg(user_id || ':' || peer_user_id || ':' || " +
 	"last_read_message_id, ',' ORDER BY user_id, peer_user_id) FROM direct_read_markers), '-'))"
 
-// Every user's unread counts through the real list statements, as
-// "user:room=count,...;dm=peer=count,..." per user, joined with spaces.
+// Every user's unread counts through the real unread rules, as
+// "user:room=count,...;dm=peer=count,..." per user, joined with spaces. Rooms read the room
+// list's unread rule (DATABASE_ROOMS_WITH_UNREAD_SQL) without its later columns, which a
+// version 9 schema lacks (protocol 24's permissions read migration 11 and 12 objects).
 databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> string {
 	builder := strings.builder_make(context.temp_allocator)
 	for userID, index in userIDs {
@@ -753,13 +755,26 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 			strings.write_byte(&builder, ' ')
 		}
 		fmt.sbprintf(&builder, "%d:", userID)
-		rooms := databaseExecuteRequest(conn, common.DatabaseRoomListRequest{userId = userID})
-		defer IPC__database_query_response_deinit(rooms)
-		roomList, roomListOK := rooms.result.(common.DatabaseRoomListResult)
-		assert(rooms.success && roomListOK, fmt.tprintf("expected a room list: %v", rooms))
-		for room, roomIndex in roomList.rooms {
-			fmt.sbprintf(&builder, "%s%d=%d", roomIndex > 0 ? "," : "", room.id, room.unreadCount)
-		}
+		forUser, _ := strings.replace_all(
+			DATABASE_ROOMS_WITH_UNREAD_SQL,
+			"$1::bigint",
+			fmt.tprintf("%d", userID),
+			context.temp_allocator,
+		)
+		capped, _ := strings.replace_all(
+			forUser,
+			"$2::bigint",
+			fmt.tprintf("%d", common.UNREAD_COUNT_CAP),
+			context.temp_allocator,
+		)
+		rooms := databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT COALESCE(string_agg(r.id || '=' || unread.n, ',' ORDER BY r.name), '') %s",
+				capped,
+			),
+		)
+		strings.write_string(&builder, rooms)
 		strings.write_string(&builder, ";dm=")
 		directs := databaseExecuteRequest(
 			conn,
@@ -1155,6 +1170,93 @@ testRolesMigrationUpgradesVersion10AgainstPostgreSQL :: proc(t: ^testing.T) {
 		"SELECT string_agg(name || ':' || permissions || ':' || builtin, ',') FROM server_roles",
 	)
 	assert(created == "admin:511:true", fmt.tprintf("expected the admin role, got %q", created))
+}
+
+@(test)
+testRoomPermissionsMigrationUpgradesVersion11AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "room_permissions_v11")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:11])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 11 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+	members := databaseMigrationTestValue(
+		conn,
+		"SELECT COALESCE(string_agg(room_id || ':' || user_id, ',' ORDER BY room_id, user_id), " +
+		"'') FROM room_members",
+	)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:12])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 11, version = 12},
+		fmt.tprintf("expected only migration 12 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:12])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept,
+		"expected every account, room and message intact",
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT COALESCE(string_agg(room_id || ':' || user_id, ',' ORDER BY room_id, " +
+			"user_id), '') FROM room_members",
+		) ==
+		members,
+		"expected every membership kept",
+	)
+	everyone := databaseMigrationTestValue(
+		conn,
+		"SELECT COALESCE(string_agg(DISTINCT everyone_permissions::text, ','), '') FROM rooms",
+	)
+	assert(
+		everyone == "3",
+		fmt.tprintf("expected every room to grant send and speak, got %q", everyone),
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT (SELECT count(*) FROM room_role_permissions) + " +
+			"(SELECT count(*) FROM room_access_roles)",
+		) ==
+		"0",
+		"expected no grants and no access roles yet",
+	)
+
+	// The checks: Role is an access mode, never for an encrypted room; grants hold something.
+	probes := [?]string {
+		"UPDATE rooms SET access = 5",
+		"UPDATE rooms SET everyone_permissions = -1",
+		"INSERT INTO rooms (name, description, access, encrypted) " +
+		"VALUES ('sealed-role', '', 4, true)",
+		"INSERT INTO room_role_permissions (room_id, role_id, permissions) " +
+		"SELECT r.id, s.id, 0 FROM rooms r, server_roles s LIMIT 1",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+	accepted := databaseMigrationTestValue(
+		conn,
+		"INSERT INTO rooms (name, description, access) VALUES ('role-room', '', 4) " +
+		"RETURNING access::text",
+	)
+	assert(accepted == "4", "expected an unencrypted Role room accepted")
 }
 
 @(test)

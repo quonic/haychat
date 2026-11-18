@@ -354,6 +354,13 @@ DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"r.access::text, r.history_visibility::text, r.encrypted::text, r.log_version::text, " +
 	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "r.id" +
 	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + "::text " +
+	DATABASE_ROOMS_WITH_UNREAD_SQL +
+	"ORDER BY r.name"
+
+// The requester's ($1) rooms r with their marker m and unread count unread.n (capped at $2):
+// the unread rule itself, which the read marker migration tests run on schemas older than
+// the room list's other columns.
+DATABASE_ROOMS_WITH_UNREAD_SQL ::
 	"FROM rooms r JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
@@ -362,8 +369,7 @@ DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"UNION ALL " +
 	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NULL AND cm.room_id = r.id " +
 	"AND cm.created_at > rm.joined_at AND cm.sender_user_id <> rm.user_id " +
-	"LIMIT $2::bigint) capped) unread " +
-	"ORDER BY r.name"
+	"LIMIT $2::bigint) capped) unread "
 
 databaseExecuteListRoomsForUser :: proc(
 	conn: pg.Conn,

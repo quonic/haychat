@@ -106,6 +106,10 @@ SQL_TESTS+=,server.testSignedMessagesMigrationUpgradesVersion9AgainstPostgreSQL
 SQL_TESTS+=,server.testRolesMigrationUpgradesVersion10AgainstPostgreSQL
 SQL_TESTS+=,server.testRoleStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRolePermissionsInOtherStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRoomPermissionsMigrationUpgradesVersion11AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomPermissionChecksAgainstPostgreSQL
+SQL_TESTS+=,server.testEncryptedRoomPermissionsAgainstPostgreSQL
+SQL_TESTS+=,server.testRoleRoomMembershipAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

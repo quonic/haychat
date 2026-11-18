@@ -442,7 +442,7 @@ expect_ok ra users >/dev/null
 expect_ok ra room-create "text,admin-invite,encrypted,managers=none" "secret-$run_tag"
 created=$(expect_event ra "^\\{\"event\":\"room_created\",.*\"name\":\"secret-$run_tag\"" \
 	"$start" "ra never got room_created for the encrypted room")
-[[ "$created" == *'"isMember":false,"encrypted":true,"logVersion":0}' ]] ||
+[[ "$created" == *'"isMember":false,"encrypted":true,"logVersion":0,"myPermissions":'* ]] ||
 	fail "the encrypted room did not start empty at version 0: $created"
 room_id=$(field "$created" roomID)
 first=$(room_log_line ra "$room_id" '"status":"verified","logVersion":1,' "$start")

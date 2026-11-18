@@ -54,11 +54,16 @@ roomPermissionsTestState :: proc(
 roomPermissionsBridgeTestMutex: sync.Mutex
 roomPermissionsBridgeTestRequests: [dynamic]RoomPermissionsRequest
 
+// Records the requests of this file's servers (2401..2409) only: opening the room editor
+// fetches grants too, and other tests open it on other servers while this stub is installed.
 @(private = "file")
 roomPermissionsBridgeTestStub :: proc(
 	transport: ^ClientServerTransport,
 	request: RoomPermissionsRequest,
 ) -> bool {
+	if transport.serverID < 2401 || transport.serverID > 2409 {
+		return ClientServerTransport_sendRoomPermissions(transport, request)
+	}
 	append(&roomPermissionsBridgeTestRequests, request)
 	return true
 }
@@ -306,10 +311,7 @@ testRoleRoomAccessRolesInTheForms :: proc(t: ^testing.T) {
 		roomPermissionsBridgeTestRequests = nil
 	}
 	captured: RoomAdminRequest
-	roomAdminSendBridge = proc(transport: ^ClientServerTransport, request: RoomAdminRequest) -> bool {
-		roomPermissionsTestLastAdminRequest = request
-		return true
-	}
+	roomAdminSendBridge = roomPermissionsTestCaptureAdminRequest
 
 	state := roomPermissionsTestState(2405, {.ManageRooms})
 	defer State_deinit(&state)
@@ -387,6 +389,18 @@ testRoleRoomAccessRolesInTheForms :: proc(t: ^testing.T) {
 }
 
 roomPermissionsTestLastAdminRequest: RoomAdminRequest
+
+@(private = "file")
+roomPermissionsTestCaptureAdminRequest :: proc(
+	transport: ^ClientServerTransport,
+	request: RoomAdminRequest,
+) -> bool {
+	if transport.serverID < 2401 || transport.serverID > 2409 {
+		return ClientServerTransport_sendRoomAdminRequest(transport, request)
+	}
+	roomPermissionsTestLastAdminRequest = request
+	return true
+}
 
 @(test)
 testHeadlessRoomPermissionCommandsAndEvents :: proc(t: ^testing.T) {

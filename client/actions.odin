@@ -263,7 +263,9 @@ State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
 
 // Sends the selected room's draft. The draft is cleared only once the transport accepted it;
 // the message itself appears when the server echoes it back.
-State_sendChannelChat :: proc(state: ^State) {
+// checkPermission false (the headless harness) leaves the SendMessages check to the server, so
+// an agent sees its refusal.
+State_sendChannelChat :: proc(state: ^State, checkPermission := true) {
 	if state.selected_channel_id == 0 {
 		State_setChatStatus(state, "No channel selected")
 		return
@@ -282,7 +284,8 @@ State_sendChannelChat :: proc(state: ^State) {
 		return
 	}
 	// Protocol 24: the server refuses it too; saying so here keeps the draft.
-	if !State_hasRoomPermission(
+	if checkPermission &&
+	   !State_hasRoomPermission(
 		state,
 		state.selected_server_id,
 		state.selected_channel_id,

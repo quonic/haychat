@@ -88,6 +88,29 @@ databaseRoleTestRun :: proc(
 		delete(account.nickname)
 	}
 	delete(result.affected)
+	// Protocol 24: the Role room changes and the accounts whose room permissions may move.
+	moved.membershipChanges = make(
+		[dynamic]common.DatabaseRoomMembershipChange,
+		0,
+		len(result.membershipChanges),
+		context.temp_allocator,
+	)
+	for &change in result.membershipChanges {
+		copy := change
+		copy.memberUserIDs = make(
+			[dynamic]int,
+			0,
+			len(change.memberUserIDs),
+			context.temp_allocator,
+		)
+		append(&copy.memberUserIDs, ..change.memberUserIDs[:])
+		append(&moved.membershipChanges, copy)
+		common.DatabaseRoomMembershipChange_deinit(&change)
+	}
+	delete(result.membershipChanges)
+	moved.roomPermissionUserIDs = make([dynamic]int, context.temp_allocator)
+	append(&moved.roomPermissionUserIDs, ..result.roomPermissionUserIDs[:])
+	delete(result.roomPermissionUserIDs)
 	return moved
 }
 
