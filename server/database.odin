@@ -345,10 +345,22 @@ databaseExecuteUserIdentityResolution :: proc(
 // chat_messages_by_room_id_and_id or chat_messages_by_room_id_and_created_at, and stops after
 // common.UNREAD_COUNT_CAP rows ($2); the branch that does not apply is skipped by its one-time
 // filter on the marker.
+//
+// Protocol 24: the last column is the requester's permissions in the room
+// (database_room_permissions.odin), RoomSummary.myPermissions.
 DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"SELECT r.id::text, r.name, r.description, " +
 	"COALESCE(m.last_read_message_id, 0)::text, unread.n::text, r.room_type::text, " +
-	"r.access::text, r.history_visibility::text, r.encrypted::text, r.log_version::text " +
+	"r.access::text, r.history_visibility::text, r.encrypted::text, r.log_version::text, " +
+	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "r.id" +
+	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + "::text " +
+	DATABASE_ROOMS_WITH_UNREAD_SQL +
+	"ORDER BY r.name"
+
+// The requester's ($1) rooms r with their marker m and unread count unread.n (capped at $2):
+// the unread rule itself, which the read marker migration tests run on schemas older than
+// the room list's other columns.
+DATABASE_ROOMS_WITH_UNREAD_SQL ::
 	"FROM rooms r JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
@@ -357,8 +369,7 @@ DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	"UNION ALL " +
 	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NULL AND cm.room_id = r.id " +
 	"AND cm.created_at > rm.joined_at AND cm.sender_user_id <> rm.user_id " +
-	"LIMIT $2::bigint) capped) unread " +
-	"ORDER BY r.name"
+	"LIMIT $2::bigint) capped) unread "
 
 databaseExecuteListRoomsForUser :: proc(
 	conn: pg.Conn,
@@ -400,6 +411,9 @@ databaseExecuteListRoomsForUser :: proc(
 				historyVisibility = databaseGetRoomHistoryVisibility(result, row, 7, access),
 				encrypted = databaseGetBool(result, row, 8),
 				logVersion = databaseGetIntOrZero(result, row, 9),
+				myPermissions = common.roomPermissionsFromMask(
+					i64(databaseGetIntOrZero(result, row, 10)),
+				),
 			},
 		)
 	}
@@ -409,10 +423,12 @@ databaseExecuteListRoomsForUser :: proc(
 // The room's type and members: one row per member, or one row with a NULL member for a room
 // without members, and no row for a room that does not exist. The last columns are the room's
 // encrypted flag (protocol 18) and its member log version (protocol 21: the epoch voice keys
-// must name).
+// must name). Protocol 24: the last is $2's permissions in the room (0 for no account), whose
+// SpeakInVoice decides whether the relay forwards a joiner's frames.
 DATABASE_LIST_ROOM_MEMBERS_SQL ::
-	"SELECT r.room_type::text, rm.user_id::text, r.encrypted::text, r.log_version::text " +
-	"FROM rooms r " +
+	"SELECT r.room_type::text, rm.user_id::text, r.encrypted::text, r.log_version::text, " +
+	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$2" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "r.id" +
+	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + "::text FROM rooms r " +
 	"LEFT JOIN room_members rm ON rm.room_id = r.id WHERE r.id = $1"
 
 databaseExecuteListRoomMemberUserIDs :: proc(
@@ -421,7 +437,9 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 ) -> common.DatabaseQueryResponse {
 	roomIDParam := databaseIntParam(request.roomId)
 	defer delete(roomIDParam)
-	params := [?][^]byte{transmute([^]byte)roomIDParam}
+	userIDParam := databaseIntParam(request.userId)
+	defer delete(userIDParam)
+	params := [?][^]byte{transmute([^]byte)roomIDParam, transmute([^]byte)userIDParam}
 	result := databaseExecParams(conn, DATABASE_LIST_ROOM_MEMBERS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
@@ -440,6 +458,8 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 			members.roomType = databaseGetRoomType(result, row, 0)
 			members.encrypted = databaseGetBool(result, row, 2)
 			members.logVersion, _ = databaseGetInt(result, row, 3)
+			mask, _ := databaseGetInt(result, row, 4)
+			members.permissions = common.roomPermissionsFromMask(i64(mask))
 		}
 		if userID, ok := databaseGetInt(result, row, 1); ok {
 			append(&members.userIDs, userID)
@@ -460,8 +480,14 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 // one store nothing (ON CONFLICT DO NOTHING). It always returns exactly one row: membership,
 // the message ID and time, recipients, nickname, whether chat is allowed, whether the room is
 // encrypted, and its log version.
+//
+// Protocol 24: the sender must hold SendMessages in the room (database_room_permissions.odin),
+// plaintext or sealed; the last column says whether it does.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
+	"may_send AS (SELECT ((" + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$2" +
+	DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " & " +
+	DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL + ") <> 0) AS ok), " +
 	"room AS (SELECT room_type, encrypted, log_version FROM rooms WHERE id = $1), " +
 	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND encrypted = ($4::text <> '') " +
 	"AND (NOT encrypted OR log_version = $6::bigint)), " +
@@ -475,13 +501,13 @@ DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"CASE WHEN $4::text = '' THEN NULL ELSE $8::integer END, " +
 	"CASE WHEN $4::text = '' THEN decode($9::text, 'hex') ELSE NULL END " +
 	"WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
-	"ON CONFLICT DO NOTHING RETURNING id, created_at) " +
+	"AND (SELECT ok FROM may_send) ON CONFLICT DO NOTHING RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $2), ''), " +
 	"COALESCE((SELECT room_type IN (1, 3) FROM room), false), " +
 	"COALESCE((SELECT encrypted FROM room), false), " +
-	"COALESCE((SELECT log_version FROM room), 0)::text " +
+	"COALESCE((SELECT log_version FROM room), 0)::text, (SELECT ok FROM may_send)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
@@ -550,6 +576,11 @@ databaseExecutePostRoomChatMessage :: proc(
 	if !databaseGetBool(result, 0, 5) {
 		return databaseSuccess(
 			common.DatabasePostRoomChatMessageResult{isMember = true, chatDisabled = true},
+		)
+	}
+	if !databaseGetBool(result, 0, 8) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, sendDenied = true},
 		)
 	}
 	encrypted := databaseGetBool(result, 0, 6)
@@ -741,25 +772,48 @@ databaseExecuteGetRoomHistory :: proc(
 // Protocol 23 (#95): the creator must hold ManageRooms, checked in this statement; without it
 // nothing is created and the statement returns one row whose first column is NULL and whose
 // last says 'not_permitted'. A creation returns 'applied' there.
+//
+// Protocol 24 (#96): a Role room ($5 = 4) stores its access roles ($9, a bigint array; never
+// the built-in role, else 'unknown_role' and nothing is created) and includes exactly their
+// holders, whatever $7 says. Column 10 lists the members a Role room got, and column 11 is the
+// creator's permissions in the new room (the default everyone grant when a member, plus what
+// ManageRooms and ManageRoomMembers imply), which ServerCreateRoom carries: the room is not in
+// the statement's snapshot, so the shared subquery cannot read it.
 DATABASE_CREATE_ROOM_SQL ::
 	"WITH permitted AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOMS_SQL + " AS ok), " +
+	"bad_roles AS (SELECT 1 FROM unnest($9::bigint[]) w(role_id) LEFT JOIN server_roles r " +
+	"ON r.id = w.role_id WHERE r.id IS NULL OR r.builtin), " +
 	"created_room AS (" +
 	"INSERT INTO rooms (name, description, created_by_user_id, room_type, access, " +
 	"history_visibility, encrypted) SELECT $2, $3, $1, $4::smallint, $5::smallint, " +
 	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END, $8::boolean " +
-	"FROM permitted WHERE ok " +
+	"FROM permitted WHERE ok AND NOT EXISTS (SELECT 1 FROM bad_roles) " +
 	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
 	"log_version" +
-	"), members AS (" +
+	"), access_roles AS (INSERT INTO room_access_roles (room_id, role_id) " +
+	"SELECT created_room.id, w.role_id FROM created_room " +
+	"CROSS JOIN unnest($9::bigint[]) w(role_id) WHERE created_room.access = 4 " +
+	"ON CONFLICT DO NOTHING), " +
+	"members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
 	"WHERE NOT created_room.encrypted AND (created_room.access = 1 " +
-	"OR (users.id = $1::bigint AND $7::boolean)) " +
+	"OR (created_room.access IN (2, 3) AND users.id = $1::bigint AND $7::boolean) " +
+	"OR (created_room.access = 4 AND EXISTS (SELECT 1 FROM user_server_roles h " +
+	"WHERE h.user_id = users.id AND h.role_id = ANY($9::bigint[])))) " +
 	"ON CONFLICT DO NOTHING RETURNING user_id" +
 	") SELECT id::text, name, description, room_type::text, access::text, " +
 	"history_visibility::text, encrypted::text, log_version::text, " +
 	"EXISTS (SELECT 1 FROM members WHERE user_id = $1::bigint)::text, " +
-	"CASE WHEN (SELECT ok FROM permitted) THEN 'applied' ELSE 'not_permitted' END " +
+	"CASE WHEN NOT (SELECT ok FROM permitted) THEN 'not_permitted' " +
+	"WHEN EXISTS (SELECT 1 FROM bad_roles) THEN 'unknown_role' ELSE 'applied' END, " +
+	"CASE WHEN access = 4 THEN COALESCE((SELECT string_agg(user_id::text, ',' " +
+	"ORDER BY user_id) FROM members), '') ELSE '' END, " +
+	"(SELECT CASE WHEN p.mask = -1 THEN -1 ELSE " + DATABASE_ROOM_PERMISSION_EDIT_ROOM_SQL +
+	" | CASE WHEN (p.mask & " + DATABASE_PERMISSION_MANAGE_ROOM_MEMBERS_SQL + ") <> 0 THEN " +
+	DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL + " ELSE 0 END | CASE WHEN EXISTS (" +
+	"SELECT 1 FROM members WHERE user_id = $1::bigint) THEN 3 ELSE 0 END END " +
+	"FROM (SELECT " + DATABASE_ACTOR_PERMISSIONS_SQL + " AS mask) p)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN created_room ON true"
 
 databaseExecuteCreateRoom :: proc(
@@ -782,6 +836,8 @@ databaseExecuteCreateRoom :: proc(
 	defer delete(joinsParam)
 	encryptedParam := strings.clone_to_cstring(request.encrypted ? "true" : "false")
 	defer delete(encryptedParam)
+	accessRolesParam := databaseIntArrayParam(request.accessRoleIds[:])
+	defer delete(accessRolesParam)
 	params := [?][^]byte {
 		transmute([^]byte)creatorUserIDParam,
 		transmute([^]byte)nameCString,
@@ -791,6 +847,7 @@ databaseExecuteCreateRoom :: proc(
 		transmute([^]byte)historyParam,
 		transmute([^]byte)joinsParam,
 		transmute([^]byte)encryptedParam,
+		transmute([^]byte)accessRolesParam,
 	}
 	result := databaseExecParams(conn, DATABASE_CREATE_ROOM_SQL, params[:])
 	if result == nil {
@@ -806,15 +863,23 @@ databaseExecuteCreateRoom :: proc(
 	if outcome == "not_permitted" {
 		return databaseSuccess(common.DatabaseRoomMutationResult{notPermitted = true})
 	}
+	if outcome == "unknown_role" {
+		return databaseSuccess(common.DatabaseRoomMutationResult{refusal = .UnknownAccessRole})
+	}
 	room, roomOK := databaseGetRoomSummary(result, 0, 0)
 	if !roomOK {
 		return databaseErrorResponse(strings.clone("database returned invalid room ID"))
 	}
+	added := databaseGetText(result, 0, 10)
+	defer delete(added)
+	creatorMask, _ := databaseGetInt(result, 0, 11)
+	room.myPermissions = common.roomPermissionsFromMask(i64(creatorMask))
 	return databaseSuccess(
 		common.DatabaseRoomMutationResult {
 			changed = true,
 			room = room,
 			isMember = databaseGetBool(result, 0, 8),
+			addedUserIDs = databaseParseIDList(added),
 		},
 	)
 }
@@ -828,25 +893,56 @@ databaseExecuteCreateRoom :: proc(
 //
 // Protocol 23 (#95): $7 is the requester, who must hold ManageRooms; column 11 says whether it
 // does, and without it nothing changes.
+//
+// Protocol 24 (#96): $8 is the access roles (an ascending bigint array, empty unless $5 is 4).
+// Without ManageRooms, the room's EditRoom is enough when $5 and $8 are the room's own access
+// and access roles (only the name, description and type change). An access role that is
+// unknown or built in changes nothing (column 13). The access roles become $8, and a Role
+// room's members become exactly their holders: column 8 lists who joined (for a switch to
+// Public too) and column 12 who left, whose read markers go as on a protocol 15 removal. A
+// switch away from Role keeps the members.
 DATABASE_EDIT_ROOM_SQL ::
-	"WITH permitted AS (SELECT ((" + DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "$7::bigint" +
-	DATABASE_SERVER_PERMISSIONS_CLOSE_SQL + " & " + DATABASE_PERMISSION_MANAGE_ROOMS_SQL +
-	") <> 0) AS ok), " +
-	"current AS (SELECT encrypted, access FROM rooms WHERE id = $1), " +
+	"WITH actor AS (SELECT " + DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "$7::bigint" +
+	DATABASE_SERVER_PERMISSIONS_CLOSE_SQL + " AS server_mask, " +
+	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$7" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$1" +
+	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " AS room_mask), " +
+	"current AS (SELECT encrypted, access, COALESCE((SELECT array_agg(ar.role_id " +
+	"ORDER BY ar.role_id) FROM room_access_roles ar WHERE ar.room_id = $1), " +
+	"'{}'::bigint[]) AS access_roles FROM rooms WHERE id = $1), " +
+	"permitted AS (SELECT ((a.server_mask & " + DATABASE_PERMISSION_MANAGE_ROOMS_SQL +
+	") <> 0 OR ((a.room_mask & " + DATABASE_ROOM_PERMISSION_EDIT_ROOM_SQL + ") <> 0 " +
+	"AND EXISTS (SELECT 1 FROM current c WHERE c.access = $5::smallint " +
+	"AND c.access_roles = $8::bigint[]))) AS ok FROM actor a), " +
+	"bad_roles AS (SELECT 1 FROM unnest($8::bigint[]) w(role_id) LEFT JOIN server_roles r " +
+	"ON r.id = w.role_id WHERE r.id IS NULL OR r.builtin), " +
 	"updated AS (UPDATE rooms SET name = $2, description = $3, " +
 	"room_type = $4::smallint, access = $5::smallint WHERE id = $1 " +
-	"AND (SELECT ok FROM permitted) " +
+	"AND (SELECT ok FROM permitted) AND NOT EXISTS (SELECT 1 FROM bad_roles) " +
 	"AND encrypted = $6::boolean AND (NOT encrypted OR access = $5::smallint) " +
 	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
 	"log_version), " +
+	"roles_removed AS (DELETE FROM room_access_roles ar USING updated u " +
+	"WHERE ar.room_id = u.id AND NOT (ar.role_id = ANY($8::bigint[]))), " +
+	"roles_added AS (INSERT INTO room_access_roles (room_id, role_id) " +
+	"SELECT u.id, w.role_id FROM updated u CROSS JOIN unnest($8::bigint[]) w(role_id) " +
+	"ON CONFLICT DO NOTHING), " +
+	"holders AS (SELECT DISTINCT h.user_id FROM user_server_roles h " +
+	"WHERE h.role_id = ANY($8::bigint[])), " +
 	"added AS (INSERT INTO room_members (room_id, user_id) " +
 	"SELECT updated.id, users.id FROM updated CROSS JOIN users WHERE updated.access = 1 " +
-	"ON CONFLICT DO NOTHING RETURNING user_id) " +
+	"OR (updated.access = 4 AND users.id IN (SELECT user_id FROM holders)) " +
+	"ON CONFLICT DO NOTHING RETURNING user_id), " +
+	"removed AS (DELETE FROM room_members m USING updated u WHERE m.room_id = u.id " +
+	"AND u.access = 4 AND m.user_id NOT IN (SELECT user_id FROM holders) RETURNING m.user_id), " +
+	"unmarked AS (DELETE FROM room_read_markers k USING removed r " +
+	"WHERE k.room_id = $1 AND k.user_id = r.user_id) " +
 	"SELECT u.id::text, u.name, u.description, u.room_type::text, u.access::text, " +
 	"u.history_visibility::text, u.encrypted::text, u.log_version::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM added), ''), " +
 	"(SELECT encrypted FROM current)::text, (SELECT access FROM current)::text, " +
-	"(SELECT ok FROM permitted)::text FROM (SELECT 1) AS one LEFT JOIN updated u ON true"
+	"(SELECT ok FROM permitted)::text, " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM removed), ''), " +
+	"EXISTS (SELECT 1 FROM bad_roles)::text FROM (SELECT 1) AS one LEFT JOIN updated u ON true"
 
 databaseExecuteEditRoom :: proc(
 	conn: pg.Conn,
@@ -866,6 +962,8 @@ databaseExecuteEditRoom :: proc(
 	defer delete(encryptedParam)
 	actorParam := databaseIntParam(request.actorUserId)
 	defer delete(actorParam)
+	accessRolesParam := databaseIntArrayParam(request.accessRoleIds[:])
+	defer delete(accessRolesParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)nameCString,
@@ -874,6 +972,7 @@ databaseExecuteEditRoom :: proc(
 		transmute([^]byte)accessParam,
 		transmute([^]byte)encryptedParam,
 		transmute([^]byte)actorParam,
+		transmute([^]byte)accessRolesParam,
 	}
 	result := databaseExecParams(conn, DATABASE_EDIT_ROOM_SQL, params[:])
 	if result == nil {
@@ -896,6 +995,11 @@ databaseExecuteEditRoom :: proc(
 		added := databaseGetText(result, 0, 8)
 		defer delete(added)
 		mutation.addedUserIDs = databaseParseIDList(added)
+		removed := databaseGetText(result, 0, 12)
+		defer delete(removed)
+		mutation.removedUserIDs = databaseParseIDList(removed)
+	} else if databaseGetBool(result, 0, 13) {
+		mutation.refusal = .UnknownAccessRole
 	} else if !pg.get_is_null(result, 0, 9) {
 		// The room exists, so the encryption rules refused the edit.
 		if databaseGetBool(result, 0, 9) != request.encrypted {
@@ -1001,6 +1105,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteFetchRoomKeys(conn, r)
 	case common.DatabaseRoleRequest:
 		return databaseExecuteRoleRequest(conn, r)
+	case common.DatabaseRoomPermissionsRequest:
+		return databaseExecuteRoomPermissions(conn, r)
 	case common.DatabaseRoomKeyRequestCheckRequest:
 		return databaseExecuteRoomKeyRequestCheck(conn, r)
 	case nil:

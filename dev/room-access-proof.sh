@@ -177,8 +177,9 @@ pin_keys c "$user_a" "$user_b"
 echo "==> [access] admin invite: A adds B; C cannot see the room, its history, or its members"
 create_room a both,admin-invite "acc-admin-$run_tag"
 admin_room=$created_room
-created_tail='"access":3,"historyVisibility":1,"isMember":true,"encrypted":false,"logVersion":0}'
-[[ "$last_event" == *"$created_tail" ]] ||
+created_tail='"access":3,"historyVisibility":1,"isMember":true,"encrypted":false,'
+created_tail+='"logVersion":0,"myPermissions":'
+[[ "$last_event" == *"$created_tail"* ]] ||
 	fail "the Admin invite room was not created as asked: $last_event"
 start_a=$(lines a)
 start_b=$(lines b)
@@ -281,7 +282,7 @@ echo "==> [access] no join: A creates a room it is not in and manages it"
 hidden_name="acc-hidden-$run_tag"
 create_room a text,admin-invite,no-join "$hidden_name"
 hidden_room=$created_room
-[[ "$last_event" == *'"isMember":false,"encrypted":false,"logVersion":0}' ]] ||
+[[ "$last_event" == *'"isMember":false,"encrypted":false,"logVersion":0,"myPermissions":'* ]] ||
 	fail "the room created without joining has the creator as a member: $last_event"
 expect_ok a rooms
 [[ "$last_result" != *"\"id\":$hidden_room,"* ]] ||

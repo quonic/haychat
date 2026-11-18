@@ -534,7 +534,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	}
 
 	// The columns take only the defined values.
-	for probe in ([]string{"access = 0", "access = 4", "history_visibility = 3"}) {
+	for probe in ([]string{"access = 0", "access = 5", "history_visibility = 3"}) {
 		databaseDefaultRoomTestExec(
 			conn,
 			"probe the access checks",

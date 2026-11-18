@@ -51,14 +51,25 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	}
 	serverCache := &state.server_room_caches[serverCacheIndex]
 	view.hasSelectedRoom = ServerRoomCache_roomIsJoined(serverCache, state.selected_channel_id)
+	// Protocol 24: ManageRooms, or the room's EditRoom.
 	view.canEditRoom =
 		view.hasSelectedRoom &&
-		State_hasPermission(state, state.selected_server_id, .ManageRooms)
+		State_canEditRoom(state, state.selected_server_id, state.selected_channel_id)
 	view.allowsChat =
 		!view.hasSelectedRoom ||
 		State_roomAllowsChat(state, state.selected_server_id, state.selected_channel_id)
 	if !view.allowsChat {
 		view.voiceOnlyNote = ROOM_VOICE_ONLY_NOTE
+	} else if view.hasSelectedRoom &&
+	   !State_hasRoomPermission(
+		   state,
+		   state.selected_server_id,
+		   state.selected_channel_id,
+		   .SendMessages,
+	   ) {
+		// Protocol 24: a read-only room for this account.
+		view.allowsChat = false
+		view.voiceOnlyNote = ROOM_SEND_NOT_PERMITTED_NOTE
 	}
 	// Protocol 18: an encrypted room shows its verified member list changes as event lines,
 	// placed among the messages by time. Protocol 19: its messages are sealed; the composer
@@ -534,6 +545,21 @@ RoomEditorView :: struct {
 	managers:      []RoomEditorManagerRow,
 	encryptedRoom: bool,
 	error:         string,
+	// Protocol 24: a Role room's access roles (every role but admin, checked when chosen), and
+	// whether this account may change the access at all (ManageRooms; the room's EditRoom
+	// covers only the name, description and type). showPermissions offers the Permissions page
+	// (Edit).
+	showAccessRoles: bool,
+	accessRoles:     []RoomEditorRoleRow,
+	accessRolesNote: string,
+	accessLocked:    bool,
+	showPermissions: bool,
+}
+
+RoomEditorRoleRow :: struct {
+	roleID:  int,
+	label:   string, // Borrowed from State
+	checked: bool,
 }
 
 RoomEditorManagerRow :: struct {
@@ -583,6 +609,18 @@ buildRoomEditorView :: proc(
 	view.typeNote = roomTypeNote(view.roomType)
 	view.access = roomAccessShown(editor.access)
 	view.accessNote = roomAccessNote(view.access)
+	if view.access == .Role {
+		view.showAccessRoles = true
+		view.accessRoles = buildRoomEditorRoleRows(state, allocator)
+		switch {
+		case editor.mode == .Edit && !editor.accessRolesLoaded:
+			view.accessRolesNote = "Loading the room's roles…"
+		case len(view.accessRoles) == 0:
+			view.accessRolesNote = "Create a role in Server settings → Admin → Roles first."
+		case len(editor.accessRoleIDs) == 0:
+			view.accessRolesNote = "Choose at least one role."
+		}
+	}
 	view.history = common.roomEffectiveHistoryVisibility(view.access, editor.history)
 	view.historyNote = roomHistoryNote(view.access, view.history)
 	if view.isCreate {
@@ -602,10 +640,14 @@ buildRoomEditorView :: proc(
 				"You are not a member: you do not see its messages, but you can still add " +
 				"and remove members and delete it from Server settings → Admin."
 		}
-		view.showEncrypt = view.access != .Public
+		view.showEncrypt = view.access != .Public && view.access != .Role
 		view.encrypted = editor.encrypted && view.showEncrypt
 		view.encryptLabel = view.encrypted ? "Encrypt this room: on" : "Encrypt this room: off"
 		switch {
+		case view.access == .Role:
+			view.encryptNote =
+				"Role rooms are not encrypted: their members change with roles, which the " +
+				"member list cannot sign."
 		case !view.showEncrypt:
 			view.encryptNote = "Public rooms are not encrypted: anyone can join them."
 		case view.encrypted:
@@ -624,6 +666,9 @@ buildRoomEditorView :: proc(
 		view.encryptedRoom = room.encrypted
 	}
 	view.historyLocked = true
+	view.showPermissions = true
+	view.accessLocked =
+		view.encryptedRoom || !State_hasPermission(state, editor.serverID, .ManageRooms)
 	view.title = "Edit room"
 	room := State_knownRoom(state, editor.serverID, editor.roomID)
 	if room != nil {
@@ -639,7 +684,8 @@ buildRoomEditorView :: proc(
 		}
 	}
 	view.submitLabel = editor.pending == .Save ? "Saving…" : "Save"
-	view.showDelete = true
+	// Protocol 24: deleting a room stays with ManageRooms.
+	view.showDelete = State_hasPermission(state, editor.serverID, .ManageRooms)
 	switch {
 	case editor.pending == .Delete:
 		view.deleteLabel = "Deleting…"
@@ -661,6 +707,29 @@ buildRoomEditorView :: proc(
 		)
 	}
 	return
+}
+
+// A Role room's access role choices (protocol 24): every role but the built-in admin role.
+buildRoomEditorRoleRows :: proc(
+	state: ^State,
+	allocator := context.temp_allocator,
+) -> []RoomEditorRoleRow {
+	editor := &state.roomEditor
+	rows := make([dynamic]RoomEditorRoleRow, 0, allocator)
+	for role in State_roles(state, editor.serverID) {
+		if role.builtin {
+			continue
+		}
+		append(
+			&rows,
+			RoomEditorRoleRow {
+				roleID = role.id,
+				label = role.name,
+				checked = slice.contains(editor.accessRoleIDs[:], role.id),
+			},
+		)
+	}
+	return rows[:]
 }
 
 // The create form's managers (protocol 18): every admin the client sees, this account first.

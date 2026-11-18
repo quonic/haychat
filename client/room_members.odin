@@ -98,7 +98,7 @@ roomAccessShown :: proc(access: common.RoomAccess) -> common.RoomAccess {
 }
 
 // The modes the forms offer, in the selector's order.
-ROOM_EDITOR_ACCESS_MODES := [3]common.RoomAccess{.Public, .MemberInvite, .AdminInvite}
+ROOM_EDITOR_ACCESS_MODES := [4]common.RoomAccess{.Public, .MemberInvite, .AdminInvite, .Role}
 ROOM_EDITOR_HISTORY_OPTIONS := [2]common.RoomHistoryVisibility{.FromJoin, .Full}
 
 roomAccessLabel :: proc(access: common.RoomAccess) -> string {
@@ -109,6 +109,8 @@ roomAccessLabel :: proc(access: common.RoomAccess) -> string {
 		return "Member invite"
 	case .AdminInvite:
 		return "Admin invite"
+	case .Role:
+		return "Roles"
 	}
 	return "Admin invite"
 }
@@ -121,6 +123,8 @@ roomAccessNote :: proc(access: common.RoomAccess) -> string {
 		return "Members and admins add people; only admins remove them. Members can leave."
 	case .AdminInvite:
 		return "Only admins add and remove people. Members can leave."
+	case .Role:
+		return "Members are the holders of the chosen roles; nobody adds, removes or leaves."
 	}
 	return ""
 }
@@ -231,8 +235,9 @@ roomMemberRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomM
 	rights.known = true
 	rights.access = roomAccessShown(room.access)
 	// Protocol 23: "admin" here is whoever holds ManageRoomMembers (admins hold every
-	// permission), the account the server lets manage members.
-	rights.isAdmin = State_hasPermission(state, serverID, .ManageRoomMembers)
+	// permission), the account the server lets manage members. Protocol 24: or the room's own
+	// ManageMembers (room_permissions.odin).
+	rights.isAdmin = State_hasRoomPermission(state, serverID, roomID, .ManageMembers)
 	rights.isMember = ServerRoomCache_roomIsJoined(State_serverRoomCache(state, serverID), roomID)
 	if room.encrypted {
 		// Protocol 18: what the verified member log allows (room_log.odin), not room_members.
@@ -246,6 +251,10 @@ roomMemberRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomM
 	}
 	public := rights.access == .Public
 	rights.canView = rights.isAdmin || (rights.isMember && !public)
+	// Protocol 24: a Role room's members come only from its access roles.
+	if rights.access == .Role {
+		return
+	}
 	rights.canAdd =
 		!public &&
 		(rights.isAdmin || (rights.isMember && rights.access == .MemberInvite))
@@ -632,7 +641,7 @@ buildRoomMembersView :: proc(
 	view.canAdd = rights.canAdd
 	view.canLeave = rights.canLeave
 	view.isMember = rights.isMember
-	view.canEdit = State_hasPermission(state, serverID, .ManageRooms)
+	view.canEdit = State_canEditRoom(state, serverID, roomID)
 	view.busy = editor.pending != .None
 	view.notice = editor.notice
 	view.error = editor.error

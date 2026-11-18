@@ -202,6 +202,7 @@ roomChainTestListRoom :: proc(
 			historyVisibility = history,
 			encrypted = true,
 			logVersion = logVersion,
+			myPermissions = common.ROOM_PERMISSIONS_DEFAULT,
 		},
 	)
 	roomChainTestApply(state, &event)

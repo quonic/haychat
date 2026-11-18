@@ -47,10 +47,12 @@ history request, member list and voice join. Who may join a room is its **access
 | **Public** | Every account: new accounts join it, and a new Public room includes everyone | Nobody needs to (adds are refused: "Public rooms include every account") | Room member managers |
 | **Member invite** | Whoever has been added | Any member, and room member managers | Room member managers |
 | **Admin invite** | Whoever has been added | Room member managers only | Room member managers |
+| **Roles** (protocol 24) | Exactly the accounts holding one of the room's access roles | Nobody: giving someone an access role adds them | Nobody: taking the role away removes them |
 
-"Room member managers" are admins and accounts holding a role with **Manage room members**, and
-"room managers" admins and accounts holding a role with **Manage rooms** (see
-[Roles and Permissions](#roles-and-permissions)).
+"Room member managers" are admins, accounts holding a role with **Manage room members**, and
+(protocol 24) members the room grants **Manage members**; "room managers" are admins and
+accounts holding a role with **Manage rooms** (see [Roles and Permissions](#roles-and-permissions)
+and [Room Permissions](#room-permissions)).
 
 - In every mode, any member can leave a non-public room (`ClientLeaveRoom`); a Public room
   cannot be left ("You cannot leave a public room"). Room managers can create, rename, edit and
@@ -68,6 +70,16 @@ history request, member list and voice join. Who may join a room is its **access
 - **Changing the mode.** An admin may switch a room between any two modes. Switching to Public
   adds every account in the same statement (each is told it joined); switching away from Public
   keeps every member.
+- **Role rooms** (protocol 24, schema migration 12). A room in the **Roles** mode names one or
+  more access roles (never the built-in admin role), and its members are exactly their holders.
+  Creating one, switching a room to it or changing its access roles makes the members exactly
+  the holders in the same statement; giving an account an access role, taking it away or
+  deleting the role adds or removes the account in the same statement too. Everyone who joins
+  or leaves is told at once, and joining and leaving follow the usual history and unread rules
+  (a removal drops the read marker). Nobody adds, removes or leaves by hand ("This room's members
+  come from its access roles"). Switching a Role room to another mode keeps its members and
+  forgets its access roles. Encrypted rooms cannot be Role rooms ("Encrypted rooms cannot take
+  their members from roles"), because their adds must be signed in the member list.
 - Every rule is checked in the database, in the same statement as the change, so a role or
   membership change between a check and the write cannot slip through.
 - Existing rooms became Public with full history when the server migrated to schema 4, so
@@ -207,6 +219,37 @@ The permissions are fixed in code; there are no custom ones.
   session at once, an account given or denied roles shows its new roles to everyone, and an
   account whose permissions changed learns its new set without reconnecting.
 
+## Room Permissions
+
+Since protocol 24 (schema migration 12, #96) each room says what its members may do. The
+permissions are allow-only: nothing denies one, and a member may do what the room's **Everyone**
+grant or the grant of any of their roles allows. Membership still decides who sees a room at all.
+
+| Room permission | What it allows | Everyone, by default |
+| --- | --- | --- |
+| **Send messages** | Post chat messages, plaintext or sealed | Yes |
+| **Speak in voice** | Be heard in the room's voice; without it you join and listen, and the server drops your audio | Yes |
+| **Manage members** | Add and remove members (not in Public or Role rooms) | No |
+| **Edit room** | Change the name, description and type, and the room's permissions | No |
+
+- Server permissions count in every room, member or not: **Manage room members** gives Manage
+  members, **Manage rooms** gives Edit room, and admins hold every room permission.
+- **Edit room** does not cover the access mode, the access roles or encryption, and not deleting
+  the room: those stay with **Manage rooms**.
+- A room's permissions are changed by holders of Manage rooms or the room's Edit room, and no one
+  can add or take away a bit they do not hold themselves (Manage rooms counts as holding Send
+  messages, Speak in voice and Edit room). Only roles other than admin get grants.
+- A grant counts only while its holder is a member: a member who leaves keeps the role but loses
+  what the room granted it.
+- The server checks every permission in the same statement as the change (a post, a voice join,
+  an add or a removal, an edit), sealed messages in encrypted rooms included. In an encrypted
+  room, adding someone needs Manage members there (or membership of a Member invite room) as
+  well as a valid signature in the member list.
+- Every room list carries your own permissions in each room, and a change to a grant, a role or
+  the admin role sends a fresh list to everyone it concerns at once, so composers and voice
+  follow without a reconnect. A room that existed before the migration grants everyone Send
+  messages and Speak in voice, so nothing changed for it.
+
 ## Direct Messages
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one
@@ -252,8 +295,8 @@ newest message.
   the admin is not in; reopening Server settings fetches it again.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
-- Roles do not rank accounts, so kick, ban and rename cannot be delegated, and there are no
-  per-room permissions yet (#96).
+- Roles do not rank accounts, so kick, ban and rename cannot be delegated. Room permissions
+  only allow, never deny: a room cannot take something from a role another grant gives.
 - Account registration (`ClientRegister`) is not implemented.
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.

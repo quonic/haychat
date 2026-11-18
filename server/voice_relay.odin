@@ -52,6 +52,8 @@ VoiceRelayDropReason :: enum u8 {
 	// Protocol 21: in an encrypted room, a payload shorter than a sealed one with one Opus byte,
 	// or whose version byte is not VOICE_E2EE_VERSION, so plaintext never reaches listeners.
 	NotSealed,
+	// Protocol 24: the sender lacks SpeakInVoice in the room (NetworkVoiceRouteMember.speakDenied).
+	NoSpeakPermission,
 }
 
 VoiceRelayStats :: struct {
@@ -81,6 +83,8 @@ VoiceRelayPeer :: struct {
 	roomId:    int, // 0 when not in voice
 	muted:     bool,
 	deafened:  bool,
+	// Protocol 24: the peer may not speak in its room; its frames are dropped.
+	speakDenied: bool,
 	// The room the peer is in is encrypted (NetworkVoiceRoute.encrypted).
 	encrypted: bool,
 	bucket:    VoiceTokenBucket,
@@ -223,6 +227,7 @@ VoiceRelay_applyRoute :: proc(
 				peer.roomId = 0
 				peer.muted = false
 				peer.deafened = false
+				peer.speakDenied = false
 				peer.encrypted = false
 			}
 		}
@@ -250,6 +255,7 @@ VoiceRelay_applyRoute :: proc(
 		peer.roomId = roomId
 		peer.muted = member.muted
 		peer.deafened = member.deafened
+		peer.speakDenied = member.speakDenied
 		peer.encrypted = encrypted
 		append(&list, member.peerId)
 	}
@@ -357,6 +363,10 @@ VoiceRelay_handleDatagram :: proc(relay: ^VoiceRelay, peerId: u32, datagram: []u
 	}
 	if sender.muted {
 		VoiceRelay__drop(relay, .Muted)
+		return
+	}
+	if sender.speakDenied {
+		VoiceRelay__drop(relay, .NoSpeakPermission)
 		return
 	}
 	if sender.encrypted {

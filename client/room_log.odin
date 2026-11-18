@@ -1506,8 +1506,9 @@ RoomLogRights :: struct {
 
 roomLogRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomLogRights) {
 	// Protocol 23: the server's add and remove rules read ManageRoomMembers, SetAccess
-	// ManageRooms (admins hold both).
-	rights.isAdmin = State_hasPermission(state, serverID, .ManageRoomMembers)
+	// ManageRooms (admins hold both). Protocol 24: ManageMembers in the room, which
+	// ManageRoomMembers implies.
+	rights.isAdmin = State_hasRoomPermission(state, serverID, roomID, .ManageMembers)
 	rights.managesRooms = State_hasPermission(state, serverID, .ManageRooms)
 	room := State_findRoomLog(state, serverID, roomID)
 	if room == nil {

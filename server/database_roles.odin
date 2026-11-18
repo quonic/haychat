@@ -152,6 +152,11 @@ DATABASE_SAVE_ROLE_SQL ::
 
 // $1 the requester, $2 the role. Columns: outcome, changed, then one affected account per row
 // (5 columns). The holders' user_server_roles rows go with the role (ON DELETE CASCADE).
+//
+// Protocol 24 (#96): every row also carries the Role room memberships the deletion ended
+// (DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL: a holder leaves each Role room whose access roles
+// include this one and no other role it holds) and the role's holders, whose room permissions
+// may change (comma separated). The room's grants and access role rows go with the role too.
 DATABASE_DELETE_ROLE_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
 	"current AS (SELECT id, builtin FROM server_roles WHERE id = $2::bigint), " +
@@ -170,9 +175,24 @@ DATABASE_DELETE_ROLE_SQL ::
 	"(SELECT user_id FROM user_server_roles WHERE role_id = $2::bigint) GROUP BY h.user_id), " +
 	"affected AS (SELECT a.user_id, a.after FROM after a WHERE a.after <> " +
 	DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "a.user_id" + DATABASE_SERVER_PERMISSIONS_CLOSE_SQL +
-	") " +
+	"), " +
+	"holders AS (SELECT user_id FROM user_server_roles WHERE role_id = $2::bigint " +
+	"AND EXISTS (SELECT 1 FROM deleted)), " +
+	"changes AS (SELECT m.room_id, m.user_id, false AS joined FROM room_members m " +
+	"JOIN rooms r ON r.id = m.room_id AND r.access = 4 " +
+	"JOIN room_access_roles ar ON ar.room_id = m.room_id AND ar.role_id = $2::bigint " +
+	"WHERE m.user_id IN (SELECT user_id FROM holders) AND NOT EXISTS (" +
+	"SELECT 1 FROM room_access_roles other JOIN user_server_roles h " +
+	"ON h.role_id = other.role_id WHERE other.room_id = m.room_id " +
+	"AND other.role_id <> $2::bigint AND h.user_id = m.user_id)), " +
+	"left_rooms AS (DELETE FROM room_members m USING changes c " +
+	"WHERE m.room_id = c.room_id AND m.user_id = c.user_id), " +
+	"unmarked AS (DELETE FROM room_read_markers k USING changes c " +
+	"WHERE k.room_id = c.room_id AND k.user_id = c.user_id) " +
 	"SELECT d.outcome, EXISTS (SELECT 1 FROM deleted)::text, " + DATABASE_AFFECTED_COLUMNS_SQL +
-	" FROM decision d LEFT JOIN affected a ON true LEFT JOIN users u ON u.id = a.user_id " +
+	", " + DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL + ", COALESCE((SELECT string_agg(" +
+	"user_id::text, ',' ORDER BY user_id) FROM holders), '') " +
+	"FROM decision d LEFT JOIN affected a ON true LEFT JOIN users u ON u.id = a.user_id " +
 	"ORDER BY a.user_id"
 
 // $1 the requester, $2 the account, $3 its new non-built-in roles (a bigint array literal).
@@ -180,6 +200,10 @@ DATABASE_DELETE_ROLE_SQL ::
 // identity key hex ('' without one), whether it has an encryption key, its role IDs after
 // (comma separated), and its permission masks before and after. The account columns are NULL
 // for unknown_user and for not_admin of a missing account.
+//
+// Protocol 24 (#96): the account joins every Role room one of its roles after the change gives
+// access to and leaves every other Role room (deleting its read marker there), in the same
+// statement; column 12 lists those changes (DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL).
 DATABASE_SET_USER_ROLES_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
 	"target AS (SELECT u.id, u.nickname, u.nickname_locked, u.banned_at IS NOT NULL AS banned, " +
@@ -209,14 +233,27 @@ DATABASE_SET_USER_ROLES_SQL ::
 	"'applied'), " +
 	"after AS (SELECT CASE WHEN EXISTS (SELECT 1 FROM held WHERE builtin) THEN -1::bigint " +
 	"ELSE COALESCE((SELECT bit_or(r.permissions) FROM server_roles r " +
-	"WHERE r.id IN (SELECT role_id FROM roles_after)), 0)::bigint END AS mask) " +
+	"WHERE r.id IN (SELECT role_id FROM roles_after)), 0)::bigint END AS mask), " +
+	"role_rooms AS (SELECT r.id AS room_id, EXISTS (SELECT 1 FROM room_access_roles ar " +
+	"WHERE ar.room_id = r.id AND ar.role_id IN (SELECT role_id FROM roles_after)) AS holds, " +
+	"EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id " +
+	"AND m.user_id = $2::bigint) AS is_member FROM rooms r " +
+	"WHERE r.access = 4 AND (SELECT outcome FROM decision) = 'applied'), " +
+	"changes AS (SELECT room_id, $2::bigint AS user_id, holds AS joined FROM role_rooms " +
+	"WHERE holds <> is_member), " +
+	"joined_rooms AS (INSERT INTO room_members (room_id, user_id) " +
+	"SELECT room_id, user_id FROM changes WHERE joined ON CONFLICT DO NOTHING), " +
+	"left_rooms AS (DELETE FROM room_members m USING changes c " +
+	"WHERE m.room_id = c.room_id AND m.user_id = c.user_id AND NOT c.joined), " +
+	"unmarked AS (DELETE FROM room_read_markers k USING changes c " +
+	"WHERE k.room_id = c.room_id AND k.user_id = c.user_id AND NOT c.joined) " +
 	"SELECT d.outcome, (EXISTS (SELECT 1 FROM removed) OR EXISTS (SELECT 1 FROM added))::text, " +
 	"t.id::text, t.nickname, t.nickname_locked::text, " +
 	"EXISTS (SELECT 1 FROM held WHERE builtin)::text, t.banned::text, " +
 	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
 	"COALESCE((SELECT string_agg(role_id::text, ',' ORDER BY role_id) FROM roles_after), ''), " +
-	"t.before::text, (SELECT mask FROM after)::text " +
-	"FROM decision d LEFT JOIN target t ON true"
+	"t.before::text, (SELECT mask FROM after)::text, " + DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL +
+	" FROM decision d LEFT JOIN target t ON true"
 
 // Reads one role in DATABASE_ROLE_COLUMNS_SQL order starting at first. name is owned.
 databaseGetRoleSummary :: proc(
@@ -436,6 +473,13 @@ databaseExecuteDeleteRole :: proc(
 	for row in 0 ..< pg.n_tuples(result) {
 		databaseAppendAffectedAccount(&roleResult.affected, result, row, 2)
 	}
+	changes := databaseGetText(result, 0, 7)
+	defer delete(changes)
+	roleResult.membershipChanges = make([dynamic]common.DatabaseRoomMembershipChange)
+	databaseParseRoleRoomChanges(changes, &roleResult.membershipChanges)
+	holders := databaseGetText(result, 0, 8)
+	defer delete(holders)
+	roleResult.roomPermissionUserIDs = databaseParseIDList(holders)
 	return databaseSuccess(roleResult)
 }
 
@@ -487,6 +531,14 @@ databaseExecuteSetUserRoles :: proc(
 	roleResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 7)
 	before, _ := databaseGetInt(result, 0, 10)
 	after, _ := databaseGetInt(result, 0, 11)
+	changes := databaseGetText(result, 0, 12)
+	defer delete(changes)
+	roleResult.membershipChanges = make([dynamic]common.DatabaseRoomMembershipChange)
+	databaseParseRoleRoomChanges(changes, &roleResult.membershipChanges)
+	roleResult.roomPermissionUserIDs = make([dynamic]int)
+	if roleResult.changed {
+		append(&roleResult.roomPermissionUserIDs, userID)
+	}
 	roleResult.affected = make([dynamic]common.DatabaseAccountPermissions)
 	if before != after {
 		append(

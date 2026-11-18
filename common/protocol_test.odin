@@ -98,6 +98,9 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientAdminSetUserRoles, 184},
 	{.ServerRoleUpdated, 185},
 	{.ServerRoleDeleted, 186},
+	{.ClientAdminSetRoomPermissions, 187},
+	{.ClientAdminFetchRoomPermissions, 188},
+	{.ServerAdminRoomPermissions, 189},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -128,8 +131,9 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 	assert(
 		int(RoomAccess.Public) == 1 &&
 		int(RoomAccess.MemberInvite) == 2 &&
-		int(RoomAccess.AdminInvite) == 3,
-		"expected RoomAccess to stay Public 1, MemberInvite 2, AdminInvite 3",
+		int(RoomAccess.AdminInvite) == 3 &&
+		int(RoomAccess.Role) == 4,
+		"expected RoomAccess to stay Public 1, MemberInvite 2, AdminInvite 3, Role 4",
 	)
 	assert(
 		int(RoomHistoryVisibility.FromJoin) == 1 && int(RoomHistoryVisibility.Full) == 2,
@@ -144,8 +148,8 @@ testRoomAccessModesAndHistoryVisibility :: proc(t: ^testing.T) {
 		assert(roomAccessIsSupported(access), fmt.tprintf("expected %v supported", access))
 	}
 	assert(
-		!roomAccessIsSupported(RoomAccess(0)) && !roomAccessIsSupported(RoomAccess(4)),
-		"expected 0 and 4 to be no access mode",
+		!roomAccessIsSupported(RoomAccess(0)) && !roomAccessIsSupported(RoomAccess(5)),
+		"expected 0 and 5 to be no access mode",
 	)
 	assert(
 		!roomHistoryVisibilityIsSupported(RoomHistoryVisibility(0)) &&
@@ -454,10 +458,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// cannot talk to this build; 23 added roles and server permissions (#95: ServerPermission,
 	// RoleSummary, UserSummary.roleIds, permissions in ServerAuthSuccess and
 	// ServerAccountUpdated, ClientAdminListRoles ... ServerRoleDeleted, the SaveRole, DeleteRole
-	// and SetUserRoles admin actions) and retired the old role placeholders.
+	// and SetUserRoles admin actions) and retired the old role placeholders; 24 added room
+	// permissions and role rooms (#96: RoomPermission, RoomSummary.myPermissions,
+	// RoomAccess.Role, accessRoleIds on ClientCreateRoom and ClientEditRoom,
+	// ClientAdminSetRoomPermissions, ClientAdminFetchRoomPermissions, ServerAdminRoomPermissions).
 	assert(
-		protocolVersion == 23,
-		fmt.tprintf("expected protocol version 23 for roles, got %d", protocolVersion),
+		protocolVersion == 24,
+		fmt.tprintf("expected protocol version 24 for room permissions, got %d", protocolVersion),
 	)
 }
 
@@ -1599,4 +1606,122 @@ testReadMarkerPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	// The kind is a fixed wire value, like MessageType.
 	assert(int(ReadMarkerKind.Room) == 0, "expected ReadMarkerKind.Room to stay 0 on the wire")
 	assert(int(ReadMarkerKind.Direct) == 1, "expected ReadMarkerKind.Direct to stay 1 on the wire")
+}
+
+// Protocol 24 (#96): room permissions are bit numbers on the wire (a u64 bit_set) and in
+// rooms.everyone_permissions and room_role_permissions.permissions. Never renumber them.
+@(test)
+testRoomPermissionWireValuesArePinned :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(RoomPermission.SendMessages) == 0 &&
+		int(RoomPermission.SpeakInVoice) == 1 &&
+		int(RoomPermission.ManageMembers) == 2 &&
+		int(RoomPermission.EditRoom) == 3,
+		"expected RoomPermission to stay SendMessages 0, SpeakInVoice 1, ManageMembers 2, " +
+		"EditRoom 3",
+	)
+	assert(
+		roomPermissionsMask(ROOM_PERMISSIONS_ALL) == 15 &&
+		roomPermissionsMask(ROOM_PERMISSIONS_DEFAULT) == 3,
+		"expected every room permission to be mask 15 and the default (send, speak) mask 3",
+	)
+	assert(
+		roomPermissionsFromMask(-1) == ROOM_PERMISSIONS_ALL &&
+		roomPermissionsFromMask(0b10) == RoomPermissions{.SpeakInVoice},
+		"expected mask -1 to read as every room permission and 2 as SpeakInVoice",
+	)
+}
+
+@(test)
+testRoomPermissionPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	roles := make([dynamic]RoomRoleGrant, context.temp_allocator)
+	append(&roles, RoomRoleGrant{roleId = 4, permissions = {.SendMessages, .ManageMembers}})
+	encoded, err := cbor.marshal(
+		ClientAdminSetRoomPermissionsPayload {
+			roomId = 7,
+			everyone = {.SpeakInVoice},
+			roles = roles,
+		},
+	)
+	assert(err == nil, "expected ClientAdminSetRoomPermissionsPayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ClientAdminSetRoomPermissionsPayload
+	assert(cbor.unmarshal(encoded, &decoded) == nil, "expected it to decode")
+	defer ClientAdminSetRoomPermissionsPayload_deinit(&decoded)
+	assert(
+		decoded.roomId == 7 &&
+		decoded.everyone == RoomPermissions{.SpeakInVoice} &&
+		len(decoded.roles) == 1 &&
+		decoded.roles[0].roleId == 4 &&
+		decoded.roles[0].permissions == RoomPermissions{.SendMessages, .ManageMembers},
+		fmt.tprintf("expected the grants back, got %v", decoded),
+	)
+	assert(roomPermissionsRequestIsValid(decoded), "expected the request to be valid")
+	duplicate := decoded
+	duplicate.roles = make([dynamic]RoomRoleGrant, context.temp_allocator)
+	append(&duplicate.roles, RoomRoleGrant{roleId = 4}, RoomRoleGrant{roleId = 4})
+	assert(!roomPermissionsRequestIsValid(duplicate), "expected a repeated role to be refused")
+	duplicate.roles = nil
+	duplicate.roomId = 0
+	assert(!roomPermissionsRequestIsValid(duplicate), "expected room 0 to be refused")
+
+	accessRoles := make([dynamic]int, context.temp_allocator)
+	append(&accessRoles, 4, 9)
+	answer, answerErr := cbor.marshal(
+		ServerAdminRoomPermissionsPayload {
+			roomId = 7,
+			everyone = ROOM_PERMISSIONS_DEFAULT,
+			roles = roles,
+			accessRoleIds = accessRoles,
+			myPermissions = ROOM_PERMISSIONS_ALL,
+		},
+	)
+	assert(answerErr == nil, "expected ServerAdminRoomPermissionsPayload encoding to succeed")
+	defer delete(answer)
+	decodedAnswer: ServerAdminRoomPermissionsPayload
+	assert(cbor.unmarshal(answer, &decodedAnswer) == nil, "expected the answer to decode")
+	defer ServerAdminRoomPermissionsPayload_deinit(&decodedAnswer)
+	assert(
+		decodedAnswer.everyone == ROOM_PERMISSIONS_DEFAULT &&
+		len(decodedAnswer.accessRoleIds) == 2 &&
+		decodedAnswer.accessRoleIds[1] == 9 &&
+		decodedAnswer.myPermissions == ROOM_PERMISSIONS_ALL,
+		fmt.tprintf("expected the answer back, got %v", decodedAnswer),
+	)
+
+	// RoomSummary.myPermissions and a Role room's access roles on create.
+	listEncoded, listErr := cbor.marshal(
+		RoomSummary{id = 3, name = "ops", access = .Role, myPermissions = {.SpeakInVoice}},
+	)
+	assert(listErr == nil, "expected RoomSummary encoding to succeed")
+	defer delete(listEncoded)
+	room: RoomSummary
+	assert(cbor.unmarshal(listEncoded, &room) == nil, "expected RoomSummary to decode")
+	defer delete(room.name)
+	defer delete(room.description)
+	assert(
+		room.access == .Role && room.myPermissions == RoomPermissions{.SpeakInVoice},
+		fmt.tprintf("expected a Role room with SpeakInVoice, got %v", room),
+	)
+	create, createErr := cbor.marshal(
+		ClientCreateRoomPayload{name = "ops", access = .Role, accessRoleIds = accessRoles},
+	)
+	assert(createErr == nil, "expected ClientCreateRoomPayload encoding to succeed")
+	defer delete(create)
+	decodedCreate: ClientCreateRoomPayload
+	assert(cbor.unmarshal(create, &decodedCreate) == nil, "expected the create to decode")
+	defer ClientCreateRoomPayload_deinit(&decodedCreate)
+	assert(
+		len(decodedCreate.accessRoleIds) == 2 &&
+		roomAccessRolesAreValid(decodedCreate.access, decodedCreate.accessRoleIds[:]),
+		fmt.tprintf("expected two access roles, got %v", decodedCreate),
+	)
+	assert(
+		!roomAccessRolesAreValid(.Role, nil) &&
+		!roomAccessRolesAreValid(.MemberInvite, decodedCreate.accessRoleIds[:]) &&
+		roomAccessRolesAreValid(.Public, nil),
+		"expected a Role room to need access roles and other rooms to have none",
+	)
 }

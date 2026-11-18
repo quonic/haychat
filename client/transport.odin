@@ -103,6 +103,9 @@ ClientTransportRuntimeEventKind :: enum {
 	RoleListReceived,
 	RoleUpdated,
 	RoleDeleted,
+	// Room permissions (protocol 24, room_permissions.odin). RoomPermissionsReceived is
+	// ServerAdminRoomPermissions: roomID and the payload in roomPermissions (arrays owned).
+	RoomPermissionsReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -187,6 +190,8 @@ ClientTransportRuntimeEvent :: struct {
 	roles:             [dynamic]common.RoleSummary,
 	role:              common.RoleSummary,
 	roleID:            int,
+	// Protocol 24.
+	roomPermissions:   common.ServerAdminRoomPermissionsPayload,
 }
 
 ClientServerTransport :: struct {
@@ -363,6 +368,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	}
 	delete(event.roles)
 	common.RoleSummary_deinit(&event.role)
+	common.ServerAdminRoomPermissionsPayload_deinit(&event.roomPermissions)
 	for &participant in event.voiceParticipants {
 		common.VoiceParticipant_deinit(&participant)
 	}
@@ -1073,7 +1079,11 @@ ClientServerTransport_createRoom :: proc(
 	historyVisibility: common.RoomHistoryVisibility,
 	creatorJoins: bool,
 	encrypted := false,
+	accessRoleIDs: []int = nil,
 ) -> bool {
+	accessRoles := make([dynamic]int, 0, len(accessRoleIDs))
+	defer delete(accessRoles)
+	append(&accessRoles, ..accessRoleIDs)
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
 		.ClientCreateRoom,
@@ -1085,6 +1095,40 @@ ClientServerTransport_createRoom :: proc(
 			historyVisibility = historyVisibility,
 			creatorJoins = creatorJoins,
 			encrypted = encrypted,
+			accessRoleIds = accessRoles,
+		},
+	)
+}
+
+// Room permissions (protocol 24): a room's grants, answered by ServerAdminRoomPermissions.
+ClientServerTransport_fetchRoomPermissions :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminFetchRoomPermissions,
+		common.ClientAdminFetchRoomPermissionsPayload{roomId = roomID},
+	)
+}
+
+// Replaces a room's grants; roles is borrowed.
+ClientServerTransport_setRoomPermissions :: proc(
+	transport: ^ClientServerTransport,
+	roomID: int,
+	everyone: common.RoomPermissions,
+	roles: []common.RoomRoleGrant,
+) -> bool {
+	grants := make([dynamic]common.RoomRoleGrant, 0, len(roles))
+	defer delete(grants)
+	append(&grants, ..roles)
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminSetRoomPermissions,
+		common.ClientAdminSetRoomPermissionsPayload {
+			roomId = roomID,
+			everyone = everyone,
+			roles = grants,
 		},
 	)
 }
@@ -1097,7 +1141,11 @@ ClientServerTransport_editRoom :: proc(
 	roomType: common.RoomType,
 	access: common.RoomAccess,
 	encrypted := false,
+	accessRoleIDs: []int = nil,
 ) -> bool {
+	accessRoles := make([dynamic]int, 0, len(accessRoleIDs))
+	defer delete(accessRoles)
+	append(&accessRoles, ..accessRoleIDs)
 	return ClientServerTransport_sendEncryptedRuntimeMessage(
 		transport,
 		.ClientEditRoom,
@@ -1108,6 +1156,7 @@ ClientServerTransport_editRoom :: proc(
 			roomType = roomType,
 			access = access,
 			encrypted = encrypted,
+			accessRoleIds = accessRoles,
 		},
 	)
 }
@@ -1959,6 +2008,29 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				kind = .RoleUpdated,
 				serverID = transport.serverID,
 				role = payload.role,
+			},
+			true
+
+	case .ServerAdminRoomPermissions:
+		payload: common.ServerAdminRoomPermissionsPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.roomId <= 0 {
+			common.ServerAdminRoomPermissionsPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid room permissions payload",
+				),
+				true
+		}
+		payload.everyone &= common.ROOM_PERMISSIONS_ALL
+		payload.myPermissions &= common.ROOM_PERMISSIONS_ALL
+		for &grant in payload.roles {
+			grant.permissions &= common.ROOM_PERMISSIONS_ALL
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoomPermissionsReceived,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				roomPermissions = payload,
 			},
 			true
 

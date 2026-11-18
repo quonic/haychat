@@ -65,6 +65,7 @@ version below therefore needs clients and servers rebuilt together.
 | 22 | Signed room messages (#90): `ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `signature`, and every plaintext room message carries a random `clientMessageId` and its sender's signature (`signPlaintextRoomMessage`); the server refuses unsigned plaintext ("Invalid room message signature") and a reused client message ID, and clients show no room or direct message without its sender's valid signature (#82). Schema migration 10 deletes every unsigned message ([below](#signed-messages-protocol-22)) |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 | 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
+| 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
@@ -98,6 +99,48 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#roles-and-permiss
   `ClientAdminDeleteRole` 183, `ClientAdminSetUserRoles` 184, `ServerRoleUpdated` 185,
   `ServerRoleDeleted` 186. The retired placeholders `ClientGetRoles` … `ServerRemovedRole` keep
   24..31 and are never sent.
+
+## Room permissions and role rooms (protocol 24)
+
+The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions).
+
+- **Room permissions** are `common.RoomPermission` bit numbers carried as one unsigned integer,
+  the `RoomPermissions` `bit_set` (u64), and stored as `rooms.everyone_permissions` and
+  `room_role_permissions.permissions` (BIGINT). Pinned values: SendMessages 0, SpeakInVoice 1,
+  ManageMembers 2, EditRoom 3. The default everyone grant is SendMessages + SpeakInVoice.
+  Receivers drop unknown bits.
+- `RoomSummary.myPermissions` is the receiving account's set in the room (server permissions
+  included: ManageRoomMembers gives ManageMembers, ManageRooms EditRoom, an admin every bit). It
+  is filled in `ServerListRooms`, `ServerAdminRooms` and the creator's `ServerCreateRoom`; other
+  payloads carry an empty set and a client keeps the one it has. A change of a room's grants,
+  an account's roles, a role's deletion, the admin role or a role's server permissions sends
+  the accounts concerned a fresh `ServerListRooms`.
+- `ClientAdminFetchRoomPermissions{roomId}` and `ClientAdminSetRoomPermissions{roomId,
+  everyone, roles: [{roleId, permissions}]}` need ManageRooms or the room's EditRoom ("Room
+  management permission required"). A set replaces every grant (a role sent without
+  permissions loses its grant), refuses a grant to an unknown or the built-in role ("Invalid
+  role request") and any bit added or taken away that the requester may not grant ("You cannot
+  grant a room permission you do not hold"; ManageRooms may grant SendMessages, SpeakInVoice and
+  EditRoom). Both are answered by `ServerAdminRoomPermissions{roomId, everyone, roles,
+  accessRoleIds, myPermissions}`.
+- Checks: a message (plaintext or sealed) needs SendMessages ("You cannot send messages in this
+  room"). A voice join needs only membership; without SpeakInVoice the relay drops the session's
+  frames (the `[Status]` counter `voice_drops_no_speak_permission`). Adds and removals need
+  ManageMembers in the room (or, to add, membership of a Member invite room), also for an
+  encrypted room's signed Add. An edit needs ManageRooms, or EditRoom with the room's own
+  access and access roles.
+- **Role rooms** (`RoomAccess.Role`, 4): `accessRoleIds` are 1..32 distinct role IDs for a Role
+  room and none otherwise ("Invalid room metadata" or "Invalid room edit"); an unknown or
+  built-in role is "Unknown access role". The members become exactly the roles' holders;
+  `ClientAdminSetUserRoles`, `ClientAdminDeleteRole` and a change of a room's access roles add
+  and remove members in the same statement, each announced with `ServerRoomMembershipChanged`
+  (a removal also ends the account's voice in that room). `ClientAddRoomMember`,
+  `ClientRemoveRoomMember` and `ClientLeaveRoom` are refused ("This room's members come from
+  its access roles"), and so is an encrypted Role room ("Encrypted rooms cannot take their
+  members from roles").
+- Wire values: `ClientAdminSetRoomPermissions` 187, `ClientAdminFetchRoomPermissions` 188,
+  `ServerAdminRoomPermissions` 189. The older never-sent placeholders `ClientChangeRoomPermissions`,
+  `ServerRoomPermissions` and `ServerRoomPermissionsChange` stay unused.
 
 ## Account encryption keys (protocol 16)
 

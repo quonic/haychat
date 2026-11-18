@@ -7,6 +7,7 @@ import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 
@@ -48,6 +49,9 @@ PendingDBRequestType :: enum {
 	// one statement checks the role and the guards.
 	ListRoles,
 	RoleAction,
+	// Room permissions (router_room_permissions.odin, protocol 24): a fetch or a set of a room's
+	// grants, whose one statement checks ManageRooms or the room's EditRoom.
+	RoomPermissions,
 }
 
 PendingDBRequest :: struct {
@@ -85,6 +89,8 @@ PendingDBRequest :: struct {
 	// RoleAction (protocol 23): which role statement, and the role it names (0 for a create).
 	roleAction:       common.DatabaseRoleAction,
 	roleID:           int,
+	// RoomPermissions (protocol 24): a fetch or a set of a room's grants.
+	roomPermissionsAction: common.DatabaseRoomPermissionsAction,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -650,6 +656,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .DeleteRoom,
 		     .ListRoles,
 		     .RoleAction,
+		     .RoomPermissions,
 		     .RoomMemberAction,
 		     .AdminListRooms,
 		     .PostDirectMessage,
@@ -1194,21 +1201,25 @@ MainRouterState_handleClientCreateRoom :: proc(
 	payload: []u8,
 ) {
 	req: common.ClientCreateRoomPayload
+	defer common.ClientCreateRoomPayload_deinit(&req)
 	if cbor.unmarshal(payload, &req) != nil ||
 	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) ||
 	   !common.roomTypeIsSupported(req.roomType) ||
 	   !common.roomAccessIsSupported(req.access) ||
-	   !common.roomHistoryVisibilityIsSupported(req.historyVisibility) {
-		delete(req.name)
-		delete(req.description)
+	   !common.roomHistoryVisibilityIsSupported(req.historyVisibility) ||
+	   !common.roomAccessRolesAreValid(req.access, req.accessRoleIds[:]) {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room metadata")
 		return
 	}
-	defer delete(req.name)
-	defer delete(req.description)
 	// Protocol 18: encrypting a room anyone joins protects nothing (e2ee-design.md 6.1).
 	if req.encrypted && req.access == .Public {
 		MainRouterState_sendProtocolError(pm, state, peerID, common.ENCRYPTED_ROOM_PUBLIC_MESSAGE)
+		return
+	}
+	// Protocol 24: an encrypted room's adds must be signed in its member log, which a role
+	// change cannot do.
+	if req.encrypted && req.access == .Role {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ROOM_ENCRYPTED_ROLE_MESSAGE)
 		return
 	}
 	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
@@ -1229,6 +1240,7 @@ MainRouterState_handleClientCreateRoom :: proc(
 			historyVisibility = req.historyVisibility,
 			creatorJoins = req.creatorJoins,
 			encrypted = req.encrypted,
+			accessRoleIds = MainRouterState_sortedRoleIDs(req.accessRoleIds[:]),
 		},
 		PendingDBRequest{requestType = .CreateRoom, targetUserID = userID},
 	)
@@ -1241,18 +1253,16 @@ MainRouterState_handleClientEditRoom :: proc(
 	payload: []u8,
 ) {
 	req: common.ClientEditRoomPayload
+	defer common.ClientEditRoomPayload_deinit(&req)
 	if cbor.unmarshal(payload, &req) != nil ||
 	   req.roomId <= 0 ||
 	   !MainRouterState_hasValidRoomMetadata(req.name, req.description) ||
 	   !common.roomTypeIsSupported(req.roomType) ||
-	   !common.roomAccessIsSupported(req.access) {
-		delete(req.name)
-		delete(req.description)
+	   !common.roomAccessIsSupported(req.access) ||
+	   !common.roomAccessRolesAreValid(req.access, req.accessRoleIds[:]) {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room edit")
 		return
 	}
-	defer delete(req.name)
-	defer delete(req.description)
 	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
 	if !ok {
 		return
@@ -1269,6 +1279,7 @@ MainRouterState_handleClientEditRoom :: proc(
 			roomType = req.roomType,
 			access = req.access,
 			encrypted = req.encrypted,
+			accessRoleIds = MainRouterState_sortedRoleIDs(req.accessRoleIds[:]),
 		},
 		PendingDBRequest{requestType = .EditRoom, roomID = req.roomId},
 	)
@@ -1296,6 +1307,15 @@ MainRouterState_handleClientDeleteRoom :: proc(
 		common.DatabaseDeleteRoomRequest{actorUserId = userID, roomId = req.roomId},
 		PendingDBRequest{requestType = .DeleteRoom, roomID = req.roomId},
 	)
+}
+
+// An owned, ascending copy of role IDs, the order the edit statement compares a room's access
+// roles in.
+MainRouterState_sortedRoleIDs :: proc(roleIDs: []int) -> [dynamic]int {
+	sorted := make([dynamic]int, 0, len(roleIDs))
+	append(&sorted, ..roleIDs)
+	slice.sort(sorted[:])
+	return sorted
 }
 
 MainRouterState_hasRecipientUserID :: proc(userIDs: []int, userID: int) -> bool {
@@ -1388,6 +1408,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAdminSaveRole(pm, state, peerID, packet.payload)
 	case .ClientAdminDeleteRole:
 		MainRouterState_handleClientAdminDeleteRole(pm, state, peerID, packet.payload)
+	case .ClientAdminSetRoomPermissions:
+		MainRouterState_handleClientAdminSetRoomPermissions(pm, state, peerID, packet.payload)
+	case .ClientAdminFetchRoomPermissions:
+		MainRouterState_handleClientAdminFetchRoomPermissions(pm, state, peerID, packet.payload)
 	case .ClientAdminSetUserRoles:
 		MainRouterState_handleClientAdminSetUserRoles(pm, state, peerID, packet.payload)
 	case .ClientPublishEncryptionKey:
@@ -1660,6 +1684,16 @@ MainRouterState_handleDatabaseResult :: proc(
 			.ServerListRooms,
 			common.ServerListRoomsPayload{rooms = roomList.rooms},
 		)
+		// Protocol 24: the account's voice sessions follow its SpeakInVoice in each room.
+		if session, sessionOK := MainRouterState_getPeerSession(state, request.peerID);
+		   sessionOK && session.isAuthenticated {
+			MainRouterState_voiceUpdateSpeakPermissions(
+				pm,
+				state,
+				session.authenticatedUserID,
+				roomList.rooms[:],
+			)
+		}
 		MainRouterState_voiceSendActiveParticipants(
 			pm,
 			state,
@@ -1686,6 +1720,15 @@ MainRouterState_handleDatabaseResult :: proc(
 		}
 		if posted.chatDisabled {
 			MainRouterState_sendProtocolError(pm, state, request.peerID, CHAT_DISABLED_MESSAGE)
+			return
+		}
+		if posted.sendDenied {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				common.ROOM_SEND_NOT_PERMITTED_MESSAGE,
+			)
 			return
 		}
 		refusal := ""
@@ -1761,6 +1804,15 @@ MainRouterState_handleDatabaseResult :: proc(
 			)
 			return
 		}
+		if mutation.refusal == .UnknownAccessRole {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				common.ROOM_ACCESS_ROLE_UNKNOWN_MESSAGE,
+			)
+			return
+		}
 		MainRouterState_sendPeerMessage(
 			pm,
 			state,
@@ -1775,14 +1827,16 @@ MainRouterState_handleDatabaseResult :: proc(
 			},
 		)
 		// A Public room includes every account, so every connected session must refresh its
-		// room list; an invite room only the creator's, and only when they joined.
+		// room list; an invite room only the creator's, and only when they joined; a Role room
+		// (protocol 24) its access roles' holders.
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if !recipientSession.isAuthenticated {
 				continue
 			}
 			recipientUserID := recipientSession.authenticatedUserID
 			if mutation.room.access != .Public &&
-			   !(mutation.isMember && recipientUserID == request.targetUserID) {
+			   !(mutation.isMember && recipientUserID == request.targetUserID) &&
+			   !MainRouterState_hasRecipientUserID(mutation.addedUserIDs[:], recipientUserID) {
 				continue
 			}
 			MainRouterState_sendPeerMessage(
@@ -1818,6 +1872,8 @@ MainRouterState_handleDatabaseResult :: proc(
 				message = common.ENCRYPTED_ROOM_FLAG_MESSAGE
 			case .EncryptedAccess:
 				message = common.ENCRYPTED_ROOM_ACCESS_MESSAGE
+			case .UnknownAccessRole:
+				message = common.ROOM_ACCESS_ROLE_UNKNOWN_MESSAGE
 			case .None:
 			}
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
@@ -1839,8 +1895,27 @@ MainRouterState_handleDatabaseResult :: proc(
 				changed = true,
 			},
 		)
-		// A switch to Public added these accounts: each refreshes its room list.
+		// A switch to Public added these accounts: each refreshes its room list. So does a Role
+		// room's new holder (protocol 24), and its former members leave, voice first.
 		MainRouterState_roomMembersAdded(pm, state, request.roomID, mutation.addedUserIDs[:])
+		for removedUserID in mutation.removedUserIDs {
+			MainRouterState_voiceEvictUser(
+				pm,
+				state,
+				request.roomID,
+				removedUserID,
+				VOICE_LEFT_REMOVED_FROM_ROOM,
+			)
+			MainRouterState_sendRoomMembershipChange(
+				pm,
+				state,
+				request.roomID,
+				removedUserID,
+				false,
+				nil,
+				request.peerID,
+			)
+		}
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
@@ -1957,6 +2032,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleRoleListResult(pm, state, request, response)
 	case .RoleAction:
 		MainRouterState_handleRoleActionResult(pm, state, request, response)
+	case .RoomPermissions:
+		MainRouterState_handleRoomPermissionsResult(pm, state, request, response)
 	case .PublishEncryptionKey:
 		MainRouterState_handlePublishEncryptionKeyResult(pm, state, request, response)
 	case .FetchUserKeys:

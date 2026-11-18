@@ -678,6 +678,74 @@ DATABASE_ROLES_CHECKS ::
 	"AND conname = 'server_roles_position_check')), " +
 	"('server roles one builtin', to_regclass('server_roles_one_builtin') IS NOT NULL)"
 
+// Migration 12 (protocol 24, #96): room permissions and role rooms.
+//
+// - rooms.everyone_permissions: what every member may do, a common.RoomPermissions mask (bit N
+//   is RoomPermission N). Existing rooms get Send + Speak (3), what everyone could do before.
+// - room_role_permissions (room_id, role_id, permissions): allow-only grants to a role's
+//   holders who are members, both keys cascading.
+// - room_access_roles (room_id, role_id): a Role room's access roles, both keys cascading.
+// - rooms_access_check now also allows 4 (Role), and rooms_encrypted_not_role keeps encrypted
+//   rooms out of it. No existing room is a Role room, so no membership changes.
+//
+// Never edit it; append a migration instead.
+DATABASE_MIGRATION_12_ROOM_PERMISSIONS_SQL ::
+	"ALTER TABLE rooms ADD COLUMN everyone_permissions BIGINT NOT NULL DEFAULT 3; " +
+	"ALTER TABLE rooms ADD CONSTRAINT rooms_everyone_permissions_check " +
+	"CHECK (everyone_permissions >= 0); " +
+	"ALTER TABLE rooms DROP CONSTRAINT rooms_access_check; " +
+	"ALTER TABLE rooms ADD CONSTRAINT rooms_access_check CHECK (access IN (1, 2, 3, 4)), " +
+	"ADD CONSTRAINT rooms_encrypted_not_role CHECK (NOT encrypted OR access <> 4); " +
+	"CREATE TABLE room_role_permissions (" +
+	"room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, " +
+	"role_id BIGINT NOT NULL REFERENCES server_roles(id) ON DELETE CASCADE, " +
+	"permissions BIGINT NOT NULL, " +
+	"CONSTRAINT room_role_permissions_check CHECK (permissions > 0), " +
+	"PRIMARY KEY (room_id, role_id)); " +
+	"CREATE INDEX room_role_permissions_by_role_id ON room_role_permissions (role_id); " +
+	"CREATE TABLE room_access_roles (" +
+	"room_id BIGINT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, " +
+	"role_id BIGINT NOT NULL REFERENCES server_roles(id) ON DELETE CASCADE, " +
+	"PRIMARY KEY (room_id, role_id)); " +
+	"CREATE INDEX room_access_roles_by_role_id ON room_access_roles (role_id);"
+
+// What migration 12 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ROOM_PERMISSIONS_CHECKS ::
+	"('rooms everyone_permissions', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'everyone_permissions' AND data_type = 'bigint' " +
+	"AND is_nullable = 'NO')), " +
+	"('rooms everyone permissions check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_everyone_permissions_check')), " +
+	"('rooms access check allows role', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_access_check' AND pg_get_constraintdef(oid) LIKE '%4%')), " +
+	"('rooms encrypted not role', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('rooms') AND contype = 'c' " +
+	"AND conname = 'rooms_encrypted_not_role')), " +
+	"('room_role_permissions table', to_regclass('room_role_permissions') IS NOT NULL), " +
+	"('room_role_permissions columns', (SELECT count(*) = 3 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'room_role_permissions' " +
+	"AND column_name IN ('room_id', 'role_id', 'permissions'))), " +
+	"('room role permissions primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_role_permissions') AND contype = 'p')), " +
+	"('room role permissions cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_role_permissions') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('room role permissions role index', " +
+	"to_regclass('room_role_permissions_by_role_id') IS NOT NULL), " +
+	"('room_access_roles table', to_regclass('room_access_roles') IS NOT NULL), " +
+	"('room_access_roles columns', (SELECT count(*) = 2 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'room_access_roles' " +
+	"AND column_name IN ('room_id', 'role_id'))), " +
+	"('room access roles primary key', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_access_roles') AND contype = 'p')), " +
+	"('room access roles cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('room_access_roles') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('room access roles role index', to_regclass('room_access_roles_by_role_id') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -740,6 +808,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "roles",
 		sql = DATABASE_MIGRATION_11_ROLES_SQL,
 		checks = DATABASE_ROLES_CHECKS,
+	},
+	{
+		version = 12,
+		name = "room permissions",
+		sql = DATABASE_MIGRATION_12_ROOM_PERMISSIONS_SQL,
+		checks = DATABASE_ROOM_PERMISSIONS_CHECKS,
 	},
 }
 
@@ -861,6 +935,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_SIGNED_MESSAGES_CHECKS +
 	", " +
 	DATABASE_ROLES_CHECKS +
+	", " +
+	DATABASE_ROOM_PERMISSIONS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

@@ -2,6 +2,7 @@ package client
 
 import "../common"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 
 // Room management for admins: creating, renaming, describing, and deleting rooms. The server
@@ -16,11 +17,15 @@ import "core:strings"
 
 // Members (protocol 15, room_members.odin) is the room's member list, which members of a
 // non-public room open too, not only admins.
+//
+// Permissions (protocol 24, room_permissions.odin) is the room's grants, for holders of
+// ManageRooms or the room's EditRoom.
 RoomEditorMode :: enum u8 {
 	Closed,
 	Create,
 	Edit,
 	Members,
+	Permissions,
 }
 
 // The request the editor sent and is waiting on. Protocol errors do not say which request
@@ -33,6 +38,8 @@ RoomEditorPending :: enum u8 {
 	Delete,
 	// Members: an add, a removal or a leave.
 	Member,
+	// Permissions: a save of the room's grants.
+	Permissions,
 }
 
 RoomEditor :: struct {
@@ -53,6 +60,15 @@ RoomEditor :: struct {
 	// is a manager unless unchecked, Q10; the creator always is).
 	encrypted:     bool,
 	uncheckedManagers: [dynamic]int,
+	// Protocol 24 (Create, Edit): a Role room's access roles, ascending. An edit of a Role room
+	// waits for the room's grants (accessRolesLoaded) before it can be saved.
+	accessRoleIDs: [dynamic]int,
+	accessRolesLoaded: bool,
+	// Permissions: the grants being edited, from the room's last ServerAdminRoomPermissions
+	// (grantsLoaded), one entry per role with a grant.
+	grantsEveryone: common.RoomPermissions,
+	grantsRoles:   [dynamic]common.RoomRoleGrant,
+	grantsLoaded:  bool,
 	// Members: the room's members from the last ServerRoomMembers, and the answer to the last
 	// add or removal (owned), shown above the list.
 	members:       [dynamic]int,
@@ -74,6 +90,8 @@ RoomEditor_deinit :: proc(editor: ^RoomEditor) {
 	delete(editor.members)
 	delete(editor.notice)
 	delete(editor.uncheckedManagers)
+	delete(editor.accessRoleIDs)
+	delete(editor.grantsRoles)
 	editor^ = {}
 }
 
@@ -102,6 +120,10 @@ RoomAdminRequest :: struct {
 	creatorJoins: bool,
 	// Create and Edit (protocol 18): the room's encrypted flag (an edit repeats the room's).
 	encrypted:   bool,
+	// Create and Edit (protocol 24): a Role room's access roles, accessRoleIDs[:accessRoleCount]
+	// (a fixed array so the request stays comparable).
+	accessRoleIDs: [common.SERVER_ROLES_MAX]int,
+	accessRoleCount: int,
 }
 
 RoomAdminSendBridge :: #type proc(
@@ -116,6 +138,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 	transport: ^ClientServerTransport,
 	request: RoomAdminRequest,
 ) -> bool {
+	request := request
 	switch request.kind {
 	case .Create:
 		return ClientServerTransport_createRoom(
@@ -127,6 +150,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.history,
 			request.creatorJoins,
 			request.encrypted,
+			request.accessRoleIDs[:request.accessRoleCount],
 		)
 	case .Edit:
 		return ClientServerTransport_editRoom(
@@ -137,6 +161,7 @@ ClientServerTransport_sendRoomAdminRequest :: proc(
 			request.roomType,
 			request.access,
 			request.encrypted,
+			request.accessRoleIDs[:request.accessRoleCount],
 		)
 	case .Delete:
 		return ClientServerTransport_deleteRoom(transport, request.roomID)
@@ -236,6 +261,12 @@ State_sendRoomAdminRequest :: proc(
 		if request.kind == .Create && !common.roomHistoryVisibilityIsSupported(request.history) {
 			return "Choose what new members can read."
 		}
+		if request.access == .Role && request.accessRoleCount == 0 {
+			return "Choose the roles whose holders are the room's members."
+		}
+		if request.access != .Role {
+			request.accessRoleCount = 0
+		}
 		request.name = name
 		request.description = description
 	} else if request.roomID <= 0 {
@@ -283,7 +314,11 @@ State_sendCreateRoom :: proc(
 	creatorJoins := true,
 	encrypted := false,
 	managers: []int = nil,
+	accessRoleIDs: []int = nil,
 ) -> string {
+	if encrypted && access == .Role {
+		return common.ROOM_ENCRYPTED_ROLE_MESSAGE
+	}
 	if encrypted {
 		cleanName, cleanDescription, errorMessage := validateRoomMetadata(name, description)
 		if len(errorMessage) > 0 {
@@ -310,19 +345,37 @@ State_sendCreateRoom :: proc(
 			managers,
 		)
 	}
-	return State_sendRoomAdminRequest(
-		state,
-		serverID,
-		RoomAdminRequest {
-			kind = .Create,
-			name = name,
-			description = description,
-			roomType = roomType,
-			access = access,
-			history = history,
-			creatorJoins = creatorJoins,
-		},
-	)
+	request := RoomAdminRequest {
+		kind         = .Create,
+		name         = name,
+		description  = description,
+		roomType     = roomType,
+		access       = access,
+		history      = history,
+		creatorJoins = creatorJoins,
+	}
+	if !roomAdminRequestSetAccessRoles(&request, accessRoleIDs) {
+		return "Too many access roles."
+	}
+	return State_sendRoomAdminRequest(state, serverID, request)
+}
+
+// Copies a Role room's access roles into request, ascending and without repeats. False when
+// there are more than SERVER_ROLES_MAX.
+roomAdminRequestSetAccessRoles :: proc(request: ^RoomAdminRequest, roleIDs: []int) -> bool {
+	request.accessRoleCount = 0
+	for roleID in roleIDs {
+		if roleID <= 0 || slice.contains(request.accessRoleIDs[:request.accessRoleCount], roleID) {
+			continue
+		}
+		if request.accessRoleCount == len(request.accessRoleIDs) {
+			return false
+		}
+		request.accessRoleIDs[request.accessRoleCount] = roleID
+		request.accessRoleCount += 1
+	}
+	slice.sort(request.accessRoleIDs[:request.accessRoleCount])
+	return true
 }
 
 // Sends ClientCreateRoom as given (room_log.odin, once an encrypted room's managers are
@@ -356,31 +409,33 @@ State_sendRoomAdminCreate :: proc(
 // Renames a room and replaces its description, type and access mode; the answer arrives as
 // RoomEdited. Neither has a default, so an edit never changes them by accident: pass the room's
 // own to keep them. Making a room text-only ends its voice session on the server; making it
-// Public adds every account.
+// Public adds every account. accessRoleIDs (protocol 24) are a Role room's access roles: the
+// room's members become their holders.
 State_sendEditRoom :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	name, description: string,
 	roomType: common.RoomType,
 	access: common.RoomAccess,
+	accessRoleIDs: []int = nil,
 ) -> string {
 	if roomID <= 0 {
 		return "No room to edit."
 	}
-	return State_sendRoomAdminRequest(
-		state,
-		serverID,
-		RoomAdminRequest {
-			kind = .Edit,
-			roomID = roomID,
-			name = name,
-			description = description,
-			roomType = roomType,
-			access = access,
-			// The flag never changes; an edit repeats the room's (protocol 18).
-			encrypted = State_roomIsEncrypted(state, serverID, roomID),
-		},
-	)
+	request := RoomAdminRequest {
+		kind        = .Edit,
+		roomID      = roomID,
+		name        = name,
+		description = description,
+		roomType    = roomType,
+		access      = access,
+		// The flag never changes; an edit repeats the room's (protocol 18).
+		encrypted   = State_roomIsEncrypted(state, serverID, roomID),
+	}
+	if !roomAdminRequestSetAccessRoles(&request, accessRoleIDs) {
+		return "Too many access roles."
+	}
+	return State_sendRoomAdminRequest(state, serverID, request)
 }
 
 // The type of a cached room, or ChatAndVoice when it is not cached.
@@ -442,6 +497,11 @@ State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roo
 	editor.creatorJoins = true
 	editor.encrypted = false
 	clear(&editor.uncheckedManagers)
+	clear(&editor.accessRoleIDs)
+	editor.accessRolesLoaded = false
+	editor.grantsEveryone = {}
+	clear(&editor.grantsRoles)
+	editor.grantsLoaded = false
 	editor.pending = .None
 	editor.confirmDelete = false
 	delete(editor.error)
@@ -468,10 +528,11 @@ State_openRoomCreator :: proc(state: ^State) {
 
 // Opens the edit form for one of the selected server's rooms, filled with its current name,
 // description, type and access. Only accounts holding ManageRooms get it, also for a room they
-// are not in (from the Admin section's list).
+// are not in (from the Admin section's list), and (protocol 24) members holding the room's
+// EditRoom, who may change only the name, description and type.
 State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	serverID := state.selected_server_id
-	if !State_hasPermission(state, serverID, .ManageRooms) {
+	if !State_canEditRoom(state, serverID, roomID) {
 		return
 	}
 	room := State_knownRoom(state, serverID, roomID)
@@ -486,6 +547,8 @@ State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	state.roomEditor.roomType = room.roomType
 	state.roomEditor.access = roomAccessShown(room.access)
 	state.roomEditor.history = room.historyVisibility
+	// Protocol 24: a Role room's access roles come with its grants.
+	State_roomEditorLoadGrants(state)
 }
 
 // Opens the edit form with its delete armed: the next click on "Confirm delete" sends. The
@@ -536,6 +599,14 @@ State_setRoomEditorAccess :: proc(state: ^State, access: common.RoomAccess) {
 	if editor.mode == .Edit && State_roomIsEncrypted(state, editor.serverID, editor.roomID) {
 		return
 	}
+	// Protocol 24: the room's EditRoom does not cover its access, and encrypted rooms never take
+	// their members from roles.
+	if editor.mode == .Edit && !State_hasPermission(state, editor.serverID, .ManageRooms) {
+		return
+	}
+	if access == .Role {
+		editor.encrypted = false
+	}
 	if editor.mode == .Create && editor.access != access {
 		// Encrypt this room follows the mode: on for invite rooms (Q9), never for Public ones.
 		editor.encrypted = access != .Public
@@ -550,7 +621,10 @@ State_setRoomEditorAccess :: proc(state: ^State, access: common.RoomAccess) {
 // Encrypt this room (Create, invite modes only).
 State_toggleRoomEditorEncrypted :: proc(state: ^State) {
 	editor := &state.roomEditor
-	if editor.mode != .Create || editor.pending != .None || editor.access == .Public {
+	if editor.mode != .Create ||
+	   editor.pending != .None ||
+	   editor.access == .Public ||
+	   editor.access == .Role {
 		return
 	}
 	editor.encrypted = !editor.encrypted
@@ -653,11 +727,16 @@ State_submitRoomEditor :: proc(state: ^State) {
 			editor.access,
 			editor.history,
 			editor.creatorJoins || editor.access == .Public,
-			editor.encrypted && editor.access != .Public,
+			editor.encrypted && editor.access != .Public && editor.access != .Role,
 			State_roomEditorManagers(state),
+			editor.accessRoleIDs[:],
 		)
 		pending = .Create
 	} else {
+		if editor.access == .Role && !editor.accessRolesLoaded {
+			RoomEditor_setError(editor, "The room's roles have not arrived yet. Try again.")
+			return
+		}
 		errorMessage = State_sendEditRoom(
 			state,
 			editor.serverID,
@@ -666,6 +745,7 @@ State_submitRoomEditor :: proc(state: ^State) {
 			description,
 			editor.roomType,
 			editor.access,
+			editor.accessRoleIDs[:],
 		)
 		pending = .Save
 	}
@@ -713,6 +793,10 @@ State_roomEditorRoomChanged :: proc(state: ^State, serverID, roomID: int) {
 		State_closeRoomEditor(state)
 	case .Members:
 		if !roomMemberRights(state, serverID, roomID).canView {
+			State_closeRoomEditor(state)
+		}
+	case .Permissions:
+		if !State_canEditRoom(state, serverID, roomID) {
 			State_closeRoomEditor(state)
 		}
 	case .Closed, .Create:

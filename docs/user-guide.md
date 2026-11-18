@@ -86,6 +86,7 @@ Each room has an access mode, chosen when it is created:
 | **Public** | Every account, new ones too | Nobody needs to | Admins |
 | **Member invite** | Whoever was added | Its members and admins | Admins |
 | **Admin invite** | Whoever was added | Admins | Admins |
+| **Roles** | Whoever holds one of the room's chosen roles | Nobody: an admin gives the role | Nobody: an admin takes the role away |
 
 - **Members…** in a channel's right-click menu (invite rooms, and every room for admins) opens
   the room's **Members** page: who is in it, **Add** next to everyone else when you may add
@@ -95,6 +96,15 @@ Each room has an access mode, chosen when it is created:
 - **Leave room…** in a channel's menu leaves an invite room (it takes a second click, "Click
   again to leave"). Public rooms cannot be left. In an Admin invite room only an admin can add
   you back.
+- **Roles** rooms take their members from roles: an admin picks one or more roles when creating
+  or editing the room, and everyone holding one of them is a member at once. Being given such a
+  role adds you to the room, and losing it (or the role being deleted) takes you out; you cannot
+  leave a Roles room yourself. Encrypted rooms cannot be Roles rooms.
+- **Room permissions.** A room may let members do less than usual: a room whose members may not
+  send shows **You cannot send messages in this room** where the composer would be, and in voice
+  you join and listen but nobody hears you (the voice bar says **You cannot speak in this
+  room**). A room can also let some roles manage its members or edit it. The controls follow at
+  once when a permission or a role changes. See [Permissions](#room-permissions).
 - **History for new members** is set when the room is created and never changes: **From join**
   (new members read only what is sent after they were added; someone removed and added again
   starts over) or **Full history** (they read everything). Public rooms always show the whole
@@ -347,7 +357,8 @@ members of invite rooms a role with **Manage room members**. In the selected ser
 the **Channels** header shows **+ New room**, which opens a
 form in the main pane: a name of 1 to 64 bytes (a leading `#` is dropped), an optional
 description of up to 256 bytes, a **Type** selector (**Text**, **Voice**, **Text and voice**),
-**Who can join** (**Public**, **Member invite**, **Admin invite**; see
+**Who can join** (**Public**, **Member invite**, **Admin invite**, **Roles** with a checkbox
+per role; see
 [Room access](#room-access)), **History for new members** (**From join** or **Full history**;
 fixed for Public rooms, which show everything), and **Join this room** (on by default; Public
 rooms always include you), **Encrypt this room** for invite rooms (checked by default; it can
@@ -364,13 +375,32 @@ A room's header shows **Edit room**, which opens the same form filled in, with *
 **Cancel**, **Members…**, and **Delete room**; delete asks for a second click (**Confirm
 delete**) and removes the room with its history. **Who can join** can change between any two
 modes: making a room Public adds every account (the form says so), and making a Public room
-invite-only keeps everyone in it. An encrypted room's access changes only from its Members page
+invite-only keeps everyone in it. Making a room a **Roles** room, or changing its roles, makes
+its members exactly the roles' holders (the others leave); switching a Roles room to another mode
+keeps its members. An encrypted room's access changes only from its Members page
 (a manager who is an admin signs it). Its history setting is shown but cannot change. The form warns before a save that would remove people from a room's
 voice, and before deleting `#general` (the server recreates it only on a start with no rooms
 left). It closes when another admin renames or deletes its room, and shows the server's answer
 when it refuses (for example a duplicate name, or "Admin permission required" when the role was
 revoked). Clients whose selected room was deleted move to `#general`, or to the first room when
 `#general` is gone.
+
+### Room Permissions
+
+The Edit room form's **Permissions…** opens the room's **Permissions** page: a row for
+**Everyone** and one per role, each with **Send messages**, **Speak in voice**, **Manage
+members** and **Edit room**. A member may do what the Everyone row or any of their roles allows;
+nothing takes a permission away. **Save** stores the page and everyone in the room gets the change
+at once; **Back** returns to the form.
+
+- Admins hold every room permission. A role with **Manage rooms** counts as **Edit room** in every
+  room, and one with **Manage room members** as **Manage members**.
+- **Edit room** lets a member open Edit room and change the name, description and type, and the
+  room's permissions, but not who can join or the room's encryption, and not delete it.
+- A toggle you could not change yourself is greyed out: you can only give or take away a
+  permission you hold (holders of Manage rooms may give Send messages, Speak in voice and Edit
+  room).
+- **Manage members** in a room lets a member add and remove people there, as an admin would.
 
 ### Server Settings → Admin
 

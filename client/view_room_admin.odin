@@ -16,6 +16,11 @@ import "ui"
 // room-editor-manager (user ID) (Create, protocol 18), room-editor-members (Edit),
 // room-editor-submit, room-editor-cancel, room-editor-delete. The Members page
 // (view_room_members.odin) has its own.
+//
+// Protocol 24: room-access 4 (Roles), room-editor-access-role (role ID) for a Role room's access
+// roles, and room-editor-permissions (Edit) opening the Permissions page, whose IDs are
+// room-permission (role ID, 0 for Everyone; permission bit 0 send, 1 speak, 2 manage members,
+// 3 edit room), room-permissions-save and room-permissions-back.
 
 ROOM_EDITOR_COLUMN_WIDTH :: 480
 ROOM_EDITOR_SECTION_GAP :: 20
@@ -97,6 +102,10 @@ roomEditorSelector :: proc(
 viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^ConnectionBanner) {
 	if state.roomEditor.mode == .Members {
 		viewRoomMembers(state, ctx, r, banner)
+		return
+	}
+	if state.roomEditor.mode == .Permissions {
+		viewRoomPermissions(state, ctx, r, banner)
 		return
 	}
 	view := buildRoomEditorView(state)
@@ -205,10 +214,39 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 			labels[:],
 			ids[:],
 			selected,
+			enabled = !view.accessLocked,
 		)
 	}
 	_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 	roomEditorWrapped(ctx, &column, view.accessNote, ctx.theme.fgMuted)
+	// Protocol 24: a Role room's access roles.
+	accessRoleClicked := 0
+	if view.showAccessRoles {
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		for role in view.accessRoles {
+			line := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+			options := ui.ButtonOptions {
+				selected   = role.checked,
+				background = ctx.theme.hover,
+				color      = view.accessLocked ? ctx.theme.fgMuted : ctx.theme.fg,
+			}
+			prefix := role.checked ? "[x] " : "[ ] "
+			if ui.button(
+				   ctx,
+				   ui.idOf("room-editor-access-role", role.roleID),
+				   line,
+				   fmt.tprintf("%s%s", prefix, role.label),
+				   options,
+			   ) &&
+			   !view.accessLocked {
+				accessRoleClicked = role.roleID
+			}
+			_ = ui.cutTop(&column, ui.dp(ctx, ROW_SPACING))
+		}
+		if len(view.accessRolesNote) > 0 {
+			roomEditorWrapped(ctx, &column, view.accessRolesNote, ctx.theme.fgMuted)
+		}
+	}
 	if view.encryptedRoom {
 		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
 		roomEditorWrapped(
@@ -260,6 +298,7 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 
 	joinClicked := false
 	membersClicked := false
+	permissionsClicked := false
 	encryptClicked := false
 	managerClicked := 0
 	if view.isCreate {
@@ -356,6 +395,17 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 			"Members…",
 			membersOptions,
 		)
+		if view.showPermissions {
+			_ = ui.cutLeft(&row, ui.dp(ctx, PANEL_PADDING))
+			permissionsRect := ui.cutLeft(&row, min(row.w, ui.dp(ctx, 160)))
+			permissionsClicked = ui.button(
+				ctx,
+				ui.idOf("room-editor-permissions"),
+				permissionsRect,
+				"Permissions…",
+				membersOptions,
+			)
+		}
 	}
 
 	if len(view.generalNotice) > 0 {
@@ -428,6 +478,10 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		State_setRoomEditorType(state, ROOM_EDITOR_TYPES[typeClicked])
 	case accessClicked >= 0:
 		State_setRoomEditorAccess(state, ROOM_EDITOR_ACCESS_MODES[accessClicked])
+	case accessRoleClicked > 0:
+		State_toggleRoomEditorAccessRole(state, accessRoleClicked)
+	case permissionsClicked:
+		State_openRoomPermissions(state, editor.serverID, editor.roomID)
 	case historyClicked >= 0:
 		State_setRoomEditorHistory(state, ROOM_EDITOR_HISTORY_OPTIONS[historyClicked])
 	case joinClicked:
@@ -444,5 +498,145 @@ viewRoomEditor :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		State_deleteRoomFromEditor(state)
 	case submitted:
 		State_submitRoomEditor(state)
+	}
+}
+
+// The Permissions page (protocol 24): a row per grant (Everyone, then each role) with a toggle
+// per permission, Save and Back. Toggles this account may not grant are drawn muted and do
+// nothing.
+viewRoomPermissions :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	r: ui.Rect,
+	banner: ^ConnectionBanner,
+) {
+	view := buildRoomPermissionsView(state)
+	if !view.visible {
+		return
+	}
+	editor := &state.roomEditor
+	area := r
+	viewHeader(ctx, &area, view.title)
+	viewConnectionBanner(state, ctx, &area, banner)
+
+	padding := ui.dp(ctx, 24)
+	width := min(area.w - padding * 2, ui.dp(ctx, ROOM_EDITOR_COLUMN_WIDTH + 160))
+	scrollID := ui.idOf("room-permissions-scroll", editor.serverID, editor.roomID)
+	offset := ui.scrollBegin(ctx, scrollID, area, editor.contentH)
+	column := ui.Rect {
+		area.x + (area.w - width) / 2,
+		area.y + padding - offset,
+		width,
+		max(f32(1e6), area.h),
+	}
+	top := column.y
+	sectionGap := ui.dp(ctx, ROOM_EDITOR_SECTION_GAP)
+	roomEditorWrapped(ctx, &column, view.intro, ctx.theme.fgMuted)
+	_ = ui.cutTop(&column, sectionGap)
+
+	toggledRole := -1
+	toggledPermission: common.RoomPermission
+	if !view.loaded {
+		roomEditorWrapped(ctx, &column, "Loading the room's permissions…", ctx.theme.fgMuted)
+	} else {
+		gap := ui.dp(ctx, PANEL_PADDING)
+		labelW := min(column.w * 0.28, ui.dp(ctx, 160))
+		cellW := (column.w - labelW - gap * f32(len(ROOM_PERMISSION_ORDER))) /
+			f32(len(ROOM_PERMISSION_ORDER))
+		header := ui.cutTop(&column, ui.lineHeight(ctx))
+		_ = ui.cutLeft(&header, labelW + gap)
+		for permission in ROOM_PERMISSION_ORDER {
+			cell := ui.cutLeft(&header, cellW)
+			_ = ui.cutLeft(&header, gap)
+			ui.label(ctx, cell, roomPermissionLabel(permission), ctx.theme.fgMuted, .Bold)
+		}
+		_ = ui.cutTop(&column, ui.dp(ctx, ROOM_EDITOR_LABEL_GAP))
+		for row in view.rows {
+			line := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+			labelRect := ui.cutLeft(&line, labelW)
+			_ = ui.cutLeft(&line, gap)
+			ui.label(ctx, labelRect, row.label, ctx.theme.fg)
+			for cell, index in row.cells {
+				cellRect := ui.cutLeft(&line, cellW)
+				_ = ui.cutLeft(&line, gap)
+				options := ui.ButtonOptions {
+					align      = .Center,
+					selected   = cell.checked,
+					background = cell.checked ? ctx.theme.primary : ctx.theme.hover,
+					color      = cell.checked ? ctx.theme.onPrimary : ctx.theme.fg,
+				}
+				if !cell.enabled {
+					options.color = ctx.theme.fgMuted
+				}
+				permission := ROOM_PERMISSION_ORDER[index]
+				if ui.button(
+					   ctx,
+					   ui.idOf("room-permission", row.roleID, int(permission)),
+					   cellRect,
+					   cell.checked ? "Allowed" : "—",
+					   options,
+				   ) &&
+				   cell.enabled {
+					toggledRole = row.roleID
+					toggledPermission = permission
+				}
+			}
+			_ = ui.cutTop(&column, ui.dp(ctx, ROW_SPACING))
+		}
+	}
+	if len(view.notice) > 0 {
+		_ = ui.cutTop(&column, sectionGap)
+		roomEditorWrapped(ctx, &column, view.notice, ctx.theme.fgMuted)
+	}
+	if len(view.error) > 0 {
+		_ = ui.cutTop(&column, ui.dp(ctx, PANEL_PADDING * 2))
+		roomEditorWrapped(ctx, &column, view.error, ctx.theme.danger)
+	}
+	_ = ui.cutTop(&column, sectionGap)
+
+	buttons := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT + 4))
+	buttonW := ui.dp(ctx, ROOM_EDITOR_BUTTON_WIDTH)
+	saveOptions := ui.ButtonOptions {
+		align      = .Center,
+		font       = .Bold,
+		color      = ctx.theme.onPrimary,
+		background = ctx.theme.primary,
+	}
+	saveClicked := ui.button(
+		ctx,
+		ui.idOf("room-permissions-save"),
+		ui.cutLeft(&buttons, buttonW),
+		view.saveLabel,
+		saveOptions,
+	)
+	_ = ui.cutLeft(&buttons, ui.dp(ctx, PANEL_PADDING))
+	backClicked := ui.button(
+		ctx,
+		ui.idOf("room-permissions-back"),
+		ui.cutLeft(&buttons, buttonW),
+		"Back",
+		{align = .Center, background = ctx.theme.hover},
+	)
+
+	_ = ui.cutTop(&column, sectionGap)
+	contentH := column.y - top
+	ui.scrollEnd(ctx, scrollID, area)
+	if contentH != editor.contentH {
+		editor.contentH = contentH
+		ui.requestFrame(ctx)
+	}
+
+	switch {
+	case toggledRole >= 0:
+		State_toggleRoomEditorGrant(state, toggledRole, toggledPermission)
+	case saveClicked:
+		State_saveRoomEditorPermissions(state)
+	case backClicked:
+		serverID, roomID := editor.serverID, editor.roomID
+		if State_knownRoom(state, serverID, roomID) != nil {
+			State_openRoomEditor(state, roomID)
+		} else {
+			State_closeRoomEditor(state)
+		}
 	}
 }

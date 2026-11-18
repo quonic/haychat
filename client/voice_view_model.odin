@@ -265,6 +265,9 @@ VoiceBarView :: struct {
 	// Protocol 21: voice in this room is end-to-end encrypted (a lock and
 	// VOICE_E2EE_ENCRYPTED_NOTE).
 	encrypted:    bool,
+	// Protocol 24: the room grants this account no SpeakInVoice (VOICE_SPEAK_NOT_PERMITTED_NOTE
+	// in note); it listens only.
+	speakDenied:  bool,
 }
 
 VOICE_UNAVAILABLE_FALLBACK_TEXT :: "Voice unavailable"
@@ -291,7 +294,7 @@ buildVoiceBarView :: proc(
 		if voice.engine != nil {
 			view.showLevel = true
 			view.levelDB, view.speaking = VoiceEngine_inputLevel(voice.engine)
-			view.speaking &&= !voice.muted
+			view.speaking &&= !voice.muted && !voice.speakDenied
 			if VoiceEngine_usedDeviceFallback(voice.engine) {
 				view.note = VOICE_DEVICE_FALLBACK_NOTE
 			}
@@ -338,6 +341,19 @@ buildVoiceBarView :: proc(
 			view.note = lock
 		}
 	case .Hidden, .Unavailable, .Notice:
+	}
+	if (view.kind == .Joined || view.kind == .Joining) && voice.speakDenied {
+		view.speakDenied = true
+		if len(view.note) > 0 {
+			view.note = fmt.aprintf(
+				"%s · %s",
+				VOICE_SPEAK_NOT_PERMITTED_NOTE,
+				view.note,
+				allocator = allocator,
+			)
+		} else {
+			view.note = VOICE_SPEAK_NOT_PERMITTED_NOTE
+		}
 	}
 	return
 }
