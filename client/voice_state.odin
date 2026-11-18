@@ -59,6 +59,9 @@ ClientVoiceState :: struct {
 	// Push-to-talk as the engine sees it: the window's key or the global hotkey
 	// (State_voiceSyncPushToTalk). The harness and tests set it directly.
 	pushToTalkHeld:   bool,
+	// Protocol 24: the room grants this account no SpeakInVoice; the engine stays muted
+	// (State_voiceApplySpeakPermission, room_permissions.odin).
+	speakDenied:      bool,
 	// The push-to-talk key as the window's own key events last left it (app.odin).
 	pushToTalkWindowHeld: bool,
 	// Global push-to-talk (client/hotkey): owned, created by the GUI only, nil elsewhere.
@@ -361,7 +364,7 @@ State_setVoiceMuted :: proc(state: ^State, muted: bool) {
 	}
 	state.voice.muted = muted
 	if state.voice.engine != nil {
-		VoiceEngine_setMuted(state.voice.engine, muted)
+		VoiceEngine_setMuted(state.voice.engine, muted || state.voice.speakDenied)
 	}
 	State_voiceSendState(state)
 }
@@ -442,7 +445,8 @@ State_voiceStartEngine :: proc(
 	}
 	engine := VoiceEngine_create(config)
 	link.engine = engine
-	VoiceEngine_setMuted(engine, state.voice.muted)
+	State_voiceApplySpeakPermission(state)
+	VoiceEngine_setMuted(engine, state.voice.muted || state.voice.speakDenied)
 	VoiceEngine_setDeafened(engine, state.voice.deafened)
 	VoiceEngine_setPushToTalk(engine, state.voice.pushToTalkHeld)
 	// Per-user volumes and local mutes for this server (user_voice.odin), before the first

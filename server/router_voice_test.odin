@@ -183,6 +183,8 @@ routerVoiceTestAnswerMemberCheck :: proc(
 				userIDs = userIDs,
 				roomFound = true,
 				roomType = roomType,
+				// Protocol 24: every member may speak unless a test says otherwise.
+				permissions = common.ROOM_PERMISSIONS_DEFAULT,
 			},
 		},
 	)

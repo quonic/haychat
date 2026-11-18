@@ -40,6 +40,9 @@ ServerRoomCache :: struct {
 	adminRooms:        [dynamic]common.AdminRoomSummary,
 	adminRoomsLoaded:  bool,
 	adminRoomsLoading: bool,
+	// Rooms' grants and access roles from ServerAdminRoomPermissions (protocol 24,
+	// room_permissions.odin), for the Permissions page and a Role room's edit form.
+	roomGrants:        [dynamic]RoomGrants,
 }
 
 State :: struct {

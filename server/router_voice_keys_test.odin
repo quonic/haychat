@@ -90,6 +90,7 @@ routerVoiceKeysTestAnswerJoin :: proc(
 				roomType = .ChatAndVoice,
 				encrypted = encrypted,
 				logVersion = encrypted ? logVersion : 0,
+				permissions = common.ROOM_PERMISSIONS_DEFAULT,
 			},
 		},
 	)

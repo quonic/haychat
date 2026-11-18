@@ -51,6 +51,7 @@ ServerRoomCache_deinit :: proc(cache: ^ServerRoomCache) {
 	}
 	delete(cache.roomCaches)
 	AdminRoomSummaries_deinit(&cache.adminRooms)
+	RoomGrantsList_deinit(&cache.roomGrants)
 	cache^ = {}
 }
 
@@ -278,6 +279,16 @@ State_sendChannelChat :: proc(state: ^State) {
 	}
 	if transport.serverID != state.selected_server_id {
 		State_setChatStatus(state, "Selected transport does not match the active server")
+		return
+	}
+	// Protocol 24: the server refuses it too; saying so here keeps the draft.
+	if !State_hasRoomPermission(
+		state,
+		state.selected_server_id,
+		state.selected_channel_id,
+		.SendMessages,
+	) {
+		State_setChatStatus(state, ROOM_SEND_NOT_PERMITTED_NOTE)
 		return
 	}
 	// Protocol 19: an encrypted room's message is sealed with this session's sender chain, and
@@ -510,6 +521,7 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 	// An admin's list of every room keeps its own copy.
 	for &entry in cache.adminRooms {
 		if entry.room.id == roomID {
+			previousPermissions := entry.room.myPermissions
 			delete(entry.room.name)
 			delete(entry.room.description)
 			entry.room = room^
@@ -517,6 +529,8 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 			entry.room.description = strings.clone(room.description)
 			entry.room.lastReadMessageId = 0
 			entry.room.unreadCount = 0
+			// Protocol 24: ServerEditRoom carries no permissions; keep the list's.
+			entry.room.myPermissions = previousPermissions
 		}
 	}
 	for index in 0 ..< len(cache.rooms) {
@@ -526,6 +540,7 @@ State_roomEdited :: proc(state: ^State, serverID, roomID: int, room: ^common.Roo
 			edited := room^
 			edited.lastReadMessageId = cache.rooms[index].lastReadMessageId
 			edited.unreadCount = cache.rooms[index].unreadCount
+			edited.myPermissions = cache.rooms[index].myPermissions
 			cache.rooms[index] = edited
 			room^ = {}
 			return
@@ -602,6 +617,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .RoomListReceived:
 		State_receiveRoomList(state, event.serverID, &event.rooms)
 		State_roomLogsRoomsListed(state, event.serverID)
+		// Protocol 24: the list carries this account's room permissions.
+		State_voiceApplySpeakPermission(state)
 	case .RoomHistoryReceived:
 		State_receiveRoomHistory(
 			state,
@@ -706,6 +723,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .AdminRoomsReceived:
 		State_receiveAdminRooms(state, event.serverID, &event.adminRooms)
 		State_roomLogsRoomsListed(state, event.serverID)
+	case .RoomPermissionsReceived:
+		State_roomPermissionsReceived(state, event.serverID, &event.roomPermissions)
 	case .RoomLogReceived:
 		State_receiveRoomLog(state, event)
 	case .RoomMemberResult:

@@ -276,6 +276,8 @@ HeadlessEventKind :: enum {
 	RoleList,
 	RoleUpdated,
 	RoleDeleted,
+	// Room permissions (protocol 24, headless_room_permissions.odin).
+	RoomPermissions,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -321,6 +323,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RoleList       = "role_list",
 	.RoleUpdated    = "role_updated",
 	.RoleDeleted    = "role_deleted",
+	.RoomPermissions = "room_permissions",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -568,7 +571,7 @@ HeadlessRoomChatJSON :: struct {
 HeadlessRoomListJSON :: struct {
 	event:    string,
 	serverID: int,
-	rooms:    []common.RoomSummary,
+	rooms:    []HeadlessRoomJSON,
 }
 
 HeadlessHistoryMessageJSON :: struct {
@@ -620,6 +623,23 @@ HeadlessRoomEditedJSON :: struct {
 	logVersion:        int,
 }
 
+// room_created: room_edited's fields and (protocol 24) this account's permissions in the new
+// room. ServerEditRoom carries none, so room_edited has no such field.
+HeadlessRoomCreatedJSON :: struct {
+	event:             string,
+	serverID:          int,
+	roomID:            int,
+	name:              string,
+	description:       string,
+	roomType:          int,
+	access:            int,
+	historyVisibility: int,
+	isMember:          bool,
+	encrypted:         bool,
+	logVersion:        int,
+	myPermissions:     []string,
+}
+
 // An encrypted room's member log as this client verified it (protocol 18), printed after each
 // ServerRoomLog was applied and for room-log. status is unknown, loading, verified or failed;
 // logVersion and headHash the verified head (the epoch); serverLogVersion the server's newest;
@@ -666,7 +686,7 @@ HeadlessRoomMembersJSON :: struct {
 HeadlessAdminRoomsJSON :: struct {
 	event:    string,
 	serverID: int,
-	rooms:    []common.AdminRoomSummary,
+	rooms:    []HeadlessAdminRoomJSON,
 }
 
 // The answer to this session's room-add (added true) or room-remove: changed false when the
@@ -1047,6 +1067,8 @@ headlessRenderRuntimeEvent :: proc(
 		return "", {}, false
 	case .RoleListReceived, .RoleUpdated, .RoleDeleted:
 		return headlessRenderRoleEvent(event, allocator)
+	case .RoomPermissionsReceived:
+		return headlessRenderRoomPermissionsEvent(event, allocator)
 	case .VoiceKeyReceived, .VoiceKeyRequested:
 		// Printed as voice_key after State handled them (headlessPollVoice).
 		return "", {}, false
@@ -1080,7 +1102,7 @@ headlessRenderRuntimeEvent :: proc(
 			HeadlessRoomListJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
-				rooms = event.rooms[:],
+				rooms = headlessRooms(event.rooms[:]),
 			},
 			allocator,
 		)
@@ -1136,7 +1158,7 @@ headlessRenderRuntimeEvent :: proc(
 	case .RoomCreated:
 		kind = .RoomCreated
 		line = headlessMarshal(
-			HeadlessRoomEditedJSON {
+			HeadlessRoomCreatedJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
 				roomID = event.room.id,
@@ -1148,6 +1170,7 @@ headlessRenderRuntimeEvent :: proc(
 				isMember = event.isMember,
 				encrypted = event.room.encrypted,
 				logVersion = event.room.logVersion,
+				myPermissions = headlessRoomPermissionNames(event.room.myPermissions),
 			},
 			allocator,
 		)
@@ -1168,7 +1191,7 @@ headlessRenderRuntimeEvent :: proc(
 			HeadlessAdminRoomsJSON {
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
-				rooms = event.adminRooms[:],
+				rooms = headlessAdminRooms(event.adminRooms[:]),
 			},
 			allocator,
 		)
@@ -1447,7 +1470,7 @@ HeadlessRoomsJSON :: struct {
 	serverID: int,
 	loaded:   bool,
 	loading:  bool,
-	rooms:    []common.RoomSummary,
+	rooms:    []HeadlessRoomJSON,
 }
 
 HeadlessHistoryJSON :: struct {
@@ -1657,13 +1680,14 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"requests a page of a direct conversation; it arrives as a direct_history event",
 		headlessCommandDirectHistory},
 	{"room-create", 2, 0, .Optional,
-		"room-create TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join]" +
-		"[,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]",
+		"room-create TYPE[,public|member-invite|admin-invite|roles=ID+ID][,from-join|full]" +
+		"[,no-join][,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]",
 		"admins: creates a room (TYPE text|voice|both); it arrives as room_created; " +
 		"encrypted names every admin as a manager unless managers= says otherwise",
 		headlessCommandRoomCreate},
 	{"room-edit", 3, 0, .Optional,
-		"room-edit ROOM_ID TYPE[,public|member-invite|admin-invite] NAME [DESCRIPTION...]",
+		"room-edit ROOM_ID TYPE[,public|member-invite|admin-invite|roles=ID+ID] NAME " +
+		"[DESCRIPTION...]",
 		"admins: sets a room's type, access, name, and description (empty without one)",
 		headlessCommandRoomEdit},
 	{"room-members", 1, 0, .None, "room-members ROOM_ID",
@@ -1694,6 +1718,14 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"room-log-entry ROOM_ID add|remove|add-manager|remove-manager|leave USER_ID [unsigned]",
 		"prints a signed (or unsigned) entry on the verified head as hex without sending it",
 		headlessCommandRoomLogEntry},
+	{"room-permissions", 1, 0, .None, "room-permissions ROOM_ID",
+		"ManageRooms or the room's edit-room: asks for its grants; they arrive as " +
+		"room_permissions", headlessCommandRoomPermissions},
+	{"room-permissions-set", 2, 0, .Optional,
+		"room-permissions-set ROOM_ID EVERYONE|none [ROLE_ID=PERMISSIONS...]",
+		"replaces a room's grants; PERMISSIONS is a comma list of send, speak, " +
+		"manage-members, edit-room; answered by room_permissions",
+		headlessCommandRoomPermissionsSet},
 	{"admin-rooms", 0, 0, .None, "admin-rooms",
 		"admins: every room, joined or not; it arrives as admin_rooms",
 		headlessCommandAdminRooms},
@@ -2486,7 +2518,7 @@ headlessCommandRooms :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			serverID = serverID,
 			loaded = cache.roomsLoaded,
 			loading = cache.roomsLoading,
-			rooms = cache.rooms[:],
+			rooms = headlessRooms(cache.rooms[:]),
 		},
 	)
 }
@@ -2831,6 +2863,9 @@ HeadlessRoomOptions :: struct {
 	hasManagers:  bool,
 	managers:     [8]int,
 	managerCount: int,
+	// Protocol 24: roles=ID+ID makes a Role room whose members are those roles' holders.
+	accessRoles:  [common.SERVER_ROLES_MAX]int,
+	accessRoleCount: int,
 }
 
 headlessParseRoomOptions :: proc(word: string, create: bool) -> (HeadlessRoomOptions, bool) {
@@ -2879,6 +2914,22 @@ headlessParseRoomOptions :: proc(word: string, create: bool) -> (HeadlessRoomOpt
 			}
 			options.encrypted = true
 		case:
+			if strings.has_prefix(part, "roles=") {
+				options.access, options.hasAccess = .Role, true
+				list := part[len("roles="):]
+				for id in strings.split_iterator(&list, "+") {
+					roleID, ok := headlessParseNumber(id)
+					if !ok || roleID <= 0 || options.accessRoleCount == len(options.accessRoles) {
+						return options, false
+					}
+					options.accessRoles[options.accessRoleCount] = roleID
+					options.accessRoleCount += 1
+				}
+				if options.accessRoleCount == 0 {
+					return options, false
+				}
+				continue
+			}
 			if !create || !strings.has_prefix(part, "managers=") {
 				return options, false
 			}
@@ -2926,6 +2977,7 @@ headlessCommandRoomCreate :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 		options.creatorJoins,
 		options.encrypted,
 		managers,
+		options.accessRoles[:options.accessRoleCount],
 	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
 	headlessWriteRoomRequest(
@@ -2952,9 +3004,27 @@ headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 	name := command.args[2]
 	description := command.argCount > 3 ? command.args[3] : ""
 	state := &harness.state
-	// Without an access option the room keeps the mode the client knows for it.
+	// Without an access option the room keeps the mode the client knows for it, and a Role
+	// room the access roles of its last room_permissions (protocol 24).
 	if !options.hasAccess {
 		options.access = State_roomAccess(state, state.selected_server_id, roomID)
+		if options.access == .Role {
+			grants := State_findRoomGrants(state, state.selected_server_id, roomID)
+			if grants == nil {
+				headlessWriteError(
+					harness,
+					command.name,
+					"run room-permissions ROOM_ID first: a Role room's edit repeats its roles",
+				)
+				return
+			}
+			for roleID in grants.accessRoleIDs {
+				if options.accessRoleCount < len(options.accessRoles) {
+					options.accessRoles[options.accessRoleCount] = roleID
+					options.accessRoleCount += 1
+				}
+			}
+		}
 	}
 	errorMessage := State_sendEditRoom(
 		state,
@@ -2964,6 +3034,7 @@ headlessCommandRoomEdit :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 		description,
 		options.roomType,
 		options.access,
+		options.accessRoles[:options.accessRoleCount],
 	)
 	cleanName, cleanDescription, _ := validateRoomMetadata(name, description)
 	options.creatorJoins = false

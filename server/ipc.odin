@@ -99,8 +99,10 @@ NetworkVoiceSessionOpen :: struct {
 
 NetworkVoiceRouteMember :: struct {
 	peerId:   u32,
-	muted:    bool, // the relay drops this peer's frames
-	deafened: bool, // the relay sends this peer nothing
+	muted:       bool, // the relay drops this peer's frames
+	deafened:    bool, // the relay sends this peer nothing
+	// Protocol 24: the account lacks SpeakInVoice in the room; the relay drops its frames.
+	speakDenied: bool,
 }
 
 // Router -> network thread: the complete recipient set of one room's voice session, sent on
@@ -301,9 +303,13 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseCreateRoomRequest:
 		delete(r.name)
 		delete(r.description)
+		delete(r.accessRoleIds)
 	case common.DatabaseEditRoomRequest:
 		delete(r.name)
 		delete(r.description)
+		delete(r.accessRoleIds)
+	case common.DatabaseRoomPermissionsRequest:
+		delete(r.roles)
 	case common.DatabasePostDirectMessageRequest:
 		delete(r.content)
 		delete(r.envelope)
@@ -375,6 +381,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.room.description)
 		delete(r.addedUserIDs)
 		delete(r.memberUserIDs)
+		delete(r.removedUserIDs)
 	case common.DatabaseRoomMemberActionResult:
 		delete(r.memberUserIDs)
 		delete(r.logEntry)
@@ -425,6 +432,15 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(account.nickname)
 		}
 		delete(r.affected)
+		for &change in r.membershipChanges {
+			common.DatabaseRoomMembershipChange_deinit(&change)
+		}
+		delete(r.membershipChanges)
+		delete(r.roomPermissionUserIDs)
+	case common.DatabaseRoomPermissionsResult:
+		delete(r.roles)
+		delete(r.accessRoleIds)
+		delete(r.memberUserIDs)
 	case common.DatabaseFetchUserKeysResult:
 		delete(r.keys)
 		delete(r.missingUserIds)

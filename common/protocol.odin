@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 23
+protocolVersion: ProtocolVersion = 24
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -384,6 +384,12 @@ MessageType :: enum {
 	ClientAdminSetUserRoles, // ClientAdminSetUserRolesPayload: admins: an account's roles
 	ServerRoleUpdated, // ServerRoleUpdatedPayload: a role was created or changed, to everyone
 	ServerRoleDeleted, // ServerRoleDeletedPayload: a role was deleted, to everyone
+	// Room permissions and role rooms (protocol 24, #96), appended so no existing wire value
+	// moves. The older ClientChangeRoomPermissions ... ServerRoomPermissionsChange placeholders
+	// above were never sent and stay unused.
+	ClientAdminSetRoomPermissions, // ClientAdminSetRoomPermissionsPayload: a room's grants
+	ClientAdminFetchRoomPermissions, // ClientAdminFetchRoomPermissionsPayload: read them
+	ServerAdminRoomPermissions, // ServerAdminRoomPermissionsPayload: a room's grants
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -419,19 +425,75 @@ roomTypeAllowsVoice :: proc(roomType: RoomType) -> bool {
 
 // Who may join a room (protocol 15, rooms.access). Public rooms include every account: new
 // accounts join them and a new Public room includes everyone. Member invite rooms take whoever a
-// member or an admin adds; Admin invite rooms only whom an admin adds. In every mode only
-// admins remove members, any member of a non-public room may leave it, and admins rename,
-// edit and delete it. The values are the database's and the wire's; they are pinned in
-// protocol_test.odin.
+// member or a member manager adds; Admin invite rooms only whom a member manager adds. In every
+// mode only member managers remove members, any member of a non-public room may leave it, and
+// room managers rename, edit and delete it. The values are the database's and the wire's; they
+// are pinned in protocol_test.odin.
+//
+// Role (protocol 24, #96, plan D6): the members are exactly the accounts holding any of the
+// room's access roles (RoomAccessRoles). Granting or revoking such a role, deleting it, or
+// changing the room's access roles adds and removes members; nobody adds, removes or leaves
+// by hand. Encrypted rooms cannot use it, because their adds must be signed in the member log.
 RoomAccess :: enum u8 {
 	Public       = 1,
 	MemberInvite = 2,
 	AdminInvite  = 3,
+	Role         = 4,
 }
 
 roomAccessIsSupported :: proc(access: RoomAccess) -> bool {
-	return access == .Public || access == .MemberInvite || access == .AdminInvite
+	return(
+		access == .Public ||
+		access == .MemberInvite ||
+		access == .AdminInvite ||
+		access == .Role \
+	)
 }
+
+// Room permissions (protocol 24, #96, plan D5). Allow-only: an account's permissions in a room
+// it is a member of are the room's everyone grant (rooms.everyone_permissions, default
+// ROOM_PERMISSIONS_DEFAULT) plus the grants of each of its roles (room_role_permissions). Server
+// permissions imply room ones in every room, member or not: ManageRoomMembers implies
+// ManageMembers, ManageRooms implies EditRoom, and admins hold every room permission.
+// Membership (room_members) still decides who sees a room at all. Like ServerPermission, the
+// value is the bit number (a u64 bit_set on the wire, a BIGINT mask in the database), pinned in
+// protocol_test.odin.
+RoomPermission :: enum u8 {
+	SendMessages  = 0, // Post chat messages (plaintext or sealed)
+	SpeakInVoice  = 1, // Be heard in voice: without it the relay drops the session's frames
+	ManageMembers = 2, // Add and remove members of this room (not Public or Role rooms)
+	EditRoom      = 3, // Change the name, description and type, and the room's grants
+}
+
+RoomPermissions :: bit_set[RoomPermission;u64]
+
+ROOM_PERMISSIONS_ALL :: RoomPermissions{.SendMessages, .SpeakInVoice, .ManageMembers, .EditRoom}
+// What rooms.everyone_permissions starts at: every member may send and speak.
+ROOM_PERMISSIONS_DEFAULT :: RoomPermissions{.SendMessages, .SpeakInVoice}
+
+// The set a database mask stands for: bits outside ROOM_PERMISSIONS_ALL are dropped, so -1 (an
+// admin) is every permission.
+roomPermissionsFromMask :: proc(mask: i64) -> RoomPermissions {
+	return transmute(RoomPermissions)u64(mask) & ROOM_PERMISSIONS_ALL
+}
+
+roomPermissionsMask :: proc(permissions: RoomPermissions) -> i64 {
+	return i64(transmute(u64)permissions)
+}
+
+// One role's grant in one room (room_role_permissions).
+RoomRoleGrant :: struct {
+	roleId:      int,
+	permissions: RoomPermissions,
+}
+
+// Refusals of room permissions (protocol 24).
+ROOM_SEND_NOT_PERMITTED_MESSAGE :: "You cannot send messages in this room"
+ROOM_ROLE_MEMBERSHIP_MESSAGE :: "This room's members come from its access roles"
+ROOM_ENCRYPTED_ROLE_MESSAGE :: "Encrypted rooms cannot take their members from roles"
+ROOM_PERMISSIONS_INVALID_MESSAGE :: "Invalid room permissions request"
+ROOM_PERMISSIONS_NOT_GRANTABLE_MESSAGE :: "You cannot grant a room permission you do not hold"
+ROOM_ACCESS_ROLE_UNKNOWN_MESSAGE :: "Unknown access role"
 
 // What a new member of a room reads (protocol 15, rooms.history_visibility), chosen when the
 // room is created and fixed afterwards. From join: only messages sent after the member was
@@ -464,17 +526,12 @@ Room :: struct {
 	children:     [dynamic]Room, // List of child rooms
 	roomType:     RoomType,
 	participants: [dynamic]int, // List of client IDs in the room, only used for Chat, Voice and ChatAndVoice room types
-	permissions:  RoomPermissions, // Permissions for the room (e.g. who can join, who can post, etc.)
 	forums:       [dynamic]ForumPost, // List of forum posts in the room (only used for Forum room type), only used for Forum room types
 	is_temporary: bool, // Whether the room is temporary (i.e. should be deleted when the last participant leaves), only used for Chat, Voice and ChatAndVoice room types
 }
 
-RoomPermissions :: struct {
-	groupsCanJoin:  [dynamic]int, // List of group IDs that can join the room, if empty then anyone can join
-	groupsCanChat:  [dynamic]int, // List of group IDs that can chat in the room, if empty then anyone can chat
-	groupsCanVoice: [dynamic]int, // List of group IDs that can use voice in the room, if empty then anyone can use voice
-	groupsCanPost:  [dynamic]int, // List of group IDs that can post in the room, if empty then anyone can post
-}
+// The old RoomPermissions placeholder (group lists) is retired: room permissions are the
+// RoomPermission bit set above (protocol 24).
 
 ForumPost :: struct {
 	id:        int,
@@ -577,6 +634,11 @@ RoomSummary :: struct {
 	// tells a client whether its verified log is behind; it proves nothing (e2ee-design.md 6.2).
 	encrypted:         bool,
 	logVersion:        int,
+	// The requester's permissions in this room (protocol 24), computed per recipient. Filled only
+	// in ServerListRooms and ServerAdminRooms, like the read state; every other payload carries
+	// an empty set and a client keeps the one it has. Any change to them resends
+	// ServerListRooms to the accounts concerned.
+	myPermissions:     RoomPermissions,
 }
 
 ClientListRoomsPayload :: struct {}
@@ -646,6 +708,12 @@ ServerRoomHistoryPayload :: struct {
 // whether the creator joins (creatorJoins here is ignored for an encrypted room), and the
 // server adds the creator to room_members from it. Until then the room has no members and
 // takes no messages; an admin can delete it.
+//
+// Role rooms (protocol 24): access Role needs 1..SERVER_ROLES_MAX distinct access roles in
+// accessRoleIds (never the built-in admin role), and every other access none. The room's
+// members are their holders (creatorJoins is ignored), each told with
+// ServerRoomMembershipChanged. An encrypted Role room is refused (ROOM_ENCRYPTED_ROLE_MESSAGE).
+// accessRoleIds is owned once decoded.
 ClientCreateRoomPayload :: struct {
 	name:              string,
 	description:       string,
@@ -654,6 +722,14 @@ ClientCreateRoomPayload :: struct {
 	historyVisibility: RoomHistoryVisibility,
 	creatorJoins:      bool,
 	encrypted:         bool,
+	accessRoleIds:     [dynamic]int,
+}
+
+ClientCreateRoomPayload_deinit :: proc(payload: ^ClientCreateRoomPayload) {
+	delete(payload.name)
+	delete(payload.description)
+	delete(payload.accessRoleIds)
+	payload^ = {}
 }
 
 // access (protocol 15) changes the room's mode; the history setting cannot change. Switching a
@@ -664,13 +740,119 @@ ClientCreateRoomPayload :: struct {
 // clear or set it is refused with ENCRYPTED_ROOM_FLAG_MESSAGE. An encrypted room's access
 // changes only through a signed SetAccess log entry, so an edit with another access is refused
 // with ENCRYPTED_ROOM_ACCESS_MESSAGE.
+//
+// Protocol 24: holders of ManageRooms may change everything here; a member holding only the
+// room's EditRoom may change the name, description and type, and must send the room's access
+// and access roles unchanged. accessRoleIds follows ClientCreateRoom's rules. A switch to Role
+// (or a change of a Role room's access roles) makes the members exactly the roles' holders:
+// whoever joins or leaves gets ServerRoomMembershipChanged. A switch away from Role keeps the
+// members. accessRoleIds is owned once decoded.
 ClientEditRoomPayload :: struct {
-	roomId:      int,
-	name:        string,
-	description: string,
-	roomType:    RoomType,
-	access:      RoomAccess,
-	encrypted:   bool,
+	roomId:        int,
+	name:          string,
+	description:   string,
+	roomType:      RoomType,
+	access:        RoomAccess,
+	encrypted:     bool,
+	accessRoleIds: [dynamic]int,
+}
+
+ClientEditRoomPayload_deinit :: proc(payload: ^ClientEditRoomPayload) {
+	delete(payload.name)
+	delete(payload.description)
+	delete(payload.accessRoleIds)
+	payload^ = {}
+}
+
+// Whether accessRoleIds fits access: 1..SERVER_ROLES_MAX distinct positive IDs for a Role
+// room, none for any other.
+roomAccessRolesAreValid :: proc(access: RoomAccess, accessRoleIds: []int) -> bool {
+	if access != .Role {
+		return len(accessRoleIds) == 0
+	}
+	if len(accessRoleIds) == 0 || len(accessRoleIds) > SERVER_ROLES_MAX {
+		return false
+	}
+	for roleID, index in accessRoleIds {
+		if roleID <= 0 {
+			return false
+		}
+		for other in accessRoleIds[:index] {
+			if other == roleID {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ClientAdminSetRoomPermissions (protocol 24): replaces the room's everyone grant and every
+// role grant (roles: distinct, non-built-in roles, at most SERVER_ROLES_MAX; a role left out
+// or sent with no permissions has no grant). Needs ManageRooms or the room's EditRoom, and
+// every bit it adds or takes away must be one the requester holds in the room (ManageRooms
+// counts as holding SendMessages, SpeakInVoice and EditRoom); anything else is refused with
+// ROOM_PERMISSIONS_NOT_GRANTABLE_MESSAGE. The requester gets ServerAdminRoomPermissions with
+// the stored grants, and the room's members get a fresh ServerListRooms. roles is owned once
+// decoded.
+ClientAdminSetRoomPermissionsPayload :: struct {
+	roomId:   int,
+	everyone: RoomPermissions,
+	roles:    [dynamic]RoomRoleGrant,
+}
+
+ClientAdminSetRoomPermissionsPayload_deinit :: proc(
+	payload: ^ClientAdminSetRoomPermissionsPayload,
+) {
+	delete(payload.roles)
+	payload.roles = nil
+}
+
+// Whether a ClientAdminSetRoomPermissions is well formed: a room, permissions inside
+// ROOM_PERMISSIONS_ALL, and at most SERVER_ROLES_MAX distinct positive role IDs.
+roomPermissionsRequestIsValid :: proc(request: ClientAdminSetRoomPermissionsPayload) -> bool {
+	if request.roomId <= 0 || request.everyone - ROOM_PERMISSIONS_ALL != {} {
+		return false
+	}
+	if len(request.roles) > SERVER_ROLES_MAX {
+		return false
+	}
+	for grant, index in request.roles {
+		if grant.roleId <= 0 || grant.permissions - ROOM_PERMISSIONS_ALL != {} {
+			return false
+		}
+		for other in request.roles[:index] {
+			if other.roleId == grant.roleId {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ClientAdminFetchRoomPermissions (protocol 24): the room's grants and access roles, for
+// holders of ManageRooms or the room's EditRoom ("Room management permission required"
+// otherwise).
+ClientAdminFetchRoomPermissionsPayload :: struct {
+	roomId: int,
+}
+
+// ServerAdminRoomPermissions: the answer to ClientAdminFetchRoomPermissions and to an applied
+// ClientAdminSetRoomPermissions. roles (by role ID, only roles with a grant) and accessRoleIds
+// (ascending, empty unless the room is a Role room) are owned once decoded. myPermissions is
+// the requester's own set in the room.
+ServerAdminRoomPermissionsPayload :: struct {
+	roomId:        int,
+	everyone:      RoomPermissions,
+	roles:         [dynamic]RoomRoleGrant,
+	accessRoleIds: [dynamic]int,
+	myPermissions: RoomPermissions,
+}
+
+ServerAdminRoomPermissionsPayload_deinit :: proc(payload: ^ServerAdminRoomPermissionsPayload) {
+	delete(payload.roles)
+	delete(payload.accessRoleIds)
+	payload.roles = nil
+	payload.accessRoleIds = nil
 }
 
 ClientDeleteRoomPayload :: struct {
@@ -1841,6 +2023,7 @@ DatabaseQueryRequest :: union {
 	DatabaseFetchRoomKeysRequest,
 	DatabaseRoomKeyRequestCheckRequest,
 	DatabaseRoleRequest,
+	DatabaseRoomPermissionsRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -1855,8 +2038,11 @@ DatabaseRoomListRequest :: struct {
 	userId: int,
 }
 
+// userId (protocol 24), when set, is the account whose room permissions the result reports
+// (the voice join check reads SpeakInVoice from it).
 DatabaseRoomMemberListRequest :: struct {
 	roomId: int,
+	userId: int,
 }
 
 // Checks membership, stores the message, and lists recipients in one statement, so the
@@ -1932,19 +2118,26 @@ DatabaseCreateRoomRequest :: struct {
 	creatorJoins:      bool,
 	// Protocol 18: an encrypted room starts with no members; its log's Create adds the creator.
 	encrypted:         bool,
+	// Protocol 24: a Role room's access roles (owned); its members are their holders.
+	accessRoleIds:     [dynamic]int,
 }
 
 // Switching access to Public adds every account in the same statement. encrypted (protocol
 // 18) must match the room's flag, and an encrypted room's access cannot change here; the
 // statement refuses both (DatabaseRoomMutationResult.refusal).
+//
+// Protocol 24: an actor without ManageRooms but with the room's EditRoom may edit when access
+// and accessRoleIds (owned, ascending) are the room's own. A Role room's members become
+// exactly its access roles' holders in the same statement.
 DatabaseEditRoomRequest :: struct {
-	actorUserId: int, // Protocol 23: must hold ManageRooms, checked in the edit statement
-	roomId:      int,
-	name:        string,
-	description: string,
-	roomType:    RoomType,
-	access:      RoomAccess,
-	encrypted:   bool,
+	actorUserId:   int, // Protocol 23: must hold ManageRooms, checked in the edit statement
+	roomId:        int,
+	name:          string,
+	description:   string,
+	roomType:      RoomType,
+	access:        RoomAccess,
+	encrypted:     bool,
+	accessRoleIds: [dynamic]int,
 }
 
 // Protocol 23: the statement checks ManageRooms and returns the members before the delete.
@@ -1979,6 +2172,23 @@ DatabaseRoomMemberActionRequest :: struct {
 // Every admin's view of every room.
 DatabaseAdminRoomListRequest :: struct {
 	actorUserId: int,
+}
+
+// Which room permissions statement a DatabaseRoomPermissionsRequest runs (protocol 24).
+DatabaseRoomPermissionsAction :: enum u8 {
+	Fetch,
+	Set,
+}
+
+// Fetch reads a room's grants and access roles; Set replaces its grants with everyone and roles
+// (owned). Both check, in the statement, that actorUserId holds ManageRooms or the room's
+// EditRoom, and Set that every changed bit is one the actor may grant.
+DatabaseRoomPermissionsRequest :: struct {
+	action:      DatabaseRoomPermissionsAction,
+	actorUserId: int,
+	roomId:      int,
+	everyone:    RoomPermissions,
+	roles:       [dynamic]RoomRoleGrant,
 }
 
 // Checks that the recipient exists and is not the sender, stores the message, and reads both
@@ -2104,6 +2314,7 @@ DatabaseQueryResult :: union {
 	DatabaseFetchRoomKeysResult,
 	DatabaseRoomKeyRequestCheckResult,
 	DatabaseRoleResult,
+	DatabaseRoomPermissionsResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -2144,6 +2355,8 @@ DatabaseRoomMemberListResult :: struct {
 	// Protocol 21: the room's member log version (0 for an unencrypted room), the epoch a voice
 	// key must name (server/voice.odin).
 	logVersion: int,
+	// Protocol 24: the request's userId's permissions in the room (empty without a userId).
+	permissions: RoomPermissions,
 }
 
 // When isMember is false, or chatDisabled is true (a voice-only room, protocol 14), nothing was
@@ -2152,9 +2365,12 @@ DatabaseRoomMemberListResult :: struct {
 // Protocol 19: notEncrypted refuses a sealed message to an unencrypted room, staleEpoch a sealed
 // message whose epoch is not the room's log version, duplicate a reused clientMessageId or
 // chain index.
+//
+// Protocol 24: sendDenied refuses a member (plaintext or sealed) without SendMessages.
 DatabasePostRoomChatMessageResult :: struct {
 	isMember:         bool,
 	chatDisabled:     bool,
+	sendDenied:       bool,
 	encryptedRoom:    bool,
 	notEncrypted:     bool,
 	staleEpoch:       bool,
@@ -2176,6 +2392,7 @@ RoomEditRefusal :: enum u8 {
 	None,
 	EncryptionFlag, // The edit would set or clear the room's encrypted flag
 	EncryptedAccess, // The edit would change an encrypted room's access
+	UnknownAccessRole, // Protocol 24: an access role is unknown or the built-in one
 }
 
 // Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
@@ -2184,14 +2401,19 @@ RoomEditRefusal :: enum u8 {
 //
 // Protocol 23: notPermitted is true when the requester does not hold ManageRooms; nothing
 // changed then. A delete lists the room's members before it in memberUserIDs (owned).
+//
+// Protocol 24: a create of a Role room lists its members (the access roles' holders) in
+// addedUserIDs, and an edit that made a Role room's members its holders lists the accounts it
+// removed in removedUserIDs (owned).
 DatabaseRoomMutationResult :: struct {
-	room:          RoomSummary,
-	changed:       bool,
-	isMember:      bool,
-	addedUserIDs:  [dynamic]int,
-	notPermitted:  bool,
-	memberUserIDs: [dynamic]int,
-	refusal:      RoomEditRefusal,
+	room:           RoomSummary,
+	changed:        bool,
+	isMember:       bool,
+	addedUserIDs:   [dynamic]int,
+	notPermitted:   bool,
+	memberUserIDs:  [dynamic]int,
+	refusal:        RoomEditRefusal,
+	removedUserIDs: [dynamic]int,
 }
 
 // How a room member statement ended (protocol 15). Applied means the rules passed (changed says
@@ -2203,6 +2425,7 @@ DatabaseRoomMemberOutcome :: enum u8 {
 	UnknownRoom, // To admins: no room has the ID
 	UnknownUser, // No account has the target ID
 	PublicRoom, // An add to, or a leave of, a Public room
+	RoleRoom, // Protocol 24: an add, removal or leave of a Role room (its roles decide)
 	EncryptedRoom, // Protocol 18: an add or leave of an encrypted room (use the member log)
 	LogDamaged, // Protocol 18: an encrypted room's stored log does not replay
 }
@@ -2337,17 +2560,59 @@ DatabaseAccountPermissions :: struct {
 	permissions:    ServerPermissions,
 }
 
+// One room membership a role change made (protocol 24, Role rooms): userId joined or left
+// roomId; memberUserIDs (owned, ascending) are the room's members after the change.
+DatabaseRoomMembershipChange :: struct {
+	roomId:        int,
+	userId:        int,
+	joined:        bool,
+	memberUserIDs: [dynamic]int,
+}
+
+DatabaseRoomMembershipChange_deinit :: proc(change: ^DatabaseRoomMembershipChange) {
+	delete(change.memberUserIDs)
+	change.memberUserIDs = nil
+}
+
 // The answer to a DatabaseRoleRequest. Everything is owned. List fills roles. Save fills role
 // (the stored role) and changed; Delete changed. SetUserRoles fills user (the target's directory
 // entry after it, isOnline false) and changed. affected lists, for every Applied change, the
 // accounts whose effective permissions changed.
+//
+// Protocol 24: membershipChanges lists the Role room memberships SetUserRoles and Delete added
+// or removed in the same statement, and roomPermissionUserIDs the accounts whose room
+// permissions may have changed (the target of SetUserRoles, the holders of a deleted role).
 DatabaseRoleResult :: struct {
-	outcome:  DatabaseAdminOutcome,
-	changed:  bool,
-	roles:    [dynamic]RoleSummary,
-	role:     RoleSummary,
-	user:     UserSummary,
-	affected: [dynamic]DatabaseAccountPermissions,
+	outcome:               DatabaseAdminOutcome,
+	changed:               bool,
+	roles:                 [dynamic]RoleSummary,
+	role:                  RoleSummary,
+	user:                  UserSummary,
+	affected:              [dynamic]DatabaseAccountPermissions,
+	membershipChanges:     [dynamic]DatabaseRoomMembershipChange,
+	roomPermissionUserIDs: [dynamic]int,
+}
+
+// How a room permissions statement ended (protocol 24). Only Applied read or changed anything.
+DatabaseRoomPermissionsOutcome :: enum u8 {
+	Applied,
+	NotPermitted, // Neither ManageRooms nor the room's EditRoom (or no such room, to others)
+	UnknownRoom, // To holders of ManageRooms: no room has the ID
+	UnknownRole, // A grant names an unknown role or the built-in one
+	NotGrantable, // A changed bit is one the requester may not grant
+}
+
+// Set when outcome is Applied: the room's grants and access roles after the statement (owned),
+// whether a grant changed, the requester's own permissions, and (Set) the room's members
+// (owned), whose room lists the router refreshes.
+DatabaseRoomPermissionsResult :: struct {
+	outcome:       DatabaseRoomPermissionsOutcome,
+	changed:       bool,
+	everyone:      RoomPermissions,
+	roles:         [dynamic]RoomRoleGrant,
+	accessRoleIds: [dynamic]int,
+	myPermissions: RoomPermissions,
+	memberUserIDs: [dynamic]int,
 }
 
 // stored is true when the row changed (a first publish or a replacement) and false when the

@@ -415,6 +415,11 @@ MainRouterState_handleAdminUserResult :: proc(
 			MainRouterState_broadcastPresence(pm, state, userID, result.user.nickname, true, 0)
 			MainRouterState_voiceRefreshUserRooms(pm, state, userID)
 		}
+		// Protocol 24: an admin holds every room permission, so the account's room
+		// permissions moved with the role.
+		if request.adminAction == .SetRole {
+			MainRouterState_resendRoomLists(pm, state, []int{userID})
+		}
 	case .Kick:
 		MainRouterState_endUserSessions(pm, state, userID, .Kicked, request.description)
 	case .Ban:

@@ -58,6 +58,11 @@ VoiceParticipantState :: struct {
 	// The device ID the session joined with. Compared only when an automatic re-join of the
 	// same user arrives, never sent to anyone.
 	deviceID: common.VoiceDeviceID,
+	// Protocol 24 (#96): the account lacks SpeakInVoice in the room, so the relay drops this
+	// session's frames. The join is not refused: the session still listens. Set from the join
+	// check and from every ServerListRooms the router sends the account
+	// (MainRouterState_voiceUpdateSpeakPermissions), so it follows grant and role changes.
+	speakDenied: bool,
 }
 
 // A participant's current voice key envelope (protocol 21), as the router accepted it.
@@ -206,9 +211,10 @@ MainRouterState_voiceSendRoute :: proc(pm: ^ProcessManager, state: ^MainRouterSt
 		members = make([]NetworkVoiceRouteMember, len(room.participants))
 		for participant, index in room.participants {
 			members[index] = NetworkVoiceRouteMember {
-				peerId   = participant.peerID,
-				muted    = participant.muted,
-				deafened = participant.deafened,
+				peerId      = participant.peerID,
+				muted       = participant.muted,
+				deafened    = participant.deafened,
+				speakDenied = participant.speakDenied,
 			}
 		}
 	}
@@ -472,7 +478,10 @@ MainRouterState_handleClientJoinVoice :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseRoomMemberListRequest{roomId = req.roomId},
+		common.DatabaseRoomMemberListRequest {
+			roomId = req.roomId,
+			userId = session.authenticatedUserID,
+		},
 		PendingDBRequest {
 			requestType = .JoinVoiceMemberCheck,
 			roomID = req.roomId,
@@ -595,6 +604,8 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 		}
 	}
 	room := &state.voiceRooms[roomID]
+	// Protocol 24: without SpeakInVoice the session joins but is not heard.
+	speakDenied := .SpeakInVoice not_in members.permissions
 	// A repeated join of the same room only updates the mute and deafen flags.
 	found := false
 	for &participant in room.participants {
@@ -602,6 +613,7 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 			participant.muted = request.voiceMuted
 			participant.deafened = request.voiceDeafened
 			participant.deviceID = request.voiceDeviceID
+			participant.speakDenied = speakDenied
 			found = true
 		}
 	}
@@ -614,6 +626,7 @@ MainRouterState_handleJoinVoiceMemberCheckResult :: proc(
 				muted = request.voiceMuted,
 				deafened = request.voiceDeafened,
 				deviceID = request.voiceDeviceID,
+				speakDenied = speakDenied,
 			},
 		)
 		state.peerVoiceRoom[peerID] = roomID
@@ -678,6 +691,36 @@ MainRouterState_handleClientVoiceState :: proc(
 	}
 	if changed {
 		MainRouterState_voiceRoomChanged(pm, state, roomID)
+	}
+}
+
+// Protocol 24 (#96): userID's permissions in its rooms, from a ServerListRooms the router just
+// sent that account. Each of its voice sessions in one of those rooms takes the room's
+// SpeakInVoice, and a room whose flags changed gets a new route, so the relay drops or forwards
+// the session's frames from then on. Nobody is told: the account's own client reads the
+// permission from the room list.
+MainRouterState_voiceUpdateSpeakPermissions :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	userID: int,
+	rooms: []common.RoomSummary,
+) {
+	for summary in rooms {
+		room, ok := &state.voiceRooms[summary.id]
+		if !ok {
+			continue
+		}
+		speakDenied := .SpeakInVoice not_in summary.myPermissions
+		changed := false
+		for &participant in room.participants {
+			if participant.userID == userID && participant.speakDenied != speakDenied {
+				participant.speakDenied = speakDenied
+				changed = true
+			}
+		}
+		if changed {
+			MainRouterState_voiceSendRoute(pm, state, summary.id)
+		}
 	}
 }
 

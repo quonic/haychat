@@ -126,7 +126,8 @@ testMainRouterRoleSaveFansOutToEverySession :: proc(t: ^testing.T) {
 			},
 		},
 	)
-	routerTestExpectNoDatabaseQuery(&h, "expected a role save to need one statement")
+	// Protocol 24: ManageRooms implies EditRoom, so bob's sessions get fresh room lists.
+	routerTestExpectRoomListResends(&h, ROUTER_ADMIN_TEST_TARGET, {2, 3})
 
 	drain := routerVoiceTestDrain(&h, clients[:])
 	defer RouterVoiceTestDrain_deinit(&drain)

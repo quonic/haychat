@@ -24,8 +24,10 @@ import "shared:pg"
 //
 // The server's rules: every signed entry's actor is the requester. Create needs ManageRooms
 // (protocol 23; the admin role before it) and the room's creator, on a room at version 0, with
-// the room's own access and history. Add needs ManageRoomMembers, or membership of a Member
-// invite room (room_members). SetAccess needs ManageRooms. A Remove signed by a manager, a
+// the room's own access and history. Add needs ManageMembers in the room (protocol 24: the
+// server's ManageRoomMembers, an admin, or a member's room grant;
+// database_room_permissions.odin), or membership of a Member invite room (room_members).
+// SetAccess needs ManageRooms. A Remove signed by a manager, a
 // Leave, and the manager changes need nothing beyond the log's rules. Unsigned entries come
 // only from the server itself (databaseExecuteServerRoomLogRemove, for a ClientRemoveRoomMember
 // of an account holding ManageRoomMembers).
@@ -41,7 +43,9 @@ DATABASE_ROOM_LOG_LOCK_SQL ::
 	"(" + DATABASE_ACTOR_MANAGES_ROOMS_SQL + ")::text, " +
 	"EXISTS (SELECT 1 FROM room_members rm WHERE rm.room_id = r.id " +
 	"AND rm.user_id = $1::bigint)::text, " +
-	"(" + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + ")::text " +
+	"((" + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL +
+	"r.id" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " & " +
+	DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL + ") <> 0)::text " +
 	"FROM rooms r WHERE r.id = $2::bigint FOR UPDATE"
 
 // Ordered by the column itself: the output column of the same name is text.

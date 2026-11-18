@@ -34,6 +34,12 @@ import "shared:pg"
 // entries (ClientAppendRoomLog). A removal by an admin becomes the log's unsigned Remove entry,
 // which database_room_log.odin writes and applies in one transaction.
 //
+// Protocol 24 (#96): "manager" is now an account holding ManageMembers in the room
+// (database_room_permissions.odin): ManageRoomMembers and admins in every room, and members a
+// grant gives it. A Role room's members come only from its access roles, so an add, a removal
+// and a leave of one are `role_room` (checked after the requester may see the room and, for a
+// removal, after the manager check).
+//
 // Every statement returns one row: outcome, whether a membership row changed, the room's
 // access, and the members after the action (ascending, comma separated). Data-modifying CTEs
 // do not see each other's changes, so the member list is the statement's snapshot with the
@@ -41,7 +47,7 @@ import "shared:pg"
 
 @(private = "file")
 DATABASE_ROOM_MEMBER_PREFIX_SQL ::
-	"WITH actor AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + " AS is_admin, " +
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_IN_ROOM_SQL + " AS is_admin, " +
 	"EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id = $1::bigint) AS is_member), " +
 	"room AS (SELECT id, access, encrypted FROM rooms WHERE id = $2::bigint), " +
@@ -70,6 +76,7 @@ DATABASE_ROOM_ADD_MEMBER_SQL ::
 	"THEN 'not_member' " +
 	"WHEN (SELECT encrypted FROM room) THEN 'encrypted_room' " +
 	"WHEN (SELECT access FROM room) = 1 THEN 'public_room' " +
+	"WHEN (SELECT access FROM room) = 4 THEN 'role_room' " +
 	"WHEN (SELECT access FROM room) = 3 AND NOT (SELECT is_admin FROM actor) " +
 	"THEN 'admin_required' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'unknown_user' " +
@@ -101,6 +108,7 @@ DATABASE_ROOM_REMOVE_MEMBER_SQL ::
 	"decision AS (SELECT CASE " +
 	"WHEN NOT (SELECT is_admin FROM actor) THEN 'admin_required' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM room) THEN 'unknown_room' " +
+	"WHEN (SELECT access FROM room) = 4 THEN 'role_room' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'unknown_user' " +
 	"ELSE 'applied' END AS outcome), " +
 	DATABASE_ROOM_MEMBER_DELETE_SQL
@@ -113,6 +121,7 @@ DATABASE_ROOM_LEAVE_SQL ::
 	"THEN 'not_member' " +
 	"WHEN (SELECT encrypted FROM room) THEN 'encrypted_room' " +
 	"WHEN (SELECT access FROM room) = 1 THEN 'public_room' " +
+	"WHEN (SELECT access FROM room) = 4 THEN 'role_room' " +
 	"ELSE 'applied' END AS outcome), " +
 	DATABASE_ROOM_MEMBER_DELETE_SQL
 
@@ -150,6 +159,8 @@ databaseRoomMemberOutcomeFromText :: proc(
 		return .PublicRoom, true
 	case "encrypted_room":
 		return .EncryptedRoom, true
+	case "role_room":
+		return .RoleRoom, true
 	}
 	return .NotMember, false
 }
@@ -231,7 +242,9 @@ DATABASE_ADMIN_LIST_ROOMS_SQL ::
 	DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + ") AS ok) " +
 	"SELECT " + DATABASE_ROOM_SUMMARY_COLUMNS_SQL + ", EXISTS (SELECT 1 FROM room_members rm " +
 	"WHERE rm.room_id = r.id AND rm.user_id = $1::bigint)::text, " +
-	"(SELECT count(*) FROM room_members rm WHERE rm.room_id = r.id)::text, a.ok::text " +
+	"(SELECT count(*) FROM room_members rm WHERE rm.room_id = r.id)::text, a.ok::text, " +
+	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "r.id" +
+	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + "::text " +
 	"FROM actor a LEFT JOIN rooms r ON a.ok ORDER BY r.name"
 
 databaseExecuteAdminRoomList :: proc(
@@ -262,6 +275,8 @@ databaseExecuteAdminRoomList :: proc(
 			continue
 		}
 		memberCount, _ := databaseGetInt(result, row, 9)
+		mask, _ := databaseGetInt(result, row, 11)
+		room.myPermissions = common.roomPermissionsFromMask(i64(mask))
 		append(
 			&list.rooms,
 			common.AdminRoomSummary {

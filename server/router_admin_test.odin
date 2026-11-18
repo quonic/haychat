@@ -158,7 +158,8 @@ testMainRouterAdminSetRolePushesTheRoleToTheTarget :: proc(t: ^testing.T) {
 		changed = true,
 		user = {id = ROUTER_ADMIN_TEST_TARGET, nickname = "voice-user-43", isAdmin = true},
 	)
-	routerTestExpectNoDatabaseQuery(&h, "expected the role change to need one statement")
+	// Protocol 24: an admin holds every room permission, so bob's sessions get fresh room lists.
+	routerTestExpectRoomListResends(&h, ROUTER_ADMIN_TEST_TARGET, {2, 3})
 
 	drain := routerVoiceTestDrain(&h, clients[:])
 	defer RouterVoiceTestDrain_deinit(&drain)

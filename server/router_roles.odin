@@ -344,4 +344,24 @@ MainRouterState_handleRoleActionResult :: proc(
 		MainRouterState_broadcastUserUpdated(pm, state, result.user)
 	}
 	MainRouterState_sendPermissionsChanged(pm, state, result.affected[:])
+
+	// Protocol 24 (#96): the Role room memberships the statement changed, then fresh room lists
+	// for every account whose room permissions may have moved: the target or the deleted role's
+	// holders (their role grants), and the accounts whose server permissions changed (those imply
+	// room ones).
+	MainRouterState_sendRoleRoomMembershipChanges(
+		pm,
+		state,
+		result.membershipChanges[:],
+		request.peerID,
+	)
+	resend := make([dynamic]int, 0, len(result.roomPermissionUserIDs) + len(result.affected))
+	defer delete(resend)
+	append(&resend, ..result.roomPermissionUserIDs[:])
+	for account in result.affected {
+		if !MainRouterState_hasRecipientUserID(resend[:], account.userId) {
+			append(&resend, account.userId)
+		}
+	}
+	MainRouterState_resendRoomLists(pm, state, resend[:])
 }

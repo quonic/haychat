@@ -151,6 +151,8 @@ MainRouterState_roomMemberRefusalMessage :: proc(
 		return action == .Leave ? ROOM_PUBLIC_LEAVE_MESSAGE : ROOM_PUBLIC_ADD_MESSAGE
 	case .EncryptedRoom:
 		return common.ROOM_LOG_REQUIRED_MESSAGE
+	case .RoleRoom:
+		return common.ROOM_ROLE_MEMBERSHIP_MESSAGE
 	case .LogDamaged:
 		return common.ROOM_LOG_DAMAGED_MESSAGE
 	case .Applied:

@@ -298,8 +298,9 @@ buildContextMenu :: proc(
 				},
 			)
 		}
-		// The server checks ManageRooms on every request; this only decides what is offered.
-		if State_hasPermission(state, target.serverID, .ManageRooms) &&
+		// The server checks ManageRooms (protocol 24: or the room's EditRoom for an edit) on
+		// every request; this only decides what is offered.
+		if State_canEditRoom(state, target.serverID, target.roomID) &&
 		   target.serverID == state.selected_server_id {
 			append(
 				&entries,
@@ -309,13 +310,18 @@ buildContextMenu :: proc(
 					enabled = true,
 					separatorBefore = true,
 				},
-				ContextMenuEntry {
-					action = .DeleteRoom,
-					label = "Delete room…",
-					enabled = true,
-					danger = true,
-				},
 			)
+			if State_hasPermission(state, target.serverID, .ManageRooms) {
+				append(
+					&entries,
+					ContextMenuEntry {
+						action = .DeleteRoom,
+						label = "Delete room…",
+						enabled = true,
+						danger = true,
+					},
+				)
+			}
 		}
 	case ConversationMenuTarget:
 		if !contextMenuUserKnown(state, target.serverID, target.peerUserID) {

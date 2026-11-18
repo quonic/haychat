@@ -96,6 +96,11 @@ testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSu
 		if !common.roomAccessIsSupported(access) {
 			access = .Public
 		}
+		// Rooms without permissions grant the default, as every room did before protocol 24.
+		permissions := room.myPermissions
+		if permissions == {} {
+			permissions = common.ROOM_PERMISSIONS_DEFAULT
+		}
 		append(
 			&event.rooms,
 			common.RoomSummary {
@@ -108,6 +113,7 @@ testApplyNamedRooms :: proc(state: ^State, serverID: int, rooms: ..common.RoomSu
 					access,
 					room.historyVisibility,
 				),
+				myPermissions = permissions,
 			},
 		)
 	}
@@ -639,8 +645,8 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":false,"cmd":"room-create","error":"usage: room-create ` +
-		`TYPE[,public|member-invite|admin-invite][,from-join|full][,no-join]` +
-		`[,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]"}` +
+		`TYPE[,public|member-invite|admin-invite|roles=ID+ID][,from-join|full]` +
+		`[,no-join][,encrypted][,managers=ID+ID|managers=none] NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-create type error",
 	)
@@ -676,7 +682,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"ok":false,"cmd":"room-edit","error":"usage: room-edit ROOM_ID ` +
-		`TYPE[,public|member-invite|admin-invite] NAME [DESCRIPTION...]"}` +
+		`TYPE[,public|member-invite|admin-invite|roles=ID+ID] NAME [DESCRIPTION...]"}` +
 		"\n",
 		"the room-edit usage error",
 	)
@@ -722,7 +728,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"room_created","serverID":908,"roomID":9,"name":"random",` +
 		`"description":"Off","roomType":2,"access":0,"historyVisibility":0,"isMember":false,` +
-		`"encrypted":false,"logVersion":0}` +
+		`"encrypted":false,"logVersion":0,"myPermissions":[]}` +
 		"\n",
 		"the room_created event",
 	)
@@ -738,7 +744,7 @@ testHeadlessRoomManagementCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		strings.contains(
 			output,
-			`{"usage":"room-create TYPE[,public|member-invite|admin-invite]` +
+			`{"usage":"room-create TYPE[,public|member-invite|admin-invite|roles=ID+ID]` +
 			`[,from-join|full][,no-join][,encrypted][,managers=ID+ID|managers=none] ` +
 			`NAME [DESCRIPTION...]",`,
 		) &&

@@ -122,7 +122,8 @@ thread logs one line of space-separated `key=value` pairs, for example:
 - One `voice_drops_<reason>` pair per drop reason: `unknown_peer`, `not_in_room`,
   `rate_limited`, `malformed`, `replayed`, `too_old`, `bad_tag`, `inactive`, `malformed_frame`,
   `wrong_room`, `muted`, `oversize`, `bad_duration`, `not_sealed` (protocol 21: an encrypted
-  room's frame that is not a sealed payload). A dropped datagram never disconnects anyone.
+  room's frame that is not a sealed payload), `no_speak_permission` (protocol 24: the sender may
+  not speak in the room). A dropped datagram never disconnects anyone.
 
 The frame counters start over when the network service restarts. In the dev pod, read the latest
 line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`; in production, see [deploy/README.md
