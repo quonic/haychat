@@ -201,8 +201,8 @@ exits with code 2).
 After `disconnected` the worker reconnects with the same backoff; `retryInMS` is the delay
 before its first attempt.
 
-Every `connected` is followed by `room_list`, `user_list`, and `conversations` events, because
-the client fetches all three for a new session. A `direct_message` belongs to the conversation
+Every `connected` is followed by `room_list`, `user_list`, `conversations` and (protocol 23)
+`role_list` events, because the client fetches all four for a new session. A `direct_message` belongs to the conversation
 with `recipientID` when `senderID` is your own `userID` (from `connected`), and with `senderID`
 otherwise. `presence` arrives when another account's first session signs in (`isOnline` true)
 or its last one ends (false); other sessions of an account that is already online send none.
