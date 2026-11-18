@@ -1925,20 +1925,8 @@ testMainRouterCreateRoomNotifiesEveryAuthenticatedSession :: proc(t: ^testing.T)
 		NetworkDataReceived{peerId = adminPeerID, channel = .Chat, data = sealedPacketBytes},
 	)
 
-	adminQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(adminQuery.request)
-	_, adminRequestOK := adminQuery.request.(common.DatabaseUserServerAdminRequest)
-	assert(adminRequestOK, "expected room creation to check the admin role first")
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		adminQuery.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserServerAdminResult{isAdmin = true},
-		},
-	)
-
+	// Protocol 23: the create statement checks ManageRooms itself, so the request goes
+	// straight to the database.
 	createQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(createQuery.request)
 	createRequest, createRequestOK := createQuery.request.(common.DatabaseCreateRoomRequest)

@@ -341,7 +341,7 @@ MainRouterState_handleAdminRoomListResult :: proc(
 	if MainRouterState_databaseFailed(pm, state, request.peerID, response, resultOK) {
 		return
 	}
-	if !result.isAdmin {
+	if !result.allowed {
 		MainRouterState_sendAdminRequired(pm, state, request.peerID)
 		return
 	}

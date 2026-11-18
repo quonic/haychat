@@ -148,16 +148,17 @@ Enter picks, and Esc or a click outside closes it (that click does nothing else)
 
 | Where | Entries |
 | --- | --- |
-| Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name, Members… (invite rooms; every room for admins), Leave room… (invite rooms; "Click again to leave", then you leave); admins also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
+| Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name, Members… (invite rooms; every room for admins), Leave room… (invite rooms; "Click again to leave", then you leave); admins and holders of **Manage rooms** also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
 | Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name, Verify encryption… (for someone else, see [Encryption keys](#encryption-keys)), Invite to room… (for someone else, when you may add people to a room: it lists those rooms) |
 | Voice participant in the channel list | Send message and Copy name, Invite to room… (as above), and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings) |
 | Message | Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer), and in rooms Send message to sender for other people's messages |
 | Server button in the rail | Server settings, Retry now (while not connected), Copy address, Remove server… (the entry turns into "Click again to remove"; the second click removes it) |
 | Text fields (the composer and the Settings fields) | Cut, Copy, Paste, Select all |
 
-Admins also get **Rename…**, **Make admin** or **Remove admin**, **Kick…**, and **Ban…** or
-**Unban** on account rows, voice participants and sender names, greyed out where the server
-refuses them. **Rename…**, **Kick…** and **Ban…** open Server settings → Admin with that
+Account rows, voice participants and sender names also show the account's roles ("Roles: …",
+greyed) to everyone. Admins also get **Rename…**, **Make admin** or **Remove admin**, **Kick…**,
+**Ban…** or **Unban**, and, once the server has a role to give, **Roles…** (Server settings →
+Admin with that account's role checkboxes open), greyed out where the server refuses them. **Rename…**, **Kick…** and **Ban…** open Server settings → Admin with that
 account's confirmation open, since they need a name or a reason.
 
 ## Voice
@@ -332,13 +333,18 @@ encrypted messages reach only the people you mean.
 ## Administration
 
 Admins are accounts holding the server's `admin` role; how to get the first one is in
-[deploy/README.md "First-Time Setup"](../deploy/README.md#first-time-setup). Every other account
-sees none of these controls, and the server checks the role for every request. The rules the
-server enforces are in [rooms-and-accounts.md](rooms-and-accounts.md#admin-actions).
+[deploy/README.md "First-Time Setup"](../deploy/README.md#first-time-setup). Admins can also
+give other accounts **roles** that let them manage rooms or room members (see
+[Roles](#roles)); such an account gets the room controls below and a smaller Admin section.
+Every other account sees none of these controls, and the server checks the permission for every
+request. The rules the server enforces are in
+[rooms-and-accounts.md](rooms-and-accounts.md#admin-actions).
 
 ### Rooms
 
-In the selected server's sidebar, the **Channels** header shows **+ New room**, which opens a
+Room management needs the admin role or a role with **Manage rooms**; adding and removing
+members of invite rooms a role with **Manage room members**. In the selected server's sidebar,
+the **Channels** header shows **+ New room**, which opens a
 form in the main pane: a name of 1 to 64 bytes (a leading `#` is dropped), an optional
 description of up to 256 bytes, a **Type** selector (**Text**, **Voice**, **Text and voice**),
 **Who can join** (**Public**, **Member invite**, **Admin invite**; see
@@ -383,7 +389,24 @@ the server, you included, with an online dot, **Admin** and **Banned** badges, a
 
 Below the accounts, every room on the server is listed, also those you are not in (greyed, "not
 joined"), with its type, access mode and member count, **Members…**, **Edit…**, **Delete…** and
-**Create room…**.
+**Create room…**. An account that is not an admin but holds a role with **Manage rooms** or
+**Manage room members** sees only this room list, with the buttons its permissions allow.
+
+### Roles
+
+Under the accounts, admins see **Roles**: every role with what it allows and how many accounts
+hold it, **New role…**, and **Edit…** on each.
+
+- The role form has a **Name** (3 to 32 characters) and a checkbox per permission a role can
+  hold: **Manage rooms**, **Manage room members**, **Create invites** and **Approve sign-ups**
+  (the last two take effect once sign-up by invitation arrives). **Create** or **Save** sends it,
+  **Delete…** asks for a second click, and **Cancel** closes it.
+- `admin` is built in: its form shows every permission ticked and greyed, and it has no Save or
+  Delete. Admins are made with **Make admin**.
+- Each account's row lists its roles ("Roles: …") and has **Roles…**, which opens a checkbox per
+  role under it; a click gives or takes that role at once. The account's sessions get their new
+  controls without reconnecting.
+- Kicking, banning and renaming cannot be given to a role.
 
 A kicked or banned client says so in its banner, with the admin's reason, and neither reconnects
 nor rejoins voice by itself.

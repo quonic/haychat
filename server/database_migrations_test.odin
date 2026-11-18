@@ -328,8 +328,10 @@ DATABASE_MIGRATION_TEST_RC1_ROWS_SQL ::
 DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL ::
 	"INSERT INTO users (nickname, public_key) VALUES ('mig-alice', '\\x01'), " +
 	"('mig-bob', '\\x02'), ('mig-carol', NULL); " +
-	"INSERT INTO server_roles (name) VALUES ('admin'); " +
-	"INSERT INTO user_server_roles (user_id, role_id) VALUES (1, 1); " +
+	// Since migration 11 the schema always holds the admin role.
+	"INSERT INTO server_roles (name) VALUES ('admin') ON CONFLICT (name) DO NOTHING; " +
+	"INSERT INTO user_server_roles (user_id, role_id) " +
+	"SELECT 1, id FROM server_roles WHERE name = 'admin'; " +
 	"INSERT INTO rooms (name, description) VALUES ('general', 'General discussion'); " +
 	"INSERT INTO rooms (name, description, created_by_user_id) VALUES ('lounge', 'Chat', 1); " +
 	"INSERT INTO room_members (room_id, user_id) VALUES (1, 1), (1, 2), (1, 3), (2, 1), (2, 2); " +
@@ -1077,6 +1079,105 @@ testSignedMessagesMigrationUpgradesVersion9AgainstPostgreSQL :: proc(t: ^testing
 		"client_message_id, signature) VALUES (1, 1, 'again', decode(repeat('a4', 16), 'hex'), " +
 		"decode(repeat('bb', 64), 'hex')); RAISE EXCEPTION 'duplicate ID accepted'; " +
 		"EXCEPTION WHEN unique_violation THEN NULL; END $$",
+	)
+}
+
+// Migration 11 (protocol 23, #95): the admin role becomes the built-in one with every
+// permission, other roles keep their holders with no permission, and a database without an
+// admin role gets one.
+@(test)
+testRolesMigrationUpgradesVersion10AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "roles_v10")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:10])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 10 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	databaseDefaultRoomTestExec(
+		conn,
+		"add a moderator role",
+		"INSERT INTO server_roles (name) VALUES ('moderator'); " +
+		"INSERT INTO user_server_roles (user_id, role_id) VALUES (2, 2)",
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:11])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 10, version = 11},
+		fmt.tprintf("expected only migration 11 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:11])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept,
+		"expected every account, role and holder intact",
+	)
+	roles := databaseMigrationTestValue(
+		conn,
+		"SELECT string_agg(name || ':' || permissions || ':' || builtin || ':' || position, ',' " +
+		"ORDER BY id) FROM server_roles",
+	)
+	assert(
+		roles == "admin:511:true:0,moderator:0:false:2",
+		fmt.tprintf("expected admin built-in with every permission, got %q", roles),
+	)
+
+	// Only admin can be built in, and only once.
+	probes := [?]string {
+		"UPDATE server_roles SET builtin = true WHERE name = 'moderator'",
+		"UPDATE server_roles SET position = -1 WHERE name = 'moderator'",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"OR unique_violation THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+
+	// A version 10 database that never had an admin role gets one.
+	empty, emptySchema := databaseMigrationTestOpen(t, "roles_v10_empty")
+	_ = emptySchema
+	databaseMigrationTestMigrate(empty, DATABASE_MIGRATIONS[:10])
+	databaseMigrationTestMigrate(empty, DATABASE_MIGRATIONS[:11])
+	created := databaseMigrationTestValue(
+		empty,
+		"SELECT string_agg(name || ':' || permissions || ':' || builtin, ',') FROM server_roles",
+	)
+	assert(created == "admin:511:true", fmt.tprintf("expected the admin role, got %q", created))
+}
+
+@(test)
+testRolesMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[10]
+	assert(
+		migration.version == 11 && migration.name == "roles",
+		fmt.tprintf("expected migration 11 to be roles, got %v", migration),
+	)
+	assert(
+		strings.contains(migration.sql, "permissions = 511") &&
+		common.serverPermissionsMask(common.SERVER_PERMISSIONS_ALL) == 511,
+		"expected migration 11 to give admin every permission known to protocol 23",
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN"),
+		"expected migration 11 to drop no table or column",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "server roles one builtin"),
+		"expected schema validation to require migration 11's checks",
 	)
 }
 

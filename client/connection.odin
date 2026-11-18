@@ -492,6 +492,7 @@ ClientServerTransport_connected :: proc(
 		nickname          = strings.clone(nickname),
 		isAdmin           = transport.authenticatedIsAdmin,
 		nicknameLocked    = transport.authenticatedNicknameLocked,
+		permissions       = transport.authenticatedPermissions,
 		sessionGeneration = transport.sessionGeneration,
 	}
 	if transport.connection.newlyPinned {

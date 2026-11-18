@@ -96,6 +96,13 @@ ClientTransportRuntimeEventKind :: enum {
 	// requester in peerUserID.
 	VoiceKeyReceived,
 	VoiceKeyRequested,
+	// Roles (protocol 23, roles.odin). RoleListReceived is ServerRoleList: every role in roles
+	// (owned). RoleUpdated is ServerRoleUpdated: the role in role (name owned). RoleDeleted is
+	// ServerRoleDeleted: the role's ID in roleID. Connected and AccountUpdated carry the
+	// account's effective permissions; AdminActionResult carries roleID for a role action.
+	RoleListReceived,
+	RoleUpdated,
+	RoleDeleted,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -120,6 +127,7 @@ ClientTransportRuntimeEvent :: struct {
 	nickname:          string,
 	isAdmin:           bool,
 	nicknameLocked:    bool,
+	permissions:       common.ServerPermissions,
 	failureKind:       ClientConnectFailureKind,
 	retryable:         bool,
 	retryAt:           time.Tick,
@@ -175,6 +183,10 @@ ClientTransportRuntimeEvent :: struct {
 	roomKeyChainID:    common.ChainID,
 	// Protocol 21.
 	voiceKey:          common.ServerVoiceKeyPayload,
+	// Protocol 23.
+	roles:             [dynamic]common.RoleSummary,
+	role:              common.RoleSummary,
+	roleID:            int,
 }
 
 ClientServerTransport :: struct {
@@ -202,6 +214,8 @@ ClientServerTransport :: struct {
 	// server sent none.
 	authenticatedNickname:     string,
 	authenticatedNicknameLocked: bool,
+	// The account's effective server permissions from ServerAuthSuccess (protocol 23).
+	authenticatedPermissions:  common.ServerPermissions,
 	lastError:                 string,
 	enetHost:                  ^ENet.Host,
 	enetPeer:                  ^ENet.Peer,
@@ -268,6 +282,7 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	delete(transport.authenticatedNickname)
 	transport.authenticatedNickname = ""
 	transport.authenticatedNicknameLocked = false
+	transport.authenticatedPermissions = {}
 }
 
 // Releases the ENet session and every string the transport owns.
@@ -342,7 +357,12 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	StoredDirectMessages_deinit(&event.directMessages)
 	UserSummaries_deinit(&event.users)
 	DirectConversationSummaries_deinit(&event.conversations)
-	delete(event.user.nickname)
+	common.UserSummary_deinit(&event.user)
+	for &role in event.roles {
+		common.RoleSummary_deinit(&role)
+	}
+	delete(event.roles)
+	common.RoleSummary_deinit(&event.role)
 	for &participant in event.voiceParticipants {
 		common.VoiceParticipant_deinit(&participant)
 	}
@@ -386,8 +406,8 @@ AdminRoomSummaries_deinit :: proc(rooms: ^[dynamic]common.AdminRoomSummary) {
 }
 
 UserSummaries_deinit :: proc(users: ^[dynamic]common.UserSummary) {
-	for user in users {
-		delete(user.nickname)
+	for &user in users {
+		common.UserSummary_deinit(&user)
 	}
 	delete(users^)
 	users^ = nil
@@ -722,6 +742,7 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		transport.authenticatedNickname = authSuccess.nickname
 		authSuccess.nickname = ""
 		transport.authenticatedNicknameLocked = authSuccess.nicknameLocked
+		transport.authenticatedPermissions = authSuccess.permissions & common.SERVER_PERMISSIONS_ALL
 		return result, true
 
 	case .ServerAuthFailure:
@@ -1216,6 +1237,61 @@ ClientServerTransport_adminBanUser :: proc(
 		transport,
 		.ClientAdminBanUser,
 		common.ClientAdminBanUserPayload{userId = userID, banned = banned, reason = reason},
+	)
+}
+
+// Roles (protocol 23). Listing is open to every account; the server checks the admin role for
+// the others and answers with ServerAdminActionResult or a ServerProtocolError.
+ClientServerTransport_adminListRoles :: proc(transport: ^ClientServerTransport) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminListRoles,
+		common.ClientAdminListRolesPayload{},
+	)
+}
+
+ClientServerTransport_adminSaveRole :: proc(
+	transport: ^ClientServerTransport,
+	roleID: int,
+	name: string,
+	permissions: common.ServerPermissions,
+	position: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminSaveRole,
+		common.ClientAdminSaveRolePayload {
+			roleId = roleID,
+			name = name,
+			permissions = permissions,
+			position = position,
+		},
+	)
+}
+
+ClientServerTransport_adminDeleteRole :: proc(
+	transport: ^ClientServerTransport,
+	roleID: int,
+) -> bool {
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminDeleteRole,
+		common.ClientAdminDeleteRolePayload{roleId = roleID},
+	)
+}
+
+ClientServerTransport_adminSetUserRoles :: proc(
+	transport: ^ClientServerTransport,
+	userID: int,
+	roleIDs: []int,
+) -> bool {
+	ids := make([dynamic]int, 0, len(roleIDs))
+	defer delete(ids)
+	append(&ids, ..roleIDs)
+	return ClientServerTransport_sendEncryptedRuntimeMessage(
+		transport,
+		.ClientAdminSetUserRoles,
+		common.ClientAdminSetUserRolesPayload{userId = userID, roleIds = ids},
 	)
 }
 
@@ -1823,6 +1899,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				isAdmin = payload.isAdmin,
 				nickname = payload.nickname,
 				nicknameLocked = payload.nicknameLocked,
+				permissions = payload.permissions & common.SERVER_PERMISSIONS_ALL,
 			},
 			true
 
@@ -1843,6 +1920,61 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				adminAction = payload.action,
 				peerUserID = payload.userId,
 				message = payload.message,
+				roleID = payload.roleId,
+			},
+			true
+
+	case .ServerRoleList:
+		payload: common.ServerRoleListPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil {
+			common.ServerRoleListPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid role list payload",
+				),
+				true
+		}
+		for &role in payload.roles {
+			role.permissions &= common.SERVER_PERMISSIONS_ALL
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoleListReceived,
+				serverID = transport.serverID,
+				roles = payload.roles,
+			},
+			true
+
+	case .ServerRoleUpdated:
+		payload: common.ServerRoleUpdatedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.role.id <= 0 {
+			common.ServerRoleUpdatedPayload_deinit(&payload)
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid role update payload",
+				),
+				true
+		}
+		payload.role.permissions &= common.SERVER_PERMISSIONS_ALL
+		return ClientTransportRuntimeEvent {
+				kind = .RoleUpdated,
+				serverID = transport.serverID,
+				role = payload.role,
+			},
+			true
+
+	case .ServerRoleDeleted:
+		payload: common.ServerRoleDeletedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.roleId <= 0 {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid role delete payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .RoleDeleted,
+				serverID = transport.serverID,
+				roleID = payload.roleId,
 			},
 			true
 

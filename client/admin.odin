@@ -13,16 +13,25 @@ import "core:strings"
 // answer: a protocol error on that server while it is pending is taken as its refusal, the way
 // the room editor does, and a connection change ends the wait.
 
-// One admin request. Strings are borrowed.
+// One admin request. Strings are borrowed. It stays comparable (tests compare requests), so
+// SetUserRoles' IDs are a fixed array with a count.
 AdminRequest :: struct {
-	action:   common.AdminAction,
-	userID:   int,
+	action:      common.AdminAction,
+	userID:      int,
 	// SetRole: grant or revoke. Rename: the lock. Ban: ban or unban.
-	flag:     bool,
+	flag:        bool,
 	// Rename: the new name, or empty to change only the lock.
-	nickname: string,
+	nickname:    string,
 	// Kick and ban: the reason, at most common.ADMIN_REASON_MAX_BYTES.
-	reason:   string,
+	reason:      string,
+	// Protocol 23 (roles.odin). SaveRole: roleID (0 creates), roleName, permissions and
+	// position. DeleteRole: roleID. SetUserRoles: userID and roleIDs[:roleIDCount].
+	roleID:      int,
+	roleName:    string,
+	permissions: common.ServerPermissions,
+	position:    int,
+	roleIDs:     [common.SERVER_ROLES_MAX]int,
+	roleIDCount: int,
 }
 
 AdminSendBridge :: #type proc(transport: ^ClientServerTransport, request: AdminRequest) -> bool
@@ -53,6 +62,23 @@ ClientServerTransport_sendAdminRequest :: proc(
 			request.flag,
 			request.reason,
 		)
+	case .SaveRole:
+		return ClientServerTransport_adminSaveRole(
+			transport,
+			request.roleID,
+			request.roleName,
+			request.permissions,
+			request.position,
+		)
+	case .DeleteRole:
+		return ClientServerTransport_adminDeleteRole(transport, request.roleID)
+	case .SetUserRoles:
+		roleIDs := request.roleIDs
+		return ClientServerTransport_adminSetUserRoles(
+			transport,
+			request.userID,
+			roleIDs[:request.roleIDCount],
+		)
 	}
 	return false
 }
@@ -62,6 +88,8 @@ AdminRequestState :: struct {
 	serverID: int,
 	action:   common.AdminAction,
 	userID:   int,
+	// The role a SaveRole or DeleteRole names (protocol 23); a created role's ID once answered.
+	roleID:   int,
 	pending:  bool,
 	// The server's sentence for a success (ServerAdminActionResult.message).
 	result:   string,
@@ -84,10 +112,33 @@ AdminRequestState_setText :: proc(field: ^string, text: string) {
 // Checks a request the way the server will, so mistakes get a readable sentence instead of
 // "Invalid admin request". Returns "" when it may go out.
 validateAdminRequest :: proc(request: AdminRequest) -> string {
+	#partial switch request.action {
+	case .SaveRole:
+		if !common.roleNameIsValid(request.roleName) {
+			return "Role names are 3 to 32 characters, without spaces at either end."
+		}
+		if request.roleID < 0 || request.position < 0 {
+			return "That role cannot be saved."
+		}
+		return ""
+	case .DeleteRole:
+		if request.roleID <= 0 {
+			return "No role selected."
+		}
+		return ""
+	case .SetUserRoles:
+		if request.userID <= 0 {
+			return "No account selected."
+		}
+		if request.roleIDCount < 0 || request.roleIDCount > common.SERVER_ROLES_MAX {
+			return "That is more roles than the server keeps."
+		}
+		return ""
+	}
 	if request.userID <= 0 {
 		return "No account selected."
 	}
-	switch request.action {
+	#partial switch request.action {
 	case .Rename:
 		nickname := request.nickname
 		if len(nickname) > 0 &&
@@ -102,7 +153,6 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 		if len(request.reason) > common.ADMIN_REASON_MAX_BYTES {
 			return "The reason must be at most 256 bytes long."
 		}
-	case .SetRole:
 	}
 	return ""
 }
@@ -114,6 +164,7 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	request := request
 	request.nickname = strings.trim_space(request.nickname)
 	request.reason = strings.trim_space(request.reason)
+	request.roleName = strings.trim_space(request.roleName)
 	if errorMessage := validateAdminRequest(request); len(errorMessage) > 0 {
 		return errorMessage
 	}
@@ -138,6 +189,7 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	tracked.serverID = serverID
 	tracked.action = request.action
 	tracked.userID = request.userID
+	tracked.roleID = request.roleID
 	tracked.pending = true
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
@@ -192,13 +244,65 @@ State_sendAdminBanUser :: proc(
 	)
 }
 
-// ServerAdminActionResult: the pending request succeeded. message is borrowed.
+// Roles (protocol 23, roles.odin). Admins only, which the server checks with every guard: the
+// built-in admin role keeps its name and every permission, and only the delegable permissions
+// go to other roles. Every account hears ServerRoleUpdated or ServerRoleDeleted; holders whose
+// permissions changed hear ServerAccountUpdated.
+State_sendAdminSaveRole :: proc(
+	state: ^State,
+	serverID, roleID: int,
+	name: string,
+	permissions: common.ServerPermissions,
+	position: int,
+) -> string {
+	return State_sendAdminRequest(
+		state,
+		serverID,
+		AdminRequest {
+			action = .SaveRole,
+			roleID = roleID,
+			roleName = name,
+			permissions = permissions,
+			position = position,
+		},
+	)
+}
+
+State_sendAdminDeleteRole :: proc(state: ^State, serverID, roleID: int) -> string {
+	return State_sendAdminRequest(
+		state,
+		serverID,
+		AdminRequest{action = .DeleteRole, roleID = roleID},
+	)
+}
+
+// Makes roleIDs every role of userID other than admin. Everyone hears ServerUserUpdated.
+State_sendAdminSetUserRoles :: proc(
+	state: ^State,
+	serverID, userID: int,
+	roleIDs: []int,
+) -> string {
+	if len(roleIDs) > common.SERVER_ROLES_MAX {
+		return "That is more roles than the server keeps."
+	}
+	request := AdminRequest {
+		action      = .SetUserRoles,
+		userID      = userID,
+		roleIDCount = len(roleIDs),
+	}
+	copy(request.roleIDs[:], roleIDs)
+	return State_sendAdminRequest(state, serverID, request)
+}
+
+// ServerAdminActionResult: the pending request succeeded. message is borrowed. roleID is the
+// role a role action named (protocol 23), 0 otherwise.
 State_adminActionResult :: proc(
 	state: ^State,
 	serverID: int,
 	action: common.AdminAction,
 	userID: int,
 	message: string,
+	roleID := 0,
 ) {
 	tracked := &state.adminRequest
 	if tracked.serverID != serverID {
@@ -207,6 +311,7 @@ State_adminActionResult :: proc(
 	tracked.pending = false
 	tracked.action = action
 	tracked.userID = userID
+	tracked.roleID = roleID
 	AdminRequestState_setText(&tracked.result, message)
 	AdminRequestState_setText(&tracked.error, "")
 }

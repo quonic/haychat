@@ -64,9 +64,40 @@ version below therefore needs clients and servers rebuilt together.
 | 21 | Encrypted voice in encrypted rooms (end-to-end encryption, part 5): voice joins of encrypted rooms are accepted, `ClientVoiceKey`/`ServerVoiceKey` (a participant's `VoiceKey` envelope, kind 4), `ClientRequestVoiceKey`/`ServerVoiceKeyRequest`, and sealed voice payloads in the frames of encrypted rooms. No schema migration: voice keys are never stored |
 | 22 | Signed room messages (#90): `ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `signature`, and every plaintext room message carries a random `clientMessageId` and its sender's signature (`signPlaintextRoomMessage`); the server refuses unsigned plaintext ("Invalid room message signature") and a reused client message ID, and clients show no room or direct message without its sender's valid signature (#82). Schema migration 10 deletes every unsigned message ([below](#signed-messages-protocol-22)) |
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
+| 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
+
+## Roles and server permissions (protocol 23)
+
+The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#roles-and-permissions).
+
+- **Permissions** are `common.ServerPermission` bit numbers carried as one unsigned integer, the
+  `ServerPermissions` `bit_set` (u64), and stored as `server_roles.permissions` (BIGINT). Pinned
+  values: ManageRooms 0, ManageRoomMembers 1, CreateInvites 2, ApproveRegistrations 3,
+  ManageRoles 4, ManageRegistration 5, KickUsers 6, BanUsers 7, RenameUsers 8. Only the first
+  four can be given to a role other than admin. Receivers drop unknown bits.
+- `ServerAuthSuccess.permissions` and `ServerAccountUpdated.permissions` are the account's
+  effective set (every bit for an admin). `ServerAccountUpdated` now also goes out when only the
+  set changed. `isAdmin` stays.
+- `RoleSummary{id, name, permissions, builtin, position}`: `builtin` is true only for `admin`,
+  whose permissions read as every bit; `position` orders the list and means nothing else.
+  `UserSummary.roleIds` lists every role an account holds, `admin` included.
+- `ClientAdminListRoles` (any account) is answered by `ServerRoleList`. `ClientAdminSaveRole`
+  (role ID 0 creates), `ClientAdminDeleteRole` and `ClientAdminSetUserRoles` (every role of one
+  account other than admin) are admins only and answered by `ServerAdminActionResult` (action
+  `SaveRole` 4, `DeleteRole` 5 or `SetUserRoles` 6, with `roleId`) or a `ServerProtocolError`.
+  A change sends `ServerRoleUpdated` or `ServerRoleDeleted` (no `ServerUserUpdated` follows for
+  the deleted role's holders: clients drop the ID themselves) or `ServerUserUpdated` to every
+  session, and `ServerAccountUpdated` to the sessions of each account whose set changed.
+- Room create, edit and delete need ManageRooms ("Room management permission required"); member
+  adds and removals, member lists of rooms one is not in, the admin room list and encrypted
+  room logs need ManageRoomMembers (ManageRooms for a log's Create and SetAccess).
+- Wire values: `ClientAdminListRoles` 180, `ServerRoleList` 181, `ClientAdminSaveRole` 182,
+  `ClientAdminDeleteRole` 183, `ClientAdminSetUserRoles` 184, `ServerRoleUpdated` 185,
+  `ServerRoleDeleted` 186. The retired placeholders `ClientGetRoles` … `ServerRemovedRole` keep
+  24..31 and are never sent.
 
 ## Account encryption keys (protocol 16)
 

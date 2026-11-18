@@ -1491,7 +1491,8 @@ RoomLogRights :: struct {
 	status:            RoomLogStatus,
 	isMember:          bool, // In the verified log
 	isManager:         bool,
-	isAdmin:           bool,
+	isAdmin:           bool, // Holds ManageRoomMembers (protocol 23)
+	managesRooms:      bool, // Holds ManageRooms
 	access:            common.RoomLogAccess,
 	canAdd:            bool,
 	// Why Add is not offered to an admin who may not sign it.
@@ -1504,7 +1505,10 @@ RoomLogRights :: struct {
 }
 
 roomLogRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomLogRights) {
-	rights.isAdmin = State_isServerAdmin(state, serverID)
+	// Protocol 23: the server's add and remove rules read ManageRoomMembers, SetAccess
+	// ManageRooms (admins hold both).
+	rights.isAdmin = State_hasPermission(state, serverID, .ManageRoomMembers)
+	rights.managesRooms = State_hasPermission(state, serverID, .ManageRooms)
 	room := State_findRoomLog(state, serverID, roomID)
 	if room == nil {
 		return
@@ -1538,7 +1542,7 @@ roomLogRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomLogR
 	rights.removeViaServer = !rights.isManager && rights.isAdmin
 	rights.canLeave = rights.isMember
 	rights.canManageManagers = rights.isManager
-	rights.canSetAccess = rights.isManager && rights.isAdmin
+	rights.canSetAccess = rights.isManager && rights.managesRooms
 	return
 }
 

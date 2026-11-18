@@ -94,7 +94,10 @@ DATABASE_LIST_USERS_SQL ::
 	"AND sr.name = 'admin')::text, (u.banned_at IS NOT NULL)::text, " +
 	"COALESCE(encode(u.public_key, 'hex'), ''), " +
 	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
-	"WHERE k.user_id = u.id))::text FROM users u " +
+	"WHERE k.user_id = u.id))::text, " +
+	// Protocol 23: the account's role IDs, comma separated.
+	"COALESCE((SELECT string_agg(usr.role_id::text, ',' ORDER BY usr.role_id) " +
+	"FROM user_server_roles usr WHERE usr.user_id = u.id), '') FROM users u " +
 	"ORDER BY lower(u.nickname), u.id"
 
 databaseExecutePostDirectMessage :: proc(
@@ -447,9 +450,12 @@ databaseExecuteListUsers :: proc(conn: pg.Conn) -> common.DatabaseQueryResponse 
 		if !userIDOK {
 			continue
 		}
+		roleIDs := databaseGetText(result, row, 6)
+		defer delete(roleIDs)
 		append(
 			&users,
 			common.UserSummary {
+				roleIds = databaseParseIDList(roleIDs),
 				id = userID,
 				nickname = databaseGetText(result, row, 1),
 				isAdmin = databaseGetBool(result, row, 2),

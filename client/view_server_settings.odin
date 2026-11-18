@@ -1,6 +1,8 @@
 package client
 
+import "../common"
 import "core:fmt"
+import "core:strings"
 import "ui"
 
 // The Server settings screen (server_settings.odin), drawn in the main pane in place of the
@@ -16,6 +18,14 @@ import "ui"
 // admin-member-kick, admin-member-ban (Ban… / Unban); the open confirmation's
 // admin-confirm-text, admin-confirm-lock (Rename only), admin-confirm, admin-confirm-cancel;
 // admin-room-edit, admin-room-delete, and admin-room-create (server ID only).
+//
+// Roles (protocol 23, roles.odin; admins): admin-member-roles (the member's Roles… button,
+// server and user ID), admin-member-role-toggle (server, user and role ID),
+// admin-member-roles-close (server, user ID); admin-role-new (server ID), admin-role-edit
+// (server, role ID), and in the open role form admin-role-name, admin-role-permission (server,
+// role ID, then the ServerPermission value), admin-role-save, admin-role-delete and
+// admin-role-cancel (server, role ID; 0 for a new role). Holders of ManageRooms or
+// ManageRoomMembers see the section with the room list only.
 
 SERVER_SETTINGS_COLUMN_WIDTH :: 520
 SERVER_SETTINGS_SHORT_WIDTH :: 96
@@ -455,6 +465,26 @@ viewServerSettings :: proc(
 	case .RoomMembers:
 		State_openRoomMembers(state, serverID, adminAction.roomID)
 		return
+	case .OpenMemberRoles:
+		if state.serverSettings.memberRolesUserID == adminAction.userID {
+			State_closeMemberRoles(state)
+		} else {
+			State_openMemberRoles(state, serverID, adminAction.userID)
+		}
+	case .CloseMemberRoles:
+		State_closeMemberRoles(state)
+	case .ToggleMemberRole:
+		State_toggleMemberRole(state, serverID, adminAction.userID, adminAction.roleID)
+	case .OpenRoleEditor:
+		State_openRoleEditor(state, serverID, adminAction.roleID)
+	case .CloseRoleEditor:
+		State_closeRoleEditor(state)
+	case .SubmitRoleEditor:
+		State_submitRoleEditor(state)
+	case .DeleteRole:
+		State_deleteRoleEditorRole(state)
+	case .ToggleRolePermission:
+		State_toggleRoleEditorPermission(state, adminAction.permission)
 	}
 	switch {
 	case closeClicked:
@@ -485,6 +515,15 @@ AdminSectionActionKind :: enum u8 {
 	DeleteRoom,
 	CreateRoom,
 	RoomMembers,
+	// Protocol 23 (roles.odin).
+	OpenMemberRoles,
+	CloseMemberRoles,
+	ToggleMemberRole,
+	OpenRoleEditor,
+	CloseRoleEditor,
+	SubmitRoleEditor,
+	DeleteRole,
+	ToggleRolePermission,
 }
 
 @(private = "file")
@@ -494,6 +533,8 @@ AdminSectionAction :: struct {
 	userID:      int,
 	roomID:      int,
 	grant:       bool,
+	roleID:      int,
+	permission:  common.ServerPermission,
 }
 
 // A small button laid out from the left of row. A disabled control is drawn muted, never
@@ -566,7 +607,9 @@ viewAdminSection :: proc(
 	}
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
 
-	serverSettingsLabel(ctx, column, "Members")
+	if view.showMembers {
+		serverSettingsLabel(ctx, column, "Members")
+	}
 	for member in view.members {
 		rowTop := column.y
 		// Line 1: online dot, name, badges.
@@ -599,6 +642,16 @@ viewAdminSection :: proc(
 			if member.isBanned {
 				adminBadge(ctx, &line, "Banned", ctx.theme.danger)
 			}
+		}
+		// Protocol 23: its roles other than admin, under the name.
+		if len(member.roleNames) > 0 {
+			line := ui.cutTop(column, ui.lineHeight(ctx))
+			_ = ui.cutLeft(&line, ui.dp(ctx, 8) + gap)
+			names := strings.join(member.roleNames, ", ", context.temp_allocator)
+			text := fmt.tprintf("Roles: %s", names)
+			ui.pushClip(ctx, line)
+			ui.label(ctx, line, text, ctx.theme.fgMuted)
+			ui.popClip(ctx)
 		}
 		// Line 2: the controls.
 		{
@@ -639,6 +692,24 @@ viewAdminSection :: proc(
 					action = {kind = .Unban, userID = userID}
 				}
 			}
+			if adminButton(
+				ctx,
+				&line,
+				ui.idOf("admin-member-roles", serverID, userID),
+				member.rolesControl,
+			) {
+				action = {kind = .OpenMemberRoles, userID = userID}
+			}
+		}
+		if member.rolesOpen {
+			_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+			if rolesAction := viewAdminMemberRoles(ctx, column, member, serverID);
+			   rolesAction.kind != .None {
+				action = rolesAction
+			}
+			if form.adminConfirm.scrollTo {
+				adminScrollIntoView(ctx, form, scrollID, area, rowTop, column.y)
+			}
 		}
 		if statusOnRow && member.userID == view.statusUserID {
 			_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING))
@@ -657,7 +728,7 @@ viewAdminSection :: proc(
 		}
 		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
 	}
-	if len(view.members) == 0 {
+	if view.showMembers && len(view.members) == 0 {
 		serverSettingsWrapped(
 			ctx,
 			column,
@@ -666,10 +737,24 @@ viewAdminSection :: proc(
 		)
 	}
 
+	if view.showRoles {
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
+		if rolesAction := viewAdminRoles(state, ctx, column, view, serverID);
+		   rolesAction.kind != .None {
+			action = rolesAction
+		}
+	}
+
+	if !view.showRooms {
+		return
+	}
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
 	{
 		header := ui.cutTop(column, rowH)
-		createControl := AdminControl{label = "Create room…", enabled = true}
+		createControl := AdminControl{label = "Create room…", enabled = view.canManageRooms}
+		if !view.canManageRooms {
+			createControl.reason = ADMIN_ROOMS_MANAGE_REASON
+		}
 		createW := ui.textSize(ui.textGet(ctx, 0, .Regular, createControl.label)).x
 		createW += ui.dp(ctx, ctx.theme.padding * 3)
 		createRect := header
@@ -682,9 +767,16 @@ viewAdminSection :: proc(
 	}
 	for room in view.rooms {
 		line := ui.cutTop(column, rowH)
-		membersControl := AdminControl{label = "Members…", enabled = true}
-		editControl := AdminControl{label = "Edit…", enabled = true}
-		deleteControl := AdminControl{label = "Delete…", enabled = true}
+		membersControl := AdminControl{label = "Members…", enabled = view.canManageRoomMembers}
+		editControl := AdminControl{label = "Edit…", enabled = view.canManageRooms}
+		deleteControl := AdminControl{label = "Delete…", enabled = view.canManageRooms}
+		if !view.canManageRoomMembers {
+			membersControl.reason = ADMIN_ROOMS_MEMBERS_REASON
+		}
+		if !view.canManageRooms {
+			editControl.reason = ADMIN_ROOMS_MANAGE_REASON
+			deleteControl.reason = ADMIN_ROOMS_MANAGE_REASON
+		}
 		buttonsW :=
 			ui.textSize(ui.textGet(ctx, 0, .Regular, membersControl.label)).x +
 			ui.textSize(ui.textGet(ctx, 0, .Regular, editControl.label)).x +
@@ -727,6 +819,269 @@ viewAdminSection :: proc(
 	}
 	if len(view.rooms) == 0 {
 		serverSettingsWrapped(ctx, column, "No rooms yet.", ctx.theme.fgMuted)
+	}
+	return
+}
+
+ADMIN_ROOMS_MANAGE_REASON :: "Needs a role that manages rooms."
+ADMIN_ROOMS_MEMBERS_REASON :: "Needs a role that manages room members."
+
+// A checkbox row: a box, ticked when checked, and the label, the whole row one button. A
+// disabled one is drawn muted and never clicks.
+@(private = "file")
+adminCheckbox :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	id: ui.ID,
+	label: string,
+	checked, enabled: bool,
+) -> bool {
+	row := ui.cutTop(column, ui.dp(ctx, ROW_HEIGHT))
+	clicked := false
+	if enabled {
+		clicked = ui.button(ctx, id, row, "", ui.ButtonOptions{align = .Left})
+	}
+	size := ui.dp(ctx, 16)
+	pad := ui.dp(ctx, ctx.theme.padding)
+	box := ui.Rect{row.x + pad, row.y + (row.h - size) / 2, size, size}
+	radius := ui.dp(ctx, 3)
+	ui.fillRoundedRect(ctx, box, radius, enabled ? ctx.theme.fgMuted : ctx.theme.border)
+	inner := ui.shrink(box, max(1, ui.dp(ctx, 2)))
+	ui.fillRoundedRect(ctx, inner, radius, checked ? ctx.theme.primary : ctx.theme.elevated)
+	text := row
+	_ = ui.cutLeft(&text, pad + size + ui.dp(ctx, 8))
+	ui.label(ctx, text, label, enabled ? ctx.theme.fg : ctx.theme.fgMuted)
+	return clicked
+}
+
+// A bordered box of height boxH cut from column, returning its padded inside.
+@(private = "file")
+adminBox :: proc(ctx: ^ui.Context, column: ^ui.Rect, boxH: f32) -> ui.Rect {
+	padding := ui.dp(ctx, PANEL_PADDING * 1.5)
+	box := ui.cutTop(column, boxH)
+	ui.fillRoundedRect(ctx, box, ui.dp(ctx, ctx.theme.cornerRadius), ctx.theme.border)
+	ui.fillRoundedRect(
+		ctx,
+		ui.shrink(box, max(1, ui.dp(ctx, 1))),
+		ui.dp(ctx, ctx.theme.cornerRadius),
+		ctx.theme.elevated,
+	)
+	return ui.shrink(box, padding)
+}
+
+// The role picker under a member: one checkbox per role other than admin, and Done.
+@(private = "file")
+viewAdminMemberRoles :: proc(
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	member: AdminMemberRow,
+	serverID: int,
+) -> (
+	action: AdminSectionAction,
+) {
+	padding := ui.dp(ctx, PANEL_PADDING * 1.5)
+	labelGap := ui.dp(ctx, SETTINGS_LABEL_GAP)
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	boxH := padding * 2 + ui.lineHeight(ctx, .Bold) + labelGap
+	boxH += f32(len(member.roles)) * rowH + labelGap * 2 + rowH
+	inner := adminBox(ctx, column, boxH)
+	title := fmt.tprintf("Roles of %s", member.label)
+	ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx, .Bold)), title, ctx.theme.fg, .Bold)
+	_ = ui.cutTop(&inner, labelGap)
+	userID := member.userID
+	for role in member.roles {
+		if adminCheckbox(
+			ctx,
+			&inner,
+			ui.idOf("admin-member-role-toggle", serverID, userID, role.roleID),
+			role.name,
+			role.held,
+			true,
+		) {
+			action = {kind = .ToggleMemberRole, userID = userID, roleID = role.roleID}
+		}
+	}
+	_ = ui.cutTop(&inner, labelGap * 2)
+	buttons := ui.cutTop(&inner, rowH)
+	if serverSettingsButton(
+		ctx,
+		&buttons,
+		ui.idOf("admin-member-roles-close", serverID, userID),
+		"Done",
+		.Plain,
+	) {
+		action = {kind = .CloseMemberRoles, userID = userID}
+	}
+	return
+}
+
+// Roles: every role with what it allows and how many accounts hold it, New role…, and the
+// open role form under its role (or under the header for a new one).
+@(private = "file")
+viewAdminRoles :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: AdminSectionView,
+	serverID: int,
+) -> (
+	action: AdminSectionAction,
+) {
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	gap := ui.dp(ctx, PANEL_PADDING)
+	{
+		header := ui.cutTop(column, rowH)
+		newControl := AdminControl{label = "New role…", enabled = true}
+		newW := ui.textSize(ui.textGet(ctx, 0, .Regular, newControl.label)).x
+		newW += ui.dp(ctx, ctx.theme.padding * 3)
+		newRect := header
+		_ = ui.cutLeft(&newRect, header.w - newW)
+		if adminButton(ctx, &newRect, ui.idOf("admin-role-new", serverID), newControl) {
+			action = {kind = .OpenRoleEditor}
+		}
+		ui.label(ctx, header, "Roles", ctx.theme.fgMuted, .Bold)
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	}
+	if view.roleEditor.open && view.roleEditor.roleID == 0 {
+		if editorAction := viewAdminRoleEditor(state, ctx, column, view.roleEditor, serverID);
+		   editorAction.kind != .None {
+			action = editorAction
+		}
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
+	}
+	for role in view.roles {
+		line := ui.cutTop(column, rowH)
+		editControl := AdminControl{label = "Edit…", enabled = true}
+		editW := ui.textSize(ui.textGet(ctx, 0, .Regular, editControl.label)).x
+		editW += ui.dp(ctx, ctx.theme.padding * 3)
+		buttons := ui.cutRight(&line, editW)
+		editID := ui.idOf("admin-role-edit", serverID, role.roleID)
+		if adminButton(ctx, &buttons, editID, editControl) {
+			action = {kind = .OpenRoleEditor, roleID = role.roleID}
+		}
+		_ = ui.cutRight(&line, gap)
+		holders := fmt.tprintf("%d %s", role.holders, role.holders == 1 ? "account" : "accounts")
+		holdersW := ui.textSize(ui.textGet(ctx, 0, .Regular, holders)).x
+		holdersRect := ui.cutRight(&line, holdersW)
+		_ = ui.cutRight(&line, gap)
+		ui.label(ctx, holdersRect, holders, ctx.theme.fgMuted)
+		{
+			ui.pushClip(ctx, line)
+			defer ui.popClip(ctx)
+			ui.label(ctx, line, role.name, ctx.theme.fg, .Bold)
+		}
+		permissionsLine := ui.cutTop(column, ui.lineHeight(ctx))
+		_ = ui.cutLeft(&permissionsLine, ui.dp(ctx, 12))
+		ui.pushClip(ctx, permissionsLine)
+		ui.label(ctx, permissionsLine, role.permissionsLabel, ctx.theme.fgMuted)
+		ui.popClip(ctx)
+		if view.roleEditor.open && view.roleEditor.roleID == role.roleID {
+			_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+			if editorAction := viewAdminRoleEditor(state, ctx, column, view.roleEditor, serverID);
+			   editorAction.kind != .None {
+				action = editorAction
+			}
+		}
+		_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING * 2))
+	}
+	if len(view.roles) == 0 {
+		serverSettingsWrapped(ctx, column, "The role list has not arrived yet.", ctx.theme.fgMuted)
+	}
+	return
+}
+
+// The role form: the name (fixed for the built-in role), one checkbox per delegable
+// permission, a note, and Create or Save, Delete… and Cancel.
+@(private = "file")
+viewAdminRoleEditor :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	view: RoleEditorView,
+	serverID: int,
+) -> (
+	action: AdminSectionAction,
+) {
+	editor := &state.serverSettings.roleEditor
+	padding := ui.dp(ctx, PANEL_PADDING * 1.5)
+	labelGap := ui.dp(ctx, SETTINGS_LABEL_GAP)
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	innerW := column.w - padding * 2
+	roleID := view.roleID
+	nameID := ui.idOf("admin-role-name", serverID, roleID)
+	inputH := ui.textInputHeight(ctx, nameID, editor.name[:], innerW)
+	noteH := ui.wrappedTextHeight(ctx, view.note, innerW)
+	boxH := padding * 2 + ui.lineHeight(ctx, .Bold) + labelGap
+	if !view.builtin {
+		boxH += ui.lineHeight(ctx) + labelGap + inputH + labelGap
+	}
+	boxH += ui.lineHeight(ctx) + labelGap
+	boxH += f32(len(view.permissions)) * rowH + labelGap
+	boxH += noteH + labelGap * 2 + rowH
+	inner := adminBox(ctx, column, boxH)
+	ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx, .Bold)), view.title, ctx.theme.fg, .Bold)
+	_ = ui.cutTop(&inner, labelGap)
+	if !view.builtin {
+		ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx)), "Name", ctx.theme.fgMuted)
+		_ = ui.cutTop(&inner, labelGap)
+		if serverSettingsField(
+			ctx,
+			ui.cutTop(&inner, inputH),
+			nameID,
+			&editor.name,
+			"Room keepers",
+			common.ROLE_NAME_MAX_BYTES,
+		) {
+			action = {kind = .SubmitRoleEditor, roleID = roleID}
+		}
+		_ = ui.cutTop(&inner, labelGap)
+	}
+	ui.label(ctx, ui.cutTop(&inner, ui.lineHeight(ctx)), "Permissions", ctx.theme.fgMuted)
+	_ = ui.cutTop(&inner, labelGap)
+	for row in view.permissions {
+		if adminCheckbox(
+			ctx,
+			&inner,
+			ui.idOf("admin-role-permission", serverID, roleID, int(row.permission)),
+			row.label,
+			row.checked,
+			row.enabled,
+		) {
+			action = {kind = .ToggleRolePermission, roleID = roleID, permission = row.permission}
+		}
+	}
+	_ = ui.cutTop(&inner, labelGap)
+	serverSettingsWrapped(ctx, &inner, view.note, ctx.theme.fgMuted)
+	_ = ui.cutTop(&inner, labelGap * 2)
+	buttons := ui.cutTop(&inner, rowH)
+	if !view.builtin &&
+	   serverSettingsButton(
+		   ctx,
+		   &buttons,
+		   ui.idOf("admin-role-save", serverID, roleID),
+		   view.saveLabel,
+		   .Primary,
+	   ) {
+		action = {kind = .SubmitRoleEditor, roleID = roleID}
+	}
+	if view.canDelete &&
+	   serverSettingsButton(
+		   ctx,
+		   &buttons,
+		   ui.idOf("admin-role-delete", serverID, roleID),
+		   view.deleteLabel,
+		   view.confirmDelete ? .DangerArmed : .Danger,
+	   ) {
+		action = {kind = .DeleteRole, roleID = roleID}
+	}
+	if serverSettingsButton(
+		ctx,
+		&buttons,
+		ui.idOf("admin-role-cancel", serverID, roleID),
+		view.builtin ? "Close" : "Cancel",
+		.Plain,
+	) {
+		action = {kind = .CloseRoleEditor, roleID = roleID}
 	}
 	return
 }

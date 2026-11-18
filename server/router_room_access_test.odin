@@ -308,7 +308,7 @@ testRoomAccessRouterLeaveFetchAndAdminList :: proc(t: ^testing.T) {
 			query.request_id,
 			common.DatabaseQueryResponse {
 				success = true,
-				result = common.DatabaseAdminRoomListResult{isAdmin = false},
+				result = common.DatabaseAdminRoomListResult{allowed = false},
 			},
 		)
 		drain := routerVoiceTestDrain(&h, clients[:])
@@ -345,7 +345,7 @@ testRoomAccessRouterLeaveFetchAndAdminList :: proc(t: ^testing.T) {
 			query.request_id,
 			common.DatabaseQueryResponse {
 				success = true,
-				result = common.DatabaseAdminRoomListResult{isAdmin = true, rooms = rooms},
+				result = common.DatabaseAdminRoomListResult{allowed = true, rooms = rooms},
 			},
 		)
 		drain := routerVoiceTestDrain(&h, clients[:])
@@ -386,17 +386,6 @@ testRoomAccessRouterCreateWithoutJoiningNotifiesNobody :: proc(t: ^testing.T) {
 			access = .AdminInvite,
 			historyVisibility = .Full,
 			creatorJoins = false,
-		},
-	)
-	adminQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(adminQuery.request)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		adminQuery.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserServerAdminResult{isAdmin = true},
 		},
 	)
 	createQuery := routerPollDatabaseQuery(&h)
@@ -446,17 +435,6 @@ testRoomAccessRouterCreateWithoutJoiningNotifiesNobody :: proc(t: ^testing.T) {
 		1,
 		.ClientEditRoom,
 		common.ClientEditRoomPayload{roomId = 12, name = "ops", roomType = .Chat, access = .Public},
-	)
-	checkQuery := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(checkQuery.request)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		checkQuery.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserServerAdminResult{isAdmin = true},
-		},
 	)
 	editQuery := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(editQuery.request)

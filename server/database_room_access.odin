@@ -11,18 +11,20 @@ import "shared:pg"
 // a check and the write cannot slip through. A refusal changes nothing and names its reason
 // in the first column.
 //
-// The rules (design 5.1), checked in this order:
+// The rules (design 5.1), checked in this order. Since protocol 23 (#95) "manager" means an
+// account holding the ManageRoomMembers server permission (admins hold every permission),
+// checked with the shared subquery of database_roles.odin:
 //
-// - Add: a room that does not exist is `unknown_room` to admins and `not_member` to anyone
+// - Add: a room that does not exist is `unknown_room` to managers and `not_member` to anyone
 //   else, so non-members learn nothing about rooms they cannot see; a requester who is neither
-//   an admin nor a member is `not_member`; a Public room is `public_room` (it already includes
-//   every account); an Admin invite room needs an admin (`admin_required`); the target must
-//   exist (`unknown_user`). Adding a member again changes nothing.
-// - Remove: admins only (`admin_required`), in every mode; then `unknown_room` and
+//   a manager nor a member is `not_member`; a Public room is `public_room` (it already
+//   includes every account); an Admin invite room needs a manager (`admin_required`); the
+//   target must exist (`unknown_user`). Adding a member again changes nothing.
+// - Remove: managers only (`admin_required`), in every mode; then `unknown_room` and
 //   `unknown_user`. Removing someone who is not a member changes nothing.
 // - Leave: the requester must be a member (`not_member`, also for a missing room), and Public
 //   rooms cannot be left (`public_room`).
-// - Fetch: members and admins (`not_member` otherwise, `unknown_room` to admins).
+// - Fetch: members and managers (`not_member` otherwise, `unknown_room` to managers).
 //
 // A removal or a leave also deletes the account's read marker for the room, so someone added
 // again later counts unread messages from the new joined_at, like a new member.
@@ -39,9 +41,7 @@ import "shared:pg"
 
 @(private = "file")
 DATABASE_ROOM_MEMBER_PREFIX_SQL ::
-	"WITH actor AS (SELECT EXISTS (SELECT 1 FROM user_server_roles usr " +
-	"JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS is_admin, " +
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + " AS is_admin, " +
 	"EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id = $1::bigint) AS is_member), " +
 	"room AS (SELECT id, access, encrypted FROM rooms WHERE id = $2::bigint), " +
@@ -224,12 +224,11 @@ databaseExecuteRoomMemberAction :: proc(
 }
 
 // Every room by name, with whether the requester is a member and how many members it has, for
-// the Admin section. One row with NULL room columns comes back when the requester is not an
-// admin (the last column false) or there are no rooms.
+// the Admin section. One row with NULL room columns comes back when the requester holds neither
+// ManageRooms nor ManageRoomMembers (protocol 23; the last column false) or there are no rooms.
 DATABASE_ADMIN_LIST_ROOMS_SQL ::
-	"WITH actor AS (SELECT EXISTS (SELECT 1 FROM user_server_roles usr " +
-	"JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS ok) " +
+	"WITH actor AS (SELECT (" + DATABASE_ACTOR_MANAGES_ROOMS_SQL + " OR " +
+	DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + ") AS ok) " +
 	"SELECT " + DATABASE_ROOM_SUMMARY_COLUMNS_SQL + ", EXISTS (SELECT 1 FROM room_members rm " +
 	"WHERE rm.room_id = r.id AND rm.user_id = $1::bigint)::text, " +
 	"(SELECT count(*) FROM room_members rm WHERE rm.room_id = r.id)::text, a.ok::text " +
@@ -251,9 +250,9 @@ databaseExecuteAdminRoomList :: proc(
 		return databaseResultError(&result)
 	}
 	list := common.DatabaseAdminRoomListResult {
-		isAdmin = databaseGetBool(result, 0, 10),
+		allowed = databaseGetBool(result, 0, 10),
 	}
-	if !list.isAdmin {
+	if !list.allowed {
 		return databaseSuccess(list)
 	}
 	list.rooms = make([dynamic]common.AdminRoomSummary)

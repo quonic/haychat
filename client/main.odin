@@ -120,6 +120,8 @@ State :: struct {
 	roomChains:                     [dynamic]ServerRoomChains,
 	recordRoomChainNotes:           bool,
 	roomChainNotes:                 [dynamic]RoomChainNote,
+	// Each server's roles (roles.odin, protocol 23).
+	serverRoles:                    [dynamic]ServerRoleCache,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -245,6 +247,7 @@ State_deinit :: proc(state: ^State) {
 	SettingsForm_deinit(&state.settings)
 	RoomEditor_deinit(&state.roomEditor)
 	AdminRequestState_deinit(&state.adminRequest)
+	State_deinitRoles(state)
 	ServerSettingsForm_deinit(&state.serverSettings)
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)

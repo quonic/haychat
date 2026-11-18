@@ -103,6 +103,9 @@ SQL_TESTS+=,server.testRoomSenderChainsMigrationUpgradesVersion7AgainstPostgreSQ
 SQL_TESTS+=,server.testRoomKeyForwardStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomKeyForwardsMigrationUpgradesVersion8AgainstPostgreSQL
 SQL_TESTS+=,server.testSignedMessagesMigrationUpgradesVersion9AgainstPostgreSQL
+SQL_TESTS+=,server.testRolesMigrationUpgradesVersion10AgainstPostgreSQL
+SQL_TESTS+=,server.testRoleStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRolePermissionsInOtherStatementsAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

@@ -6,8 +6,11 @@ import "core:slice"
 
 // The admin's controls for accounts and rooms (plan P4): the Admin section of Server settings
 // (view_server_settings.odin) and the admin entries of the user context menus
-// (context_menu.odin). Both are offered only to admins (State_isServerAdmin) and send through
-// the protocol 14 actions in admin.odin, so the server still checks the role and every guard.
+// (context_menu.odin). The account controls are offered only to admins (State_isServerAdmin)
+// and send through the protocol 14 actions in admin.odin, so the server still checks the role
+// and every guard. Since protocol 23 the section also shows to holders of a delegated
+// permission (State_hasAdminSection): the room list for ManageRooms and ManageRoomMembers,
+// and, for admins, the Roles list and form and each account's roles (roles.odin).
 //
 // What the server refuses (plan decision D6) is disabled here with a sentence saying why:
 // kicking, banning or removing the admin role of yourself, kicking or banning another admin
@@ -325,7 +328,15 @@ State_roomAllowsVoice :: proc(state: ^State, serverID, roomID: int) -> bool {
 AdminMemberRow :: struct {
 	using controls: AdminUserControls,
 	label:          string, // Borrowed from State, or in the view allocator
+	// Protocol 23: the names of its roles other than admin (borrowed), its Roles… button, and
+	// the picker when it is open under this row.
+	roleNames:      []string,
+	rolesControl:   AdminControl,
+	rolesOpen:      bool,
+	roles:          []AdminMemberRoleRow,
 }
+
+ADMIN_ROLES_NONE_REASON :: "Create a role under Roles first."
 
 AdminRoomRow :: struct {
 	roomID:      int,
@@ -362,6 +373,16 @@ AdminConfirmView :: struct {
 AdminSectionView :: struct {
 	visible:    bool,
 	note:       string,
+	// Protocol 23: which parts this account may use. Accounts (and their controls) and Roles
+	// are for admins; the room list for ManageRooms or ManageRoomMembers, with Members… for the
+	// latter and Create, Edit and Delete for the former.
+	showMembers:    bool,
+	showRooms:      bool,
+	canManageRooms: bool,
+	canManageRoomMembers: bool,
+	showRoles:      bool,
+	roles:          []AdminRoleRow,
+	roleEditor:     RoleEditorView,
 	// Every account of the server's directory, you included, by name (adminMemberLess), so a
 	// row stays where it is when its account goes offline or is banned.
 	members:    []AdminMemberRow,
@@ -394,16 +415,35 @@ buildAdminSectionView :: proc(
 ) -> (
 	view: AdminSectionView,
 ) {
-	if !State_isServerAdmin(state, serverID) {
+	if !State_hasAdminSection(state, serverID) {
 		return
 	}
+	isAdmin := State_isServerAdmin(state, serverID)
 	view.visible = true
-	view.note =
-		"Only admins see this section. The server checks every change; renaming locks the " +
-		"name so the account cannot change it back."
+	view.showMembers = isAdmin
+	view.showRoles = isAdmin
+	view.canManageRooms = State_hasPermission(state, serverID, .ManageRooms)
+	view.canManageRoomMembers = State_hasPermission(state, serverID, .ManageRoomMembers)
+	view.showRooms = view.canManageRooms || view.canManageRoomMembers
+	if isAdmin {
+		view.note =
+			"Only admins and accounts with a role that manages rooms see this section. The " +
+			"server checks every change; renaming locks the name so the account cannot " +
+			"change it back."
+	} else {
+		view.note =
+			"A role an admin gave you lets you manage rooms here. The server checks every " +
+			"change."
+	}
 	selfUserID := State_selfUserID(state, serverID)
 	members := make([dynamic]AdminMemberRow, 0, allocator)
-	if index := State_serverDirectCacheIndex(state^, serverID); index >= 0 {
+	assignable := 0
+	for role in State_roles(state, serverID) {
+		if !role.builtin {
+			assignable += 1
+		}
+	}
+	if index := State_serverDirectCacheIndex(state^, serverID); isAdmin && index >= 0 {
 		users := slice.clone(state.serverDirectCaches[index].users[:], allocator)
 		slice.sort_by(users, adminMemberLess)
 		for user in users {
@@ -412,15 +452,34 @@ buildAdminSectionView :: proc(
 			if user.id == selfUserID {
 				label = fmt.aprintf("%s (you)", label, allocator = allocator)
 			}
-			append(&members, AdminMemberRow{controls = controls, label = label})
+			row := AdminMemberRow {
+				controls  = controls,
+				label     = label,
+				roleNames = State_userRoleNames(state, serverID, user.id, allocator),
+			}
+			row.rolesControl = {label = "Roles…", enabled = assignable > 0}
+			if assignable == 0 {
+				row.rolesControl.reason = ADMIN_ROLES_NONE_REASON
+			}
+			if state.serverSettings.memberRolesUserID == user.id {
+				row.rolesOpen = true
+				row.roles = buildAdminMemberRoleRows(state, serverID, user.id, allocator)
+			}
+			append(&members, row)
 		}
 	}
 	view.members = members[:]
+	if isAdmin {
+		view.roles = buildAdminRoleRows(state, serverID, allocator)
+		if form := &state.serverSettings; form.open && form.serverID == serverID {
+			view.roleEditor = buildRoleEditorView(state, allocator)
+		}
+	}
 
 	// Every room from ServerAdminRooms (protocol 15), joined or not; until it arrives, the
 	// rooms this admin is in.
 	rooms := make([dynamic]AdminRoomRow, 0, allocator)
-	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
+	if index := State_serverRoomCacheIndex(state^, serverID); view.showRooms && index >= 0 {
 		cache := &state.server_room_caches[index]
 		if cache.adminRoomsLoaded {
 			for entry in cache.adminRooms {

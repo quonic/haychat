@@ -754,17 +754,6 @@ testMainRouterRoomTypesAreValidatedAndEnforced :: proc(t: ^testing.T) {
 			creatorJoins = true,
 		},
 	)
-	adminCheck := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(adminCheck.request)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		adminCheck.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserServerAdminResult{isAdmin = true},
-		},
-	)
 	create := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(create.request)
 	createRequest, createOK := create.request.(common.DatabaseCreateRoomRequest)
@@ -835,17 +824,6 @@ testMainRouterEditToTextOnlyEndsTheRoomsVoice :: proc(t: ^testing.T) {
 		1,
 		.ClientEditRoom,
 		common.ClientEditRoomPayload{roomId = 5, name = "lobby", roomType = .Chat, access = .Public},
-	)
-	adminCheck := routerPollDatabaseQuery(&h)
-	defer IPC__database_query_request_deinit(adminCheck.request)
-	MainRouterState_handleDatabaseResult(
-		&h.pm,
-		&h.state,
-		adminCheck.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserServerAdminResult{isAdmin = true},
-		},
 	)
 	edit := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(edit.request)

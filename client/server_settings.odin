@@ -45,6 +45,10 @@ ServerSettingsForm :: struct {
 	notice:           string, // Owned; what the last save did
 	// The Admin section's confirmation (admin_ui.odin), open under one member.
 	adminConfirm:     AdminConfirm,
+	// Protocol 23 (roles.odin): the open role form, and the member whose role picker is open
+	// (0 for none).
+	roleEditor:       RoleEditorForm,
+	memberRolesUserID: int,
 	// The view's content height last frame, for its scroll area.
 	contentH:         f32,
 	// Set when the screen opens: the view starts it at the top rather than where an earlier
@@ -61,6 +65,7 @@ ServerSettingsForm_deinit :: proc(form: ^ServerSettingsForm) {
 	delete(form.error)
 	delete(form.notice)
 	AdminConfirm_deinit(&form.adminConfirm)
+	RoleEditorForm_deinit(&form.roleEditor)
 	form^ = {}
 }
 
@@ -119,6 +124,8 @@ State_openServerSettings :: proc(state: ^State, serverID: int) -> bool {
 	ServerSettingsForm_load(form, server^)
 	ServerSettingsForm_setMessages(form, "", "")
 	State_cancelAdminConfirm(state)
+	State_closeRoleEditor(state)
+	State_closeMemberRoles(state)
 	State_clearAdminRequestStatus(state)
 	// The Admin section lists every room, also those the admin is not in (protocol 15).
 	State_requestAdminRooms(state, serverID)
@@ -133,6 +140,8 @@ State_closeServerSettings :: proc(state: ^State) {
 	form.confirmRemove = false
 	ServerSettingsForm_setMessages(form, "", "")
 	State_cancelAdminConfirm(state)
+	State_closeRoleEditor(state)
+	State_closeMemberRoles(state)
 }
 
 // Closes the screen when its server is no longer configured (removed in Settings or here).

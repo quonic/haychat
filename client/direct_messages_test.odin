@@ -117,6 +117,16 @@ testApplyDirectHistory :: proc(
 	ClientTransportRuntimeEvent_deinit(&event)
 }
 
+// A heap copy of ids, nil for none.
+testCloneIDs :: proc(ids: []int) -> [dynamic]int {
+	if len(ids) == 0 {
+		return nil
+	}
+	copied := make([dynamic]int, len(ids))
+	copy(copied[:], ids)
+	return copied
+}
+
 testApplyUserList :: proc(state: ^State, serverID: int, users: ..common.UserSummary) {
 	event := ClientTransportRuntimeEvent {
 		kind     = .UserListReceived,
@@ -133,6 +143,7 @@ testApplyUserList :: proc(state: ^State, serverID: int, users: ..common.UserSumm
 				isBanned = user.isBanned,
 				identityPublicKey = user.identityPublicKey,
 				hasEncryptionKey = user.hasEncryptionKey,
+				roleIds = testCloneIDs(user.roleIds[:]),
 			},
 		)
 	}

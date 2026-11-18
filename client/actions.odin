@@ -690,7 +690,14 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.adminAction,
 			event.peerUserID,
 			event.message,
+			event.roleID,
 		)
+	case .RoleListReceived:
+		State_receiveRoleList(state, event.serverID, &event.roles)
+	case .RoleUpdated:
+		State_roleUpdated(state, event.serverID, &event.role)
+	case .RoleDeleted:
+		State_roleDeleted(state, event.serverID, event.roleID)
 	case .SessionEnded:
 		// The transport already ended the session as a failure that is not retried.
 		State_connectionFailed(state, event)

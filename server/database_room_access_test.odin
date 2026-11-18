@@ -434,7 +434,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		defer IPC__database_query_response_deinit(response)
 		list, ok := response.result.(common.DatabaseAdminRoomListResult)
 		assert(
-			response.success && ok && list.isAdmin,
+			response.success && ok && list.allowed,
 			fmt.tprintf("expected the list: %v", response),
 		)
 		builder := strings.builder_make(context.temp_allocator)
@@ -460,7 +460,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		defer IPC__database_query_response_deinit(refused)
 		none, noneOK := refused.result.(common.DatabaseAdminRoomListResult)
 		assert(
-			refused.success && noneOK && !none.isAdmin && len(none.rooms) == 0,
+			refused.success && noneOK && !none.allowed && len(none.rooms) == 0,
 			fmt.tprintf("expected bob refused, got %v", refused),
 		)
 	}
@@ -470,6 +470,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		response := databaseExecuteRequest(
 			conn,
 			common.DatabaseEditRoomRequest {
+				actorUserId = admin,
 				roomId = adminRoom,
 				name = "acc-admin-only",
 				roomType = .ChatAndVoice,
@@ -496,6 +497,7 @@ testRoomAccessModeRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		response := databaseExecuteRequest(
 			conn,
 			common.DatabaseEditRoomRequest {
+				actorUserId = admin,
 				roomId = adminRoom,
 				name = "acc-admin-only",
 				roomType = .ChatAndVoice,
@@ -696,6 +698,7 @@ testRoomAccessFromJoinHistoryAgainstPostgreSQL :: proc(t: ^testing.T) {
 		response := databaseExecuteRequest(
 			conn,
 			common.DatabaseEditRoomRequest {
+				actorUserId = admin,
 				roomId = fromJoin,
 				name = "his-from-join",
 				roomType = .ChatAndVoice,

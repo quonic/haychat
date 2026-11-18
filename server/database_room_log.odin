@@ -11,7 +11,7 @@ import "shared:pg"
 // An append is one transaction on the database worker's connection:
 //
 // 1. Lock the room row (FOR UPDATE) and read its flag, head version, mode, creator and the
-//    requester's admin role and membership.
+//    requester's ManageRooms and ManageRoomMembers permissions (protocol 23) and membership.
 // 2. Replay every stored entry with common.replayRoomLog (no pins: the server has none), so the
 //    state it validates against is the log's, never room_members. A stored log that does not
 //    replay, or whose head is not rooms.log_version, refuses every append (Damaged).
@@ -22,12 +22,13 @@ import "shared:pg"
 // 5. Store the entry, move rooms.log_version, apply it to room_members (and room_log_managers,
 //    and rooms.access for SetAccess), and commit.
 //
-// The server's rules: every signed entry's actor is the requester. Create needs the admin role
-// and the room's creator, on a room at version 0, with the room's own access and history. Add
-// needs the admin role, or membership of a Member invite room (room_members). SetAccess needs
-// the admin role. A Remove signed by a manager, a Leave, and the manager changes need nothing
-// beyond the log's rules. Unsigned entries come only from the server itself
-// (databaseExecuteServerRoomLogRemove, for an admin's ClientRemoveRoomMember).
+// The server's rules: every signed entry's actor is the requester. Create needs ManageRooms
+// (protocol 23; the admin role before it) and the room's creator, on a room at version 0, with
+// the room's own access and history. Add needs ManageRoomMembers, or membership of a Member
+// invite room (room_members). SetAccess needs ManageRooms. A Remove signed by a manager, a
+// Leave, and the manager changes need nothing beyond the log's rules. Unsigned entries come
+// only from the server itself (databaseExecuteServerRoomLogRemove, for a ClientRemoveRoomMember
+// of an account holding ManageRoomMembers).
 //
 // Replaying on every append costs one signature check per stored entry; a room's log grows by
 // one entry per membership change, so this stays small next to the round trip. Nothing here
@@ -37,10 +38,10 @@ import "shared:pg"
 DATABASE_ROOM_LOG_LOCK_SQL ::
 	"SELECT r.encrypted::text, r.log_version::text, r.access::text, " +
 	"r.history_visibility::text, COALESCE(r.created_by_user_id, 0)::text, " +
-	"EXISTS (SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin')::text, " +
+	"(" + DATABASE_ACTOR_MANAGES_ROOMS_SQL + ")::text, " +
 	"EXISTS (SELECT 1 FROM room_members rm WHERE rm.room_id = r.id " +
-	"AND rm.user_id = $1::bigint)::text " +
+	"AND rm.user_id = $1::bigint)::text, " +
+	"(" + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL + ")::text " +
 	"FROM rooms r WHERE r.id = $2::bigint FOR UPDATE"
 
 // Ordered by the column itself: the output column of the same name is text.
@@ -83,13 +84,14 @@ DATABASE_ROOM_LOG_SET_MANAGERS_SQL ::
 	"FROM wanted w JOIN users u ON u.id = w.user_id ON CONFLICT DO NOTHING"
 
 // $1 the requester, $2 the room, $3 afterVersion, $4 the page size plus one. Members, managers
-// and admins may read; anyone else, and every request for a room that does not exist, reads
-// as not allowed. One row with NULL entry columns when there is nothing to send.
+// and accounts holding ManageRooms or ManageRoomMembers (protocol 23) may read; anyone else,
+// and every request for a room that does not exist, reads as not allowed. One row with NULL
+// entry columns when there is nothing to send.
 DATABASE_FETCH_ROOM_LOG_SQL ::
 	"WITH room AS (SELECT id, encrypted, log_version FROM rooms WHERE id = $2::bigint), " +
 	"allowed AS (SELECT EXISTS (SELECT 1 FROM room) AND (" +
-	"EXISTS (SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') " +
+	"" + DATABASE_ACTOR_MANAGES_ROOMS_SQL + " OR " + DATABASE_ACTOR_MANAGES_ROOM_MEMBERS_SQL +
+	" " +
 	"OR EXISTS (SELECT 1 FROM room_members WHERE room_id = $2::bigint " +
 	"AND user_id = $1::bigint) " +
 	"OR EXISTS (SELECT 1 FROM room_log_managers WHERE room_id = $2::bigint " +
@@ -111,8 +113,9 @@ RoomLogLockedRoom :: struct {
 	access:            common.RoomAccess,
 	historyVisibility: common.RoomHistoryVisibility,
 	createdBy:         int,
-	actorIsAdmin:      bool,
-	actorIsMember:     bool,
+	actorManagesRooms:   bool,
+	actorIsMember:       bool,
+	actorManagesMembers: bool,
 }
 
 // The accounts' identity keys, the server's stand-in for pins during validation.
@@ -249,8 +252,9 @@ databaseRoomLogLock :: proc(
 	}
 	room.historyVisibility = visibility
 	room.createdBy = databaseGetIntOrZero(result, 0, 4)
-	room.actorIsAdmin = databaseGetBool(result, 0, 5)
+	room.actorManagesRooms = databaseGetBool(result, 0, 5)
 	room.actorIsMember = databaseGetBool(result, 0, 6)
+	room.actorManagesMembers = databaseGetBool(result, 0, 7)
 	return room, true
 }
 
@@ -513,7 +517,7 @@ roomLogServerAllows :: proc(
 	}
 	#partial switch entry.action {
 	case .Create:
-		if !room.actorIsAdmin || room.createdBy != actorUserID {
+		if !room.actorManagesRooms || room.createdBy != actorUserID {
 			return .NotAuthorized
 		}
 		if int(entry.settings.access) != int(room.access) ||
@@ -521,11 +525,11 @@ roomLogServerAllows :: proc(
 			return .Invalid
 		}
 	case .Add:
-		if !room.actorIsAdmin && !(room.access == .MemberInvite && room.actorIsMember) {
+		if !room.actorManagesMembers && !(room.access == .MemberInvite && room.actorIsMember) {
 			return .NotAuthorized
 		}
 	case .SetAccess:
-		if !room.actorIsAdmin {
+		if !room.actorManagesRooms {
 			return .NotAuthorized
 		}
 	}
@@ -534,11 +538,12 @@ roomLogServerAllows :: proc(
 
 // The parts of the locked room the server's rules read, for roomLogServerAllows (and its test).
 RoomLogLockedRoomView :: struct {
-	access:            common.RoomAccess,
-	historyVisibility: common.RoomHistoryVisibility,
-	createdBy:         int,
-	actorIsAdmin:      bool,
-	actorIsMember:     bool,
+	access:              common.RoomAccess,
+	historyVisibility:   common.RoomHistoryVisibility,
+	createdBy:           int,
+	actorManagesRooms:   bool,
+	actorIsMember:       bool,
+	actorManagesMembers: bool,
 }
 
 databaseExecuteAppendRoomLog :: proc(
@@ -645,8 +650,9 @@ databaseAppendRoomLogInTransaction :: proc(
 		access            = room.access,
 		historyVisibility = room.historyVisibility,
 		createdBy         = room.createdBy,
-		actorIsAdmin      = room.actorIsAdmin,
-		actorIsMember     = room.actorIsMember,
+		actorManagesRooms   = room.actorManagesRooms,
+		actorIsMember       = room.actorIsMember,
+		actorManagesMembers = room.actorManagesMembers,
 	}
 	if allowed := roomLogServerAllows(view, request.actorUserId, entry); allowed != .Applied {
 		return {outcome = allowed}, {}, false
@@ -719,7 +725,7 @@ databaseServerRoomLogRemoveInTransaction :: proc(
 		return {}, databaseConnectionError(conn), true
 	}
 	// The same order of refusals as an unencrypted removal.
-	if !room.actorIsAdmin {
+	if !room.actorManagesMembers {
 		return {outcome = .AdminRequired}, {}, false
 	}
 	if !room.found {
