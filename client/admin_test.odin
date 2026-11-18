@@ -18,6 +18,7 @@ adminSendBridgeTestCount: int
 adminSendBridgeTestLast: AdminRequest
 adminSendBridgeTestNickname: string
 adminSendBridgeTestReason: string
+adminSendBridgeTestRoleName: string
 
 adminSendBridgeTestStub :: proc(transport: ^ClientServerTransport, request: AdminRequest) -> bool {
 	adminSendBridgeTestCount += 1
@@ -28,6 +29,9 @@ adminSendBridgeTestStub :: proc(transport: ^ClientServerTransport, request: Admi
 	adminSendBridgeTestReason = strings.clone(request.reason)
 	adminSendBridgeTestLast.nickname = adminSendBridgeTestNickname
 	adminSendBridgeTestLast.reason = adminSendBridgeTestReason
+	delete(adminSendBridgeTestRoleName)
+	adminSendBridgeTestRoleName = strings.clone(request.roleName)
+	adminSendBridgeTestLast.roleName = adminSendBridgeTestRoleName
 	return true
 }
 
@@ -42,8 +46,10 @@ testAdminRestore :: proc() {
 	adminSendBridge = ClientServerTransport_sendAdminRequest
 	delete(adminSendBridgeTestNickname)
 	delete(adminSendBridgeTestReason)
+	delete(adminSendBridgeTestRoleName)
 	adminSendBridgeTestNickname = ""
 	adminSendBridgeTestReason = ""
+	adminSendBridgeTestRoleName = ""
 	adminSendBridgeTestLast = {}
 }
 

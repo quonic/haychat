@@ -45,7 +45,12 @@ headlessPermissionNames :: proc(
 }
 
 // Parses "manage-rooms,manage-room-members" or "none".
-headlessParsePermissions :: proc(text: string) -> (permissions: common.ServerPermissions, ok: bool) {
+headlessParsePermissions :: proc(
+	text: string,
+) -> (
+	permissions: common.ServerPermissions,
+	ok: bool,
+) {
 	if text == "none" {
 		return {}, true
 	}

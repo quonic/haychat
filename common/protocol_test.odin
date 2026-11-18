@@ -1113,8 +1113,11 @@ testRoleNamesAreValidated :: proc(t: ^testing.T) {
 testRolePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	_ = t
 	roles := make([dynamic]RoleSummary, context.temp_allocator)
-	append(&roles, RoleSummary{id = 1, name = "admin", permissions = SERVER_PERMISSIONS_ALL, builtin = true})
-	append(&roles, RoleSummary{id = 4, name = "mods", permissions = {.ManageRoomMembers}, position = 2})
+	append(
+		&roles,
+		RoleSummary{id = 1, name = "admin", permissions = SERVER_PERMISSIONS_ALL, builtin = true},
+		RoleSummary{id = 4, name = "mods", permissions = {.ManageRoomMembers}, position = 2},
+	)
 	encoded, err := cbor.marshal(ServerRoleListPayload{roles = roles})
 	assert(err == nil, "expected ServerRoleListPayload encoding to succeed")
 	defer delete(encoded)
@@ -1133,7 +1136,9 @@ testRolePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 
 	roleIDs := make([dynamic]int, context.temp_allocator)
 	append(&roleIDs, 4, 7)
-	encodedSet, setErr := cbor.marshal(ClientAdminSetUserRolesPayload{userId = 9, roleIds = roleIDs})
+	encodedSet, setErr := cbor.marshal(
+		ClientAdminSetUserRolesPayload{userId = 9, roleIds = roleIDs},
+	)
 	assert(setErr == nil, "expected ClientAdminSetUserRolesPayload encoding to succeed")
 	defer delete(encodedSet)
 	decodedSet: ClientAdminSetUserRolesPayload

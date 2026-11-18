@@ -268,7 +268,8 @@ buildSidebarRows :: proc(
 	connected := State_isServerConnected(state, serverID)
 	inRoom := state.selected_dm_peer_id == 0
 
-	// Only an admin can create rooms; the server refuses everyone else anyway.
+	// Only holders of ManageRooms (protocol 23) can create rooms; the server refuses everyone
+	// else anyway.
 	channelsAction :=
 		State_hasPermission(state, serverID, .ManageRooms) ? SidebarRowAction.NewRoom : .None
 	append(

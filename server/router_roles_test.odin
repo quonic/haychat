@@ -76,7 +76,12 @@ routerRoleTestExpectRefused :: proc(
 	defer delete(refusal.message)
 	assert(
 		refusal.message == message && len(drain.packets) == 1,
-		fmt.tprintf("expected only %q for alice, got %q in %v", message, refusal.message, drain.packets),
+		fmt.tprintf(
+			"expected only %q for alice, got %q in %v",
+			message,
+			refusal.message,
+			drain.packets,
+		),
 	)
 }
 
@@ -463,7 +468,9 @@ testMainRouterRoleRequestsAreCheckedForShape :: proc(t: ^testing.T) {
 
 	// The built-in role keeps every permission, so a save of exactly that set may name it.
 	assert(
-		roleSaveRequestIsValid({roleId = 1, name = "admin", permissions = common.SERVER_PERMISSIONS_ALL}),
+		roleSaveRequestIsValid(
+			{roleId = 1, name = "admin", permissions = common.SERVER_PERMISSIONS_ALL},
+		),
 		"expected admin's own save to pass the shape check",
 	)
 }

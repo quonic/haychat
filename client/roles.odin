@@ -556,7 +556,11 @@ buildAdminRoleRows :: proc(
 			AdminRoleRow {
 				roleID = role.id,
 				name = role.name,
-				permissionsLabel = serverPermissionsSummary(role.permissions, role.builtin, allocator),
+				permissionsLabel = serverPermissionsSummary(
+					role.permissions,
+					role.builtin,
+					allocator,
+				),
 				builtin = role.builtin,
 				holders = holders,
 			},

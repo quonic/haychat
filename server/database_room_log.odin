@@ -84,8 +84,9 @@ DATABASE_ROOM_LOG_SET_MANAGERS_SQL ::
 	"FROM wanted w JOIN users u ON u.id = w.user_id ON CONFLICT DO NOTHING"
 
 // $1 the requester, $2 the room, $3 afterVersion, $4 the page size plus one. Members, managers
-// and accounts holding ManageRooms or ManageRoomMembers (protocol 23) may read; anyone else, and every request for a room that does not exist, reads
-// as not allowed. One row with NULL entry columns when there is nothing to send.
+// and accounts holding ManageRooms or ManageRoomMembers (protocol 23) may read; anyone else,
+// and every request for a room that does not exist, reads as not allowed. One row with NULL
+// entry columns when there is nothing to send.
 DATABASE_FETCH_ROOM_LOG_SQL ::
 	"WITH room AS (SELECT id, encrypted, log_version FROM rooms WHERE id = $2::bigint), " +
 	"allowed AS (SELECT EXISTS (SELECT 1 FROM room) AND (" +

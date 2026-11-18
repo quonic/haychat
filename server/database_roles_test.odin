@@ -175,7 +175,12 @@ testServerPermissionBitsMatchTheEnum :: proc(t: ^testing.T) {
 		expected := fmt.tprintf("%d", common.serverPermissionsMask({bit.permission}))
 		assert(
 			bit.literal == expected,
-			fmt.tprintf("expected %v to be %s in SQL, got %s", bit.permission, expected, bit.literal),
+			fmt.tprintf(
+				"expected %v to be %s in SQL, got %s",
+				bit.permission,
+				expected,
+				bit.literal,
+			),
 		)
 	}
 	assert(
@@ -397,7 +402,12 @@ testRoleStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		assert(
 			(account.userId == bob || account.userId == carol) &&
 			account.permissions == expected,
-			fmt.tprintf("expected %v for %d, got %v", expected, account.userId, account.permissions),
+			fmt.tprintf(
+				"expected %v for %d, got %v",
+				expected,
+				account.userId,
+				account.permissions,
+			),
 		)
 	}
 	renamed := databaseRoleTestSave(

@@ -182,6 +182,10 @@ ContextMenuAction :: enum u8 {
 	InviteToRoom,
 	InviteToRoomPick, // One per room: ContextMenuEntry.roomID names it
 	VerifyEncryption,
+	// Roles (protocol 23): the account's roles, shown disabled to everyone, and an admin's
+	// Roles… (the role picker in Server settings → Admin).
+	RoleNames,
+	MemberRoles,
 }
 
 // Item keys of the Invite to room… list: this plus the room ID, above every action's value.
@@ -583,20 +587,40 @@ contextMenuAppendInviteEntries :: proc(
 	}
 }
 
-// Rename…, Make admin / Remove admin, Kick… and Ban… / Unban for an admin of serverID, for an
-// account the directory lists, disabled where the server refuses them (buildAdminUserControls).
+// The account's roles other than admin, as one disabled line ("Roles: mods, hosts") that
+// everyone sees (protocol 23); then, for an admin of serverID and an account the directory
+// lists, Rename…, Make admin / Remove admin, Kick…, Ban… / Unban and Roles…, disabled where the
+// server refuses them (buildAdminUserControls).
 @(private = "file")
 contextMenuAppendAdminEntries :: proc(
 	state: ^State,
 	entries: ^[dynamic]ContextMenuEntry,
 	serverID, userID: int,
 ) {
+	if names := State_userRoleNames(state, serverID, userID); len(names) > 0 {
+		append(
+			entries,
+			ContextMenuEntry {
+				action = .RoleNames,
+				label = fmt.tprintf("Roles: %s", strings.join(names, ", ", context.temp_allocator)),
+				separatorBefore = true,
+			},
+		)
+	}
 	if !State_isServerAdmin(state, serverID) {
 		return
 	}
 	controls, known := buildAdminUserControls(state, serverID, userID)
 	if !known {
 		return
+	}
+	// Roles… only once the server has a role to give.
+	assignable := false
+	for role in State_roles(state, serverID) {
+		assignable ||= !role.builtin
+	}
+	defer if assignable {
+		append(entries, ContextMenuEntry{action = .MemberRoles, label = "Roles…", enabled = true})
 	}
 	append(
 		entries,
@@ -932,6 +956,8 @@ State_runUserMenuAction :: proc(
 		State_adminSetRole(state, serverID, userID, false)
 	case .AdminUnban:
 		State_adminUnban(state, serverID, userID)
+	case .MemberRoles:
+		State_openMemberRoles(state, serverID, userID)
 	case .MuteForMe:
 		State_setUserVoiceMuted(state, serverID, userID, true)
 	case .UnmuteForMe:

@@ -162,7 +162,11 @@ MainRouterState_handleClientAdminDeleteRole :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseRoleRequest{action = .Delete, actorUserId = actorUserID, roleId = req.roleId},
+		common.DatabaseRoleRequest {
+			action = .Delete,
+			actorUserId = actorUserID,
+			roleId = req.roleId,
+		},
 		.DeleteRole,
 	)
 }

@@ -1095,7 +1095,11 @@ testRolesMigrationUpgradesVersion10AgainstPostgreSQL :: proc(t: ^testing.T) {
 	_ = schema
 
 	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:10])
-	databaseDefaultRoomTestExec(conn, "fill version 10 schema", DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL)
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 10 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
 	databaseDefaultRoomTestExec(
 		conn,
 		"add a moderator role",

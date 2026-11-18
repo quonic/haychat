@@ -97,8 +97,9 @@ DATABASE_AFFECTED_COLUMNS_SQL ::
 
 // $1 the requester, $2 the role (0 creates), $3 the name, $4 the permissions mask, $5 the
 // position (0 on a create puts it last), $6 the mask of every permission (what admin must
-// keep), $7 SERVER_ROLES_MAX, $8 the mask of SERVER_PERMISSIONS_ASSIGNABLE. Columns: outcome, changed, the stored role (5 columns,
-// DATABASE_ROLE_COLUMNS_SQL order), then one affected account per row (5 columns).
+// keep), $7 SERVER_ROLES_MAX, $8 the mask of SERVER_PERMISSIONS_ASSIGNABLE. Columns: outcome,
+// changed, the stored role (5 columns, DATABASE_ROLE_COLUMNS_SQL order), then one affected
+// account per row (5 columns).
 DATABASE_SAVE_ROLE_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
 	"current AS (SELECT id, name, builtin, permissions, position FROM server_roles " +
@@ -233,7 +234,10 @@ databaseGetRoleSummary :: proc(
 	role.name = databaseGetText(result, row, first + 1)
 	mask, _ := databaseGetInt(result, row, first + 2)
 	role.builtin = databaseGetBool(result, row, first + 3)
-	role.permissions = role.builtin ? common.SERVER_PERMISSIONS_ALL : common.serverPermissionsFromMask(i64(mask))
+	role.permissions = common.serverPermissionsFromMask(i64(mask))
+	if role.builtin {
+		role.permissions = common.SERVER_PERMISSIONS_ALL
+	}
 	role.position, _ = databaseGetInt(result, row, first + 4)
 	return role, true
 }
@@ -333,8 +337,8 @@ databaseRoleOutcome :: proc(
 	defer delete(outcomeText)
 	outcome, outcomeOK := databaseRoleOutcomeFromText(outcomeText)
 	if !outcomeOK {
-		return {}, databaseErrorResponse(strings.clone("database returned an unknown role outcome")),
-			false
+		message := strings.clone("database returned an unknown role outcome")
+		return {}, databaseErrorResponse(message), false
 	}
 	roleResult.outcome = outcome
 	roleResult.changed = outcome == .Applied && databaseGetBool(result, 0, 1)

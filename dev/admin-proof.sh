@@ -17,6 +17,11 @@ set -euo pipefail
 #   5. types:   A creates a room for text and voice, B joins its voice, A makes it text-only:
 #               B prints voice_left "voice is disabled in this room", and B's next voice-join
 #               is refused with the same reason.
+#   6. roles:   (protocol 23) B cannot create a room or a role. A creates a role with
+#               manage-rooms and gives it to B: B sees role_updated, user_updated and
+#               account_updated with the permission, and creates a room. A deletes the role:
+#               B sees role_deleted and account_updated without it, and its next room-create is
+#               refused again.
 #
 # dev/live-proof.sh --admin (and --all) runs it against its throwaway server. It needs bash,
 # coreutils, psql (for make-admin.sql through the HAYCHAT_DATABASE_* variables), and libopus
@@ -119,7 +124,7 @@ expect_ok a admin-rename "$user_b" lock "$renamed_b"
 expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"rename\",\"userID\":$user_b," \
 	"$start_a" "client a got no admin_result for the rename"
 renamed_pattern="^\\{\"event\":\"account_updated\",.*\"nickname\":\"$renamed_b\","
-renamed_pattern+="\"nicknameLocked\":true\\}$"
+renamed_pattern+="\"nicknameLocked\":true,\"permissions\":\\[\\]\\}$"
 expect_event b "$renamed_pattern" "$start_b" "client b did not see its new locked name"
 expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,\"nickname\":\"$renamed_b\"," \
 	"$start_a" "client a did not see user_updated with b's new name"
@@ -129,7 +134,8 @@ expect_ok b wait connected 8000
 connected_b=$(tail -n +"$((start_b + 1))" "$work_dir/b.out" | grep -F '{"event":"connected",' |
 	tail -n 1)
 echo "    b< $connected_b"
-locked_name="\"nickname\":\"$renamed_b\",\"isAdmin\":false,\"nicknameLocked\":true}"
+locked_name="\"nickname\":\"$renamed_b\",\"isAdmin\":false,\"nicknameLocked\":true,"
+locked_name+="\"permissions\":[]}"
 [[ "$connected_b" == *"$locked_name"* ]] ||
 	fail "client b's reconnect did not keep the locked name $renamed_b: $connected_b"
 echo "==> [admin] rename passed"
@@ -159,10 +165,10 @@ expect_ok a admin-ban "$user_b" proof ban
 banned_pattern="^\\{\"event\":\"session_ended\",.*\"kind\":\"banned\","
 banned_pattern+=".*\"reason\":\"proof ban\","
 expect_event b "$banned_pattern" "$start_b" "client b did not see session_ended banned"
-expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"isBanned\":true\\}\\}$" \
+expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"isBanned\":true," \
 	"$start_a" "client a did not see user_updated with b banned"
 expect_ok a users
-[[ "$last_result" =~ \{\"id\":$user_b,[^}]*\"isBanned\":true\} ]] ||
+[[ "$last_result" =~ \{\"id\":$user_b,[^}]*\"isBanned\":true, ]] ||
 	fail "client a's users do not show b banned: $last_result"
 start_b=$(lines b)
 expect_ok b reconnect
@@ -172,7 +178,7 @@ refused_pattern+="\"failure\":\"Banned\",\"retryable\":false,"
 expect_event b "$refused_pattern" "$start_b" "client b's reconnect was not refused as banned"
 start_a=$(lines a)
 expect_ok a admin-unban "$user_b"
-expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"isBanned\":false\\}\\}$" \
+expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"isBanned\":false," \
 	"$start_a" "client a did not see user_updated with b unbanned"
 expect_ok b reconnect
 expect_ok b wait connected 8000
@@ -207,6 +213,54 @@ expect_event b "^\\{\"event\":\"voice_join_rejected\",\"serverID\":1,$text_only_
 	"$start_b" "client b's voice join of a text-only room was not refused"
 expect_ok b voice-leave
 echo "==> [admin] room types passed"
+
+echo "==> [admin] roles: a role with manage-rooms lets B create a room until it is deleted"
+role_name="adm-role-$run_tag"
+start_b=$(lines b)
+expect_ok b room-create text "adm-refused-$run_tag"
+expect_event b '^\{"event":"protocol_error",.*"message":"Room management permission required"' \
+	"$start_b" "client b created a room without a role"
+start_b=$(lines b)
+expect_ok b roles-save 0 manage-rooms "adm-b-role-$run_tag"
+expect_event b '^\{"event":"protocol_error",.*"message":"Admin permission required"' \
+	"$start_b" "client b saved a role without the admin role"
+start_a=$(lines a)
+start_b=$(lines b)
+expect_ok a roles-save 0 manage-rooms "$role_name"
+role_line=$(wait_for_match a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\"," \
+	"$start_a") || fail "client a got no admin_result for the role"
+echo "    a< $role_line"
+[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the role's admin_result has no roleID"
+role_id=${BASH_REMATCH[1]}
+expect_event b "^\\{\"event\":\"role_updated\",.*\"id\":$role_id,\"name\":\"$role_name\"," \
+	"$start_b" "client b did not see the new role"
+start_b=$(lines b)
+expect_ok a roles-assign "$user_b" "$role_id"
+expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-assign\",\"userID\":$user_b," \
+	"$start_a" "client a got no admin_result for the assignment"
+expect_event b "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"roleIds\":\\[$role_id\\]" \
+	"$start_b" "client b did not see its new role in user_updated"
+expect_event b '^\{"event":"account_updated",.*"permissions":\["manage-rooms"\]\}$' \
+	"$start_b" "client b did not see account_updated with manage-rooms"
+expect_ok b status
+[[ "$last_result" == *'"permissions":["manage-rooms"]'* ]] ||
+	fail "client b's status does not show manage-rooms: $last_result"
+start_b=$(lines b)
+role_room="adm-b-room-$run_tag"
+expect_ok b room-create text "$role_room" "made through a role"
+expect_event b "^\\{\"event\":\"room_created\",.*\"name\":\"$role_room\"," "$start_b" \
+	"client b could not create a room with the role"
+start_b=$(lines b)
+expect_ok a roles-delete "$role_id"
+expect_event b "^\\{\"event\":\"role_deleted\",\"serverID\":1,\"roleID\":$role_id\\}$" \
+	"$start_b" "client b did not see the role deleted"
+expect_event b '^\{"event":"account_updated",.*"permissions":\[\]\}$' "$start_b" \
+	"client b did not lose manage-rooms with the role"
+start_b=$(lines b)
+expect_ok b room-create text "adm-refused-again-$run_tag"
+expect_event b '^\{"event":"protocol_error",.*"message":"Room management permission required"' \
+	"$start_b" "client b still created a room after the role was deleted"
+echo "==> [admin] roles passed"
 
 stop_client b
 stop_client a

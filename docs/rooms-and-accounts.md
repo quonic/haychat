@@ -15,8 +15,8 @@ such as the fixture's `admin`, can be claimed only by `HAYCHAT_ADMIN_PUBLIC_KEY`
 
 The server lists every account with an online flag (online while at least one of its sessions is
 authenticated) and tells connected sessions when an account comes online or goes offline. Every
-account sees which accounts are admins and which are banned; banned accounts stay listed because
-history names them.
+account sees which accounts are admins and which are banned, and (protocol 23) which roles each
+account holds; banned accounts stay listed because history names them.
 
 ### Display Names
 
@@ -44,13 +44,18 @@ history request, member list and voice join. Who may join a room is its **access
 
 | Mode | Who is a member | Who can add members | Who can remove members |
 | --- | --- | --- | --- |
-| **Public** | Every account: new accounts join it, and a new Public room includes everyone | Nobody needs to (adds are refused: "Public rooms include every account") | Admins |
-| **Member invite** | Whoever has been added | Any member, and admins | Admins |
-| **Admin invite** | Whoever has been added | Admins only | Admins |
+| **Public** | Every account: new accounts join it, and a new Public room includes everyone | Nobody needs to (adds are refused: "Public rooms include every account") | Room member managers |
+| **Member invite** | Whoever has been added | Any member, and room member managers | Room member managers |
+| **Admin invite** | Whoever has been added | Room member managers only | Room member managers |
+
+"Room member managers" are admins and accounts holding a role with **Manage room members**, and
+"room managers" admins and accounts holding a role with **Manage rooms** (see
+[Roles and Permissions](#roles-and-permissions)).
 
 - In every mode, any member can leave a non-public room (`ClientLeaveRoom`); a Public room
-  cannot be left ("You cannot leave a public room"). Admins can rename, edit and delete every
-  room, also one they are not in.
+  cannot be left ("You cannot leave a public room"). Room managers can create, rename, edit and
+  delete every room, also one they are not in; anyone else is refused ("Room management
+  permission required").
 - Members cannot remove each other, also in a Member invite room: the server would have to
   remember who invited whom.
 - A non-public room is listed only for its members; anyone else is refused its history and its
@@ -172,6 +177,36 @@ below in the database for every request, in the same statement as the change.
   and sign-up is open, so a banned person can connect again with a new identity key as a new
   account.
 
+## Roles and Permissions
+
+Since protocol 23 (schema migration 11, #95) a server has **roles**: named sets of permissions
+that admins give to accounts. An account's permissions are the union of its roles' permissions.
+The permissions are fixed in code; there are no custom ones.
+
+| Permission | What it allows | Who can hold it |
+| --- | --- | --- |
+| **Manage rooms** | Create, edit and delete rooms (also encrypted ones: create and change their access) | Any role |
+| **Manage room members** | Add and remove members of invite rooms, see every room in the Admin section | Any role |
+| **Create invites** | Create invite codes (used once sign-up by invitation arrives, #43) | Any role |
+| **Approve sign-ups** | Accept or decline sign-up requests (#43) | Any role |
+| Manage roles, Manage sign-up, Kick, Ban, Rename | Admin actions | The admin role only |
+
+- `admin` is the **built-in role**. It holds every permission and cannot be renamed, deleted or
+  given fewer permissions. Every admin guard stays keyed to it (nobody revokes their own admin
+  role, the server keeps an admin, admins cannot be kicked or banned). It is given and taken
+  with **Make admin** and **Remove admin** as before.
+- Only admins create, edit, delete and assign roles. A role other than admin can hold only the
+  four delegable permissions; kicking, banning and renaming stay with admins, because they act
+  on accounts and would need a ranking of who may act on whom.
+- A server keeps at most 32 roles. Role names are 3 to 32 characters and unique (`admin`
+  included).
+- The server checks every permission in the same statement as the change, so a role changed in
+  between cannot slip through. Clients only use the permissions to decide which controls to
+  show.
+- Every account lists the roles. A created, edited or deleted role reaches every connected
+  session at once, an account given or denied roles shows its new roles to everyone, and an
+  account whose permissions changed learns its new set without reconnecting.
+
 ## Direct Messages
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one
@@ -217,6 +252,8 @@ newest message.
   the admin is not in; reopening Server settings fetches it again.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
+- Roles do not rank accounts, so kick, ban and rename cannot be delegated, and there are no
+  per-room permissions yet (#96).
 - Account registration (`ClientRegister`) is not implemented.
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.
