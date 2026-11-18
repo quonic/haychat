@@ -592,13 +592,19 @@ testRoomLogAppendRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 
 	// Edits never change the encryption or an encrypted room's access.
-	edit :: proc(conn: pg.Conn, roomID: int, access: common.RoomAccess, encrypted: bool) -> (
+	edit :: proc(
+		conn: pg.Conn,
+		actor, roomID: int,
+		access: common.RoomAccess,
+		encrypted: bool,
+	) -> (
 		bool,
 		common.RoomEditRefusal,
 	) {
 		response := databaseExecuteRequest(
 			conn,
 			common.DatabaseEditRoomRequest {
+				actorUserId = actor,
 				roomId = roomID,
 				name = "log-admin",
 				roomType = .Chat,
@@ -611,13 +617,13 @@ testRoomLogAppendRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 		assert(response.success && ok, "expected the edit to run")
 		return mutation.changed, mutation.refusal
 	}
-	changed, refusal := edit(conn, roomID, .MemberInvite, false)
+	changed, refusal := edit(conn, alice.userID, roomID, .MemberInvite, false)
 	assert(!changed && refusal == .EncryptionFlag, "expected clearing the flag refused")
-	changed, refusal = edit(conn, roomID, .AdminInvite, true)
+	changed, refusal = edit(conn, alice.userID, roomID, .AdminInvite, true)
 	assert(!changed && refusal == .EncryptedAccess, "expected an access change refused")
-	changed, refusal = edit(conn, roomID, .MemberInvite, true)
+	changed, refusal = edit(conn, alice.userID, roomID, .MemberInvite, true)
 	assert(changed && refusal == .None, "expected a rename keeping the access applied")
-	changed, refusal = edit(conn, roomID + 1000, .MemberInvite, true)
+	changed, refusal = edit(conn, alice.userID, roomID + 1000, .MemberInvite, true)
 	assert(!changed && refusal == .None, "expected a missing room to be not found")
 
 	// A row written behind the server's back (an unsigned Add of bob) damages the log: every
@@ -819,7 +825,8 @@ testRoomLogServerRules :: proc(t: ^testing.T) {
 		access            = .AdminInvite,
 		historyVisibility = .FromJoin,
 		createdBy         = 1,
-		actorIsAdmin      = true,
+		actorManagesRooms = true,
+		actorManagesMembers = true,
 	}
 	create := common.RoomLogEntry {
 		action = .Create,
@@ -843,7 +850,8 @@ testRoomLogServerRules :: proc(t: ^testing.T) {
 		actorUserID = 1,
 	}
 	member := room
-	member.actorIsAdmin = false
+	member.actorManagesRooms = false
+	member.actorManagesMembers = false
 	member.actorIsMember = true
 	assert(roomLogServerAllows(room, 1, add) == .Applied, "expected an admin's add")
 	assert(
@@ -865,6 +873,24 @@ testRoomLogServerRules :: proc(t: ^testing.T) {
 		actorUserID = 1,
 	}
 	assert(roomLogServerAllows(member, 1, leave) == .Applied, "expected a leave allowed")
+
+	// Protocol 23: the permissions, not the admin role, decide. ManageRoomMembers adds in an
+	// Admin invite room but cannot create or change the access; ManageRooms the reverse.
+	membersOnly := room
+	membersOnly.actorManagesRooms = false
+	assert(roomLogServerAllows(membersOnly, 1, add) == .Applied, "expected a manager's add")
+	assert(
+		roomLogServerAllows(membersOnly, 1, create) == .NotAuthorized,
+		"expected Create to need ManageRooms",
+	)
+	roomsOnly := room
+	roomsOnly.actorManagesMembers = false
+	assert(roomLogServerAllows(roomsOnly, 1, create) == .Applied, "expected ManageRooms to create")
+	assert(
+		roomLogServerAllows(roomsOnly, 1, add) == .NotAuthorized,
+		"expected Add in an Admin invite room to need ManageRoomMembers",
+	)
+	assert(roomLogServerAllows(roomsOnly, 1, setAccess) == .Applied, "expected SetAccess allowed")
 
 	assert(roomLogAppendOutcomeFor(.VersionNotNext) == .Conflict, "expected a conflict")
 	assert(roomLogAppendOutcomeFor(.BadPrevHash) == .Conflict, "expected a conflict")

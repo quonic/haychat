@@ -72,12 +72,11 @@ MainRouterState_enqueueAdminUserAction :: proc(
 		nickname     = strings.clone(nickname),
 		reason       = strings.clone(reason),
 	}
-	switch action {
+	#partial switch action {
 	case .SetRole:
 		request.isAdmin = flag
 	case .Rename:
 		request.locked = flag
-	case .Kick:
 	case .Ban:
 		request.banned = flag
 	}
@@ -221,6 +220,19 @@ MainRouterState_adminRefusalMessage :: proc(
 		return "That name is already in use on this server"
 	case .BannedTarget:
 		return "Unban the account before making it an admin"
+	case .UnknownRole:
+		return "Unknown role"
+	case .BuiltinRole:
+		if action == .DeleteRole {
+			return "The admin role cannot be deleted"
+		}
+		return "The admin role cannot be renamed or given fewer permissions"
+	case .RoleNameTaken:
+		return "Another role already has that name"
+	case .AdminOnlyPermission:
+		return "Only the admin role can hold that permission"
+	case .TooManyRoles:
+		return "The server already has as many roles as it keeps"
 	}
 	return "The server refused the admin request"
 }
@@ -259,13 +271,13 @@ MainRouterState_adminSuccessMessage :: proc(
 			return fmt.aprintf("Banned %s", nickname)
 		}
 		return fmt.aprintf("Unbanned %s", nickname)
+	case .SaveRole, .DeleteRole, .SetUserRoles:
 	}
 	return strings.clone("Done")
 }
 
 // Sends the target's directory entry to every authenticated session. isOnline comes from the
 // sessions, like ServerUserList.
-@(private = "file")
 MainRouterState_broadcastUserUpdated :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -396,6 +408,7 @@ MainRouterState_handleAdminUserResult :: proc(
 				isAdmin = result.user.isAdmin,
 				nickname = result.user.nickname,
 				nicknameLocked = result.nicknameLocked,
+				permissions = result.permissions,
 			},
 		)
 		if renamed && MainRouterState_isUserOnline(state, userID) {
@@ -411,5 +424,7 @@ MainRouterState_handleAdminUserResult :: proc(
 		if result.changed {
 			MainRouterState_broadcastUserUpdated(pm, state, result.user)
 		}
+	case .SaveRole, .DeleteRole, .SetUserRoles:
+	// Role actions are DatabaseRoleRequests (router_roles.odin).
 	}
 }

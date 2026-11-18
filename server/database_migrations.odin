@@ -631,6 +631,53 @@ DATABASE_SIGNED_MESSAGES_CHECKS ::
 	"WHERE conrelid = to_regclass('direct_messages') AND contype = 'c' " +
 	"AND conname = 'direct_messages_signed'))"
 
+// Migration 11 (protocol 23, #95): roles and server permissions.
+//
+// - server_roles.permissions: the role's common.ServerPermissions as a BIGINT mask (bit N is
+//   ServerPermission N). Existing roles get none.
+// - server_roles.builtin: true only for admin (server_roles_builtin_admin), at most one row
+//   (server_roles_one_builtin). The built-in role cannot be renamed, deleted or reduced.
+// - server_roles.position: display order only, ascending.
+//
+// The admin role is created when it is missing, so every database has it from now on, and gets
+// every permission known today (511, ManageRooms .. RenameUsers); the server also treats it as
+// holding every permission whatever the column says (database_roles.odin). Other existing roles
+// keep their holders and are ordered by ID.
+//
+// Never edit it; append a migration instead.
+DATABASE_MIGRATION_11_ROLES_SQL ::
+	"ALTER TABLE server_roles ADD COLUMN permissions BIGINT NOT NULL DEFAULT 0, " +
+	"ADD COLUMN builtin BOOLEAN NOT NULL DEFAULT false, " +
+	"ADD COLUMN position INTEGER NOT NULL DEFAULT 0; " +
+	"INSERT INTO server_roles (name) SELECT 'admin' " +
+	"WHERE NOT EXISTS (SELECT 1 FROM server_roles WHERE name = 'admin'); " +
+	"UPDATE server_roles SET builtin = true, permissions = 511, position = 0 " +
+	"WHERE name = 'admin'; " +
+	"UPDATE server_roles SET position = id WHERE NOT builtin; " +
+	"ALTER TABLE server_roles ADD CONSTRAINT server_roles_builtin_admin " +
+	"CHECK (NOT builtin OR name = 'admin'), " +
+	"ADD CONSTRAINT server_roles_position_check CHECK (position >= 0); " +
+	"CREATE UNIQUE INDEX server_roles_one_builtin ON server_roles (builtin) WHERE builtin;"
+
+// What migration 11 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ROLES_CHECKS ::
+	"('server_roles permissions', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'server_roles' " +
+	"AND column_name = 'permissions' AND data_type = 'bigint' AND is_nullable = 'NO')), " +
+	"('server_roles builtin', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'server_roles' " +
+	"AND column_name = 'builtin' AND data_type = 'boolean' AND is_nullable = 'NO')), " +
+	"('server_roles position', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'server_roles' " +
+	"AND column_name = 'position' AND data_type = 'integer' AND is_nullable = 'NO')), " +
+	"('server roles builtin admin', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('server_roles') AND contype = 'c' " +
+	"AND conname = 'server_roles_builtin_admin')), " +
+	"('server roles position check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('server_roles') AND contype = 'c' " +
+	"AND conname = 'server_roles_position_check')), " +
+	"('server roles one builtin', to_regclass('server_roles_one_builtin') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -687,6 +734,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "signed messages",
 		sql = DATABASE_MIGRATION_10_SIGNED_MESSAGES_SQL,
 		checks = DATABASE_SIGNED_MESSAGES_CHECKS,
+	},
+	{
+		version = 11,
+		name = "roles",
+		sql = DATABASE_MIGRATION_11_ROLES_SQL,
+		checks = DATABASE_ROLES_CHECKS,
 	},
 }
 
@@ -806,6 +859,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ROOM_KEY_FORWARDS_CHECKS +
 	", " +
 	DATABASE_SIGNED_MESSAGES_CHECKS +
+	", " +
+	DATABASE_ROLES_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

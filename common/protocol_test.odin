@@ -91,6 +91,13 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerVoiceKey, 177},
 	{.ClientRequestVoiceKey, 178},
 	{.ServerVoiceKeyRequest, 179},
+	{.ClientAdminListRoles, 180},
+	{.ServerRoleList, 181},
+	{.ClientAdminSaveRole, 182},
+	{.ClientAdminDeleteRole, 183},
+	{.ClientAdminSetUserRoles, 184},
+	{.ServerRoleUpdated, 185},
+	{.ServerRoleDeleted, 186},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -444,13 +451,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// ServerVoiceKey, ClientRequestVoiceKey, ServerVoiceKeyRequest, the VoiceKey envelope kind and
 	// sealed voice payloads); 22 signs every plaintext room message (signature in
 	// ClientChatMessage, ServerChatMessage and StoredChatMessage, #90), so peers on 21 or older
-	// cannot talk to this build.
+	// cannot talk to this build; 23 added roles and server permissions (#95: ServerPermission,
+	// RoleSummary, UserSummary.roleIds, permissions in ServerAuthSuccess and
+	// ServerAccountUpdated, ClientAdminListRoles ... ServerRoleDeleted, the SaveRole, DeleteRole
+	// and SetUserRoles admin actions) and retired the old role placeholders.
 	assert(
-		protocolVersion == 22,
-		fmt.tprintf(
-			"expected protocol version 22 for signed room messages, got %d",
-			protocolVersion,
-		),
+		protocolVersion == 23,
+		fmt.tprintf("expected protocol version 23 for roles, got %d", protocolVersion),
 	)
 }
 
@@ -998,6 +1005,158 @@ testClientJoinVoiceCarriesRejoinAndDeviceID :: proc(t: ^testing.T) {
 	)
 }
 
+// The retired role placeholders (protocol 23) must stay where they are: removing them would
+// renumber every member after them.
+@(test)
+testRetiredRolePlaceholdersKeepTheirPlace :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(MessageType.ClientGetRoles) == 24 &&
+		int(MessageType.ServerUserRoles) == 25 &&
+		int(MessageType.ClientGetPermissions) == 26 &&
+		int(MessageType.ServerUserPermissions) == 27 &&
+		int(MessageType.ClientAddRole) == 28 &&
+		int(MessageType.ServerAddedRole) == 29 &&
+		int(MessageType.ClientRemoveRole) == 30 &&
+		int(MessageType.ServerRemovedRole) == 31,
+		fmt.tprintf(
+			"expected the retired role placeholders at 24..31, got %d..%d",
+			int(MessageType.ClientGetRoles),
+			int(MessageType.ServerRemovedRole),
+		),
+	)
+}
+
+// Protocol 23 (#95): server permissions are bit numbers on the wire (a u64 bit_set) and in
+// server_roles.permissions. Never renumber them.
+@(test)
+testServerPermissionWireValuesArePinned :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(ServerPermission.ManageRooms) == 0 &&
+		int(ServerPermission.ManageRoomMembers) == 1 &&
+		int(ServerPermission.CreateInvites) == 2 &&
+		int(ServerPermission.ApproveRegistrations) == 3 &&
+		int(ServerPermission.ManageRoles) == 4 &&
+		int(ServerPermission.ManageRegistration) == 5 &&
+		int(ServerPermission.KickUsers) == 6 &&
+		int(ServerPermission.BanUsers) == 7 &&
+		int(ServerPermission.RenameUsers) == 8,
+		"expected ServerPermission to stay ManageRooms 0 .. RenameUsers 8",
+	)
+	assert(
+		serverPermissionsMask(SERVER_PERMISSIONS_ALL) == 511,
+		fmt.tprintf(
+			"expected every permission to be mask 511, got %d",
+			serverPermissionsMask(SERVER_PERMISSIONS_ALL),
+		),
+	)
+	assert(
+		serverPermissionsMask(SERVER_PERMISSIONS_ASSIGNABLE) == 15,
+		"expected the assignable permissions to be mask 15",
+	)
+	assert(
+		serverPermissionsFromMask(-1) == SERVER_PERMISSIONS_ALL,
+		"expected mask -1 (an admin in the database) to read as every permission",
+	)
+	assert(
+		serverPermissionsFromMask(0b11) == ServerPermissions{.ManageRooms, .ManageRoomMembers},
+		"expected mask 3 to read as ManageRooms and ManageRoomMembers",
+	)
+	assert(
+		int(AdminAction.SaveRole) == 4 &&
+		int(AdminAction.DeleteRole) == 5 &&
+		int(AdminAction.SetUserRoles) == 6,
+		"expected AdminAction to stay SaveRole 4, DeleteRole 5, SetUserRoles 6",
+	)
+
+	// On the wire the set is one unsigned integer, the mask.
+	encoded, err := cbor.marshal(
+		ServerAccountUpdatedPayload {
+			isAdmin = false,
+			nickname = "bob",
+			permissions = {.ManageRooms, .CreateInvites},
+		},
+	)
+	assert(err == nil, "expected ServerAccountUpdatedPayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ServerAccountUpdatedPayload
+	assert(cbor.unmarshal(encoded, &decoded) == nil, "expected it to decode")
+	defer ServerAccountUpdatedPayload_deinit(&decoded)
+	assert(
+		decoded.permissions == ServerPermissions{.ManageRooms, .CreateInvites} &&
+		decoded.nickname == "bob",
+		fmt.tprintf("expected ManageRooms and CreateInvites for bob, got %v", decoded),
+	)
+}
+
+@(test)
+testRoleNamesAreValidated :: proc(t: ^testing.T) {
+	_ = t
+	for name in ([]string{"mod", "Room managers", "Ünïcødé", "abcdefghijklmnopqrstuvwxyz012345"}) {
+		assert(roleNameIsValid(name), fmt.tprintf("expected %q to be a valid role name", name))
+	}
+	for name in ([]string {
+			"",
+			"ab",
+			" mod",
+			"mod ",
+			"mo\nd",
+			"abcdefghijklmnopqrstuvwxyz0123456",
+			"éé",
+		}) {
+		assert(!roleNameIsValid(name), fmt.tprintf("expected %q to be refused", name))
+	}
+}
+
+@(test)
+testRolePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	roles := make([dynamic]RoleSummary, context.temp_allocator)
+	append(&roles, RoleSummary{id = 1, name = "admin", permissions = SERVER_PERMISSIONS_ALL, builtin = true})
+	append(&roles, RoleSummary{id = 4, name = "mods", permissions = {.ManageRoomMembers}, position = 2})
+	encoded, err := cbor.marshal(ServerRoleListPayload{roles = roles})
+	assert(err == nil, "expected ServerRoleListPayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ServerRoleListPayload
+	assert(cbor.unmarshal(encoded, &decoded) == nil, "expected ServerRoleListPayload to decode")
+	defer ServerRoleListPayload_deinit(&decoded)
+	assert(
+		len(decoded.roles) == 2 &&
+		decoded.roles[0].builtin &&
+		decoded.roles[0].permissions == SERVER_PERMISSIONS_ALL &&
+		decoded.roles[1].name == "mods" &&
+		decoded.roles[1].permissions == {.ManageRoomMembers} &&
+		decoded.roles[1].position == 2,
+		fmt.tprintf("expected admin and mods, got %v", decoded.roles),
+	)
+
+	roleIDs := make([dynamic]int, context.temp_allocator)
+	append(&roleIDs, 4, 7)
+	encodedSet, setErr := cbor.marshal(ClientAdminSetUserRolesPayload{userId = 9, roleIds = roleIDs})
+	assert(setErr == nil, "expected ClientAdminSetUserRolesPayload encoding to succeed")
+	defer delete(encodedSet)
+	decodedSet: ClientAdminSetUserRolesPayload
+	assert(cbor.unmarshal(encodedSet, &decodedSet) == nil, "expected it to decode")
+	defer ClientAdminSetUserRolesPayload_deinit(&decodedSet)
+	assert(
+		decodedSet.userId == 9 && len(decodedSet.roleIds) == 2 && decodedSet.roleIds[1] == 7,
+		fmt.tprintf("expected user 9 with roles 4 and 7, got %v", decodedSet),
+	)
+
+	user := UserSummary{id = 9, nickname = "bob", roleIds = roleIDs}
+	encodedUser, userErr := cbor.marshal(ServerUserUpdatedPayload{user = user})
+	assert(userErr == nil, "expected ServerUserUpdatedPayload encoding to succeed")
+	defer delete(encodedUser)
+	decodedUser: ServerUserUpdatedPayload
+	assert(cbor.unmarshal(encodedUser, &decodedUser) == nil, "expected it to decode")
+	defer ServerUserUpdatedPayload_deinit(&decodedUser)
+	assert(
+		len(decodedUser.user.roleIds) == 2 && decodedUser.user.roleIds[0] == 4,
+		fmt.tprintf("expected roles 4 and 7 on bob, got %v", decodedUser.user.roleIds),
+	)
+}
+
 // The retired voice placeholders must stay where they are: removing them would renumber
 // ClientDirectMessage and ServerDirectMessage, which follow them and are on the wire.
 @(test)
@@ -1254,8 +1413,8 @@ testUserDirectoryAndPresencePayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		"expected ServerUserListPayload decoding to succeed",
 	)
 	defer {
-		for user in decoded.users {
-			delete(user.nickname)
+		for &user in decoded.users {
+			UserSummary_deinit(&user)
 		}
 		delete(decoded.users)
 	}

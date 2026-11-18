@@ -47,7 +47,8 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 //
 // Columns: user ID, whether this was a rename, the nickname before the rename, whether the
 // account is an admin, its nickname after this login, whether that nickname is locked, whether
-// the account is banned, and the ban reason.
+// the account is banned, the ban reason, and (protocol 23) the account's effective server
+// permission mask (database_roles.odin).
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WITH by_key AS (SELECT id, nickname, nickname_locked, banned_at IS NOT NULL AS banned " +
 	"FROM users WHERE public_key = decode($2, 'hex')), " +
@@ -79,7 +80,9 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text, resolved.nickname, " +
 	"COALESCE(u.nickname_locked, false)::text, (u.banned_at IS NOT NULL)::text, " +
-	"COALESCE(u.ban_reason, '') FROM resolved LEFT JOIN users u ON u.id = resolved.id"
+	"COALESCE(u.ban_reason, ''), " +
+	DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "resolved.id" + DATABASE_SERVER_PERMISSIONS_CLOSE_SQL +
+	"::text FROM resolved LEFT JOIN users u ON u.id = resolved.id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
 // loading a fixture. Rooms are open, so every existing account joins it. On an empty table
@@ -330,6 +333,8 @@ databaseExecuteUserIdentityResolution :: proc(
 		if identity.banned {
 			identity.banReason = databaseGetText(result, 0, 7)
 		}
+		mask, _ := databaseGetInt(result, 0, 8)
+		identity.permissions = common.serverPermissionsFromMask(i64(mask))
 	}
 	return databaseSuccess(identity)
 }
@@ -725,32 +730,6 @@ databaseExecuteGetRoomHistory :: proc(
 	)
 }
 
-databaseExecuteCheckUserServerAdmin :: proc(
-	conn: pg.Conn,
-	request: common.DatabaseUserServerAdminRequest,
-) -> common.DatabaseQueryResponse {
-	userIDParam := databaseIntParam(request.userId)
-	defer delete(userIDParam)
-	params := [?][^]byte{transmute([^]byte)userIDParam}
-	result := databaseExecParams(
-		conn,
-		"SELECT EXISTS(SELECT 1 FROM user_server_roles usr " +
-		"JOIN server_roles sr ON sr.id = usr.role_id " +
-		"WHERE usr.user_id = $1 AND sr.name = 'admin')",
-		params[:],
-	)
-	if result == nil {
-		return databaseConnectionError(conn)
-	}
-	defer pg.clear(result)
-	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
-		return databaseResultError(&result)
-	}
-	return databaseSuccess(
-		common.DatabaseUserServerAdminResult{isAdmin = databaseGetBool(result, 0, 0)},
-	)
-}
-
 // A new Public room ($5 = 1) includes every account, the creator among them, and stores Full
 // history whatever $6 says; an invite room includes only the creator, and only when $7
 // (creatorJoins) is true. An encrypted room ($8, protocol 18; never Public, which the router
@@ -758,11 +737,17 @@ databaseExecuteCheckUserServerAdmin :: proc(
 // creator. The database worker runs one statement at a time on one connection, so an account
 // created concurrently either sees this room or is seen by it. The last column says whether the
 // creator is a member.
+//
+// Protocol 23 (#95): the creator must hold ManageRooms, checked in this statement; without it
+// nothing is created and the statement returns one row whose first column is NULL and whose
+// last says 'not_permitted'. A creation returns 'applied' there.
 DATABASE_CREATE_ROOM_SQL ::
-	"WITH created_room AS (" +
+	"WITH permitted AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOMS_SQL + " AS ok), " +
+	"created_room AS (" +
 	"INSERT INTO rooms (name, description, created_by_user_id, room_type, access, " +
-	"history_visibility, encrypted) VALUES ($2, $3, $1, $4::smallint, $5::smallint, " +
-	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END, $8::boolean) " +
+	"history_visibility, encrypted) SELECT $2, $3, $1, $4::smallint, $5::smallint, " +
+	"CASE WHEN $5::smallint = 1 THEN 2 ELSE $6::smallint END, $8::boolean " +
+	"FROM permitted WHERE ok " +
 	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
 	"log_version" +
 	"), members AS (" +
@@ -773,7 +758,9 @@ DATABASE_CREATE_ROOM_SQL ::
 	"ON CONFLICT DO NOTHING RETURNING user_id" +
 	") SELECT id::text, name, description, room_type::text, access::text, " +
 	"history_visibility::text, encrypted::text, log_version::text, " +
-	"EXISTS (SELECT 1 FROM members WHERE user_id = $1::bigint)::text FROM created_room"
+	"EXISTS (SELECT 1 FROM members WHERE user_id = $1::bigint)::text, " +
+	"CASE WHEN (SELECT ok FROM permitted) THEN 'applied' ELSE 'not_permitted' END " +
+	"FROM (SELECT 1) AS one LEFT JOIN created_room ON true"
 
 databaseExecuteCreateRoom :: proc(
 	conn: pg.Conn,
@@ -814,6 +801,11 @@ databaseExecuteCreateRoom :: proc(
 		return databaseResultError(&result)
 	}
 
+	outcome := databaseGetText(result, 0, 9)
+	defer delete(outcome)
+	if outcome == "not_permitted" {
+		return databaseSuccess(common.DatabaseRoomMutationResult{notPermitted = true})
+	}
 	room, roomOK := databaseGetRoomSummary(result, 0, 0)
 	if !roomOK {
 		return databaseErrorResponse(strings.clone("database returned invalid room ID"))
@@ -833,10 +825,17 @@ databaseExecuteCreateRoom :: proc(
 // flag and, for an encrypted room, $5 its access (an encrypted room's access changes through a
 // signed SetAccess log entry). It always returns one row; columns 9 and 10 are the room's flag
 // and access before the edit (NULL for no such room), so a refusal can say why.
+//
+// Protocol 23 (#95): $7 is the requester, who must hold ManageRooms; column 11 says whether it
+// does, and without it nothing changes.
 DATABASE_EDIT_ROOM_SQL ::
-	"WITH current AS (SELECT encrypted, access FROM rooms WHERE id = $1), " +
+	"WITH permitted AS (SELECT ((" + DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "$7::bigint" +
+	DATABASE_SERVER_PERMISSIONS_CLOSE_SQL + " & " + DATABASE_PERMISSION_MANAGE_ROOMS_SQL +
+	") <> 0) AS ok), " +
+	"current AS (SELECT encrypted, access FROM rooms WHERE id = $1), " +
 	"updated AS (UPDATE rooms SET name = $2, description = $3, " +
 	"room_type = $4::smallint, access = $5::smallint WHERE id = $1 " +
+	"AND (SELECT ok FROM permitted) " +
 	"AND encrypted = $6::boolean AND (NOT encrypted OR access = $5::smallint) " +
 	"RETURNING id, name, description, room_type, access, history_visibility, encrypted, " +
 	"log_version), " +
@@ -846,8 +845,8 @@ DATABASE_EDIT_ROOM_SQL ::
 	"SELECT u.id::text, u.name, u.description, u.room_type::text, u.access::text, " +
 	"u.history_visibility::text, u.encrypted::text, u.log_version::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM added), ''), " +
-	"(SELECT encrypted FROM current)::text, (SELECT access FROM current)::text " +
-	"FROM (SELECT 1) AS one LEFT JOIN updated u ON true"
+	"(SELECT encrypted FROM current)::text, (SELECT access FROM current)::text, " +
+	"(SELECT ok FROM permitted)::text FROM (SELECT 1) AS one LEFT JOIN updated u ON true"
 
 databaseExecuteEditRoom :: proc(
 	conn: pg.Conn,
@@ -865,6 +864,8 @@ databaseExecuteEditRoom :: proc(
 	defer delete(accessParam)
 	encryptedParam := strings.clone_to_cstring(request.encrypted ? "true" : "false")
 	defer delete(encryptedParam)
+	actorParam := databaseIntParam(request.actorUserId)
+	defer delete(actorParam)
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)nameCString,
@@ -872,6 +873,7 @@ databaseExecuteEditRoom :: proc(
 		transmute([^]byte)roomTypeParam,
 		transmute([^]byte)accessParam,
 		transmute([^]byte)encryptedParam,
+		transmute([^]byte)actorParam,
 	}
 	result := databaseExecParams(conn, DATABASE_EDIT_ROOM_SQL, params[:])
 	if result == nil {
@@ -882,6 +884,9 @@ databaseExecuteEditRoom :: proc(
 		return databaseResultError(&result)
 	}
 
+	if !databaseGetBool(result, 0, 11) {
+		return databaseSuccess(common.DatabaseRoomMutationResult{notPermitted = true})
+	}
 	mutation := common.DatabaseRoomMutationResult {
 		changed = !pg.get_is_null(result, 0, 0),
 	}
@@ -902,26 +907,47 @@ databaseExecuteEditRoom :: proc(
 	return databaseSuccess(mutation)
 }
 
+// Protocol 23 (#95): $1 is the requester, who must hold ManageRooms, and $2 the room. One row:
+// whether the requester may, whether a room was deleted, and the room's members before the
+// delete (comma separated), which the router tells. The snapshot is read before the delete
+// cascades the memberships away.
+DATABASE_DELETE_ROOM_SQL ::
+	"WITH permitted AS (SELECT " + DATABASE_ACTOR_MANAGES_ROOMS_SQL + " AS ok), " +
+	"members AS (SELECT user_id FROM room_members WHERE room_id = $2::bigint), " +
+	"deleted AS (DELETE FROM rooms WHERE id = $2::bigint AND (SELECT ok FROM permitted) " +
+	"RETURNING id) " +
+	"SELECT (SELECT ok FROM permitted)::text, EXISTS (SELECT 1 FROM deleted)::text, " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM members), '')"
+
 databaseExecuteDeleteRoom :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseDeleteRoomRequest,
 ) -> common.DatabaseQueryResponse {
+	actorParam := databaseIntParam(request.actorUserId)
+	defer delete(actorParam)
 	roomIDParam := databaseIntParam(request.roomId)
 	defer delete(roomIDParam)
-	params := [?][^]byte{transmute([^]byte)roomIDParam}
-	result := databaseExecParams(
-		conn,
-		"DELETE FROM rooms WHERE id = $1 RETURNING id::text",
-		params[:],
-	)
+	params := [?][^]byte{transmute([^]byte)actorParam, transmute([^]byte)roomIDParam}
+	result := databaseExecParams(conn, DATABASE_DELETE_ROOM_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
 	defer pg.clear(result)
-	if pg.result_status(result) != .Tuples_OK {
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
 		return databaseResultError(&result)
 	}
-	return databaseSuccess(common.DatabaseRoomMutationResult{changed = pg.n_tuples(result) == 1})
+	if !databaseGetBool(result, 0, 0) {
+		return databaseSuccess(common.DatabaseRoomMutationResult{notPermitted = true})
+	}
+	mutation := common.DatabaseRoomMutationResult {
+		changed = databaseGetBool(result, 0, 1),
+	}
+	if mutation.changed {
+		members := databaseGetText(result, 0, 2)
+		defer delete(members)
+		mutation.memberUserIDs = databaseParseIDList(members)
+	}
+	return databaseSuccess(mutation)
 }
 
 databaseExecuteRequest :: proc(
@@ -939,8 +965,6 @@ databaseExecuteRequest :: proc(
 		return databaseExecutePostRoomChatMessage(conn, r)
 	case common.DatabaseRoomHistoryRequest:
 		return databaseExecuteGetRoomHistory(conn, r)
-	case common.DatabaseUserServerAdminRequest:
-		return databaseExecuteCheckUserServerAdmin(conn, r)
 	case common.DatabaseCreateRoomRequest:
 		return databaseExecuteCreateRoom(conn, r)
 	case common.DatabaseEditRoomRequest:
@@ -975,6 +999,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteStoreRoomKeyEnvelope(conn, r)
 	case common.DatabaseFetchRoomKeysRequest:
 		return databaseExecuteFetchRoomKeys(conn, r)
+	case common.DatabaseRoleRequest:
+		return databaseExecuteRoleRequest(conn, r)
 	case common.DatabaseRoomKeyRequestCheckRequest:
 		return databaseExecuteRoomKeyRequestCheck(conn, r)
 	case nil:

@@ -272,6 +272,10 @@ HeadlessEventKind :: enum {
 	// Encrypted voice (protocol 21, headless_voice.odin): a voice key sent, accepted or
 	// refused, or a key request sent or received.
 	VoiceKey,
+	// Roles (protocol 23, headless_roles.odin).
+	RoleList,
+	RoleUpdated,
+	RoleDeleted,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -314,6 +318,9 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.VoiceSpeaking  = "voice_speaking",
 	.VoiceStatus    = "voice_status",
 	.VoiceKey       = "voice_key",
+	.RoleList       = "role_list",
+	.RoleUpdated    = "role_updated",
+	.RoleDeleted    = "role_deleted",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -329,6 +336,8 @@ headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
 // is offered. A role an admin changes from a client arrives as account_updated (protocol 14);
 // one changed in the database shows on the next connection (`reconnect`). nickname is the
 // account's name on the server, which an admin may have set and locked (nicknameLocked).
+// permissions (protocol 23) are the account's effective server permissions
+// (HEADLESS_PERMISSION_NAMES; every one for an admin).
 HeadlessConnectedJSON :: struct {
 	event:          string,
 	serverID:       int,
@@ -336,6 +345,7 @@ HeadlessConnectedJSON :: struct {
 	nickname:       string,
 	isAdmin:        bool,
 	nicknameLocked: bool,
+	permissions:    []string,
 }
 
 // ServerUserUpdated: an admin changed an account's role, ban, or name (protocol 14). user is
@@ -360,6 +370,8 @@ HeadlessDirectoryUserJSON :: struct {
 	keyState:          string,
 	isAdmin:           bool,
 	isBanned:          bool,
+	// Protocol 23: every role the account holds, the admin role included.
+	roleIds:           []int,
 }
 
 // data in lowercase hex, allocated with allocator.
@@ -393,6 +405,7 @@ headlessDirectoryUser :: proc(
 		keyState = e2eeKeyStateName(keyState),
 		isAdmin = user.isAdmin,
 		isBanned = user.isBanned,
+		roleIds = user.roleIds[:],
 	}
 }
 
@@ -445,16 +458,19 @@ HeadlessAccountUpdatedJSON :: struct {
 	isAdmin:        bool,
 	nickname:       string,
 	nicknameLocked: bool,
+	permissions:    []string,
 }
 
 // ServerAdminActionResult: this session's admin request succeeded. action is "role", "rename",
-// "kick" or "ban" (an unban is a ban); userID is the target.
+// "kick" or "ban" (an unban is a ban), or (protocol 23) "role-save", "role-delete" or
+// "role-assign"; userID is the target and roleID the role a role-save or role-delete named.
 HeadlessAdminResultJSON :: struct {
 	event:    string,
 	serverID: int,
 	action:   string,
 	userID:   int,
 	message:  string,
+	roleID:   int,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -475,6 +491,9 @@ HEADLESS_ADMIN_ACTION_NAMES := [common.AdminAction]string {
 	.Rename  = "rename",
 	.Kick    = "kick",
 	.Ban     = "ban",
+	.SaveRole = "role-save",
+	.DeleteRole = "role-delete",
+	.SetUserRoles = "role-assign",
 }
 
 // The words room-create and room-edit take for a room type, and what room_created,
@@ -1026,6 +1045,8 @@ headlessRenderRuntimeEvent :: proc(
 	case .RoomKeyEnvelopeReceived, .RoomKeysReceived, .RoomKeyRequested:
 		// Printed as room_key and room_key_request after State handled them.
 		return "", {}, false
+	case .RoleListReceived, .RoleUpdated, .RoleDeleted:
+		return headlessRenderRoleEvent(event, allocator)
 	case .VoiceKeyReceived, .VoiceKeyRequested:
 		// Printed as voice_key after State handled them (headlessPollVoice).
 		return "", {}, false
@@ -1204,6 +1225,7 @@ headlessRenderRuntimeEvent :: proc(
 				nickname = event.nickname,
 				isAdmin = event.isAdmin,
 				nicknameLocked = event.nicknameLocked,
+				permissions = headlessPermissionNames(event.permissions),
 			},
 			allocator,
 		)
@@ -1338,6 +1360,7 @@ headlessRenderRuntimeEvent :: proc(
 				isAdmin = event.isAdmin,
 				nickname = event.nickname,
 				nicknameLocked = event.nicknameLocked,
+				permissions = headlessPermissionNames(event.permissions),
 			},
 			allocator,
 		)
@@ -1350,6 +1373,7 @@ headlessRenderRuntimeEvent :: proc(
 				action = HEADLESS_ADMIN_ACTION_NAMES[event.adminAction],
 				userID = event.peerUserID,
 				message = event.message,
+				roleID = event.roleID,
 			},
 			allocator,
 		)
@@ -1411,6 +1435,8 @@ HeadlessStatusJSON :: struct {
 	nickname:       string,
 	isAdmin:        bool,
 	nicknameLocked: bool,
+	// Protocol 23: the account's effective server permissions.
+	permissions:    []string,
 	selectedRoomID: int,
 	lastError:      string,
 }
@@ -1463,6 +1489,7 @@ HeadlessUserJSON :: struct {
 	keyState:          string,
 	isAdmin:           bool,
 	isBanned:          bool,
+	roleIds:           []int, // Protocol 23
 }
 
 HeadlessUsersJSON :: struct {
@@ -1685,6 +1712,18 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: bans an account and ends its sessions", headlessCommandAdminBan},
 	{"admin-unban", 1, 0, .None, "admin-unban USER_ID", "admins: lifts a ban",
 		headlessCommandAdminUnban},
+	{"roles-list", 0, 0, .None, "roles-list",
+		"the server's roles from the cache; asks for them (role_list) when they have not arrived",
+		headlessCommandRolesList},
+	{"roles-save", 2, 0, .Required, "roles-save ROLE_ID PERMISSIONS|none NAME...",
+		"admins: creates (ROLE_ID 0) or edits a role; PERMISSIONS is a comma list of " +
+		"manage-rooms, manage-room-members, create-invites, approve-registrations",
+		headlessCommandRolesSave},
+	{"roles-delete", 1, 0, .None, "roles-delete ROLE_ID",
+		"admins: deletes a role; its holders lose it", headlessCommandRolesDelete},
+	{"roles-assign", 2, 0, .None, "roles-assign USER_ID ROLE_ID,ROLE_ID|none",
+		"admins: makes the list every role of the account other than admin",
+		headlessCommandRolesAssign},
 	{"user-keys", 1, 0, .None, "user-keys USER_ID",
 		"fetches an account's encryption key bundle; the answer is a user_keys event",
 		headlessCommandUserKeys},
@@ -2389,6 +2428,9 @@ headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParse
 			result.nickname = connection.nickname
 			result.isAdmin = connection.isAdmin
 			result.nicknameLocked = connection.nicknameLocked
+			result.permissions = headlessPermissionNames(
+				State_serverPermissions(state, state.selected_server_id),
+			)
 		case .Disconnected:
 			result.connection = "retrying"
 			result.retryInMS = headlessMillisecondsUntil(connection.retryAt, time.tick_now())
@@ -2550,6 +2592,7 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			isOnline = user.isOnline,
 			isAdmin  = user.isAdmin,
 			isBanned = user.isBanned,
+			roleIds  = user.roleIds[:],
 		}
 		directory := headlessDirectoryUser(user, state, serverID, context.temp_allocator)
 		users[index].identityPublicKey = directory.identityPublicKey

@@ -314,10 +314,12 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.userIds)
 	case common.DatabaseAppendRoomLogRequest:
 		delete(r.entry)
+	case common.DatabaseRoleRequest:
+		delete(r.name)
+		delete(r.roleIds)
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
-	     common.DatabaseUserServerAdminRequest,
 	     common.DatabaseDeleteRoomRequest,
 	     common.DatabaseRoomMemberActionRequest,
 	     common.DatabaseAdminRoomListRequest,
@@ -372,6 +374,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.room.name)
 		delete(r.room.description)
 		delete(r.addedUserIDs)
+		delete(r.memberUserIDs)
 	case common.DatabaseRoomMemberActionResult:
 		delete(r.memberUserIDs)
 		delete(r.logEntry)
@@ -398,8 +401,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		}
 		delete(r.conversations)
 	case common.DatabaseUserDirectoryResult:
-		for user in r.users {
-			delete(user.nickname)
+		for &user in r.users {
+			common.UserSummary_deinit(&user)
 		}
 		delete(r.users)
 	case common.DatabaseUserIdentityResult:
@@ -407,8 +410,21 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.nickname)
 		delete(r.banReason)
 	case common.DatabaseAdminUserResult:
-		delete(r.user.nickname)
+		user := r.user
+		common.UserSummary_deinit(&user)
 		delete(r.previousNickname)
+	case common.DatabaseRoleResult:
+		for &role in r.roles {
+			common.RoleSummary_deinit(&role)
+		}
+		delete(r.roles)
+		delete(r.role.name)
+		user := r.user
+		common.UserSummary_deinit(&user)
+		for account in r.affected {
+			delete(account.nickname)
+		}
+		delete(r.affected)
 	case common.DatabaseFetchUserKeysResult:
 		delete(r.keys)
 		delete(r.missingUserIds)
@@ -431,8 +447,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.envelopes)
 	case common.DatabaseRoomKeyRequestCheckResult:
 		delete(r.memberUserIDs)
-	case common.DatabaseUserServerAdminResult,
-	     common.DatabaseMarkReadResult,
+	case common.DatabaseMarkReadResult,
 	     common.DatabasePublishEncryptionKeyResult:
 	case nil:
 	}

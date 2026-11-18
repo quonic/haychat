@@ -1,13 +1,15 @@
 package common
 
+import "core:strings"
 import "core:time/datetime"
+import "core:unicode/utf8"
 
 // The common protocol that both the server and client will use to communicate.
 // This includes things like message formats, enums, and transport handshake data.
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 22
+protocolVersion: ProtocolVersion = 23
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -111,12 +113,17 @@ ClientAuthRequestPayload :: struct {
 // admin set it. While it is locked, a sign-in keeps the account's name whatever ClientHello
 // asked for, so nickname can differ from the one the client sent. message and nickname are
 // owned once decoded.
+//
+// permissions (protocol 23, #95) is the account's effective server permissions: the union of
+// its roles' permissions, or every permission for an admin. Like isAdmin it only decides which
+// controls a client offers; the server checks the permission again in every statement.
 ServerAuthSuccessPayload :: struct {
 	userId:         int,
 	message:        string,
 	isAdmin:        bool,
 	nickname:       string,
 	nicknameLocked: bool,
+	permissions:    ServerPermissions,
 }
 
 ServerAuthFailurePayload :: struct {
@@ -128,29 +135,11 @@ NicknameChange :: struct {
 	newNickname: string, // The new nickname that the user wants to use
 }
 
-Roles :: struct {
-	userId: int, // ID of the user whose roles are being queried or modified
-	roles:  [dynamic]Role, // List of roles that the user has been assigned, included in the response from the server to the client when the client requests their roles
-}
-
-Permissions :: struct {
-	userId:      int, // ID of the user whose permissions are being queried or modified
-	resource:    string, // Name of the resource for which permissions are being queried or modified (e.g. "room:general", "forum:123", etc.)
-	permissions: [dynamic]string, // List of permissions for the user on the specified resource (e.g. "canJoinRoom", "canPostInRoom", etc.), included in the response from the server to the client when the client requests their permissions for a resource
-}
-
-Role :: struct {
-	id:          int, // Unique ID of the role
-	name:        string, // Name of the role (e.g. "admin", "moderator", "member", etc.)
-	permissions: [dynamic]string, // List of permissions that this role grants to users who have been assigned this role
-}
-
 User :: struct {
 	id:            int, // Unique ID of the user
 	authPublicKey: IdentityPublicKeyBytes, // User's long-lived identity public key
 	nickname:      string, // User's nickname
 	color:         string, // User color in hex format for client display
-	roles:         [dynamic]Role, // List of roles that the user has been assigned
 	currentRoom:   int, // ID of the room the user is currently in, or -1 when not in a room
 }
 
@@ -176,14 +165,17 @@ MessageType :: enum {
 	ClientChangeNickname, // Request to change a user's nickname (only allowed for certain admin users or the user themselves), includes user ID and new nickname
 	ServerNicknameChange, // Notification of a nickname change, includes old and new nickname
 	ClientGetNickname, // Request to get a user's nickname, includes user ID
-	ClientGetRoles, // Request to get a user's roles, includes user ID
-	ServerUserRoles, // Response to ClientGetRoles, includes list of role names that the user has been assigned
-	ClientGetPermissions, // Request to get a user's permissions of the requested resource, includes user ID and resource name
-	ServerUserPermissions, // Response to ClientGetPermissions, includes list of permissions for the requested resource (e.g. canJoinRoom, canPostInRoom, etc.)
-	ClientAddRole, // Request to add a role to a user, includes user ID and role name (only allowed for certain admin users)
-	ServerAddedRole, // Notification that a role has been added to a user, includes role name
-	ClientRemoveRole, // Request to remove a role from a user, includes user ID and role name (only allowed for certain admin users)
-	ServerRemovedRole, // Notification that a role has been removed from a user, includes role name
+	// Retired placeholders (protocol 23, #95), never sent: roles travel as ClientAdminListRoles
+	// ... ServerRoleDeleted at the end of this enum. Kept so that every member after them keeps
+	// its wire value; protocol_test.odin pins them at 24..31.
+	ClientGetRoles,
+	ServerUserRoles,
+	ClientGetPermissions,
+	ServerUserPermissions,
+	ClientAddRole,
+	ServerAddedRole,
+	ClientRemoveRole,
+	ServerRemovedRole,
 	ClientSetPermissions, // Request to set a user's permissions for a resource, includes user ID, resource name and list of permissions (only allowed for certain admin users)
 	ServerSetPermissions, // Notification that a user's permissions for a resource have been changed, includes resource name and new list of permissions
 
@@ -384,6 +376,14 @@ MessageType :: enum {
 	ServerVoiceKey, // ServerVoiceKeyPayload: another participant's current VoiceKey envelope
 	ClientRequestVoiceKey, // ClientRequestVoiceKeyPayload: ask a speaker for a new voice key
 	ServerVoiceKeyRequest, // ServerVoiceKeyRequestPayload: the request, relayed to the speaker
+	// Roles and server permissions (protocol 23, #95), appended so no existing wire value moves.
+	ClientAdminListRoles, // ClientAdminListRolesPayload: every role on the server
+	ServerRoleList, // ServerRoleListPayload: answer to ClientAdminListRoles
+	ClientAdminSaveRole, // ClientAdminSaveRolePayload: admins: create or edit a role
+	ClientAdminDeleteRole, // ClientAdminDeleteRolePayload: admins: delete a role
+	ClientAdminSetUserRoles, // ClientAdminSetUserRolesPayload: admins: an account's roles
+	ServerRoleUpdated, // ServerRoleUpdatedPayload: a role was created or changed, to everyone
+	ServerRoleDeleted, // ServerRoleDeletedPayload: a role was deleted, to everyone
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -1179,6 +1179,29 @@ UserSummary :: struct {
 	// carries neither, so a directory entry added from presence has zeros until the next list.
 	identityPublicKey: IdentityPublicKeyBytes,
 	hasEncryptionKey:  bool,
+	// Protocol 23 (#95): the IDs of every role the account holds, the built-in admin role
+	// included, ascending. Owned once decoded (UserSummary_deinit). ServerUserPresence carries
+	// none.
+	roleIds:           [dynamic]int,
+}
+
+// Frees a UserSummary's owned fields: the nickname and roleIds.
+UserSummary_deinit :: proc(user: ^UserSummary) {
+	delete(user.nickname)
+	user.nickname = ""
+	delete(user.roleIds)
+	user.roleIds = nil
+}
+
+// A deep copy of user, allocated with allocator.
+UserSummary_clone :: proc(user: UserSummary, allocator := context.allocator) -> UserSummary {
+	copy := user
+	copy.nickname = strings.clone(user.nickname, allocator)
+	copy.roleIds = make([dynamic]int, len(user.roleIds), allocator)
+	for roleID, index in user.roleIds {
+		copy.roleIds[index] = roleID
+	}
+	return copy
 }
 
 // ServerUserList: every account on the server, the requester included, ordered by nickname.
@@ -1377,10 +1400,14 @@ ServerReadMarkerPayload :: struct {
 
 // Which admin action a ServerAdminActionResult answers. An unban is a Ban with banned false.
 AdminAction :: enum u8 {
-	SetRole = 0,
-	Rename  = 1,
-	Kick    = 2,
-	Ban     = 3,
+	SetRole      = 0,
+	Rename       = 1,
+	Kick         = 2,
+	Ban          = 3,
+	// Protocol 23 (#95): role management.
+	SaveRole     = 4,
+	DeleteRole   = 5,
+	SetUserRoles = 6,
 }
 
 // ClientAdminSetRole: grant (isAdmin true) or revoke the admin role.
@@ -1420,11 +1447,13 @@ ClientAdminBanUserPayload :: struct {
 }
 
 // ServerAdminActionResult: the requester's action succeeded. message is a sentence for people
-// and owned once decoded.
+// and owned once decoded. roleId (protocol 23) names the role a SaveRole or DeleteRole acted on
+// (a created role's new ID); userId is 0 for them.
 ServerAdminActionResultPayload :: struct {
 	action:  AdminAction,
 	userId:  int,
 	message: string,
+	roleId:  int,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
@@ -1434,11 +1463,190 @@ ServerUserUpdatedPayload :: struct {
 }
 
 // ServerAccountUpdated: the receiving session's own account changed role or name (#41), to
-// every session of that account. nickname is owned once decoded.
+// every session of that account. nickname is owned once decoded. Protocol 23 (#95): permissions
+// is the account's effective set after the change; it is also sent when only that set changed
+// (a role granted or taken away, a held role edited or deleted).
 ServerAccountUpdatedPayload :: struct {
 	isAdmin:        bool,
 	nickname:       string,
 	nicknameLocked: bool,
+	permissions:    ServerPermissions,
+}
+
+// Roles and server permissions (protocol 23, #95, plan 2026-11-18 D1-D4).
+//
+// A server permission is a fixed bit: there are no custom names, and its value is its bit
+// number in ServerPermissions (a u64 on the wire and server_roles.permissions BIGINT in the
+// database), pinned in protocol_test.odin. Never renumber them; add new ones at the end.
+// An account's effective permissions are the union of its roles' permissions; the built-in
+// admin role holds every permission. Only SERVER_PERMISSIONS_ASSIGNABLE may be given to other
+// roles; the rest stay with admin (D2).
+ServerPermission :: enum u8 {
+	ManageRooms          = 0, // Create, edit and delete rooms
+	ManageRoomMembers    = 1, // Add and remove members of invite rooms, see every room
+	CreateInvites        = 2, // Create invite codes (registration, G1)
+	ApproveRegistrations = 3, // Accept or decline sign-up requests (registration, G1)
+	ManageRoles          = 4, // Admin only: create, edit, delete and assign roles
+	ManageRegistration   = 5, // Admin only: change the registration mode (G1)
+	KickUsers            = 6, // Admin only
+	BanUsers             = 7, // Admin only
+	RenameUsers          = 8, // Admin only
+}
+
+ServerPermissions :: bit_set[ServerPermission;u64]
+
+SERVER_PERMISSIONS_ALL :: ServerPermissions {
+	.ManageRooms,
+	.ManageRoomMembers,
+	.CreateInvites,
+	.ApproveRegistrations,
+	.ManageRoles,
+	.ManageRegistration,
+	.KickUsers,
+	.BanUsers,
+	.RenameUsers,
+}
+
+// The permissions a role other than admin may hold.
+SERVER_PERMISSIONS_ASSIGNABLE :: ServerPermissions {
+	.ManageRooms,
+	.ManageRoomMembers,
+	.CreateInvites,
+	.ApproveRegistrations,
+}
+
+// The name of the built-in role (server_roles.builtin). It cannot be renamed, deleted or given
+// fewer permissions, and every admin guard is keyed to it.
+ADMIN_ROLE_NAME :: "admin"
+// Role names are ROLE_NAME_MIN_BYTES..ROLE_NAME_MAX_BYTES bytes of UTF-8 with at least
+// ROLE_NAME_MIN_BYTES characters (server_roles.name is VARCHAR(32), 3..32 characters).
+ROLE_NAME_MIN_BYTES :: 3
+ROLE_NAME_MAX_BYTES :: 32
+// Most roles a server keeps, the built-in admin role included; also the most role IDs a
+// ClientAdminSetUserRoles may name.
+SERVER_ROLES_MAX :: 32
+
+// The set a database mask stands for: bits outside SERVER_PERMISSIONS_ALL are dropped, so a
+// mask of -1 (what the database reports for an admin) is every permission.
+serverPermissionsFromMask :: proc(mask: i64) -> ServerPermissions {
+	return transmute(ServerPermissions)u64(mask) & SERVER_PERMISSIONS_ALL
+}
+
+// The database mask of a set.
+serverPermissionsMask :: proc(permissions: ServerPermissions) -> i64 {
+	return i64(transmute(u64)permissions)
+}
+
+// Whether name may be a role's name: ROLE_NAME_MIN_BYTES..ROLE_NAME_MAX_BYTES bytes, at least
+// ROLE_NAME_MIN_BYTES characters, valid UTF-8 without control characters, and no leading or
+// trailing space.
+roleNameIsValid :: proc(name: string) -> bool {
+	if len(name) < ROLE_NAME_MIN_BYTES || len(name) > ROLE_NAME_MAX_BYTES {
+		return false
+	}
+	if !utf8.valid_string(name) || utf8.rune_count_in_string(name) < ROLE_NAME_MIN_BYTES {
+		return false
+	}
+	if name[0] == ' ' || name[len(name) - 1] == ' ' {
+		return false
+	}
+	for r in name {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// One role. builtin is true only for admin, whose permissions read as SERVER_PERMISSIONS_ALL.
+// position orders the list (ascending, then by ID) and means nothing else. name is owned once
+// decoded.
+RoleSummary :: struct {
+	id:          int,
+	name:        string,
+	permissions: ServerPermissions,
+	builtin:     bool,
+	position:    int,
+}
+
+RoleSummary_deinit :: proc(role: ^RoleSummary) {
+	delete(role.name)
+	role.name = ""
+}
+
+RoleSummary_clone :: proc(role: RoleSummary, allocator := context.allocator) -> RoleSummary {
+	copy := role
+	copy.name = strings.clone(role.name, allocator)
+	return copy
+}
+
+// ClientAdminListRoles: no fields. Any authenticated account may list the roles (their names
+// show next to accounts); only admins change them.
+ClientAdminListRolesPayload :: struct {}
+
+// ServerRoleList: every role, ordered by position and ID. Owned once decoded.
+ServerRoleListPayload :: struct {
+	roles: [dynamic]RoleSummary,
+}
+
+// ClientAdminSaveRole: admins only. roleId 0 creates a role (position 0 puts it last); another
+// ID edits that role. permissions must be a subset of SERVER_PERMISSIONS_ASSIGNABLE, except for
+// the built-in admin role, whose name and SERVER_PERMISSIONS_ALL must be sent unchanged (only
+// its position can change). name is owned once decoded.
+ClientAdminSaveRolePayload :: struct {
+	roleId:      int,
+	name:        string,
+	permissions: ServerPermissions,
+	position:    int,
+}
+
+// ClientAdminDeleteRole: admins only; the built-in admin role cannot be deleted. The role's
+// holders lose it.
+ClientAdminDeleteRolePayload :: struct {
+	roleId: int,
+}
+
+// ClientAdminSetUserRoles: admins only. roleIds (distinct, at most SERVER_ROLES_MAX, owned once
+// decoded) becomes every role of the account other than admin, which ClientAdminSetRole grants
+// and revokes.
+ClientAdminSetUserRolesPayload :: struct {
+	userId:  int,
+	roleIds: [dynamic]int,
+}
+
+// ServerRoleUpdated: a role was created or edited, to every authenticated session. role.name is
+// owned once decoded.
+ServerRoleUpdatedPayload :: struct {
+	role: RoleSummary,
+}
+
+// ServerRoleDeleted: a role was deleted, to every authenticated session. Every account that held
+// it no longer does; no ServerUserUpdated follows for them, so clients drop roleId from their
+// directory entries themselves.
+ServerRoleDeletedPayload :: struct {
+	roleId: int,
+}
+
+ServerRoleListPayload_deinit :: proc(payload: ^ServerRoleListPayload) {
+	for &role in payload.roles {
+		RoleSummary_deinit(&role)
+	}
+	delete(payload.roles)
+	payload.roles = nil
+}
+
+ClientAdminSaveRolePayload_deinit :: proc(payload: ^ClientAdminSaveRolePayload) {
+	delete(payload.name)
+	payload.name = ""
+}
+
+ClientAdminSetUserRolesPayload_deinit :: proc(payload: ^ClientAdminSetUserRolesPayload) {
+	delete(payload.roleIds)
+	payload.roleIds = nil
+}
+
+ServerRoleUpdatedPayload_deinit :: proc(payload: ^ServerRoleUpdatedPayload) {
+	RoleSummary_deinit(&payload.role)
 }
 
 // Why the server ended a session.
@@ -1574,8 +1782,7 @@ ServerAdminActionResultPayload_deinit :: proc(payload: ^ServerAdminActionResultP
 }
 
 ServerUserUpdatedPayload_deinit :: proc(payload: ^ServerUserUpdatedPayload) {
-	delete(payload.user.nickname)
-	payload.user.nickname = ""
+	UserSummary_deinit(&payload.user)
 }
 
 ServerAccountUpdatedPayload_deinit :: proc(payload: ^ServerAccountUpdatedPayload) {
@@ -1615,7 +1822,6 @@ DatabaseQueryRequest :: union {
 	DatabaseRoomMemberListRequest,
 	DatabasePostRoomChatMessageRequest,
 	DatabaseRoomHistoryRequest,
-	DatabaseUserServerAdminRequest,
 	DatabaseCreateRoomRequest,
 	DatabaseEditRoomRequest,
 	DatabaseDeleteRoomRequest,
@@ -1634,6 +1840,7 @@ DatabaseQueryRequest :: union {
 	DatabaseStoreRoomKeyEnvelopeRequest,
 	DatabaseFetchRoomKeysRequest,
 	DatabaseRoomKeyRequestCheckRequest,
+	DatabaseRoleRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -1710,12 +1917,11 @@ DatabaseRoomHistoryRequest :: struct {
 	limit:           int,
 }
 
-DatabaseUserServerAdminRequest :: struct {
-	userId: int,
-}
-
 // Protocol 15: a Public room includes every account (and stores Full history); an invite room
 // includes the creator only when creatorJoins is set.
+//
+// Protocol 23 (#95): the statement checks that creatorUserId holds ManageRooms itself and
+// creates nothing otherwise (DatabaseRoomMutationResult.notPermitted).
 DatabaseCreateRoomRequest :: struct {
 	creatorUserId:     int,
 	name:              string,
@@ -1732,6 +1938,7 @@ DatabaseCreateRoomRequest :: struct {
 // 18) must match the room's flag, and an encrypted room's access cannot change here; the
 // statement refuses both (DatabaseRoomMutationResult.refusal).
 DatabaseEditRoomRequest :: struct {
+	actorUserId: int, // Protocol 23: must hold ManageRooms, checked in the edit statement
 	roomId:      int,
 	name:        string,
 	description: string,
@@ -1740,8 +1947,10 @@ DatabaseEditRoomRequest :: struct {
 	encrypted:   bool,
 }
 
+// Protocol 23: the statement checks ManageRooms and returns the members before the delete.
 DatabaseDeleteRoomRequest :: struct {
-	roomId: int,
+	actorUserId: int,
+	roomId:      int,
 }
 
 // What a DatabaseRoomMemberActionRequest does (protocol 15). Fetch changes nothing.
@@ -1878,7 +2087,6 @@ DatabaseQueryResult :: union {
 	DatabaseRoomMemberListResult,
 	DatabasePostRoomChatMessageResult,
 	DatabaseRoomHistoryResult,
-	DatabaseUserServerAdminResult,
 	DatabaseRoomMutationResult,
 	DatabasePostDirectMessageResult,
 	DatabaseDirectHistoryResult,
@@ -1895,6 +2103,7 @@ DatabaseQueryResult :: union {
 	DatabaseStoreRoomKeyEnvelopeResult,
 	DatabaseFetchRoomKeysResult,
 	DatabaseRoomKeyRequestCheckResult,
+	DatabaseRoleResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -1906,11 +2115,14 @@ DatabaseQueryResult :: union {
 // Protocol 14: nickname (owned) is the account's name after this login, which differs from the
 // requested one when an admin locked it (nicknameLocked). banned is true for a banned account,
 // with banReason (owned, may be empty); the router refuses its sign-in.
+//
+// permissions (protocol 23) is the account's effective server permissions.
 DatabaseUserIdentityResult :: struct {
 	userId:           int,
 	renamed:          bool,
 	previousNickname: string,
 	isAdmin:          bool,
+	permissions:      ServerPermissions,
 	nickname:         string,
 	nicknameLocked:   bool,
 	banned:           bool,
@@ -1957,10 +2169,6 @@ DatabaseRoomHistoryResult :: struct {
 	hasOlder: bool,
 }
 
-DatabaseUserServerAdminResult :: struct {
-	isAdmin: bool,
-}
-
 // Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
 // lists the accounts an edit to Public added.
 // Why an edit was refused (protocol 18); None for every other mutation.
@@ -1973,11 +2181,16 @@ RoomEditRefusal :: enum u8 {
 // Protocol 15: isMember is the creator's membership of a created room; addedUserIDs (owned)
 // lists the accounts an edit to Public added. Protocol 18: refusal says why an edit of an
 // existing room changed nothing (changed false).
+//
+// Protocol 23: notPermitted is true when the requester does not hold ManageRooms; nothing
+// changed then. A delete lists the room's members before it in memberUserIDs (owned).
 DatabaseRoomMutationResult :: struct {
-	room:         RoomSummary,
-	changed:      bool,
-	isMember:     bool,
-	addedUserIDs: [dynamic]int,
+	room:          RoomSummary,
+	changed:       bool,
+	isMember:      bool,
+	addedUserIDs:  [dynamic]int,
+	notPermitted:  bool,
+	memberUserIDs: [dynamic]int,
 	refusal:      RoomEditRefusal,
 }
 
@@ -2010,9 +2223,10 @@ DatabaseRoomMemberActionResult :: struct {
 	managerUserIDs: [dynamic]int,
 }
 
-// isAdmin false means the requester is not an admin and rooms is empty. rooms is owned.
+// allowed false means the requester holds neither ManageRooms nor ManageRoomMembers (protocol
+// 23) and rooms is empty. rooms is owned.
 DatabaseAdminRoomListResult :: struct {
-	isAdmin: bool,
+	allowed: bool,
 	rooms:   [dynamic]AdminRoomSummary,
 }
 
@@ -2067,17 +2281,73 @@ DatabaseAdminOutcome :: enum u8 {
 	LastAdmin, // The revoke would leave the server without an admin
 	NicknameTaken, // Another account holds the new nickname
 	BannedTarget, // Granting the admin role to a banned account
+	// Protocol 23 (#95), role management.
+	UnknownRole, // No role has the ID, or a role to assign is the built-in one
+	BuiltinRole, // The change would rename, reduce or delete the built-in admin role
+	RoleNameTaken, // Another role has the name
+	TooManyRoles, // The server already keeps SERVER_ROLES_MAX roles
+	AdminOnlyPermission, // A role other than admin would hold an admin-only permission
 }
 
 // user (nickname owned) is the target's directory entry after the action, isOnline false (the
 // router fills it in); previousNickname (owned) is its name before a rename. Both are set only
 // when outcome is Applied.
+//
+// Protocol 23: user.roleIds (owned) is the target's roles after the action and permissions its
+// effective set after it.
 DatabaseAdminUserResult :: struct {
 	outcome:          DatabaseAdminOutcome,
 	changed:          bool,
 	user:             UserSummary,
 	nicknameLocked:   bool,
 	previousNickname: string,
+	permissions:      ServerPermissions,
+}
+
+// Which role statement a DatabaseRoleRequest runs (protocol 23, server/database_roles.odin).
+DatabaseRoleAction :: enum u8 {
+	List,
+	Save,
+	Delete,
+	SetUserRoles,
+}
+
+// One role request. List needs an authenticated account only; Save, Delete and SetUserRoles
+// check that actorUserId is an admin and apply the guards in the same statement as the change.
+// Save uses roleId (0 creates), name (owned), permissions and position; Delete roleId;
+// SetUserRoles targetUserId and roleIds (owned, distinct, without the built-in role).
+DatabaseRoleRequest :: struct {
+	action:       DatabaseRoleAction,
+	actorUserId:  int,
+	roleId:       int,
+	name:         string,
+	permissions:  ServerPermissions,
+	position:     int,
+	targetUserId: int,
+	roleIds:      [dynamic]int,
+}
+
+// An account whose effective permissions a role change altered, with what
+// ServerAccountUpdated needs. nickname is owned.
+DatabaseAccountPermissions :: struct {
+	userId:         int,
+	nickname:       string,
+	nicknameLocked: bool,
+	isAdmin:        bool,
+	permissions:    ServerPermissions,
+}
+
+// The answer to a DatabaseRoleRequest. Everything is owned. List fills roles. Save fills role
+// (the stored role) and changed; Delete changed. SetUserRoles fills user (the target's directory
+// entry after it, isOnline false) and changed. affected lists, for every Applied change, the
+// accounts whose effective permissions changed.
+DatabaseRoleResult :: struct {
+	outcome:  DatabaseAdminOutcome,
+	changed:  bool,
+	roles:    [dynamic]RoleSummary,
+	role:     RoleSummary,
+	user:     UserSummary,
+	affected: [dynamic]DatabaseAccountPermissions,
 }
 
 // stored is true when the row changed (a first publish or a replacement) and false when the

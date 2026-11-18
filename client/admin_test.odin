@@ -537,7 +537,7 @@ testAdminTransportBuildsEachRequest :: proc(t: ^testing.T) {
 	for testCase in cases {
 		// Built the way sendAdminRequest builds them, and opened on the server side.
 		payload: any
-		switch testCase.request.action {
+		#partial switch testCase.request.action {
 		case .SetRole:
 			payload = common.ClientAdminSetRolePayload{userId = 9, isAdmin = true}
 		case .Rename:
@@ -691,7 +691,7 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 			},
 			`{"event":"user_updated","serverID":955,"user":{"id":9,"nickname":"bob",` +
 			`"isOnline":true,"identityPublicKey":"","hasEncryptionKey":false,` +
-			`"keyState":"unknown","isAdmin":false,"isBanned":true}}`,
+			`"keyState":"unknown","isAdmin":false,"isBanned":true,"roleIds":[]}}`,
 			.UserUpdated,
 		},
 		{
@@ -703,7 +703,7 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 				message = strings.clone("Banned bob"),
 			},
 			`{"event":"admin_result","serverID":955,"action":"ban","userID":9,` +
-			`"message":"Banned bob"}`,
+			`"message":"Banned bob","roleID":0}`,
 			.AdminResult,
 		},
 		{
@@ -715,7 +715,7 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 				nicknameLocked = true,
 			},
 			`{"event":"account_updated","serverID":955,"isAdmin":true,"nickname":"Tester",` +
-			`"nicknameLocked":true}`,
+			`"nicknameLocked":true,"permissions":[]}`,
 			.AccountUpdated,
 		},
 		{

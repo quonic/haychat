@@ -31,7 +31,8 @@ import "shared:pg"
 // nickname, nickname lock, admin flag, and ban flag after the action, its nickname before it,
 // and (protocol 16) its identity key in hex ('' without one) and whether it has published an
 // encryption key bundle. The target columns are NULL for unknown_user and not_admin of a
-// missing target.
+// missing target. Protocol 23 (#95) adds two more: the target's role IDs after the action
+// (comma separated) and its effective permission mask after it (database_roles.odin).
 
 @(private = "file")
 DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
@@ -43,7 +44,23 @@ DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
 	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
 	"WHERE k.user_id = u.id)) AS has_key, " +
 	"EXISTS (SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
-	"WHERE usr.user_id = u.id AND sr.name = 'admin') AS is_admin " +
+	"WHERE usr.user_id = u.id AND sr.name = 'admin') AS is_admin, " +
+	"COALESCE((SELECT string_agg(usr.role_id::text, ',' ORDER BY usr.role_id) " +
+	"FROM user_server_roles usr WHERE usr.user_id = u.id), '') AS role_ids, " +
+	DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "u.id" + DATABASE_SERVER_PERMISSIONS_CLOSE_SQL +
+	" AS permissions, " +
+	// What a grant or a revoke of admin leaves: the roles with or without admin, and the mask
+	// of the other roles.
+	"COALESCE((SELECT string_agg(x.id::text, ',' ORDER BY x.id) FROM (" +
+	"SELECT usr.role_id AS id FROM user_server_roles usr WHERE usr.user_id = u.id " +
+	"UNION SELECT sr.id FROM server_roles sr WHERE sr.name = 'admin') x), '') " +
+	"AS role_ids_granted, " +
+	"COALESCE((SELECT string_agg(usr.role_id::text, ',' ORDER BY usr.role_id) " +
+	"FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
+	"WHERE usr.user_id = u.id AND sr.name <> 'admin'), '') AS role_ids_revoked, " +
+	"COALESCE((SELECT bit_or(sr.permissions) FROM user_server_roles usr " +
+	"JOIN server_roles sr ON sr.id = usr.role_id " +
+	"WHERE usr.user_id = u.id AND sr.name <> 'admin'), 0)::bigint AS permissions_revoked " +
 	"FROM users u WHERE u.id = $2::bigint), "
 
 // $3 is true to grant the role and false to revoke it.
@@ -70,7 +87,11 @@ DATABASE_ADMIN_SET_ROLE_SQL ::
 	"t.id::text, t.nickname, t.nickname_locked::text, " +
 	"(CASE WHEN d.outcome = 'applied' THEN $3::boolean ELSE t.is_admin END)::text, " +
 	"t.banned::text, t.nickname, " +
-	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
+	"CASE WHEN d.outcome <> 'applied' THEN t.role_ids WHEN $3::boolean " +
+	"THEN t.role_ids_granted ELSE t.role_ids_revoked END, " +
+	"(CASE WHEN d.outcome <> 'applied' THEN t.permissions WHEN $3::boolean THEN -1::bigint " +
+	"ELSE t.permissions_revoked END)::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is the new nickname, or '' to keep it; $4 is the new lock.
@@ -92,7 +113,8 @@ DATABASE_ADMIN_RENAME_SQL ::
 	"COALESCE((SELECT nickname FROM updated), t.nickname), " +
 	"COALESCE((SELECT nickname_locked FROM updated), t.nickname_locked)::text, " +
 	"t.is_admin::text, t.banned::text, t.nickname, " +
-	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
+	"t.role_ids, t.permissions::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // Changes nothing: the router ends the target's sessions when the guards pass.
@@ -106,7 +128,8 @@ DATABASE_ADMIN_KICK_SQL ::
 	"ELSE 'applied' END AS outcome) " +
 	"SELECT d.outcome, 'false', t.id::text, t.nickname, t.nickname_locked::text, " +
 	"t.is_admin::text, t.banned::text, t.nickname, " +
-	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
+	"t.role_ids, t.permissions::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is true to ban and false to unban; $4 is the reason, kept only while banned. Banning a
@@ -129,7 +152,8 @@ DATABASE_ADMIN_BAN_SQL ::
 	"SELECT d.outcome, EXISTS (SELECT 1 FROM updated)::text, t.id::text, t.nickname, " +
 	"t.nickname_locked::text, t.is_admin::text, " +
 	"COALESCE((SELECT banned FROM updated), t.banned)::text, t.nickname, " +
-	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
+	"t.role_ids, t.permissions::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 databaseAdminOutcomeFromText :: proc(text: string) -> (common.DatabaseAdminOutcome, bool) {
@@ -166,7 +190,7 @@ databaseExecuteAdminUser :: proc(
 	query: cstring
 	flag: bool
 	text: string
-	switch request.action {
+	#partial switch request.action {
 	case .SetRole:
 		query = DATABASE_ADMIN_SET_ROLE_SQL
 		flag = request.isAdmin
@@ -180,6 +204,9 @@ databaseExecuteAdminUser :: proc(
 		query = DATABASE_ADMIN_BAN_SQL
 		flag = request.banned
 		text = request.reason
+	case:
+		// Role actions are DatabaseRoleRequests (database_roles.odin).
+		return databaseErrorResponse(strings.clone("not an account admin action"))
 	}
 	flagParam := strings.clone_to_cstring(flag ? "true" : "false")
 	defer delete(flagParam)
@@ -191,7 +218,7 @@ databaseExecuteAdminUser :: proc(
 	params := make([dynamic][^]byte, 0, 4)
 	defer delete(params)
 	append(&params, transmute([^]byte)actorParam, transmute([^]byte)targetParam)
-	switch request.action {
+	#partial switch request.action {
 	case .SetRole:
 		append(&params, transmute([^]byte)flagParam)
 	case .Rename:
@@ -227,14 +254,19 @@ databaseExecuteAdminUser :: proc(
 		return databaseErrorResponse(strings.clone("database returned an invalid user ID"))
 	}
 	adminResult.changed = databaseGetBool(result, 0, 1)
+	roleIDs := databaseGetText(result, 0, 10)
+	defer delete(roleIDs)
+	mask, _ := databaseGetInt(result, 0, 11)
 	adminResult.user = common.UserSummary {
-		id       = userID,
-		nickname = databaseGetText(result, 0, 3),
-		isAdmin  = databaseGetBool(result, 0, 5),
-		isBanned = databaseGetBool(result, 0, 6),
+		id               = userID,
+		nickname         = databaseGetText(result, 0, 3),
+		isAdmin          = databaseGetBool(result, 0, 5),
+		isBanned         = databaseGetBool(result, 0, 6),
 		hasEncryptionKey = databaseGetBool(result, 0, 9),
+		roleIds          = databaseParseIDList(roleIDs),
 	}
 	adminResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 8)
+	adminResult.permissions = common.serverPermissionsFromMask(i64(mask))
 	adminResult.nicknameLocked = databaseGetBool(result, 0, 4)
 	adminResult.previousNickname = databaseGetText(result, 0, 7)
 	return databaseSuccess(adminResult)

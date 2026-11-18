@@ -294,8 +294,8 @@ buildContextMenu :: proc(
 				},
 			)
 		}
-		// The server checks the role on every request; this only decides what is offered.
-		if State_isServerAdmin(state, target.serverID) &&
+		// The server checks ManageRooms on every request; this only decides what is offered.
+		if State_hasPermission(state, target.serverID, .ManageRooms) &&
 		   target.serverID == state.selected_server_id {
 			append(
 				&entries,

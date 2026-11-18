@@ -144,9 +144,11 @@ roomHistoryNote :: proc(
 
 // ── Admin room list ───────────────────────────────────────────────
 
-// Asks for every room on the server (admins only); the answer is AdminRoomsReceived.
+// Asks for every room on the server (accounts holding ManageRooms or ManageRoomMembers,
+// protocol 23); the answer is AdminRoomsReceived.
 State_requestAdminRooms :: proc(state: ^State, serverID: int) {
-	if !State_isServerAdmin(state, serverID) {
+	if !State_hasPermission(state, serverID, .ManageRooms) &&
+	   !State_hasPermission(state, serverID, .ManageRoomMembers) {
 		return
 	}
 	if State_serverRoomCache(state, serverID).adminRoomsLoading {
@@ -228,7 +230,9 @@ roomMemberRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomM
 	}
 	rights.known = true
 	rights.access = roomAccessShown(room.access)
-	rights.isAdmin = State_isServerAdmin(state, serverID)
+	// Protocol 23: "admin" here is whoever holds ManageRoomMembers (admins hold every
+	// permission), the account the server lets manage members.
+	rights.isAdmin = State_hasPermission(state, serverID, .ManageRoomMembers)
 	rights.isMember = ServerRoomCache_roomIsJoined(State_serverRoomCache(state, serverID), roomID)
 	if room.encrypted {
 		// Protocol 18: what the verified member log allows (room_log.odin), not room_members.
@@ -268,7 +272,7 @@ State_invitableRooms :: proc(
 			append(&rooms, room)
 		}
 	}
-	if State_isServerAdmin(state, serverID) {
+	if State_hasPermission(state, serverID, .ManageRoomMembers) {
 		for entry in cache.adminRooms {
 			if ServerRoomCache_roomIsJoined(cache, entry.room.id) {
 				continue
@@ -628,7 +632,7 @@ buildRoomMembersView :: proc(
 	view.canAdd = rights.canAdd
 	view.canLeave = rights.canLeave
 	view.isMember = rights.isMember
-	view.canEdit = rights.isAdmin
+	view.canEdit = State_hasPermission(state, serverID, .ManageRooms)
 	view.busy = editor.pending != .None
 	view.notice = editor.notice
 	view.error = editor.error

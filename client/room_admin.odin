@@ -454,10 +454,11 @@ State_resetRoomEditor :: proc(state: ^State, mode: RoomEditorMode, serverID, roo
 	editor.contentH = 0
 }
 
-// Opens the empty "New room" form for the selected server. Only admins get it.
+// Opens the empty "New room" form for the selected server. Only accounts holding ManageRooms
+// (protocol 23; admins hold every permission) get it.
 State_openRoomCreator :: proc(state: ^State) {
 	serverID := state.selected_server_id
-	if !State_isServerAdmin(state, serverID) {
+	if !State_hasPermission(state, serverID, .ManageRooms) {
 		return
 	}
 	State_closeDirectConversation(state)
@@ -466,11 +467,11 @@ State_openRoomCreator :: proc(state: ^State) {
 }
 
 // Opens the edit form for one of the selected server's rooms, filled with its current name,
-// description, type and access. Only admins get it, also for a room they are not in (from the
-// Admin section's list).
+// description, type and access. Only accounts holding ManageRooms get it, also for a room they
+// are not in (from the Admin section's list).
 State_openRoomEditor :: proc(state: ^State, roomID: int) {
 	serverID := state.selected_server_id
-	if !State_isServerAdmin(state, serverID) {
+	if !State_hasPermission(state, serverID, .ManageRooms) {
 		return
 	}
 	room := State_knownRoom(state, serverID, roomID)

@@ -1,5 +1,6 @@
 package client
 
+import "../common"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
@@ -23,6 +24,10 @@ ServerConnection :: struct {
 	// ServerAccountUpdated when an admin changes the role from a client (protocol 14, #41). A
 	// role changed directly in the database shows up on the next connection.
 	isAdmin:                  bool,
+	// The account's effective server permissions (protocol 23): from ServerAuthSuccess, then
+	// from ServerAccountUpdated whenever an admin changes a role it holds or the roles it holds.
+	// Like isAdmin it only decides which controls are drawn (State_hasPermission).
+	permissions:              common.ServerPermissions,
 	// Whether an admin set this account's name and locked it (protocol 14): the server keeps
 	// nickname whatever display name the client connects with.
 	nicknameLocked:           bool,
@@ -128,6 +133,37 @@ State_isServerAdmin :: proc(state: ^State, serverID: int) -> bool {
 	)
 }
 
+// The effective server permissions of the account signed in on serverID (protocol 23): every
+// permission for an admin, the union of its roles' otherwise. Empty while not signed in. Only
+// decides which controls the view offers; the server checks every request.
+State_serverPermissions :: proc(state: ^State, serverID: int) -> common.ServerPermissions {
+	index := State_serverConnectionIndex(state^, serverID)
+	if index < 0 || state.serverConnections[index].status != .Established {
+		return {}
+	}
+	connection := state.serverConnections[index]
+	if connection.isAdmin {
+		return common.SERVER_PERMISSIONS_ALL
+	}
+	return connection.permissions
+}
+
+// Whether the account signed in on serverID holds permission there (State_serverPermissions).
+State_hasPermission :: proc(
+	state: ^State,
+	serverID: int,
+	permission: common.ServerPermission,
+) -> bool {
+	return permission in State_serverPermissions(state, serverID)
+}
+
+// Whether the account may see the Admin section on serverID: an admin, or a holder of any
+// delegated permission.
+State_hasAdminSection :: proc(state: ^State, serverID: int) -> bool {
+	return State_serverPermissions(state, serverID) & common.SERVER_PERMISSIONS_ASSIGNABLE != {} ||
+		State_isServerAdmin(state, serverID)
+}
+
 State_serverConfig :: proc(state: ^State, serverID: int) -> (^Server, bool) {
 	for index in 0 ..< len(state.config.servers) {
 		if state.config.servers[index].id == serverID {
@@ -188,6 +224,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	connection.lastAttemptFailed = false
 	connection.userID = event.userID
 	connection.isAdmin = event.isAdmin
+	connection.permissions = event.permissions
 	connection.nicknameLocked = event.nicknameLocked
 	connection.sessionGeneration = event.sessionGeneration
 	delete(connection.nickname)
@@ -213,6 +250,7 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_directRequestQueuedKeys(state, event.serverID)
 	State_roomChainsConnected(state, event.serverID)
 	State_voiceConnected(state, event.serverID)
+	State_rolesConnected(state, event.serverID)
 }
 
 // Takes ownership of the event's message and offered key.
@@ -225,6 +263,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.lastAttemptFailed = true
 	connection.userID = 0
 	connection.isAdmin = false
+	connection.permissions = {}
 	connection.nicknameLocked = false
 	ServerConnection_setDetail(connection, &event.message)
 	ServerConnection_clearOfferedKey(connection)
@@ -252,6 +291,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.lastAttemptFailed = false
 	connection.userID = 0
 	connection.isAdmin = false
+	connection.permissions = {}
 	connection.nicknameLocked = false
 	ServerConnection_setDetail(connection, &event.message)
 	State_resetPendingRequests(state, event.serverID, false)
@@ -267,17 +307,29 @@ State_accountUpdated :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 		return
 	}
 	connection := &state.serverConnections[index]
+	wasAdmin := connection.isAdmin
 	connection.isAdmin = event.isAdmin
+	connection.permissions = event.permissions
 	connection.nicknameLocked = event.nicknameLocked
 	if len(event.nickname) > 0 {
 		delete(connection.nickname)
 		connection.nickname = event.nickname
 		event.nickname = ""
 	}
-	// Admin controls on a form for a server where the role just went away would only be
-	// refused; close it.
-	if !connection.isAdmin {
+	// A room form for a server where room management just went away would only be refused;
+	// close it. The Members page follows its own rights (State_roomEditorRoomChanged).
+	if !State_hasPermission(state, event.serverID, .ManageRooms) &&
+	   (state.roomEditor.mode == .Create || state.roomEditor.mode == .Edit) {
 		State_closeRoomEditorForServer(state, event.serverID)
+	}
+	if wasAdmin && !connection.isAdmin {
+		State_rolesAdminLost(state, event.serverID)
+	}
+	// An admin may have handed this account the room permissions: the Admin section's room list
+	// needs every room.
+	if State_hasPermission(state, event.serverID, .ManageRooms) ||
+	   State_hasPermission(state, event.serverID, .ManageRoomMembers) {
+		State_noteRoomManagementGained(state, event.serverID)
 	}
 }
 

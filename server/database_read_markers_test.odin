@@ -106,6 +106,7 @@ testRoomUnreadRulesAgainstPostgreSQL :: proc(t: ^testing.T) {
 	room := common.GENERAL_ROOM_ID
 
 	alice := databaseSQLTestCreateUser(conn, "read-alice")
+	databaseRoleTestGrant(conn, alice, "read-rooms", {.ManageRooms})
 	bob := databaseSQLTestCreateUser(conn, "read-bob")
 	first := databaseReadMarkerTestPostRoom(conn, room, alice)
 	second := databaseReadMarkerTestPostRoom(conn, room, alice)
@@ -218,6 +219,7 @@ testMarkRoomReadMovesForwardClampsAndChecksMembershipAgainstPostgreSQL :: proc(t
 	room := common.GENERAL_ROOM_ID
 
 	alice := databaseSQLTestCreateUser(conn, "mark-alice")
+	databaseRoleTestGrant(conn, alice, "mark-rooms", {.ManageRooms})
 	bob := databaseSQLTestCreateUser(conn, "mark-bob")
 	// An empty room: nothing to mark, so nothing is stored and nothing changed.
 	empty := databaseReadMarkerTestMark(conn, bob, .Room, room, 5)

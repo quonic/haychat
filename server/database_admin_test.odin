@@ -92,6 +92,10 @@ databaseAdminTestRun :: proc(
 	previous := result.previousNickname
 	result.previousNickname = strings.clone(previous, context.temp_allocator)
 	delete(previous)
+	roleIDs := result.user.roleIds
+	result.user.roleIds = make([dynamic]int, len(roleIDs), context.temp_allocator)
+	copy(result.user.roleIds[:], roleIDs[:])
+	delete(roleIDs)
 	return result
 }
 
@@ -241,8 +245,9 @@ testAdminActionStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	databaseAdminTestGrant(conn, admin)
 	unknown := carol + 1000
 
-	// Only an admin may act, and only on an account that exists.
-	for action in common.AdminAction {
+	// Only an admin may act, and only on an account that exists. The role actions (protocol 23)
+	// are DatabaseRoleRequests, tested in database_roles_test.odin.
+	for action in ([]common.AdminAction{.SetRole, .Rename, .Kick, .Ban}) {
 		databaseAdminTestExpect(
 			conn,
 			{
@@ -536,6 +541,7 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	conn := databaseAdminTestOpen(t, "room_types")
 
 	member := databaseAdminTestUser(conn, "type-member")
+	databaseRoleTestGrant(conn, member, "type-rooms", {.ManageRooms})
 	created := databaseExecuteRequest(
 		conn,
 		common.DatabaseCreateRoomRequest {
@@ -633,6 +639,7 @@ testRoomTypeStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		edited := databaseExecuteRequest(
 			conn,
 			common.DatabaseEditRoomRequest {
+				actorUserId = member,
 				roomId = roomID,
 				name = "type-text",
 				description = "",

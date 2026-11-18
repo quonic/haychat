@@ -795,6 +795,7 @@ State_userUpdated :: proc(state: ^State, serverID: int, user: ^common.UserSummar
 		} else {
 			delete(known.nickname)
 		}
+		delete(known.roleIds)
 		known^ = user^
 		user^ = {}
 		return

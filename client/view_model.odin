@@ -52,7 +52,8 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 	serverCache := &state.server_room_caches[serverCacheIndex]
 	view.hasSelectedRoom = ServerRoomCache_roomIsJoined(serverCache, state.selected_channel_id)
 	view.canEditRoom =
-		view.hasSelectedRoom && State_isServerAdmin(state, state.selected_server_id)
+		view.hasSelectedRoom &&
+		State_hasPermission(state, state.selected_server_id, .ManageRooms)
 	view.allowsChat =
 		!view.hasSelectedRoom ||
 		State_roomAllowsChat(state, state.selected_server_id, state.selected_channel_id)
@@ -268,7 +269,8 @@ buildSidebarRows :: proc(
 	inRoom := state.selected_dm_peer_id == 0
 
 	// Only an admin can create rooms; the server refuses everyone else anyway.
-	channelsAction := State_isServerAdmin(state, serverID) ? SidebarRowAction.NewRoom : .None
+	channelsAction :=
+		State_hasPermission(state, serverID, .ManageRooms) ? SidebarRowAction.NewRoom : .None
 	append(
 		&rows,
 		SidebarRow{kind = .SectionHeader, label = "Channels", action = channelsAction},
