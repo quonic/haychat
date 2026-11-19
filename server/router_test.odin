@@ -1315,8 +1315,14 @@ testProcessManagerRestartSchedulingIsDeduplicated :: proc(t: ^testing.T) {
 
 }
 
+// The old ClientStoreFile request body, kept only here: the endpoint was removed (#31).
+RouterTestRetiredStoreFileRequest :: struct {
+	filename: string,
+	content:  []u8,
+}
+
 @(test)
-testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
+testMainRouterRetiredStoreFileIsUnsupported :: proc(t: ^testing.T) {
 	_ = t
 
 	sync.mutex_lock(&routerTestMutex)
@@ -1328,15 +1334,16 @@ testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
 	peerID := u32(1)
 	clientTransport := routerCompleteHandshake(&h, peerID)
 
-	searedPacket, sealOK := common.sealPacketForSession(
+	// A well-formed request of the old shape is refused like any message without a handler.
+	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
 		.ClientStoreFile,
-		common.ClientStoreFileRequest{filename = "", content = []u8{1}},
+		RouterTestRetiredStoreFileRequest{filename = "notes.txt", content = []u8{1, 2, 3}},
 	)
 	assert(sealOK, "expected encrypted file-store packet sealing to succeed")
-	defer delete(searedPacket.payload)
+	defer delete(sealedPacket.payload)
 
-	sealedPacketBytes := routerEncodePacketBytes(searedPacket)
+	sealedPacketBytes := routerEncodePacketBytes(sealedPacket)
 	defer delete(sealedPacketBytes)
 
 	MainRouterState_handleNetworkDataReceived(
@@ -1351,29 +1358,36 @@ testMainRouterStoreFileValidationFailureReturnsMessage :: proc(t: ^testing.T) {
 	defer delete(responseOuterPacket.payload)
 	assert(
 		responseOuterPacket.messageType == .EncryptedPacket,
-		"expected file-store validation failure to use encrypted transport",
+		fmt.tprintf(
+			"expected the refusal to use encrypted transport, got %v",
+			responseOuterPacket.messageType,
+		),
 	)
 
 	responseInnerPacket, openOK := common.openPacketForSession(
 		&clientTransport,
 		responseOuterPacket,
 	)
-	assert(openOK, "expected client to decrypt file-store validation response")
+	assert(openOK, "expected client to decrypt the refusal")
 	defer delete(responseInnerPacket.payload)
 	assert(
-		responseInnerPacket.messageType == .ServerStoreFileResponse,
-		"expected file-store validation failure to return a file-store response",
+		responseInnerPacket.messageType == .ServerProtocolError,
+		fmt.tprintf(
+			"expected ServerProtocolError for ClientStoreFile, got %v",
+			responseInnerPacket.messageType,
+		),
 	)
 
-	responsePayload: common.ServerStoreFileResult
+	responsePayload: common.ProtocolErrorResponse
 	responsePayloadErr := cbor.unmarshal(responseInnerPacket.payload, &responsePayload)
-	assert(responsePayloadErr == nil, "expected file-store response payload decode to succeed")
+	assert(responsePayloadErr == nil, "expected protocol error payload decode to succeed")
 	defer delete(responsePayload.message)
-	defer delete(responsePayload.hashedFilename)
-	assert(!responsePayload.success, "expected invalid file-store request to fail")
 	assert(
-		responsePayload.message == "invalid payload",
-		"expected invalid file-store request to explain payload validation failure",
+		responsePayload.message == "Unsupported message type",
+		fmt.tprintf(
+			"expected \"Unsupported message type\" for ClientStoreFile, got %q",
+			responsePayload.message,
+		),
 	)
 }
 

@@ -313,8 +313,11 @@ MessageType :: enum {
 	ServerShutdownServer, // Response to ClientShutdownServer, includes success/failure and reason if failure
 
 	// File Management
-	ClientStoreFile, // Request to store file content on server
-	ServerStoreFileResponse, // Response to ClientStoreFile, includes success/failure and stored hash name
+	// Retired placeholders (#31), never sent: the server answers ClientStoreFile with
+	// "Unsupported message type". Kept so that every member after them keeps its wire value;
+	// protocol_test.odin pins them at 120 and 121.
+	ClientStoreFile,
+	ServerStoreFileResponse,
 	ServerProtocolError, // Generic protocol decode/validation error response
 
 	// File Management
@@ -2051,17 +2054,6 @@ VideoData :: struct {
 	roomId:    int,
 	timestamp: datetime.DateTime, // Time the video data was sent, only used by the server when sending to clients, when receiving from clients this can be set to the current time on the server
 	data:      []u8, // Raw VP8-encoded video data
-}
-
-ClientStoreFileRequest :: struct {
-	filename: string,
-	content:  []u8,
-}
-
-ServerStoreFileResult :: struct {
-	success:        bool,
-	message:        string,
-	hashedFilename: string,
 }
 
 // Database IPC between the server router and its database worker. Requests and results are

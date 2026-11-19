@@ -3,7 +3,6 @@ package server
 import "../common"
 import "core:encoding/json"
 import "core:fmt"
-import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -39,10 +38,9 @@ ServerConfig :: struct {
 	logLevel:               string, // "debug", "info", "warn", "error"
 	logPath:                string, // Directory for log files
 
-	// File storage settings
-	fileStoragePath:        string, // Directory for storing uploaded files
-	maxFileSize:            i64, // Maximum allowed file size for uploads
-	maxStorageCapacity:     i64, // Maximum total storage capacity for all uploaded files combined
+	// State directory: holds the default server identity file. Nothing is uploaded to it; the
+	// file upload endpoint was removed (#31).
+	fileStoragePath:        string,
 
 	// Network server settings
 	listenAddr:             string, // IP address to listen on (e.g., "0.0.0.0", "127.0.0.1")
@@ -108,8 +106,6 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		logLevel               = getEnvOr("HAYCHAT_LOG_LEVEL", "info"),
 		logPath                = logDir,
 		fileStoragePath        = getEnvOr("HAYCHAT_FILE_STORAGE_PATH", DEFAULT_FILE_STORAGE_PATH),
-		maxFileSize            = parseOr("HAYCHAT_MAX_FILE_SIZE", i64(10 * mem.Megabyte)),
-		maxStorageCapacity     = parseOr("HAYCHAT_MAX_STORAGE_CAPACITY", i64(1 * mem.Gigabyte)),
 		listenAddr             = getEnvOr("HAYCHAT_LISTEN_ADDR", "0.0.0.0"),
 		listenPort             = u16(
 			parseOr("HAYCHAT_LISTEN_PORT", uint(common.DEFAULT_SERVER_PORT)),
@@ -137,6 +133,23 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		return config, identityErr
 	}
 	return config, ""
+}
+
+// Variables the server no longer reads. Startup warns when one is set, so an operator does not
+// believe a limit still applies. HAYCHAT_MAX_FILE_SIZE and HAYCHAT_MAX_STORAGE_CAPACITY limited
+// the file upload endpoint removed in #31.
+RETIRED_CONFIG_VARIABLES :: [?]string{"HAYCHAT_MAX_FILE_SIZE", "HAYCHAT_MAX_STORAGE_CAPACITY"}
+
+// Returns the retired variables set in the environment, allocated with the given allocator.
+retiredConfigVariablesSet :: proc(allocator := context.allocator) -> [dynamic]string {
+	set := make([dynamic]string, allocator)
+	for key in RETIRED_CONFIG_VARIABLES {
+		value := os.get_env(key, context.temp_allocator)
+		if len(value) > 0 {
+			append(&set, key)
+		}
+	}
+	return set
 }
 
 // Reads the HAYCHAT_VOICE_* keys and clamps them to their ranges. A value that does not parse
@@ -192,12 +205,6 @@ validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
 	}
 	if config.maxNetworkThreads < 1 {
 		config.maxNetworkThreads = 1
-	}
-	if config.maxFileSize < 1 {
-		config.maxFileSize = i64(10 * mem.Megabyte)
-	}
-	if config.maxStorageCapacity < config.maxFileSize {
-		config.maxStorageCapacity = config.maxFileSize
 	}
 	if config.restartBackoffMin < 0 {
 		config.restartBackoffMin = 0

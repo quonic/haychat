@@ -68,6 +68,10 @@ version below therefore needs clients and servers rebuilt together.
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
 | 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
 
+Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
+(#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
+type". Nothing else on the wire changed, so the protocol version stayed 25.
+
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
 

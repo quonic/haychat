@@ -37,7 +37,10 @@ migrates the schema itself (see [Schema Migrations](#schema-migrations)).
 | `HAYCHAT_FILE_STORAGE_PATH` | `./storage` |
 | `HAYCHAT_SERVER_IDENTITY_FILE` | `$HAYCHAT_FILE_STORAGE_PATH/server_identity.json` |
 
-Paths are resolved relative to the server's working directory.
+Paths are resolved relative to the server's working directory. `HAYCHAT_FILE_STORAGE_PATH` is
+the server's state directory: the server must be able to write to it at startup, and it holds
+the default identity file. Nothing else is written there; the server accepts no file uploads
+(see [Retired Variables](#retired-variables)).
 
 ### Runtime
 
@@ -48,8 +51,6 @@ Paths are resolved relative to the server's working directory.
 | `HAYCHAT_RESTART_BACKOFF_MIN` | `0.1` | Shortest wait before a restart, in seconds |
 | `HAYCHAT_RESTART_BACKOFF_MAX` | `10.0` | Longest wait before a restart, in seconds |
 | `HAYCHAT_MAX_NETWORK_THREADS` | `4` | ENet peer capacity, 16 connections per unit (64 by default). It no longer starts threads; the name is historical |
-| `HAYCHAT_MAX_FILE_SIZE` | `10485760` | Bytes |
-| `HAYCHAT_MAX_STORAGE_CAPACITY` | `1073741824` | Bytes |
 | `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY` | unset | A fixed server identity (hex). When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE` |
 | `HAYCHAT_ADMIN_PUBLIC_KEY` | unset | Hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname (on an Open server). Since protocol 25 this key may also always sign up, in every registration mode, unrestricted and without approval. `./dev.sh key [PROFILE]` prints a dev client profile's key |
 
@@ -66,6 +67,15 @@ range; a value that does not parse uses the default.
 | `HAYCHAT_VOICE_MAX_PARTICIPANTS` | `25` (1 to 200) | Voice sessions per room. An account has one voice session, so a user joining from a second device takes the first device's place. A join into a full room is refused with "voice room is full" |
 | `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` | `60` (1 to 1000) | Per-connection rate limit for voice datagrams, as a token bucket with a burst of a third of the rate. A client sends 50 per second while talking, so values below 50 cut speech up |
 | `HAYCHAT_VOICE_MAX_FRAME_BYTES` | `512` (64 to 512) | The largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes. In an encrypted room it counts the Opus bytes inside the sealed payload, without its 18 bytes of overhead |
+
+### Retired Variables
+
+The server no longer reads these. When one is set, startup prints `[Startup] NAME is no longer
+used and is ignored (#31)` and carries on.
+
+| Variable | Removed |
+| --- | --- |
+| `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY` | #31: they limited the `ClientStoreFile` upload endpoint, which no client used and nothing could read back. It was removed; attachments get their own design in #118 (metadata in PostgreSQL, access checks, client-side encryption in encrypted conversations) |
 
 ## Registration Mode
 
