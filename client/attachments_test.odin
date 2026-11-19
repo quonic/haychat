@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:encoding/cbor"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -398,4 +399,235 @@ testUploadsAreCheckedAgainstTheServersLimits :: proc(t: ^testing.T) {
 	assert(both == common.ATTACHMENT_INVALID_REQUEST_MESSAGE, "expected one conversation only")
 	_, missing := State_uploadAttachment(&state, ATTACHMENT_TEST_SERVER, 1, 0, "/nonexistent/x")
 	assert(missing == "Cannot read the file", "expected an unreadable file refused")
+}
+
+// Protocol 28 (F3, attachment_moderation.odin): a file an admin removed keeps its message's v2
+// signature (removed is never signed), shows as removed, cannot be downloaded, and a live
+// ServerAttachmentRemoved marks it in the caches, forgets an unsent upload of it, and gives
+// this account's quota the bytes back.
+@(test)
+testRemovedAttachmentsStaySignedAndAreMarked :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&e2eeSendBridgeTestMutex)
+	defer sync.mutex_unlock(&e2eeSendBridgeTestMutex)
+	e2eeFetchBridge = attachmentTestFetchBridge
+	defer e2eeFetchBridge = ClientServerTransport_fetchUserKeys
+	defer free_all(context.temp_allocator)
+
+	server := testDirectServer(ATTACHMENT_TEST_SERVER)
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	testPrepareRoomSend(&state, ATTACHMENT_TEST_SERVER, ATTACHMENT_TEST_SELF)
+	serverKey, peerKey := testMessageSigner(&state, ATTACHMENT_TEST_SERVER, ATTACHMENT_TEST_PEER)
+	refs := attachmentTestRefs()
+
+	// History after a removal: the second file is listed removed, and the signature over the
+	// list still verifies.
+	fromHistory := refs
+	fromHistory[1].removed = true
+	attachmentTestDeliver(&state, 40, "report", peerKey, serverKey, refs[:], fromHistory[:])
+	entry := attachmentTestEntry(&state, 40)
+	assert(
+		entry != nil &&
+		entry.security.protection == .Plain &&
+		len(entry.files) == 2 &&
+		!entry.files[0].removed &&
+		entry.files[1].removed &&
+		entry.files[1].sha256 == refs[1].sha256 &&
+		entry.files[1].name == "b.txt",
+		fmt.tprintf("expected the message verified with its second file removed, got %v", entry^),
+	)
+	text := messageTextWithFiles(entry.content, entry.files[:], entry.filesChanged)
+	assert(
+		strings.contains(text, "b.txt (2.0 KB), removed by an admin"),
+		fmt.tprintf("expected the removed file labelled, got %q", text),
+	)
+	_, removedError := State_downloadMessageAttachment(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		common.GENERAL_ROOM_ID,
+		0,
+		40,
+		1,
+		"/nonexistent/out",
+	)
+	assert(
+		removedError == common.ATTACHMENT_REMOVED_MESSAGE,
+		fmt.tprintf("expected the removed file refused, got %q", removedError),
+	)
+
+	// A live removal of the first file, which this account also still has as an unsent upload
+	// (the case of an admin removing an unbound blob of the owner).
+	connection := State_serverConnection(&state, ATTACHMENT_TEST_SERVER)
+	connection.attachmentLimits = {enabled = true, maxBytes = 1 << 20, usedBytes = 5000}
+	append(
+		&state.attachmentUploads,
+		UploadedAttachment {
+			serverID = ATTACHMENT_TEST_SERVER,
+			roomID = common.GENERAL_ROOM_ID,
+			blobId = refs[0].blobId,
+			storedSize = 1000,
+			name = strings.clone("a.txt"),
+			mediaType = strings.clone("text/plain"),
+		},
+	)
+	event := ClientTransportRuntimeEvent {
+		kind = .AttachmentRemoved,
+		serverID = ATTACHMENT_TEST_SERVER,
+		attachmentRemoved = {
+			blobId = refs[0].blobId,
+			roomId = common.GENERAL_ROOM_ID,
+			senderId = ATTACHMENT_TEST_SELF,
+		},
+	}
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+	entry = attachmentTestEntry(&state, 40)
+	assert(
+		entry.files[0].removed && entry.attachments[0].removed && entry.files[1].removed,
+		"expected the first file marked removed in the entry and its reference",
+	)
+	assert(len(state.attachmentUploads) == 0, "expected the unsent upload forgotten")
+	limits := State_attachmentLimits(&state, ATTACHMENT_TEST_SERVER)
+	assert(
+		limits.usedBytes == 4000,
+		fmt.tprintf("expected the quota to get 1000 bytes back, got %d", limits.usedBytes),
+	)
+	// Another account's file gives this account's quota nothing.
+	marked := State_attachmentRemoved(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		{blobId = refs[1].blobId, roomId = common.GENERAL_ROOM_ID, senderId = ATTACHMENT_TEST_PEER},
+	)
+	assert(marked == 1, fmt.tprintf("expected one shown file marked, got %d", marked))
+	limits = State_attachmentLimits(&state, ATTACHMENT_TEST_SERVER)
+	assert(limits.usedBytes == 4000, "expected another account's file not to count")
+
+	// A removal made in SQL reaches a client only with history: a page fetched again marks a
+	// message already cached.
+	attachmentTestDeliver(&state, 41, "again", peerKey, serverKey, refs[:], refs[:])
+	assert(!attachmentTestEntry(&state, 41).files[0].removed, "expected the file not removed")
+	page := [1]common.StoredChatMessage {
+		{
+			id = 41,
+			roomId = common.GENERAL_ROOM_ID,
+			attachments = common.AttachmentRefs_clone(fromHistory[:]),
+		},
+	}
+	page[0].attachments[0].removed = true
+	defer common.AttachmentRefs_deinit(&page[0].attachments)
+	State_receiveRoomHistory(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		common.GENERAL_ROOM_ID,
+		page[:],
+		false,
+	)
+	again := attachmentTestEntry(&state, 41)
+	assert(
+		again.files[0].removed && again.files[1].removed && again.attachments[0].removed,
+		"expected a history page to mark a cached message's files removed",
+	)
+}
+
+// The moderation packets decode into their runtime events; a bad one is a protocol error.
+@(test)
+testAttachmentModerationPacketsTranslate :: proc(t: ^testing.T) {
+	_ = t
+	transport: ClientServerTransport
+	transport.serverID = 7
+	defer delete(transport.lastError)
+	blobId: common.AttachmentBlobID
+	blobId[0] = 0xaa
+	payload, err := cbor.marshal(
+		common.ServerAttachmentRemovedPayload{blobId = blobId, senderId = 3, recipientId = 4},
+	)
+	assert(err == nil, "expected the notice to encode")
+	event, handled := ClientServerTransport_translateAttachmentModerationPacket(
+		&transport,
+		common.Packet{messageType = .ServerAttachmentRemoved, payload = payload},
+	)
+	delete(payload)
+	assert(
+		handled &&
+		event.kind == .AttachmentRemoved &&
+		event.serverID == 7 &&
+		event.attachmentRemoved.blobId == blobId &&
+		event.attachmentRemoved.recipientId == 4,
+		fmt.tprintf("expected the removal event, got %v", event),
+	)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	unset, unsetErr := cbor.marshal(common.ServerAttachmentRemovedPayload{senderId = 3})
+	assert(unsetErr == nil, "expected the notice to encode")
+	bad, badHandled := ClientServerTransport_translateAttachmentModerationPacket(
+		&transport,
+		common.Packet{messageType = .ServerAttachmentRemoved, payload = unset},
+	)
+	delete(unset)
+	assert(badHandled && bad.kind == .ProtocolError, "expected a notice without a blob refused")
+	ClientTransportRuntimeEvent_deinit(&bad)
+
+	usage := common.ServerAdminAttachmentUsagePayload {
+		usedBytes = 12,
+		freeBytes = 99,
+		freeBytesKnown = true,
+	}
+	usage.accounts = make([dynamic]common.AttachmentAccountUsage, 0, 1)
+	append(&usage.accounts, common.AttachmentAccountUsage{userId = 2, bytes = 12, count = 1})
+	usagePayload, usageErr := cbor.marshal(usage)
+	delete(usage.accounts)
+	assert(usageErr == nil, "expected the usage to encode")
+	usageEvent, usageHandled := ClientServerTransport_translateAttachmentModerationPacket(
+		&transport,
+		common.Packet{messageType = .ServerAdminAttachmentUsage, payload = usagePayload},
+	)
+	delete(usagePayload)
+	assert(
+		usageHandled &&
+		usageEvent.kind == .AttachmentUsageReceived &&
+		usageEvent.attachmentUsage.usedBytes == 12 &&
+		len(usageEvent.attachmentUsage.accounts) == 1,
+		fmt.tprintf("expected the usage event, got %v", usageEvent),
+	)
+	// State keeps it per server and takes the accounts.
+	defer free_all(context.temp_allocator)
+	server := testDirectServer(7)
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	_ = State_serverConnection(&state, 7)
+	State_applyRuntimeEvent(&state, &usageEvent)
+	ClientTransportRuntimeEvent_deinit(&usageEvent)
+	kept, keptOK := State_attachmentUsage(&state, 7)
+	assert(
+		keptOK && kept.usedBytes == 12 && len(kept.accounts) == 1 && kept.accounts[0].userId == 2,
+		"expected the usage kept for the server",
+	)
+}
+
+// A removal request is checked like the server will before it goes out.
+@(test)
+testAttachmentRemovalRequestValidation :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		validateAdminRequest(AdminRequest{action = .RemoveAttachment}) ==
+		"No attachment selected.",
+		"expected a removal without a blob refused",
+	)
+	blobId: common.AttachmentBlobID
+	blobId[3] = 1
+	assert(
+		validateAdminRequest(
+			AdminRequest{action = .RemoveAttachment, blobID = blobId, reason = "a\tb"},
+		) ==
+		"The reason must be at most 500 bytes long, without control characters.",
+		"expected a reason with a tab refused",
+	)
+	assert(
+		validateAdminRequest(
+			AdminRequest{action = .RemoveAttachment, blobID = blobId, reason = "spam"},
+		) ==
+		"",
+		"expected a removal with a reason allowed",
+	)
 }

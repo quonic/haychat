@@ -582,7 +582,7 @@ State_downloadMessageAttachment :: proc(
 	}
 	file := files[index]
 	if file.removed {
-		return 0, "Attachment removed by an admin"
+		return 0, common.ATTACHMENT_REMOVED_MESSAGE
 	}
 	worker := State_transferWorker(state)
 	if worker == nil {

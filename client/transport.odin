@@ -132,6 +132,12 @@ ClientTransportRuntimeEventKind :: enum {
 	InviteList,
 	RegistrationRequests,
 	RegistrationRequestUpdated,
+	// Attachment moderation (protocol 28, attachment_moderation.odin). AttachmentRemoved is
+	// ServerAttachmentRemoved (attachmentRemoved: blobId, roomId, senderId, recipientId; nothing
+	// owned). AttachmentUsageReceived is ServerAdminAttachmentUsage (attachmentUsage, accounts
+	// owned). AdminActionResult carries blobID for a RemoveAttachment.
+	AttachmentRemoved,
+	AttachmentUsageReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -238,6 +244,10 @@ ClientTransportRuntimeEvent :: struct {
 	// message's attachments (RoomChatReceived, owned).
 	attachmentLimits:          common.AttachmentLimits,
 	attachments:               [dynamic]common.AttachmentRef,
+	// Protocol 28.
+	attachmentRemoved:         common.ServerAttachmentRemovedPayload,
+	attachmentUsage:           common.ServerAdminAttachmentUsagePayload,
+	blobID:                    common.AttachmentBlobID,
 }
 
 ClientServerTransport :: struct {
@@ -468,6 +478,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	}
 	delete(event.logEntries)
 	common.AttachmentRefs_deinit(&event.attachments)
+	common.ServerAdminAttachmentUsagePayload_deinit(&event.attachmentUsage)
 	event^ = {}
 }
 
@@ -1505,7 +1516,6 @@ ClientServerTransport_deleteRoom :: proc(transport: ^ClientServerTransport, room
 }
 
 // Reports a payload that failed to decode as a ProtocolError event.
-@(private = "file")
 ClientServerTransport_invalidPayloadEvent :: proc(
 	transport: ^ClientServerTransport,
 	message: string,
@@ -2117,7 +2127,9 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 
 	case .ServerAdminActionResult:
 		payload: common.ServerAdminActionResultPayload
-		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		// blobId (protocol 28) is a fixed-size byte field: decode it through the heap.
+		if cbor.unmarshal(innerPacket.payload, &payload, temp_allocator = context.allocator) !=
+			   nil ||
 		   int(payload.action) > int(max(common.AdminAction)) {
 			common.ServerAdminActionResultPayload_deinit(&payload)
 			return ClientServerTransport_invalidPayloadEvent(
@@ -2135,8 +2147,12 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				roleID = payload.roleId,
 				inviteID = payload.inviteId,
 				requestID = payload.requestId,
+				blobID = payload.blobId,
 			},
 			true
+
+	case .ServerAttachmentRemoved, .ServerAdminAttachmentUsage:
+		return ClientServerTransport_translateAttachmentModerationPacket(transport, innerPacket)
 
 	case .ServerRoleList:
 		payload: common.ServerRoleListPayload

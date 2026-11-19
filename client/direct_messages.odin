@@ -665,7 +665,13 @@ State_receiveDirectHistory :: proc(
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)
 	for message in messages {
-		if DirectConversationCache_entry(conversation, message.id) != nil {
+		if existing := DirectConversationCache_entry(conversation, message.id); existing != nil {
+			// Protocol 28: the server's removed flags, as for rooms (RoomCache_mergeMessage).
+			messageAttachmentsNoteRemoved(
+				existing.attachments[:],
+				existing.files[:],
+				message.attachments[:],
+			)
 			continue
 		}
 		entry := State_openDirectEntry(state, serverID, keys, message)
