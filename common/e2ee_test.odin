@@ -3059,7 +3059,12 @@ testPlaintextDirectMessageV2Signature :: proc(t: ^testing.T) {
 		senderUserID            = TEST_ALICE_ID,
 		clientMessageID         = fields.clientMessageID,
 	}
-	roomSignature, roomOK := signPlaintextRoomMessage(roomFields, "two files", alice.privateKey, refs[:])
+	roomSignature, roomOK := signPlaintextRoomMessage(
+		roomFields,
+		"two files",
+		alice.privateKey,
+		refs[:],
+	)
 	assert(roomOK, "expected the room message to sign")
 	assert(
 		!verifyPlaintextDirectMessage(fields, "two files", alice.publicKey, roomSignature, refs[:]),
@@ -3304,7 +3309,10 @@ testAttachmentRefValidation :: proc(t: ^testing.T) {
 		assert(attachmentMediaTypeIsValid(mediaType), fmt.tprintf("expected %s", mediaType))
 	}
 	for mediaType in ([?]string{"", "png", "/png", "image/", "image/png; q=1", "a/b/c", "é/x"}) {
-		assert(!attachmentMediaTypeIsValid(mediaType), fmt.tprintf("expected %q refused", mediaType))
+		assert(
+			!attachmentMediaTypeIsValid(mediaType),
+			fmt.tprintf("expected %q refused", mediaType),
+		)
 	}
 	assert(messageContentLengthIsValid(0, 1), "expected empty content with one attachment")
 	assert(!messageContentLengthIsValid(0, 0), "expected empty content alone to be refused")

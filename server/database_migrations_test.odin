@@ -786,7 +786,8 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 			context.temp_allocator,
 		)
 		directSQL := withoutAttachments
-		for value, index in ([]int{userID, common.DIRECT_CONVERSATIONS_MAX, common.UNREAD_COUNT_CAP}) {
+		parameters := []int{userID, common.DIRECT_CONVERSATIONS_MAX, common.UNREAD_COUNT_CAP}
+		for value, index in parameters {
 			directSQL, _ = strings.replace_all(
 				directSQL,
 				fmt.tprintf("$%d::bigint", index + 1),

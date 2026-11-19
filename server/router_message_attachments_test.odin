@@ -73,11 +73,19 @@ testMainRouterChecksRoomMessageAttachments :: proc(t: ^testing.T) {
 	senderPeerID, recipientPeerID := u32(1), u32(2)
 	h.state.connectedPeers[recipientPeerID] = true
 	senderKey: common.IdentityPrivateKeyBytes
-	senderTransport := routerCompleteHandshake(&h, senderPeerID, 42, identityPrivateKeyOut = &senderKey)
+	senderTransport := routerCompleteHandshake(
+		&h,
+		senderPeerID,
+		42,
+		identityPrivateKeyOut = &senderKey,
+	)
 	defer common.TransportState_deinit(&senderTransport)
 	recipientTransport := routerCompleteHandshake(&h, recipientPeerID, 43, nickname = "other")
 	defer common.TransportState_deinit(&recipientTransport)
-	peers := [?]RouterTestPeer{{senderPeerID, &senderTransport}, {recipientPeerID, &recipientTransport}}
+	peers := [?]RouterTestPeer {
+		{senderPeerID, &senderTransport},
+		{recipientPeerID, &recipientTransport},
+	}
 	// The second sign-in announced the second account to the first.
 	_, presence := routerTestReceivePresence(&h, peers[:])
 	delete(presence.nickname)

@@ -2985,7 +2985,11 @@ headlessSendDirect :: proc(
 	}
 	if len(blobIds) > 0 && mode == .Queue {
 		// A message with files waits for the key in the composer, not in the queue.
-		headlessWriteError(harness, command.name, "the user's key is still being checked; try again")
+		headlessWriteError(
+			harness,
+			command.name,
+			"the user's key is still being checked; try again",
+		)
 		return
 	}
 	clear(&conversation.draft)

@@ -1779,7 +1779,10 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			State_setChatStatus(state, sendError)
 			break
 		}
-		append(&room.inFlight, RoomChainInFlight{clientMessageID = send.clientMessageID, item = item})
+		append(
+			&room.inFlight,
+			RoomChainInFlight{clientMessageID = send.clientMessageID, item = item},
+		)
 		ordered_remove(&room.queued, 0)
 		sent += 1
 	}

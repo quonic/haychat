@@ -197,7 +197,10 @@ State_attachmentLimits :: proc(state: ^State, serverID: int) -> common.Attachmen
 // Whether a file for this conversation is uploaded sealed: an encrypted room's are, and a direct
 // conversation's are when its messages are or will be encrypted (not through the plaintext
 // switch, and not while encryption is impossible).
-State_attachmentShouldEncrypt :: proc(state: ^State, serverID, roomID, recipientUserID: int) -> bool {
+State_attachmentShouldEncrypt :: proc(
+	state: ^State,
+	serverID, roomID, recipientUserID: int,
+) -> bool {
 	if roomID > 0 {
 		return State_roomIsEncrypted(state, serverID, roomID)
 	}

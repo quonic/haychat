@@ -869,11 +869,20 @@ testAttachmentBindingInRoomMessagesAgainstPostgreSQL :: proc(t: ^testing.T) {
 			attachmentSQLTestHex(plainInSecret),
 		),
 	)
-	plainOuter := [1]common.AttachmentRef{attachmentSQLTestRef(plainInSecret, 10, plainSHA, sealed = true)}
-	sealedResult, sealedID := attachmentSQLTestPost(conn, secret, alice, "", plainOuter[:], sealed = true)
+	plainOuter := [1]common.AttachmentRef {
+		attachmentSQLTestRef(plainInSecret, 10, plainSHA, sealed = true),
+	}
+	sealedResult, sealedID := attachmentSQLTestPost(
+		conn,
+		secret,
+		alice,
+		"",
+		plainOuter[:],
+		sealed = true,
+	)
 	assert(
 		sealedResult.attachmentsRefused && sealedID == 0,
-		fmt.tprintf("expected a sealed message with a plaintext blob refused, got %v", sealedResult),
+		fmt.tprintf("expected a sealed message with a plaintext blob refused: %v", sealedResult),
 	)
 	encryptedInFiles, encryptedSHA := attachmentSQLTestReady(conn, alice, 10, roomID = files)
 	databaseDefaultRoomTestExec(
@@ -884,12 +893,21 @@ testAttachmentBindingInRoomMessagesAgainstPostgreSQL :: proc(t: ^testing.T) {
 			attachmentSQLTestHex(encryptedInFiles),
 		),
 	)
-	encryptedRef := [1]common.AttachmentRef{attachmentSQLTestRef(encryptedInFiles, 10, encryptedSHA)}
+	encryptedRef := [1]common.AttachmentRef {
+		attachmentSQLTestRef(encryptedInFiles, 10, encryptedSHA),
+	}
 	refuse(conn, files, alice, encryptedRef[:], "an encrypted blob in a plaintext message")
 
 	// A sealed message binds its encrypted blob; history carries only the ID, size and flag.
 	outer := [1]common.AttachmentRef{{blobId = encryptedBlob, size = 500}}
-	sealedPosted, sealedMessageID := attachmentSQLTestPost(conn, secret, alice, "", outer[:], sealed = true)
+	sealedPosted, sealedMessageID := attachmentSQLTestPost(
+		conn,
+		secret,
+		alice,
+		"",
+		outer[:],
+		sealed = true,
+	)
 	assert(
 		sealedMessageID > 0,
 		fmt.tprintf("expected the sealed message stored, got %v", sealedPosted),
@@ -1126,7 +1144,10 @@ testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL :: proc(t: ^testing.T)
 		.Applied,
 		"expected the upload to begin",
 	)
-	opened, _ := StorageWorker_handle(&worker, StorageUploadOpen{blobId = blob, size = u64(len(data))})
+	opened, _ := StorageWorker_handle(
+		&worker,
+		StorageUploadOpen{blobId = blob, size = u64(len(data))},
+	)
 	assert(opened.(StorageUploadOpened).ok, "expected the part file")
 	chunk := make([]u8, len(data))
 	copy(chunk, data)

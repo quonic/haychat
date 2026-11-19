@@ -117,8 +117,8 @@ attachmentEncryptedLayout :: proc(plainSize: u64) -> (layout: AttachmentLayout, 
 		u64(1),
 		(layout.paddedSize + ATTACHMENT_E2EE_CHUNK_BYTES - 1) / ATTACHMENT_E2EE_CHUNK_BYTES,
 	)
-	layout.storedSize =
-		ATTACHMENT_E2EE_HEADER_SIZE + layout.paddedSize + ATTACHMENT_E2EE_TAG_SIZE * layout.chunkCount
+	layout.storedSize = ATTACHMENT_E2EE_HEADER_SIZE + layout.paddedSize
+	layout.storedSize += ATTACHMENT_E2EE_TAG_SIZE * layout.chunkCount
 	return layout, true
 }
 
