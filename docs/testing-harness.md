@@ -114,7 +114,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-remove ROOM_ID USER_ID` | Admins: removes the account from the room, in every mode. The answer is `room_member_result` with `added` false; the account (whose client drops the room), the remaining members and you get `room_membership` with `joined` false. Removing someone who is not a member changes nothing. Anyone else gets `protocol_error "Admin permission required"`. |
 | `room-leave ROOM_ID` | Leaves a non-public room you are a member of; the answer is `room_membership` with `joined` false and your `userID` (also to the room's other members), and the room leaves your `rooms`. Refusals: `You cannot leave a public room`, `Not a room member`, and (protocol 24) `This room's members come from its access roles` for a Roles room, whose `room-add` and `room-remove` are refused the same way. |
 | `room-permissions ROOM_ID` | Holders of `manage-rooms` or the room's `edit-room` (protocol 24): asks for the room's grants and access roles; the answer is a `room_permissions` event, a refusal `protocol_error "Room management permission required"`. `ok` (`serverID`, `roomID`) means the request went out. |
-| `room-permissions-set ROOM_ID EVERYONE\|none [ROLE_ID=PERMISSIONS\|none ...]` | The same accounts: replaces the room's grants, the everyone grant and each role's (comma lists of `send`, `speak`, `manage-members`, `edit-room`; a role left out or given `none` loses its grant). The answer is `room_permissions`, and every member's sessions get a fresh `room_list`. Refusals: `You cannot grant a room permission you do not hold`, `Invalid role request` (an unknown or the `admin` role). Like the other admin commands it checks nothing the server checks. |
+| `room-permissions-set ROOM_ID EVERYONE\|none [ROLE_ID=PERMISSIONS\|none ...]` | The same accounts: replaces the room's grants, the everyone grant and each role's (comma lists of `send`, `speak`, `manage-members`, `edit-room`, `attach-files` (protocol 27); a role left out or given `none` loses its grant). The answer is `room_permissions`, and every member's sessions get a fresh `room_list`. Refusals: `You cannot grant a room permission you do not hold`, `Invalid role request` (an unknown or the `admin` role). Like the other admin commands it checks nothing the server checks. |
 | `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. |
 | `room-log ROOM_ID` | An encrypted room's member log as this client verified it (protocol 18): prints a `room_log` event at once, then its result (`serverID`, `roomID`), and fetches what the client lacks (the whole log the first time, else what follows its verified version), which prints another `room_log` once applied. A client whose log failed fetches nothing more. Non-members who are neither managers nor admins get `protocol_error "Not a room member"`. See [Encrypted Rooms](#encrypted-rooms). |
 | `room-keys ROOM_ID [fetch]` | Protocol 19: the sender chains of an encrypted room this profile holds (`chains`: epoch, sender, chain ID and start index, never a key), the log's `epoch`, and how sending stands (`sending`, `sendingEpoch`, `sendingChain`, `nextIndex`, `distribution` none/sent/stored, `queued`, `inFlight`, `keysFetched`). With `fetch` it first asks the server for the room's envelopes again (`room_key` events follow; a non-member gets `protocol_error` "Not a room member"). |
@@ -673,8 +673,8 @@ Protocol 28 (F3) adds admin moderation: `attach-usage` reports the server's stor
 
 | Command | Meaning |
 | --- | --- |
-| `attach-upload ROOM_ID\|@USER_ID FILE...` | Uploads FILE (the rest of the line, spaces allowed) to a room or, with `@`, to the direct conversation with that account: `{"ok":true,"cmd":"attach-upload","id":1,"serverID":1,"roomID":1,"recipientUserID":0,"blobID":"","path":"…","encrypted":false,"messageID":0,"index":0}`. Protocol 27: `encrypted` says the file is sealed (the conversation is encrypted, or a direct conversation will be); a file that is too large or over the quota announced at sign-in is refused before it starts (`Attachment is too large`, `Attachment storage quota exceeded`, `Attachments are disabled on this server`), and the file is named after its path's last element and labelled from its extension. `id` names the transfer in its events. The server's answer comes as `attachment_progress` (the blob ID, from 0 bytes), more progress, and `attachment_done` (or `attachment_error` with the server's refusal, for example `Not a room member`, `Attachment is too large`, `Attachment storage quota exceeded`, `Too many uploads at once`). |
-| `attach-resume BLOB` | Continues an upload this process started that stopped (a lost connection, a reconnect, a refused chunk) at the offset the server holds: its first `attachment_progress` reports that offset in `bytes`. A cancelled upload, or one from an earlier run of the client, cannot be resumed (D9). |
+| `attach-upload ROOM_ID\|@USER_ID [--unchecked] FILE...` | Uploads FILE (the rest of the line, spaces allowed) to a room or, with `@`, to the direct conversation with that account: `{"ok":true,"cmd":"attach-upload","id":1,"serverID":1,"roomID":1,"recipientUserID":0,"blobID":"","path":"…","encrypted":false,"messageID":0,"index":0}`. Protocol 27: `encrypted` says the file is sealed (the conversation is encrypted, or a direct conversation will be); a file that is too large or over the quota announced at sign-in is refused before it starts (`Attachment is too large`, `Attachment storage quota exceeded`, `Attachments are disabled on this server`), unless `--unchecked` leaves those two checks to the server (so a proof sees the server refuse with the same sentences), and the file is named after its path's last element and labelled from its extension. `id` names the transfer in its events. The server's answer comes as `attachment_progress` (the blob ID, from 0 bytes), more progress, and `attachment_done` (or `attachment_error` with the server's refusal, for example `Not a room member`, `Attachment is too large`, `Attachment storage quota exceeded`, `Too many uploads at once`). |
+| `attach-resume BLOB` | Continues an upload this process started that stopped (a lost connection, a reconnect, a refused chunk) at the offset the server holds: its first `attachment_progress` reports that offset in `bytes`. A cancelled upload cannot be resumed, and neither can one from an earlier run of the client (`attachment_error` `unknown upload: only an upload this process started can be resumed`): the client keeps no transfer state on disk, so a client that quit or was killed uploads the file again as a new blob, and the sweeper deletes the old one (D9). |
 | `attach-download BLOB OUT...` | Downloads a blob into OUT (written as `OUT.part` and renamed once complete) as stored, unchecked; `attachment_done` carries the SHA-256 of what arrived. A blob this account may not read is refused with `Attachment not found`. |
 | `attach-download ROOM_ID\|@USER_ID MESSAGE_ID INDEX OUT...` | Protocol 27: saves file INDEX (from 0) of a cached, shown message into OUT through `OUT.part`. The worker checks the stored size and the whole blob's SHA-256 against the signed or sealed message, and for an encrypted file opens it chunk by chunk and checks the padding; a failed check deletes the part file and ends in `attachment_error` `This attachment was changed on the server`. Refused at once for an unknown or hidden message (`Unknown message`), a list the server changed, or a removed file. |
 | `attach-cancel BLOB` | Stops this client's upload or download of the blob: `attachment_error` `cancelled`. The server deletes a cancelled upload's file and keeps its row as a tombstone, so it cannot be resumed. |
@@ -700,18 +700,36 @@ verified or opened: `{"blobID":"<hex>","size":1234,"fileSize":1234,"sha256":"<he
 `attachmentsChanged` is true for a sealed message whose outer list is not the one inside the
 seal; its files are then not listed.
 
-`./dev.sh live --attachments` runs `dev/attachment-proof.sh`: two client processes measure
-their chat echo latency with no transfer, then during a 25 MiB upload and its download, and
-check the stored blob, the owner-only download of an unbound blob, a refused upload, a resume
-after `reconnect` and a cancel; then (protocol 27) a file on a `#general` message saved by the
-other client by message and by blob, a sealed file on an encrypted direct message and one in
-an encrypted room, each saved and compared with the original; then (protocol 28) admin A
-removes B's 25 MiB file while B saves it (B's download ends, both hear `attachment_removed`,
-the file leaves the blob directory, history lists it removed, saving it again is refused and
-`attach-usage` shows the 25 MiB freed), B is refused `attach-remove`, and the
-`deploy/sql/attachment-usage.sql` and `remove-attachment.sql` helpers are checked, the second
-seen by B on its next `history`. It prints one `[attachments] latency` line per client and phase and fails when a
-p95 during a transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 1000).
+`./dev.sh live --attachments` runs `dev/attachment-proof.sh` (also part of `--all`). Against
+the live proof's server, two client processes measure their chat echo latency with no
+transfer, then during a 25 MiB upload and its download, and check the stored blob, the
+owner-only download of an unbound blob, a refused upload, a resume after `reconnect` and a
+cancel; then (protocol 27) a file on a `#general` message saved by the other client by message
+and by blob, a sealed file on an encrypted direct message and one in an encrypted room, each
+saved and compared with the original; then (protocol 28) admin A removes B's 25 MiB file while B
+saves it (B's download ends, both hear `attachment_removed`, the file leaves the blob directory,
+history lists it removed, saving it again is refused and `attach-usage` shows the 25 MiB freed),
+B is refused `attach-remove`, and the `deploy/sql/attachment-usage.sql` and
+`remove-attachment.sql` helpers are checked, the second seen by B on its next `history`.
+
+Then it starts a second server from the same binary, on a fresh database it creates and drops,
+with its own blob directory, 2 MiB per file, a 3 MiB quota and a 512 KiB/s pace
+(`HAYCHAT_ATTACHMENT_PROOF_PORT`, default 12347), so the first server's limits stay as they
+are and the proof may restart it. There: the client and then (with `--unchecked`) the server
+refuse a file over the size and one over the quota; a non-member is refused an upload to a
+Member invite, From join room and its file; once added, the newcomer is still refused the file
+sent before it joined and saves one sent after; with Attach files taken from the room's Everyone
+grant, the newcomer's upload is refused at begin and its message naming an upload it finished
+before is refused at binding, while its text still posts; an uploader's process is killed
+mid-file, and a new process with the same profile cannot resume it but uploads the file again
+as a new blob; finally the room is deleted, the server stopped, the rows backdated with `psql`
+and a two-hour-old orphan file put in its blob directory, and after the restart the startup sweep
+deletes exactly the deleted room's files, the stalled upload and the room's unsent upload past
+the pending window, the startup scan the orphan, and two controls stay.
+
+It prints one `[attachments] latency` line per client and phase and fails when a p95 during a
+transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 250 ms; the measured p95s have been
+11 to 16 ms).
 
 ## Example: Two Agents Chatting
 
@@ -1122,8 +1140,9 @@ of cards. Right-click a card (its name is drawn text, so `right-click "NAME"` wo
 **Copy file name** and, for admins, **Remove attachment…**, which opens a confirmation with an
 optional reason: `attachment-remove-reason SERVER` (the field), `attachment-remove-confirm
 SERVER` and `attachment-remove-cancel SERVER`; it closes once the server confirmed. Admins find
-**Storage** at the end of Server settings → Admin: Used, Capacity, Free space ("unknown" when
-the server cannot tell) and the accounts by usage, with `admin-storage-refresh SERVER`.
+**Storage** in Server settings right after the Admin section: Used, Capacity, Free space
+("unknown" when the server cannot tell) and the accounts by usage, with
+`admin-storage-refresh SERVER`.
 
 ```text
 click "# general"

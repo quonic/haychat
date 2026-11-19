@@ -37,8 +37,12 @@ set -euo pipefail
 #                   restricted account, and the admin key on a fresh database
 #   --attachments   only the attachment proof (dev/attachment-proof.sh): a 25 MiB upload and
 #                   download between client processes while both measure their chat echo
-#                   latency against a baseline, the blob on disk, the owner-only download, a
-#                   refused upload, a resume after a reconnect, and a cancel
+#                   latency against a baseline, a resume after a reconnect, a cancel, files on
+#                   a room message, an encrypted direct message and an encrypted room, an
+#                   admin removal mid-download and the deploy/sql helpers; then, on a second
+#                   server with small limits, size and quota refusals, a non-member, a From
+#                   join newcomer, AttachFiles taken away, an uploader killed mid-file, and a
+#                   deleted room's files gone after the startup sweep
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -376,9 +380,12 @@ if [[ "$run_registration" == true ]]; then
 fi
 
 # After the registration proof, which restores the Open mode the attachment clients sign up in.
+# Like it, the attachment proof runs a second server from the same binary, on a fresh database
+# it creates and drops (port 12347), with small limits it may restart.
 if [[ "$run_attachments" == true ]]; then
 	echo "==> [live] running dev/attachment-proof.sh"
-	run_step 900 "dev/attachment-proof.sh" dev/attachment-proof.sh 127.0.0.1:12345
+	run_step 900 "dev/attachment-proof.sh" env HAYCHAT_SERVER_BIN="$server_bin" \
+		dev/attachment-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

@@ -207,7 +207,7 @@ headlessParseBlob :: proc(
 	return blobId, ok
 }
 
-// attach-upload ROOM|@USER FILE...
+// attach-upload ROOM|@USER [--unchecked] FILE...
 headlessCommandAttachUpload :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
 	target := command.args[0]
 	roomID, recipientID := 0, 0
@@ -218,15 +218,33 @@ headlessCommandAttachUpload :: proc(harness: ^HeadlessHarness, command: ^Headles
 		roomID, ok = headlessParseNumber(target)
 	}
 	path := strings.trim_space(command.args[1])
+	// --unchecked skips the client's size and quota checks (D18), so a proof can show the
+	// server refusing the upload itself.
+	checkLimits := true
+	if strings.has_prefix(path, "--unchecked ") {
+		checkLimits = false
+		path = strings.trim_space(path[len("--unchecked "):])
+	}
 	if !ok || (roomID == 0 && recipientID == 0) || len(path) == 0 {
-		headlessWriteError(harness, command.name, "usage: attach-upload ROOM_ID|@USER_ID FILE")
+		headlessWriteError(
+			harness,
+			command.name,
+			"usage: attach-upload ROOM_ID|@USER_ID [--unchecked] FILE",
+		)
 		return
 	}
 	if headlessTransferWorker(harness, command) == nil {
 		return
 	}
 	serverID := harness.state.selected_server_id
-	id, uploadError := State_uploadAttachment(&harness.state, serverID, roomID, recipientID, path)
+	id, uploadError := State_uploadAttachment(
+		&harness.state,
+		serverID,
+		roomID,
+		recipientID,
+		path,
+		checkLimits,
+	)
 	if len(uploadError) > 0 {
 		headlessWriteError(harness, command.name, uploadError)
 		return

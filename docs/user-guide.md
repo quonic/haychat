@@ -211,6 +211,66 @@ greyed) to everyone. Admins also get **Rename…**, **Make admin** or **Remove a
 Admin with that account's role checkboxes open), greyed out where the server refuses them. **Rename…**, **Kick…** and **Ban…** open Server settings → Admin with that
 account's confirmation open, since they need a name or a reason.
 
+## Files
+
+A message in a room or a direct conversation can carry up to four files, with or without text.
+HayChat never opens, runs or previews a file: it only saves it where you choose, and you open it
+yourself.
+
+- **Attaching.** Click the paperclip at the left of the composer ("Attach files (or drop them
+  on the window)") and pick one or more files, or drop files on the window. Each becomes a chip
+  above the composer with its name, "N% of SIZE" and a progress bar while it uploads, and a
+  remove button ("Remove from the message"). Removing a chip stops its upload; a finished file
+  you remove is never sent and the server deletes it later.
+- **When the paperclip is greyed out.** Its tooltip says why: you may not send messages or
+  attach files in this room ("You cannot attach files in this room", the room's **Attach
+  files** permission), the room is voice only, or the message already has four files ("A
+  message can carry at most 4 files"). It is hidden while the server has attachments turned off
+  or you are not connected.
+- **Refused before uploading.** The server tells the client its limits when you sign in. A file
+  larger than the server allows ("Attachment is too large"), one that does not fit your storage
+  quota ("Attachment storage quota exceeded"), or one HayChat cannot read becomes a red chip with
+  the reason, and nothing is uploaded. The server checks every limit again anyway.
+- **Sending.** Enter (or the **Send** button at the right of the chips) sends the text and the
+  files together; with files the text may be empty. Until every file is uploaded, Send is shut
+  and says why under the chips: "Waiting for 1 upload to finish…" (or "Waiting for N uploads to
+  finish…"), "Remove the file that could not be uploaded to send" (or "the files"), or, in a
+  direct conversation whose **Send without encryption** switch changed after the upload, "A file
+  was uploaded unencrypted; remove it and attach it again" (or "encrypted"). The chips go once
+  the message is sent.
+- **Encryption.** In encrypted rooms and encrypted direct conversations your client encrypts
+  each file before it uploads it, and the file's key, name and type travel inside the encrypted
+  message: the server stores only ciphertext, padded to a coarse size, and sees how many files a
+  message has and who downloads them. **Send without encryption** in a direct conversation
+  covers the files as well as the text. In other rooms the server can read the files, as it can
+  read the text, but the sender's signature covers each file's contents, name and type, so
+  nobody can swap one.
+- **Encrypted direct messages being set up.** While HayChat fetches the other person's key
+  ("Setting up encryption…") a message with files waits in the draft rather than in the queue;
+  send it again once the conversation is encrypted.
+- **File cards.** A file in a message is a card with 📄, its name, "SIZE · type" and **Save…**. A
+  message with only files shows only its cards. Right-click a card for **Save…**, **Copy file
+  name** and, for admins, **Remove attachment…**.
+- **Saving.** **Save…** opens your system's save dialog in your Downloads folder with the file's
+  name, cleaned up so it is safe on every system: separators, control characters and
+  `: * ? " < > |` become `_`, leading dots and trailing dots or spaces go, Windows device names
+  (such as `CON` or `COM1`) get a `_` in front, and a name with nothing left is "attachment".
+  While it downloads the card says "Saving… N%" with a bar and **Cancel**, then "Saved as NAME".
+  HayChat writes to `NAME.part` next to the file and renames it only after checking every byte
+  against what the sender signed or sealed.
+- **When saving fails.** "This attachment was changed on the server" means the bytes the server
+  sent are not the ones the sender sent; nothing is kept. "Attachment unavailable" means the
+  server has no such file for you (it answered "Attachment not found"). "Server storage error"
+  means the server knows the file but could not read it from its disk, for example after a
+  restore that brought back the database without the blob directory. "Attachment removed by an
+  admin" replaces the card's button when an admin removed the file. "This message's
+  attachments were changed on the server" replaces all of a message's cards when the server's
+  list of an encrypted message's files is not the one inside it. Other failures (a lost
+  connection, a folder you cannot write to) are shown on the card; click **Save…** again.
+- **Who can download.** Whoever can read the message: the room's members (in a From join room,
+  only files sent after they joined) and the two sides of a direct conversation. Admins get no
+  way around that.
+
 ## Voice
 
 Every room carries voice unless an admin made it text-only, and the client is in at most one
@@ -464,6 +524,24 @@ joined"), with its type, access mode and member count, **Members…**, **Edit…
 **Manage room members** sees this room list, with the buttons its permissions allow, and one
 with **Create invites** or **Approve sign-ups** sees the parts in
 [Sign-up and Invites](#sign-up-and-invites); none of them sees the accounts.
+
+### Removing Files and Storage
+
+Admins (only admins: no role grants this) can remove any file and see how much the server
+stores.
+
+- **Remove attachment…** on a file card's right-click menu asks for confirmation ("Remove NAME
+  from the server? The message stays, and everyone who can read it sees "Attachment removed by
+  an admin" instead of the file.") with an optional **Reason**. The reason goes only to the
+  server's log; nobody else sees it. The file is deleted from the server at once, a download in
+  progress stops, and the file no longer counts toward its owner's quota. The message stays,
+  and its card says "Attachment removed by an admin" for everyone who can read it.
+- **Server settings → Storage**, after the Admin section, shows **Used**, **Capacity** ("No
+  limit" when the server has none), **Free space** on the server's disk ("unknown" when the
+  server cannot read it) and the accounts by the bytes they store, with **Refresh**. It is asked
+  for again each time Server settings opens. Removed files count toward nothing.
+- Operators without a client can do the same with SQL; see
+  [deploy/README.md](../deploy/README.md#attachment-storage-and-removing-files).
 
 ### Roles
 

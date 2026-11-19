@@ -70,9 +70,9 @@ range; a value that does not parse uses the default.
 
 ### Attachments
 
-Attachment files (protocol 26) are uploaded and downloaded over the same UDP port (ENet channel
-5). Their metadata is in PostgreSQL (the `attachments` table, migration 14); the files are in
-`HAYCHAT_ATTACHMENT_DIR`, written by the server's storage worker thread as
+Attachment files (protocols 26-28) are uploaded and downloaded over the same UDP port (ENet
+channel 5). Their metadata is in PostgreSQL (the `attachments` table, migration 14); the files
+are in `HAYCHAT_ATTACHMENT_DIR`, written by the server's storage worker thread as
 `incoming/<hex>.part` while an upload runs and `blobs/<2 hex>/<hex>` once it is complete, with
 mode 0600 for files and 0700 for directories. Back the directory up together with the database
 ([deploy/README.md "Backups"](../deploy/README.md#backups)). Out-of-range values are clamped to
@@ -82,10 +82,10 @@ the range; a value that does not parse uses the default. Byte values are plain n
 | --- | --- | --- |
 | `HAYCHAT_ATTACHMENTS_ENABLED` | `true` | `false` refuses every new upload with "Attachments are disabled on this server". Stored files stay downloadable |
 | `HAYCHAT_ATTACHMENT_DIR` | `./attachments` | The blob directory. Startup creates it (and `incoming/`, `blobs/`) and fails with `[Startup]` when it is `HAYCHAT_FILE_STORAGE_PATH`, contains the server identity file, or is not writable. The server image uses `/var/lib/haychat/attachments`, the `haychat-attachments` volume |
-| `HAYCHAT_ATTACHMENT_MAX_BYTES` | `26214400` (25 MiB; 1 KiB to 4 GiB) | The largest file a client may upload, in stored bytes (in encrypted conversations the ciphertext with its padding and tags) |
-| `HAYCHAT_ATTACHMENT_ACCOUNT_QUOTA_BYTES` | `1073741824` (1 GiB; 0 = none, at most 1 TiB) | Bytes one account may have stored. An upload reserves its declared size when it begins, so concurrent uploads cannot overshoot it |
-| `HAYCHAT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR` | `536870912` (512 MiB; 0 = none, at most 1 TiB) | Bytes one account may begin uploading in any hour, cancelled and failed uploads included |
-| `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` | `0` (none; at most 1 PiB) | Bytes the server stores for every account together |
+| `HAYCHAT_ATTACHMENT_MAX_BYTES` | `26214400` (25 MiB; 1 KiB to 4 GiB) | The largest file a client may upload, in stored bytes (in encrypted conversations the ciphertext with its padding and tags); larger ones are refused with "Attachment is too large". Clients learn it at sign-in and refuse such a file before uploading |
+| `HAYCHAT_ATTACHMENT_ACCOUNT_QUOTA_BYTES` | `1073741824` (1 GiB; 0 = none, at most 1 TiB) | Bytes one account may have stored (removed files do not count; uploads in progress count with their declared size, which they reserve when they begin, so concurrent uploads cannot overshoot it); beyond it "Attachment storage quota exceeded". Clients learn it at sign-in |
+| `HAYCHAT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR` | `536870912` (512 MiB; 0 = none, at most 1 TiB) | Bytes one account may begin uploading in any hour, cancelled, failed and removed uploads included; beyond it "Attachment upload limit reached; try again later" |
+| `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` | `0` (none; at most 1 PiB) | Bytes the server stores for every account together; beyond it "Server storage is full". Admins see it in Server settings → Storage |
 | `HAYCHAT_ATTACHMENT_MIN_FREE_BYTES` | `1073741824` (1 GiB; 0 to 1 TiB) | Free space the blob directory's volume must keep after an upload; an upload that would go below it is refused with "Server storage is full" |
 | `HAYCHAT_ATTACHMENT_PENDING_HOURS` | `24` (1 to 720) | An upload that was never sent with a message is deleted this many hours after it began |
 | `HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND` | `4194304` (4 MiB/s; 64 KiB/s to 1 GiB/s) | Each connection's transfer pace, uploads and downloads together, so file chunks never crowd out chat |
@@ -93,8 +93,16 @@ the range; a value that does not parse uses the default. Byte values are plain n
 The sweeper runs at startup and then hourly. It deletes uploads that received no chunk for an
 hour, uploads and unbound files older than `HAYCHAT_ATTACHMENT_PENDING_HOURS`, files whose
 message is gone (a deleted room, for example), and cancelled uploads, but never a row younger
-than an hour. At startup the server also deletes files in the blob directory that have no row
-(older than an hour) and logs each one.
+than an hour or a file being transferred. It deletes the rows first and then the files, and
+logs `[Attachments] Swept N attachment rows`. At startup the server also deletes every file in
+the blob directory that is older than an hour and has no row (or whose row is a removed file),
+logging each one and `[Attachments] Deleted N orphan attachment files`; this is why a restore
+must load the database before the blob directory ([deploy/README.md
+"Restoring"](../deploy/README.md#restoring)). Hourly and at startup it also deletes the files of
+the newest 1000 removed files that are still on a message again, which is how a removal made
+with `deploy/sql/remove-attachment.sql` leaves the disk. An upload whose client process ended
+is never resumed (the client uploads the file again as a new blob), so its part file goes with
+the stalled uploads.
 
 ### Retired Variables
 

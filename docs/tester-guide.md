@@ -24,7 +24,8 @@ What works today:
 | Server settings                      | Works. The gear in a server's sidebar header: a display name for that server only, its label, and a volume slider and **Mute for me** for each person                                                     |
 | Right-click menus                    | Works. Rooms, people, messages, server buttons and text fields have a menu: mark as read, copy, quote, send a message, join voice, and more                                                               |
 | Creating rooms                       | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room                                                                 |
-| Changing your password, file uploads | Not in the client yet (there are no passwords: see [Your Identity](#your-identity))                                                                                                                       |
+| Files                                | Works. The paperclip left of the message box (or dropping files on the window) attaches up to four files to a message; **Save…** on a file saves it. HayChat never opens or previews files. See [Files](user-guide.md#files) |
+| Changing your password               | Not in the client (there are no passwords: see [Your Identity](#your-identity))                                                                                                                            |
 
 > [!IMPORTANT]
 > Messages are encrypted between your computer and the server. Direct messages are also
@@ -261,6 +262,11 @@ Use HayChat as you would use any chat app, and keep an eye on these:
 - **Server settings:** open a server's settings with the gear in its sidebar header. Give
   yourself a different name on that server only, change its label, and set another person's
   voice volume or mute them for yourself while you are both in voice.
+- **Files:** attach a file or a few (the paperclip, or drag them onto the window), with and
+  without text, in a room and in a direct message, and save the other person's with **Save…**.
+  Check that the saved file opens and is the same as the original, that a file over the
+  server's limit is refused before it uploads, and that **Cancel** stops a save. Tell us which
+  system's save and open dialogs you used and whether they worked.
 - **Right-click menus:** right-click rooms, people, messages, the server buttons and the message
   box. Try copy, quote, mark as read and send message, and moving through a menu with the arrow
   keys, Enter and Esc.

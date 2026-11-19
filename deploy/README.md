@@ -62,9 +62,9 @@ the dev image and CI use.
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
 | Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
-The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the three
+The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the four
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
-`HAYCHAT_SERVER_IDENTITY_FILE`) to match the volumes.
+`HAYCHAT_SERVER_IDENTITY_FILE`, `HAYCHAT_ATTACHMENT_DIR`) to match the volumes.
 
 The server writes its log to stdout (read it with `journalctl` or `podman logs`).
 `HAYCHAT_LOG_DIR` is created at startup and reserved for log files. The server needs no
@@ -173,9 +173,9 @@ deployment:
 
 | Set by                                  | Variables                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The image                               | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE`                                                                                                                                                                                                                                                                                                 |
+| The image                               | `HAYCHAT_LISTEN_ADDR`, `HAYCHAT_LISTEN_PORT`, `HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`, `HAYCHAT_SERVER_IDENTITY_FILE`, `HAYCHAT_ATTACHMENT_DIR`                                                                                                                                                                                                                                                                      |
 | The quadlet unit (or your `podman run`) | `HAYCHAT_DATABASE_URL=127.0.0.1`, `HAYCHAT_DATABASE_PORT`, `HAYCHAT_DATABASE_USER`, `HAYCHAT_DATABASE_NAME`, and `HAYCHAT_DATABASE_PASS` from the `haychat-db-password` secret                                                                                                                                                                                                                                               |
-| You, in `server.env` (all optional)     | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES`                                                          |
+| You, in `server.env` (all optional)     | `HAYCHAT_LOG_LEVEL`, `HAYCHAT_MAX_RESTARTS`, `HAYCHAT_RESTART_BACKOFF_MIN`, `HAYCHAT_RESTART_BACKOFF_MAX`, `HAYCHAT_MAX_NETWORK_THREADS`, `HAYCHAT_ADMIN_PUBLIC_KEY`, `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY`, `HAYCHAT_VOICE_ENABLED`, `HAYCHAT_VOICE_MAX_PARTICIPANTS`, `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND`, `HAYCHAT_VOICE_MAX_FRAME_BYTES`, the `HAYCHAT_ATTACHMENT*` limits (see [Attachment Storage](#attachment-storage-and-removing-files))                            |
 
 `server.env` holds a secret when you set a fixed server key, so keep it
 at mode `0600`. To keep the server listening on another port inside the pod, set
@@ -316,7 +316,11 @@ The quadlet unit has no `HealthCmd`; systemd restarts the server whenever it exi
 
 ## Backups
 
-Back up the database, the server's storage volume and its attachments volume together:
+Back up three things together: the database, the server's storage volume (`haychat-storage`,
+the identity key) and its attachments volume (`haychat-attachments`, `HAYCHAT_ATTACHMENT_DIR`,
+the uploaded files). The files' names, owners, hashes and messages are rows in the database,
+so neither half is complete without the other. Take the database dump first and the
+attachments volume right after it:
 
 ```sh
 podman exec haychat-db pg_dump -U haychat -d haychat -Fc >"haychat-$(date +%F).dump"
@@ -324,17 +328,79 @@ podman volume export haychat-storage >"haychat-storage-$(date +%F).tar"
 podman volume export haychat-attachments >"haychat-attachments-$(date +%F).tar"
 ```
 
-The attachments volume (`haychat-attachments`, `HAYCHAT_ATTACHMENT_DIR`) holds the uploaded
-files; their names, owners and hashes are rows in the database, so a backup of one without
-the other is incomplete: a row without its file is unavailable to clients, and a file without
-a row is deleted by the server's startup scan once it is an hour old. Restore both from the same
-backup, the attachments volume before the first start like the storage volume. The server
-refuses an attachment directory that is the storage directory or holds the identity file.
+In that order the worst case is a file finished between the two commands: it has no row in the
+dump, so after a restore the startup scan deletes it, and its message is not in the dump either.
+For an exact pair, stop the server (`systemctl stop haychat-server.service` or `podman stop
+haychat-server`) for the two commands and start it again after. Finished files are renamed into
+`blobs/` only once they are complete, so the archive never holds half a finished file; uploads
+in progress (`incoming/*.part`) are dropped on restore.
+
+The storage archive holds the server's private key: store it as privately as the database
+dump. The attachments archive holds every file of unencrypted rooms and conversations in the
+clear (files of encrypted ones are ciphertext).
+
+### Restoring
+
+The order matters: **the database first, then the blob directory**, and the server must not run
+with the restored files before their rows are back. At every start the server deletes each file
+in the blob directory that is older than an hour and has no row (the startup scan), so a server
+that starts on a fresh database with the restored attachments volume deletes them all.
+
+1. Import the storage volume before the first start: `podman volume create haychat-storage &&
+   podman volume import haychat-storage FILE.tar`. Leave the attachments volume empty for now.
+2. Start the pod (`systemctl start haychat-pod.service`, or the `podman run` commands). The
+   server creates an empty schema and an empty blob directory, which is harmless.
+3. Stop the server, empty the database and load the dump:
+
+   ```sh
+   sudo systemctl stop haychat-server.service        # or: podman stop haychat-server
+   podman exec haychat-db psql -U haychat -d haychat -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public'
+   podman exec -i haychat-db pg_restore -U haychat -d haychat <FILE.dump
+   ```
+
+4. With the server still stopped, import the attachments volume: `podman volume import
+   haychat-attachments FILE.tar`.
+5. Start the server again (`systemctl start haychat-server.service` or `podman start
+   haychat-server`).
+
+Emptying the schema first matters: the server's own `schema_migrations` table must come from
+the dump, not from the server that ran before it. A dump from an older server version is
+migrated on that start, exactly like an upgrade (see below).
+
+What a mismatched pair does:
+
+- **A row without its file** (the blob directory is older than the dump, or was lost): the
+  message still lists the file, but a download fails with "Server storage error". Nothing
+  deletes the row early; the sweeper removes it on its usual schedule (an unsent upload after
+  `HAYCHAT_ATTACHMENT_PENDING_HOURS`, a file whose message is gone after an hour). An admin can
+  remove such a file from its card to show it as removed instead.
+- **A file without a row** (the blob directory is newer than the dump): the startup scan deletes
+  it once the file is an hour old and logs `[Attachments] Deleted N orphan attachment files`.
+
+The server refuses an attachment directory that is the storage directory or holds the identity
+file, so the two volumes cannot be mixed up.
 
 ### Attachment Storage and Removing Files
 
-Admins see storage use and remove files from the client (Server settings, Admin, Storage, and
-**Remove attachment** on a file; protocol 28). Without a client, use the SQL helpers:
+Uploaded files live in the `haychat-attachments` volume (`/var/lib/haychat/attachments`):
+`incoming/<blob>.part` while an upload runs and `blobs/<2 hex>/<blob>` once it is finished, mode
+0600 in 0700 directories, named only by the server's random blob IDs. The server keeps a free-disk
+reserve on that volume (`HAYCHAT_ATTACHMENT_MIN_FREE_BYTES`, 1 GiB) and refuses uploads that
+would go below it with "Server storage is full"; giving the volume its own file system keeps a
+full disk away from the database and the logs. The limits (25 MiB per file, 1 GiB per account,
+512 MiB uploaded per account per hour, no global cap) and every other `HAYCHAT_ATTACHMENT*`
+variable are in [docs/server-configuration.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/server-configuration.md#attachments).
+
+The server cleans the volume by itself. Hourly and at every start it deletes the rows and then
+the files of uploads that stalled (no data for an hour) or were never sent with a message
+(`HAYCHAT_ATTACHMENT_PENDING_HOURS`, 24), of cancelled uploads, and of files whose message is
+gone (a deleted room's files, for example), each at least an hour after the upload began. At
+every start it also deletes files that have no row. The `[Status]` line counts both
+(`attachment_blobs_swept`, `attachment_orphans`).
+
+Admins see storage use and remove files from the client (Server settings → **Storage**, after
+the Admin section, and **Remove attachment…** in a file card's right-click menu; protocol 28).
+Without a client, use the SQL helpers:
 
 ```sh
 podman exec -i haychat-db psql -U haychat -d haychat <deploy/sql/attachment-usage.sql
@@ -343,29 +409,16 @@ podman exec -i haychat-db psql -U haychat -d haychat \
 	-v blob=0123456789abcdef0123456789abcdef <deploy/sql/remove-attachment.sql
 ```
 
-`attachment-usage.sql` prints the stored bytes (removed files count toward nothing), the top
-accounts (`-v limit=N`, default 100) and, with `-v owner=NAME`, that account's files with their
-blob IDs. `remove-attachment.sql` makes the file a removed tombstone, as an admin's removal
-does: its message stays and lists it as removed, nobody can download it, and it frees its
-owner's quota. SQL cannot reach the running server, so the file itself is deleted by the
-server's hourly pass (and at its next start), and connected clients see the removal on their
-next history fetch, as with other changes made in the database. An admin who removes a file
-from the client deletes it at once and tells everyone who may read its message.
-
-The storage archive holds the server's private key: store it as
-privately as the database dump. To restore into a fresh deployment, import the volume before
-the first start (`podman volume create haychat-storage && podman volume import
-haychat-storage FILE.tar`), start the pod, stop the server, empty the database, and load the
-dump:
-
-```sh
-podman exec haychat-db psql -U haychat -d haychat -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public'
-podman exec -i haychat-db pg_restore -U haychat -d haychat <FILE.dump
-```
-
-Emptying the schema first matters: the server's own `schema_migrations` table must come from
-the dump, not from the server that ran before it. Then start the server again. A dump from an
-older server version is migrated on that start, exactly like an upgrade (see below).
+The image carries them in `/usr/share/haychat/sql/` too. `attachment-usage.sql` prints the
+stored bytes (removed files count toward nothing), the top accounts (`-v limit=N`, default 100)
+and, with `-v owner=NAME`, that account's files with their blob IDs. `remove-attachment.sql`
+makes the file a removed tombstone, as an admin's removal does: its message stays and lists it
+as removed, nobody can download it, and it frees its owner's quota. It refuses an unknown,
+uploading or already removed blob. SQL cannot reach the running server, so the file itself is
+deleted by the server's hourly pass (and at its next start), and connected clients see the
+removal on their next history fetch, as with other changes made in the database. An admin who
+removes a file from the client deletes it at once and tells everyone who may read its message.
+Neither way records the reason anywhere but the server's log.
 
 ## Upgrades
 

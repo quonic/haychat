@@ -278,11 +278,14 @@ attachmentMediaTypeFor :: proc(name: string) -> string {
 
 // Starts uploading path to a room (roomID) or a direct conversation (recipientUserID), sealed
 // when the conversation is encrypted. Refuses early what the server's limits would refuse
-// (D18). Returns the transfer ID its events carry, or why it cannot start (static or temp).
+// (D18); checkLimits = false skips the size and quota checks, so the harness can show the
+// server refusing them (attach-upload --unchecked). Returns the transfer ID its events carry,
+// or why it cannot start (static or temp).
 State_uploadAttachment :: proc(
 	state: ^State,
 	serverID, roomID, recipientUserID: int,
 	path: string,
+	checkLimits := true,
 ) -> (
 	transferID: int,
 	errorMessage: string,
@@ -327,10 +330,10 @@ State_uploadAttachment :: proc(
 	} else if size == 0 {
 		return 0, "The file is empty"
 	}
-	if stored > limits.maxBytes {
+	if checkLimits && stored > limits.maxBytes {
 		return 0, common.ATTACHMENT_TOO_LARGE_MESSAGE
 	}
-	if limits.quotaBytes > 0 && limits.usedBytes + stored > limits.quotaBytes {
+	if checkLimits && limits.quotaBytes > 0 && limits.usedBytes + stored > limits.quotaBytes {
 		return 0, common.ATTACHMENT_QUOTA_MESSAGE
 	}
 	worker := State_transferWorker(state)
