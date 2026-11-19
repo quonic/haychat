@@ -160,6 +160,10 @@ UIScriptCommandKind :: enum u8 {
 	AttachFile,
 	SavePath,
 	DropFile,
+	// #76 M3: move the pointer without pressing (an edit history popover opens on hover).
+	Hover,
+	HoverAt,
+	HoverID,
 }
 
 UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
@@ -183,6 +187,9 @@ UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
 	.AttachFile   = "attach-file",
 	.SavePath     = "save-path",
 	.DropFile     = "drop-file",
+	.Hover        = "hover",
+	.HoverAt      = "hover",
+	.HoverID      = "hover-id",
 }
 
 UIScriptKey :: struct {
@@ -377,15 +384,29 @@ uiScriptParseLine :: proc(
 			return {}, false, "usage: wait-count N \"TEXT\" [TIMEOUT_MS] (N from 1 to 1000)"
 		}
 		text = args[1].text
-	case "click", "right-click":
-		right := tokens[0].text == "right-click"
+	case "click", "right-click", "hover":
+		name := tokens[0].text
 		switch len(args) {
 		case 1:
-			command.kind = right ? .RightClick : .Click
+			switch name {
+			case "right-click":
+				command.kind = .RightClick
+			case "hover":
+				command.kind = .Hover
+			case:
+				command.kind = .Click
+			}
 			ok = len(args[0].text) > 0
 			text = args[0].text
 		case 2:
-			command.kind = right ? .RightClickAt : .ClickAt
+			switch name {
+			case "right-click":
+				command.kind = .RightClickAt
+			case "hover":
+				command.kind = .HoverAt
+			case:
+				command.kind = .ClickAt
+			}
 			xOK, yOK: bool
 			command.x, xOK = uiScriptParseCoordinate(args[0])
 			command.y, yOK = uiScriptParseCoordinate(args[1])
@@ -394,10 +415,7 @@ uiScriptParseLine :: proc(
 			ok = false
 		}
 		if !ok {
-			if right {
-				return {}, false, "usage: right-click \"TEXT\" or right-click X Y"
-			}
-			return {}, false, "usage: click \"TEXT\" or click X Y"
+			return {}, false, fmt.tprintf("usage: %s \"TEXT\" or %s X Y", name, name)
 		}
 	case "scroll":
 		command.kind = .Scroll
@@ -441,9 +459,16 @@ uiScriptParseLine :: proc(
 			return {}, false, UI_SCRIPT_SCROLL_UNTIL_USAGE
 		}
 		text = args[0].text
-	case "click-id", "right-click-id":
-		right := tokens[0].text == "right-click-id"
-		command.kind = right ? .RightClickID : .ClickID
+	case "click-id", "right-click-id", "hover-id":
+		name := tokens[0].text
+		switch name {
+		case "right-click-id":
+			command.kind = .RightClickID
+		case "hover-id":
+			command.kind = .HoverID
+		case:
+			command.kind = .ClickID
+		}
 		ok = len(args) >= 1 && len(args) <= 1 + UI_SCRIPT_MAX_IDS && len(args[0].text) > 0
 		for index := 1; ok && index < len(args); index += 1 {
 			value, valueOK := strconv.parse_int(args[index].text, 10)
@@ -452,10 +477,10 @@ uiScriptParseLine :: proc(
 			command.idCount += 1
 		}
 		if !ok {
-			if right {
-				return {}, false, "usage: right-click-id NAME [INTEGER...] (at most 4 integers)"
-			}
-			return {}, false, "usage: click-id NAME [INTEGER...] (at most 4 integers)"
+			return {}, false, fmt.tprintf(
+				"usage: %s NAME [INTEGER...] (at most 4 integers)",
+				name,
+			)
 		}
 		text = args[0].text
 	case "type":
@@ -694,9 +719,17 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		line = command.line,
 	}
 	switch command.kind {
-	case .WaitText, .WaitCount, .WaitGone, .AssertText, .Click, .RightClick, .Type, .ScrollUntil:
+	case .WaitText,
+	     .WaitCount,
+	     .WaitGone,
+	     .AssertText,
+	     .Click,
+	     .RightClick,
+	     .Type,
+	     .ScrollUntil,
+	     .Hover:
 		result.text = command.text
-	case .ClickID, .RightClickID:
+	case .ClickID, .RightClickID, .HoverID:
 		result.name = command.text
 	case .Key:
 		result.key = command.text
@@ -704,7 +737,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		result.file = command.text
 	case .Wait:
 		result.ms = command.timeoutMS
-	case .ClickAt, .RightClickAt, .Scroll, .Quit:
+	case .ClickAt, .RightClickAt, .Scroll, .Quit, .HoverAt:
 	}
 	return result
 }
@@ -793,6 +826,19 @@ uiScriptPushClick :: proc(window: ^SDL.Window, p: ui.Vec2, button: u8 = SDL.BUTT
 	release.button.type = .MOUSE_BUTTON_UP
 	release.button.down = false
 	return uiScriptPushEvent(&motion) && uiScriptPushEvent(&press) && uiScriptPushEvent(&release)
+}
+
+// Moves the pointer to p without pressing anything (hover).
+@(private = "file")
+uiScriptPushMotion :: proc(window: ^SDL.Window, p: ui.Vec2) -> bool {
+	motion: SDL.Event
+	motion.motion = SDL.MouseMotionEvent {
+		type     = .MOUSE_MOTION,
+		windowID = SDL.GetWindowID(window),
+		x        = p.x,
+		y        = p.y,
+	}
+	return uiScriptPushEvent(&motion)
 }
 
 // Moves the pointer to p and turns the wheel by notches (positive scrolls the content down,
@@ -980,6 +1026,31 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		point := uiScriptWindowPoint(ctx, rect)
 		result.x, result.y = point.x, point.y
 		pushOK = uiScriptPushClick(window, point, uiScriptButton(command.kind))
+		pushed = true
+	case .Hover:
+		rect, found := ui.Automation_findText(automation, command.text)
+		if !found {
+			uiScriptFail(runner, result, "no drawn text equals TEXT in the current frame")
+			return
+		}
+		point := uiScriptWindowPoint(ctx, rect)
+		result.x, result.y = point.x, point.y
+		pushOK = uiScriptPushMotion(window, point)
+		pushed = true
+	case .HoverID:
+		id := ui.idOf(command.text, ..command.ids[:command.idCount])
+		rect, found := ui.Automation_findWidget(automation, id)
+		if !found {
+			uiScriptFail(runner, result, "no widget with that ID is on screen in the current frame")
+			return
+		}
+		point := uiScriptWindowPoint(ctx, rect)
+		result.x, result.y = point.x, point.y
+		pushOK = uiScriptPushMotion(window, point)
+		pushed = true
+	case .HoverAt:
+		result.x, result.y = command.x, command.y
+		pushOK = uiScriptPushMotion(window, ui.Vec2{command.x, command.y})
 		pushed = true
 	case .ClickAt, .RightClickAt:
 		result.x, result.y = command.x, command.y

@@ -2337,19 +2337,16 @@ roomMessageDisplay :: proc(
 	placeholder: bool,
 	badge: string,
 ) {
-	// Protocol 30: a tombstone (D6) and the latest verified edit (message_edits.odin).
+	// Protocol 30: a tombstone (D6) and the latest verified edit (message_edits.odin); the
+	// "(edited)" marker is the view's (messageEditMarker).
 	if entry.deleted {
 		return messageDeletedText(entry.edit), true, ""
 	}
 	switch entry.security.protection {
 	case .Plain:
-		return messageEditShownText(entry.content, entry.edit, entry.editCount, allocator),
-			false,
-			""
+		return messageEditCurrentText(entry.content, entry.edit), false, ""
 	case .Encrypted:
-		return messageEditShownText(entry.content, entry.edit, entry.editCount, allocator),
-			false,
-			"🔒"
+		return messageEditCurrentText(entry.content, entry.edit), false, "🔒"
 	case .Failed:
 		return DIRECT_UNDECRYPTABLE_TEXT, true, ""
 	case .Hidden:

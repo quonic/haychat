@@ -21,6 +21,13 @@ TranscriptUnit :: struct {
 	// optional progress bar and up to two buttons. A card unit's text is empty, so it is never
 	// selected or copied. nil for a text unit.
 	card:       ^TranscriptCard,
+	// A short label drawn after the end of the text (for example "(edited)"), on the last
+	// line when it fits and on a line of its own otherwise. Like the badge it is not part of
+	// the text: never selected or copied. The transcript reports the pointer over it and a
+	// click on it (TranscriptResult.marker*), with markerID as its widget ID for automation.
+	marker:      string,
+	markerColor: Color,
+	markerID:    ID,
 }
 
 TRANSCRIPT_CARD_MAX_ACTIONS :: 2

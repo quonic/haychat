@@ -8,9 +8,12 @@ import SDL "vendor:sdl3"
 
 @(private = "file")
 UnitLayout :: struct {
-	text:  Text,
-	badge: Text,
-	y, h:  f32,
+	text:   Text,
+	badge:  Text,
+	marker: Text,
+	// Where the marker sits, relative to the unit's top-left.
+	markerAt: Vec2,
+	y, h:   f32,
 }
 
 TRANSCRIPT_DRAG_SCROLL_STEP :: 12 // Logical points per frame while drag-selecting past an edge
@@ -30,6 +33,39 @@ TranscriptResult :: struct {
 	cardClicked:   bool,
 	cardKey:       u64,
 	cardAction:    int,
+	// The pointer is over a unit's marker (markerKey, drawn at markerRect), and whether the
+	// left button went down on it this frame (the press goes to the marker, not the
+	// selection).
+	markerHovered: bool,
+	markerClicked: bool,
+	markerKey:     u64,
+	markerRect:    Rect,
+}
+
+// Where a marker of size markerSize goes after text: on its last line after a gap when it fits
+// in wrapW, else at the start of a line of its own under the text. Also returns the height the
+// unit needs. Pure apart from reading the laid out text.
+@(private = "file")
+transcriptMarkerPlace :: proc(
+	ctx: ^Context,
+	text: Text,
+	markerSize: Vec2,
+	wrapW: f32,
+) -> (
+	at: Vec2,
+	height: f32,
+) {
+	height = textHeight(ctx, text)
+	if len(text.str) == 0 {
+		return {}, max(height, markerSize.y)
+	}
+	end := caretRect(ctx, text, len(text.str))
+	gap := dp(ctx, 6)
+	if end.x + gap + markerSize.x <= wrapW {
+		// Bottom-aligned with the line, so a smaller marker font would still sit on it.
+		return Vec2{end.x + gap, end.y + max(0, end.h - markerSize.y)}, height
+	}
+	return Vec2{0, height}, height + markerSize.y
 }
 
 // The height of a card: a title line, a detail line, the status line and the progress bar
@@ -137,8 +173,15 @@ transcript :: proc(
 			unitWrapW = max(1, wrapW - textSize(badge).x - padding)
 		}
 		text := textGet(ctx, hashInt(u64(id), int(unit.key)), unit.font, unit.text, unitWrapW)
-		height := max(textHeight(ctx, text), textHeight(ctx, badge))
-		layouts[index] = UnitLayout{text, badge, y, height}
+		textH := textHeight(ctx, text)
+		marker: Text
+		markerAt: Vec2
+		if len(unit.marker) > 0 {
+			marker = textGet(ctx, 0, .Regular, unit.marker)
+			markerAt, textH = transcriptMarkerPlace(ctx, text, textSize(marker), unitWrapW)
+		}
+		height := max(textH, textHeight(ctx, badge))
+		layouts[index] = UnitLayout{text, badge, marker, markerAt, y, height}
 		items[index] = ScrollItem{unit.key, y, height}
 		y += height
 	}
@@ -171,9 +214,39 @@ transcript :: proc(
 		}
 	}
 
+	// Markers go before the selection too: a press on one opens what it stands for.
+	overMarker := false
+	for unit, index in units {
+		if len(unit.marker) == 0 || unit.card != nil {
+			continue
+		}
+		layout := layouts[index]
+		top := origin.y + layout.y
+		if top + layout.h < clip.y || top > clip.y + clip.h {
+			continue
+		}
+		size := textSize(layout.marker)
+		markerRect := Rect{origin.x + layout.markerAt.x, top + layout.markerAt.y, size.x, size.y}
+		automationWidget(ctx, unit.markerID, markerRect)
+		if !mouseOver(ctx, markerRect) {
+			continue
+		}
+		overMarker = true
+		result.markerHovered = true
+		result.markerKey = unit.key
+		result.markerRect = markerRect
+		if ctx.input.mousePressed[.Left] && !ctx.pressConsumed {
+			ctx.pressConsumed = true
+			result.markerClicked = true
+		}
+	}
+
 	it := interact(ctx, id, inputRect)
 	if it.hovered && !overCard {
 		ctx.wantCursor = .TEXT
+	}
+	if overMarker {
+		ctx.wantCursor = .POINTER
 	}
 
 	if len(units) == 0 && len(emptyText) > 0 {
@@ -282,6 +355,20 @@ transcript :: proc(
 		if ctx.automation != nil {
 			drawn := Rect{position.x, position.y, max(1, textSize(layout.text).x), layout.h}
 			automationText(ctx, drawn, unit.text)
+		}
+		if len(unit.marker) > 0 {
+			markerPosition := position + layout.markerAt
+			drawText(ctx, layout.marker, markerPosition, unit.markerColor)
+			if ctx.automation != nil {
+				markerSize := textSize(layout.marker)
+				drawn := Rect {
+					markerPosition.x,
+					markerPosition.y,
+					max(1, markerSize.x),
+					markerSize.y,
+				}
+				automationText(ctx, drawn, unit.marker)
+			}
 		}
 		if len(unit.badge) > 0 {
 			badgeSize := textSize(layout.badge)

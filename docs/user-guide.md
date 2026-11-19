@@ -201,7 +201,7 @@ Enter picks, and Esc or a click outside closes it (that click does nothing else)
 | Channel | Mark as read (when it has unread messages, including ones not loaded yet), Join voice or Leave voice (not in a text-only room), Copy room name, Members… (invite rooms; every room for admins), Leave room… (invite rooms; "Click again to leave", then you leave); admins and holders of **Manage rooms** also get Edit room… and Delete room… (the room form opens with **Confirm delete** armed, so one more click deletes) |
 | Direct Messages and Members rows, sender names above messages | Send message, Mark as read (for an existing conversation with unread messages), Copy name, Verify encryption… (for someone else, see [Encryption keys](#encryption-keys)), Invite to room… (for someone else, when you may add people to a room: it lists those rooms) |
 | Voice participant in the channel list | Send message and Copy name, Invite to room… (as above), and for anyone but you **Mute for me** / **Unmute for me** and a volume slider (0 to 200 %, kept like the Voice section of Server settings) |
-| Message | Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer), and in rooms Send message to sender for other people's messages |
+| Message | Copy message, Copy selected text (with a selection in the transcript), Copy name, Quote (adds the message as `> ` lines to your draft and focuses the composer; both use the latest version of an edited message), and in rooms Send message to sender for other people's messages; for your own messages **Edit message** and **Delete message…**, and for admins **Delete message…** on other people's room messages (see [Editing and deleting messages](#editing-and-deleting-messages)). A deleted message offers only Copy name |
 | Server button in the rail | Server settings, Retry now (while not connected), Copy address, Remove server… (the entry turns into "Click again to remove"; the second click removes it) |
 | Text fields (the composer and the Settings fields) | Cut, Copy, Paste, Select all |
 
@@ -210,6 +210,42 @@ greyed) to everyone. Admins also get **Rename…**, **Make admin** or **Remove a
 **Ban…** or **Unban**, and, once the server has a role to give, **Roles…** (Server settings →
 Admin with that account's role checkboxes open), greyed out where the server refuses them. **Rename…**, **Kick…** and **Ban…** open Server settings → Admin with that
 account's confirmation open, since they need a name or a reason.
+
+## Editing and Deleting Messages
+
+You can edit and delete your own messages, in rooms and in direct conversations, encrypted or
+not. Admins can also delete other people's room messages.
+
+- **Editing.** Right-click your message and pick **Edit message**, or press Up in the empty
+  message box to edit your newest message there. The message's text moves into the box under
+  an **Editing message** bar: change it and press Enter to save, or press Esc (or the bar's ×)
+  to cancel. Whatever you had typed in the box before waits and is back after you save or
+  cancel. An edit changes the text only: a message's files stay as they are, and the paperclip
+  is hidden while you edit. A message without files cannot be edited to nothing. You can edit
+  a message as often as you like, up to 100 times. Editing needs what sending needs: in a room
+  where you may not send any more, **Edit message** is greyed out.
+- **Encrypted conversations.** An edit of an encrypted message is encrypted too, the same way
+  as a new message, and it reaches the people who can read the conversation now. In a
+  direct conversation whose encryption is still being set up the bar stays open with "Setting
+  up encryption…" and the edit goes out by itself once it can. An encrypted message that could
+  not be opened cannot be edited.
+- **"(edited)".** An edited message shows its latest version with **(edited)** after it. Rest
+  the pointer on it (or click it) for its **Edit history**: the original and each edit, oldest
+  first, with the time of each. An edit is shown only once your client has checked that its
+  author signed it; one still waiting for a key reads "Waiting for key…", and one that does not
+  check out reads "This edit could not be verified" and is never shown: the message keeps its
+  last good version and reads **(edited) · An edit could not be verified**. Editing never
+  makes a message unread again.
+- **Deleting.** **Delete message…** asks first: deleting erases the message's text, its files
+  and its edit history from the server for everyone. The message's place stays, as one grey
+  line with its sender: **Message deleted**. Deleting does not recall anything: whoever already
+  read the message, saved its files or copied it keeps what they have.
+- **Deleted by an admin.** Admins can delete any room message (not direct messages, which they
+  cannot read) with **Delete message…**; its confirmation says that members will see
+  **Removed by the server**. That is also what you see for any deletion your client cannot
+  confirm the author made: HayChat cannot tell which admin removed a message, and a server could
+  remove one by itself, so it never names anyone. Only a deletion signed by the author reads
+  "Message deleted".
 
 ## Files
 
@@ -524,6 +560,14 @@ joined"), with its type, access mode and member count, **Members…**, **Edit…
 **Manage room members** sees this room list, with the buttons its permissions allow, and one
 with **Create invites** or **Approve sign-ups** sees the parts in
 [Sign-up and Invites](#sign-up-and-invites); none of them sees the accounts.
+
+### Deleting Messages
+
+Admins can delete any room message from its right-click menu (**Delete message…**), with its
+files and edit history; everyone in the room sees "Removed by the server" in its place, and its
+files are logged under **Removed files** with the reason "Message deleted". Direct messages can
+be deleted only by their author. See [Editing and deleting
+messages](#editing-and-deleting-messages).
 
 ### Removing Files and Storage
 

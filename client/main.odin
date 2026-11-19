@@ -77,6 +77,11 @@ State :: struct {
 	attachmentSaves:                [dynamic]AttachmentSave,
 	attachmentRemoveDialog:         AttachmentRemoveDialog,
 	fileDialogs:                    ^FileDialogQueue,
+	// #76 M3 (message_edit_ui.odin): the inline edit of one message, the Delete message…
+	// confirmation and the edit history popover.
+	messageEditComposer:            MessageEditComposer,
+	messageDeleteDialog:            MessageDeleteDialog,
+	editHistory:                    EditHistoryPopover,
 	// Wakes the UI loop when the worker queues events; kept so the worker can be restarted
 	// after a settings change.
 	networkWake:                    NetworkWorkerEventQueuedProc,
@@ -278,6 +283,7 @@ State_deinit :: proc(state: ^State) {
 	State_stopTransfers(state)
 	ClientNetworkWorker_stop(state.networkWorker)
 	State_attachmentUIDeinit(state)
+	State_messageEditUIDeinit(state)
 	State_attachmentsDeinit(state)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)

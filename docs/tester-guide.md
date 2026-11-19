@@ -23,6 +23,7 @@ What works today:
 | Voice rooms                          | Works. Rooms have voice unless an admin made them text-only: **Join voice** in the room's header. See [Voice](#voice). Needs headphones for now (there is no echo cancellation)                           |
 | Server settings                      | Works. The gear in a server's sidebar header: a display name for that server only, its label, and a volume slider and **Mute for me** for each person                                                     |
 | Right-click menus                    | Works. Rooms, people, messages, server buttons and text fields have a menu: mark as read, copy, quote, send a message, join voice, and more                                                               |
+| Editing and deleting messages        | Works. Right-click your own message for **Edit message** and **Delete message…**, or press Up in the empty message box. Edited messages say **(edited)**; rest the pointer on it for the history. See [Editing and deleting messages](user-guide.md#editing-and-deleting-messages) |
 | Creating rooms                       | Only for the maintainer and other admins. Testers do not see the **+ New room** and **Edit room** controls; ask the maintainer for a room                                                                 |
 | Files                                | Works. The paperclip left of the message box (or dropping files on the window) attaches up to four files to a message; **Save…** on a file saves it. HayChat never opens or previews files. See [Files](user-guide.md#files) |
 | Changing your password               | Not in the client (there are no passwords: see [Your Identity](#your-identity))                                                                                                                            |
@@ -267,6 +268,11 @@ Use HayChat as you would use any chat app, and keep an eye on these:
   Check that the saved file opens and is the same as the original, that a file over the
   server's limit is refused before it uploads, and that **Cancel** stops a save. Tell us which
   system's save and open dialogs you used and whether they worked.
+- **Editing and deleting:** edit your own messages from their menu and with Up in the empty
+  message box, in a room and in a direct message; check that the others see the new text with
+  **(edited)**, that resting on **(edited)** lists every version, that Esc cancels and your
+  half-typed message comes back, and that **Delete message…** leaves "Message deleted" for
+  everyone. Tell us if an edit or a delete ever shows on one computer and not on another.
 - **Right-click menus:** right-click rooms, people, messages, the server buttons and the message
   box. Try copy, quote, mark as read and send message, and moving through a menu with the arrow
   keys, Enter and Esc.

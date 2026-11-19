@@ -26,6 +26,12 @@ TranscriptLine :: struct {
 	// only the cards are drawn.
 	cards:        []FileCardView,
 	filesChanged: bool,
+	// Protocol 30 (#76 M3): the "(edited)" marker after the text (messageEditMarker; empty
+	// when never edited), drawn in the warning colour when the latest edit failed, and whether
+	// the line is a tombstone ("Message deleted" / "Removed by the server", muted italic).
+	marker:       string,
+	markerFailed: bool,
+	tombstone:    bool,
 }
 
 RoomView :: struct {
@@ -156,6 +162,14 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 			content      = text,
 			badge        = badge,
 			placeholder  = placeholder,
+			tombstone    = message.deleted,
+		}
+		if !placeholder {
+			line.marker, line.markerFailed = messageEditMarker(
+				message.edit,
+				message.editCount,
+				message.deleted,
+			)
 		}
 		if !placeholder {
 			line.filesChanged = message.filesChanged
@@ -220,6 +234,9 @@ SidebarRow :: struct {
 	// Conversation: the newest message is plaintext that deserves the Unencrypted badge
 	// (directPreviewUnencrypted), shown unless the key changed.
 	previewUnencrypted: bool,
+	// Conversation: what the newest message reads as (State_directPreviewText: its latest
+	// version, or the tombstone's sentence), shown in the row's tooltip. #76 M3.
+	preview:            string,
 }
 
 // Fallback label for an account the client has no nickname for.
@@ -379,10 +396,13 @@ buildSidebarRows :: proc(
 				isOnline = ServerDirectCache_peerIsOnline(cache, peerUserID),
 				unreadCount = conversation.unreadCount,
 				keyState = State_e2eePeerKeyInfo(state, serverID, peerUserID).state,
-				previewUnencrypted = directPreviewUnencrypted(
-					conversation.security,
-					len(conversation.lastEnvelope) > 0,
-				),
+				// A tombstone (#76) carries no text, so it is never "Unencrypted".
+				previewUnencrypted = !conversation.lastDeleted &&
+					directPreviewUnencrypted(
+						conversation.security,
+						len(conversation.lastEnvelope) > 0,
+					),
+				preview = State_directPreviewText(state, serverID, conversation, allocator),
 			},
 		)
 		conversationCount += 1
@@ -500,6 +520,10 @@ buildDirectConversationView :: proc(
 			senderLabel = userLabel(message.senderNickname, message.senderId, allocator)
 		}
 		badge, tone := directMessageBadge(message.security, len(message.envelope) > 0)
+		if message.deleted {
+			// A tombstone is one muted line: no badge (D7).
+			badge = ""
+		}
 		content, placeholder := directMessageText(message)
 		line := TranscriptLine {
 			messageID    = message.id,
@@ -510,6 +534,14 @@ buildDirectConversationView :: proc(
 			badge        = badge,
 			badgeTone    = tone,
 			placeholder  = placeholder,
+			tombstone    = message.deleted,
+		}
+		if !placeholder {
+			line.marker, line.markerFailed = messageEditMarker(
+				message.edit,
+				message.editCount,
+				message.deleted,
+			)
 		}
 		if !placeholder {
 			line.filesChanged = message.filesChanged

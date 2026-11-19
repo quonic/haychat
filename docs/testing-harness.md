@@ -1046,6 +1046,7 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `click-id NAME [INT...]` | Clicks the widget whose ID is `ui.idOf(NAME, INT...)`, the same name and values the view passes (up to 4 integers), e.g. `click-id dm-input 1 7` for the DM composer with user 7 on server 1, or `click-id room-input 1 1`. |
 | `click X Y` | Clicks at window coordinates. |
 | `right-click "TEXT"`, `right-click-id NAME [INT...]`, `right-click X Y` | The same lookups as `click`, `click-id` and `click X Y`, with the right mouse button: this opens a context menu (see [Context Menus](#context-menus)). |
+| `hover "TEXT"`, `hover-id NAME [INT...]`, `hover X Y` | The same lookups as `click`, `click-id` and `click X Y`, but only moves the pointer there, pressing nothing: what opens on hover (a tooltip, a message's edit history on "(edited)", see [Message Edits](#message-edits-1)) opens after its delay, so follow it with `wait-text`. Hover somewhere else (e.g. `hover 640 80`) to move the pointer away. |
 | `scroll X Y N` | Moves the pointer to window coordinates X Y and turns the wheel N notches (-100 to 100; positive scrolls the content down), for widgets below the fold of a scrolling screen. |
 | `scroll-until "TEXT" X Y N [TIMEOUT_MS]` | Turns the wheel N notches at a time at X Y (as `scroll`) until TEXT is drawn in view, then succeeds; fails at the timeout. Use it for controls whose place on a long screen depends on what the server lists above them (Server settings → Admin with many accounts), then `click-id` the control. Keep N small enough that one turn moves less than the visible area. |
 | `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
@@ -1056,7 +1057,7 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `drop-file PATH` | Pushes an `SDL_EVENT_DROP_FILE` for PATH, as when a file is dragged onto the window: it goes to the composer on screen. |
 | `quit` | Ends the script and closes the window. Reaching the end of the file does the same. |
 
-After every click and right-click command (by text, ID or coordinates), `scroll`, `type`,
+After every click, right-click and hover command (by text, ID or coordinates), `scroll`, `type`,
 `key`, `attach-file`, `save-path` and `drop-file` the next command waits until two more frames
 are drawn, so the input has been handled
 and its effects are on screen. Waits re-check every frame and at least every 10 ms.
@@ -1218,6 +1219,44 @@ click-id attachment-remove-confirm 1
 wait-text "Attachment removed by an admin" 10000
 ```
 
+### Message Edits
+
+Editing and deleting messages (#76 M3, `client/view_message_edits.odin`). A message's
+right-click menu has **Edit message** and **Delete message…** for your own messages (Edit
+greyed out where you may not send, or for a sealed message that did not open), and admins get
+**Delete message…** on other people's room messages; the entries are `menu-item` with the
+`ContextMenuAction` value (`EditMessage`, `DeleteMessage`, `AdminDeleteMessage`). **Edit
+message**, or Up in the empty composer (your newest editable message there), replaces the
+composer with an "Editing message" bar over a field holding the message's text,
+`room-edit-input SERVER ROOM` / `dm-edit-input SERVER USER`, with its × `room-edit-cancel` /
+`dm-edit-cancel`; Return saves, Escape cancels, and the composer's draft is back afterwards.
+Select the text with `key Ctrl+A` before typing a replacement. An edited message is drawn with
+its latest text and "(edited)" after it, its own drawn text and widget (`room-edited SERVER ROOM
+MESSAGE` / `dm-edited SERVER USER MESSAGE`); `hover "(edited)"` (or a click on it, which pins
+it) opens "Edit history" with "Original" and "Edit N", each with its time, and every version's
+text, so `wait-count 2 "LATEST TEXT"` sees the latest both in the transcript and in the
+history. **Delete message…** opens "Delete message" with `message-delete-confirm SERVER` and
+`message-delete-cancel SERVER`; the message then reads "Message deleted" (the author's signed
+delete) or "Removed by the server" in grey italics.
+
+```text
+right-click "my message"
+click "Edit message"
+wait-text "Editing message" 5000
+key Ctrl+A
+type "my message, fixed"
+key Return
+wait-text "(edited)" 10000
+hover "(edited)"
+wait-text "Edit history" 5000
+wait-text "my message" 5000
+hover 640 80
+right-click "my message, fixed"
+click "Delete message…"
+click-id message-delete-confirm 1
+wait-text "Message deleted" 10000
+```
+
 ### Output and Exit Codes
 
 stdout carries one JSON line per command and a final summary; diagnostics go to stderr.
@@ -1328,7 +1367,14 @@ confirms: her card shows "Attachment removed by an admin", bob must print
 Server settings and scrolls to **Storage** and then (protocol 29) to **Removed files**, which
 must list her removal with its reason. Under `--all` the Admin section is several screens
 long, so these steps reach every control with `scroll-until` rather than a fixed scroll.
-alice takes 55 screenshots on the way (`01-…` to `54-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
+Step 15 (#76 M3) edits and deletes messages: in `#general` alice sends a message, edits it
+from its menu and again with Up in the empty composer (bob must print both edits verified),
+hovers "(edited)" and the history shows the original and both edits, deletes it from its menu
+("Message deleted"; bob prints `removedByServer` false), and as an admin deletes a message bob
+just posted ("Removed by the server"; bob prints `removedByServer` true). In her encrypted
+conversation with bob she opens an edit with Up and cancels it with Escape, then sends, edits
+(sealed) and deletes a message; bob prints the edit verified and the signed tombstone.
+alice takes 65 screenshots on the way (`01-…` to `64-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
 lines of the GUI script it generates, deletes any files with those names before the window
 opens, and at the end prints every path and fails naming each one that was not written, so a
 new shot needs no count to update and leftovers from an earlier run never count. They stay in

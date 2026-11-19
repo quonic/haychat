@@ -82,19 +82,29 @@ transcriptUnits :: proc(
 			)
 		}
 		hasFiles := len(line.cards) > 0 || line.filesChanged
-		// A message with only files has no text line (D15), but the badge needs one.
-		if len(line.content) > 0 || !hasFiles || len(line.badge) > 0 {
+		// A message with only files has no text line (D15), but the badge and the edit
+		// marker need one.
+		if len(line.content) > 0 || !hasFiles || len(line.badge) > 0 || len(line.marker) > 0 {
 			append(
 				&units,
 				ui.TranscriptUnit {
 					key = transcriptUnitKey(line.messageID, TRANSCRIPT_SLOT_TEXT),
 					text = line.content,
-					font = .Regular,
+					// A tombstone (#76) is one muted italic line.
+					font = line.tombstone ? .Italic : .Regular,
 					color = line.placeholder ? ctx.theme.fgMuted : ctx.theme.fg,
 					gapBefore = MESSAGE_LINE_GAP,
 					copySep = "\n",
 					badge = line.badge,
 					badgeColor = e2eeIndicatorColor(ctx, line.badgeTone),
+					marker = line.marker,
+					markerColor = line.markerFailed ? ctx.theme.warning : ctx.theme.fgMuted,
+					markerID = ui.idOf(
+						fileWidgetName(kind, "room-edited", "dm-edited"),
+						serverID,
+						conversationID,
+						line.messageID,
+					),
 				},
 			)
 		}

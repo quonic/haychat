@@ -201,6 +201,11 @@ ContextMenuAction :: enum u8 {
 	SaveAttachment,
 	CopyFileName,
 	RemoveAttachment,
+	// Editing and deleting messages (#76 M3): the author's Edit message and Delete message…,
+	// and an admin's Delete message… of someone else's room message (D5).
+	EditMessage,
+	DeleteMessage,
+	AdminDeleteMessage,
 }
 
 // Item keys of the Invite to room… list: this plus the room ID, above every action's value.
@@ -413,10 +418,13 @@ buildContextMenu :: proc(
 		if !found {
 			return
 		}
-		append(
-			&entries,
-			ContextMenuEntry{action = .CopyMessage, label = "Copy message", enabled = true},
-		)
+		// A tombstone has no text to copy or quote (D7).
+		if !message.deleted {
+			append(
+				&entries,
+				ContextMenuEntry{action = .CopyMessage, label = "Copy message", enabled = true},
+			)
+		}
 		if len(menu.selectionText) > 0 {
 			append(
 				&entries,
@@ -430,8 +438,10 @@ buildContextMenu :: proc(
 		append(
 			&entries,
 			ContextMenuEntry{action = .CopyName, label = "Copy name", enabled = true},
-			ContextMenuEntry{action = .Quote, label = "Quote", enabled = true},
 		)
+		if !message.deleted {
+			append(&entries, ContextMenuEntry{action = .Quote, label = "Quote", enabled = true})
+		}
 		// In a direct conversation the sender's conversation is the one already open.
 		selfUserID := State_selfUserID(state, target.serverID)
 		if target.kind == .Room && message.senderID != selfUserID {
@@ -445,6 +455,7 @@ buildContextMenu :: proc(
 				},
 			)
 		}
+		contextMenuAppendMessageChangeEntries(state, &entries, target)
 	case SenderMenuTarget:
 		message, found := contextMenuMessage(
 			state,
@@ -728,11 +739,65 @@ contextMenuVoiceParticipant :: proc(
 	return {}, false
 }
 
-// A cached message, borrowed from the room or direct-message cache.
+// #76 M3: Edit message and Delete message… for the author, Delete message… for an admin on
+// someone else's room message (D5). A tombstone gets neither; an own message that cannot be
+// edited now (a sealed one that did not open, a room this account may not send in, not
+// connected) shows Edit message disabled.
+@(private = "file")
+contextMenuAppendMessageChangeEntries :: proc(
+	state: ^State,
+	entries: ^[dynamic]ContextMenuEntry,
+	target: MessageMenuTarget,
+) {
+	rights := State_messageChangeRights(
+		state,
+		target.serverID,
+		target.kind,
+		target.conversationID,
+		target.messageID,
+	)
+	if !rights.found || rights.deleted {
+		return
+	}
+	if rights.own {
+		append(
+			entries,
+			ContextMenuEntry {
+				action = .EditMessage,
+				label = "Edit message",
+				enabled = rights.canEdit,
+				separatorBefore = true,
+			},
+			ContextMenuEntry {
+				action = .DeleteMessage,
+				label = "Delete message…",
+				enabled = rights.canDelete,
+				danger = true,
+			},
+		)
+		return
+	}
+	if target.kind == .Room && State_isServerAdmin(state, target.serverID) {
+		append(
+			entries,
+			ContextMenuEntry {
+				action = .AdminDeleteMessage,
+				label = "Delete message…",
+				enabled = rights.canAdminDelete,
+				danger = true,
+				separatorBefore = true,
+			},
+		)
+	}
+}
+
+// A cached message, borrowed from the room or direct-message cache. content is what it shows
+// now: the latest verified edit, else the original (empty for a tombstone).
 ContextMenuMessage :: struct {
 	senderID:       int,
 	senderNickname: string,
 	content:        string,
+	deleted:        bool,
 }
 
 @(private = "file")
@@ -758,7 +823,13 @@ contextMenuMessage :: proc(
 		}
 		for message in cache.roomCaches[roomIndex].messages {
 			if message.id == messageID {
-				return {message.senderId, message.senderNickname, message.content}, true
+				return {
+						message.senderId,
+						message.senderNickname,
+						messageEditCurrentText(message.content, message.edit),
+						message.deleted,
+					},
+					true
 			}
 		}
 	case .Direct:
@@ -773,7 +844,13 @@ contextMenuMessage :: proc(
 		}
 		for message in cache.caches[conversationIndex].messages {
 			if message.id == messageID {
-				return {message.senderId, message.senderNickname, message.content}, true
+				return {
+						message.senderId,
+						message.senderNickname,
+						messageEditCurrentText(message.content, message.edit),
+						message.deleted,
+					},
+					true
 			}
 		}
 	}
@@ -936,6 +1013,25 @@ State_runContextMenuAction :: proc(
 			effect.focusInput = State_quoteIntoDraft(state, target, message.content)
 		case .SendMessage:
 			State_openDirectConversation(state, target.serverID, message.senderID)
+		case .EditMessage:
+			if failure := State_beginMessageEdit(
+				state,
+				target.serverID,
+				target.kind,
+				target.conversationID,
+				target.messageID,
+			); len(failure) > 0 {
+				State_setChatStatus(state, failure)
+			}
+		case .DeleteMessage, .AdminDeleteMessage:
+			_ = State_openMessageDeleteDialog(
+				state,
+				target.serverID,
+				target.kind,
+				target.conversationID,
+				target.messageID,
+				asAdmin = action == .AdminDeleteMessage,
+			)
 		}
 	case ServerMenuTarget:
 		server, found := State_serverConfig(state, target.serverID)

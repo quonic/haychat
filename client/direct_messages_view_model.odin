@@ -51,8 +51,8 @@ directMessageBadge :: proc(
 // waiting for the key keeps its text in content but shows only the placeholder until its
 // signature is checked.
 directMessageText :: proc(entry: DirectMessageEntry) -> (text: string, placeholder: bool) {
-	// Protocol 30: a tombstone (D6) and the latest verified edit (message_edits.odin; the
-	// marked text is in the temp allocator).
+	// Protocol 30: a tombstone (D6) and the latest verified edit (message_edits.odin); the
+	// "(edited)" marker is the view's (messageEditMarker).
 	if entry.deleted {
 		return messageDeletedText(entry.edit), true
 	}
@@ -68,7 +68,7 @@ directMessageText :: proc(entry: DirectMessageEntry) -> (text: string, placehold
 		return "", true
 	case .Signed, .Encrypted:
 	}
-	return messageEditShownText(entry.content, entry.edit, entry.editCount), false
+	return messageEditCurrentText(entry.content, entry.edit), false
 }
 
 // Whether a conversation row gets the Unencrypted badge for its newest message: a signed
