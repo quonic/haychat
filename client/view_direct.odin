@@ -24,13 +24,35 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	viewE2EEKeyBanner(state, ctx, &area, serverID, peerUserID)
 	composer := view.composer
 	action := DirectComposerAction.None
+	attachClicked := false
+	chips := ComposerChipsAction {
+		removeIndex = -1,
+	}
 	if draft := State_selectedDirectDraft(state); draft != nil {
 		switch composer.mode {
 		case .Encrypted, .SettingUp, .Fallback:
 			inputID := ui.idOf("dm-input", serverID, peerUserID)
-			result := viewComposer(ctx, &area, inputID, draft, composer.placeholder, view.status)
-			if result.submitted {
+			// Files follow the conversation's encryption, the Send without encryption switch
+			// included (F4).
+			attach := buildComposerAttachmentsView(state, serverID, 0, peerUserID)
+			result: ui.TextInputResult
+			result, attachClicked = viewComposer(
+				ctx,
+				&area,
+				inputID,
+				draft,
+				composer.placeholder,
+				view.status,
+				attach,
+				ui.idOf("dm-attach", serverID, peerUserID),
+			)
+			if result.submitted || (result.entered && len(attach.chips) > 0) {
 				action = .Send
+			}
+			chips = viewComposerChips(ctx, &area, attach, serverID, .Direct, peerUserID)
+			if chips.send {
+				action = .Send
+				chips.send = false
 			}
 			if composer.mode == .SettingUp {
 				viewComposerNoteLine(ctx, &area, composer.note, ctx.theme.fgMuted)
@@ -56,10 +78,11 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		viewComposerStatusOnly(ctx, &area, view.status)
 	}
 	// Actions run after drawing the composer, like the rest of the pane.
+	viewRunComposerAttachments(state, ctx, serverID, 0, peerUserID, attachClicked, chips)
 	switch action {
 	case .None:
 	case .Send:
-		State_sendDirectMessage(state)
+		State_composerSend(state, serverID, 0, peerUserID)
 	case .SwitchOn:
 		State_setDirectFallback(state, serverID, peerUserID, true)
 	case .SwitchOff:
@@ -97,10 +120,11 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 		ctx,
 		ui.idOf("dm-transcript", serverID, peerUserID),
 		area,
-		transcriptUnits(ctx, view.lines),
+		transcriptUnits(ctx, view.lines, serverID, .Direct, peerUserID),
 		emptyText,
 	)
 	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Direct, peerUserID)
+	viewTranscriptCardAction(state, ctx, transcript, view.lines, serverID, .Direct, peerUserID)
 }
 
 DirectComposerAction :: enum u8 {

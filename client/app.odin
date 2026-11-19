@@ -153,6 +153,14 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		globalWake = appWakeFromWorker
 	}
 	state.voice.globalPushToTalk = hotkey.create(globalBackend, globalWake, &wake)
+	// Attachments (F4): the native file dialogs answer on SDL's thread and wake the loop like
+	// the network worker; a script answers them itself (attach-file, save-path).
+	dialogs := State_fileDialogs(&state)
+	dialogs.wake = wakeProc
+	dialogs.wakeData = &wake
+	if script != nil {
+		script.dialogs = dialogs
+	}
 	// How long until a throttled mark-read may go out (State_updateReadMarkers), or -1.
 	readMarkerWait := time.Duration(-1)
 	// Voice meters and speaking dots change with no event. While they are on screen the loop
@@ -204,6 +212,9 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 				if appHandleVoiceEvent(&state, &event, ui.hasTextFocus(&ctx)) {
 					redraw = true
 				}
+				if appHandleDropEvent(&state, &event) {
+					redraw = true
+				}
 				if handleAppEvent(&ctx, &event, &wake, &running) {
 					redraw = true
 				}
@@ -216,6 +227,14 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			break
 		}
 		if State_drainNetworkEvents(&state) {
+			redraw = true
+		}
+		// Attachments (F4): transfer progress onto the chips and cards, then the file dialogs'
+		// answers (picked files, where to save).
+		if State_pollTransfers(&state) {
+			redraw = true
+		}
+		if State_pollFileDialogs(&state) {
 			redraw = true
 		}
 		// A link another process passed on shows its confirmation.
@@ -297,6 +316,17 @@ appHandleVoiceEvent :: proc(state: ^State, event: ^SDL.Event, textFocused: bool)
 		return true
 	}
 	return false
+}
+
+// A file dropped on the window goes to the composer on screen (attachments plan F4). Returns
+// true when the event needs a new frame.
+@(private = "file")
+appHandleDropEvent :: proc(state: ^State, event: ^SDL.Event) -> bool {
+	if event.type != .DROP_FILE || event.drop.data == nil {
+		return false
+	}
+	State_dropFile(state, string(event.drop.data))
+	return true
 }
 
 // Returns true when the event needs a new frame.

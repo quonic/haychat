@@ -56,6 +56,15 @@ SenderMenuTarget :: struct {
 	messageID:      int,
 }
 
+// A file card under a message (attachments plan F4): file index of messageID.
+AttachmentMenuTarget :: struct {
+	serverID:       int,
+	kind:           common.ReadMarkerKind,
+	conversationID: int,
+	messageID:      int,
+	index:          int,
+}
+
 // A server's button in the rail.
 ServerMenuTarget :: struct {
 	serverID: int,
@@ -75,6 +84,7 @@ ContextMenuTarget :: union {
 	SenderMenuTarget,
 	ServerMenuTarget,
 	TextFieldMenuTarget,
+	AttachmentMenuTarget,
 }
 
 ContextMenuState :: struct {
@@ -186,6 +196,11 @@ ContextMenuAction :: enum u8 {
 	// Roles… (the role picker in Server settings → Admin).
 	RoleNames,
 	MemberRoles,
+	// Attachments (F4): a file card's Save…, Copy file name, and an admin's Remove
+	// attachment… (D22).
+	SaveAttachment,
+	CopyFileName,
+	RemoveAttachment,
 }
 
 // Item keys of the Invite to room… list: this plus the room ID, above every action's value.
@@ -488,6 +503,33 @@ buildContextMenu :: proc(
 				},
 			)
 		}
+	case AttachmentMenuTarget:
+		file, found := State_attachmentFile(state, attachmentMenuRef(target))
+		if !found {
+			return
+		}
+		append(
+			&entries,
+			ContextMenuEntry {
+				action = .SaveAttachment,
+				label = "Save…",
+				enabled = !file.removed,
+			},
+			ContextMenuEntry{action = .CopyFileName, label = "Copy file name", enabled = true},
+		)
+		// Admins only, with no assignable permission (D22); the server checks the role.
+		if State_isServerAdmin(state, target.serverID) {
+			append(
+				&entries,
+				ContextMenuEntry {
+					action = .RemoveAttachment,
+					label = "Remove attachment…",
+					enabled = !file.removed && State_isServerConnected(state, target.serverID),
+					danger = true,
+					separatorBefore = true,
+				},
+			)
+		}
 	case TextFieldMenuTarget:
 		if !facts.textFieldDrawn {
 			return
@@ -759,6 +801,18 @@ ContextMenuEffect :: struct {
 	textInputID: ui.ID,
 	focusInput:  ui.ID, // A composer that should get focus with the caret at the end
 	keepOpen:    bool, // The menu stays open (Remove server… only arms itself)
+	// Save… on a file card: the view opens the save dialog for it (it needs the window).
+	saveFile:    Maybe(AttachmentFileRef),
+}
+
+attachmentMenuRef :: proc(target: AttachmentMenuTarget) -> AttachmentFileRef {
+	return AttachmentFileRef {
+		serverID = target.serverID,
+		kind = target.kind,
+		conversationID = target.conversationID,
+		messageID = target.messageID,
+		index = target.index,
+	}
 }
 
 // Runs the open menu's action. The menu closes afterwards unless effect.keepOpen is set.
@@ -904,6 +958,20 @@ State_runContextMenuAction :: proc(
 			State_closeContextMenu(state)
 			State_settingsRemoveServer(state, target.serverID)
 			return
+		}
+	case AttachmentMenuTarget:
+		ref := attachmentMenuRef(target)
+		file, found := State_attachmentFile(state, ref)
+		if !found {
+			break
+		}
+		#partial switch action {
+		case .SaveAttachment:
+			effect.saveFile = ref
+		case .CopyFileName:
+			effect.copyText = fmt.tprint(file.name)
+		case .RemoveAttachment:
+			State_openAttachmentRemoveDialog(state, ref)
 		}
 	case TextFieldMenuTarget:
 		effect.textInputID = target.inputID

@@ -978,16 +978,20 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
 | `key NAME` | Presses and releases a key. Names (any case): `Return`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `A`, `C`, `V`, `X`, with optional `Shift+`, `Ctrl+`, `Alt+`, `Gui+`/`Cmd+` prefixes, e.g. `Shift+Return`, `Ctrl+A`. |
 | `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
+| `attach-file PATH` | Adds PATH to the composer on screen as if it was picked in the paperclip's open dialog (automation cannot drive a native dialog): its chip appears and its upload starts, or it is a failed chip saying why. See [File Attachments](#file-attachments). |
+| `save-path PATH` | Answers the next **Save…** (a file card's button or its menu entry) with PATH instead of opening the save dialog. The file is written as `PATH.part` and renamed once checked. |
+| `drop-file PATH` | Pushes an `SDL_EVENT_DROP_FILE` for PATH, as when a file is dragged onto the window: it goes to the composer on screen. |
 | `quit` | Ends the script and closes the window. Reaching the end of the file does the same. |
 
-After every click and right-click command (by text, ID or coordinates), `scroll`, `type` and
-`key` the next command waits until two more frames are drawn, so the input has been handled
+After every click and right-click command (by text, ID or coordinates), `scroll`, `type`,
+`key`, `attach-file`, `save-path` and `drop-file` the next command waits until two more frames
+are drawn, so the input has been handled
 and its effects are on screen. Waits re-check every frame and at least every 10 ms.
 
 ### Context Menus
 
-A right-click on a channel, a Direct Messages or Members row, a voice participant, a message or
-a sender name in a transcript, a server's rail button, or any text field opens its context menu
+A right-click on a channel, a Direct Messages or Members row, a voice participant, a message, a
+sender name or a file card in a transcript, a server's rail button, or any text field opens its context menu
 at the pointer (`client/context_menu.odin` lists the entries). The menu's labels are drawn
 through the automation hook, so `click "Copy message"` picks an entry, and every entry also has
 a stable widget ID, `ui.idOf("menu-item", ACTION)`, with ACTION the entry's
@@ -1089,6 +1093,53 @@ wait-text "1 pending"
 click-id admin-request-approve 1 4
 ```
 
+### File Attachments
+
+Attachments (plan F4, `client/view_attachments.odin`). A room or direct conversation whose
+server announces attachments (and, in a room, grants Send messages and Attach files) has a
+paperclip at the left of the composer, `room-attach SERVER ROOM` / `dm-attach SERVER USER`;
+without them it is drawn disabled with the reason as its tooltip, and with attachments off it
+is not drawn. Files added by `attach-file`, `drop-file` or the dialog become chips above the
+composer with their name and "N% of SIZE" while uploading, the size when done, or the reason
+they failed in red ("Attachment is too large" and "Attachment storage quota exceeded" are
+refused before any upload). Each chip has a remove button, `room-file-chip-remove SERVER ROOM
+INDEX` (`dm-file-chip-remove` in a direct conversation; INDEX counts from 0 in the order the
+files were added, and the chip itself is `room-file-chip`). At most four files go on a message.
+While the draft has files, **Send** (`room-send SERVER ROOM` / `dm-send SERVER USER`) sits at the
+right of the chips; while a file uploads or failed (or was uploaded with other encryption than
+the conversation now has) it is disabled with no widget, and the reason is drawn under the
+chips ("Waiting for 1 upload to finish…", "Remove the file that could not be uploaded to
+send"). Enter sends a message with only files too.
+
+Each file of a message is a card under its text: name, "SIZE · media/type", and **Save…**
+(`room-file-save SERVER ROOM MESSAGE INDEX` / `dm-file-save SERVER USER MESSAGE INDEX`; the
+card itself is `room-file` / `dm-file`). While it saves the card shows "Saving… N%", a progress
+bar and **Cancel** (`room-file-cancel` / `dm-file-cancel`), then "Saved as NAME" or why it failed
+("This attachment was changed on the server", "Attachment unavailable", …). A removed file's
+card says "Attachment removed by an admin" and has no **Save…**; a message whose list was
+changed on the server shows "This message's attachments were changed on the server" instead
+of cards. Right-click a card (its name is drawn text, so `right-click "NAME"` works) for **Save…**,
+**Copy file name** and, for admins, **Remove attachment…**, which opens a confirmation with an
+optional reason: `attachment-remove-reason SERVER` (the field), `attachment-remove-confirm
+SERVER` and `attachment-remove-cancel SERVER`; it closes once the server confirmed. Admins find
+**Storage** at the end of Server settings → Admin: Used, Capacity, Free space ("unknown" when
+the server cannot tell) and the accounts by usage, with `admin-storage-refresh SERVER`.
+
+```text
+click "# general"
+attach-file /tmp/report.pdf
+wait-gone "Waiting for 1 upload to finish…" 30000
+click-id room-send 1 1
+wait-text "Save…" 10000
+save-path /tmp/copy-of-report.pdf
+click "Save…"
+wait-text "Saved as copy-of-report.pdf" 30000
+right-click "report.pdf"
+click "Remove attachment…"
+click-id attachment-remove-confirm 1
+wait-text "Attachment removed by an admin" 10000
+```
+
 ### Output and Exit Codes
 
 stdout carries one JSON line per command and a final summary; diagnostics go to stderr.
@@ -1183,10 +1234,22 @@ back (bob must print both `registration_mode` events, and the server must end in
 makes a code with **New invite…** and **Create code** ("Copy link" is shown, then **Done**; SQL
 must find one code under her account), and, with "N pending" on **Sign-up requests**, clicks
 **Approve** on erin's request: the badge drops, the row reads "Approved", and erin, still
-connected, must print `connected` with `"registered":true` (her request is used up). Under
-`--all` the Admin section is several screens long, so these steps reach every control with
-`scroll-until` rather than a fixed scroll. alice takes 45 screenshots on the way (`01-…` to
-`44-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
+connected, must print `connected` with `"registered":true` (her request is used up). Then
+the attachments (plan F4, [File Attachments](#file-attachments)): in `#general` she adds an
+8 MiB file with `attach-file` and drops a 2 GiB sparse one on the window with `drop-file`,
+which is refused before its upload and
+stays as a failed chip ("Attachment is too large") while Send waits; she removes it, waits for
+the upload, types a line and clicks **Send**. bob must list the file signed with its hash and
+save it with `attach-download 1 MESSAGE 0` to a matching copy. bob uploads a 6 MiB file to
+their direct conversation (sealed) and sends it with `dm --attach`; alice opens the
+conversation, answers the save dialog with `save-path`, clicks **Save…** (the card shows its
+progress and **Cancel**) and waits for "Saved as …"; the saved file must match bob's. Then
+she right-clicks her own file's card, clicks **Remove attachment…**, types a reason and
+confirms: her card shows "Attachment removed by an admin", bob must print
+`attachment_removed` for the blob, and his next `history` lists it removed. Last she opens
+Server settings and scrolls to **Storage**. Under `--all` the Admin section is several screens
+long, so these steps reach every control with `scroll-until` rather than a fixed scroll.
+alice takes 54 screenshots on the way (`01-…` to `53-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
 lines of the GUI script it generates, deletes any files with those names before the window
 opens, and at the end prints every path and fails naming each one that was not written, so a
 new shot needs no count to update and leftovers from an earlier run never count. They stay in

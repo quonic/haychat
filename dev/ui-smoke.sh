@@ -64,6 +64,16 @@ set -euo pipefail
 #      invite…" and "Create code" (the code and "Copy link" are shown once; SQL must find it
 #      under her account), and approves erin's request, which drops the badge; erin, still
 #      connected, is signed up at once.
+#  14. attachments (attachments plan F4): in #general alice attaches a file (`attach-file`, as
+#      if picked in the open dialog) and drops one far over the size limit on the window
+#      (`drop-file`), which is refused before its upload and stays as a failed chip while Send
+#      waits; she removes the failed chip, the
+#      upload finishes and she sends the file with a line of text. bob must list it signed and
+#      save it with a matching hash. bob sends alice an encrypted file in their direct
+#      conversation; she saves it through its card (`save-path` answers the save dialog) and
+#      its hash must match. Admin alice removes her own file from its card's menu with a
+#      reason: her card shows "Attachment removed by an admin", bob hears attachment_removed
+#      and his history lists it removed. Last she opens Admin → Storage.
 #
 # Under --all the server holds every earlier proof's accounts, so the Admin section is several
 # screens long: the script reaches each control with `scroll-until`, never by a fixed scroll.
@@ -150,6 +160,22 @@ encrypted_room="ui-secret-$run_tag"
 encrypted_room_message="ui smoke sealed room message $run_tag"
 gui_role="ui-role-$run_tag"
 nickname_erin="ui-erin-$run_tag"
+# Step 14's files: alice's (8 MiB, so the chip is still uploading for its screenshot), one far
+# over any size limit (sparse: refused from its size alone, never read), and bob's (6 MiB).
+alice_file_name="ui-file-$run_tag.bin"
+alice_file="$work_dir/$alice_file_name"
+head -c $((8 * 1024 * 1024)) /dev/urandom >"$alice_file"
+alice_file_sha=$(sha256sum "$alice_file" | cut -d' ' -f1)
+huge_file="$work_dir/ui-huge-$run_tag.bin"
+truncate -s 2G "$huge_file"
+bob_file_name="ui-bob-file-$run_tag.bin"
+bob_file="$work_dir/$bob_file_name"
+head -c $((6 * 1024 * 1024)) /dev/urandom >"$bob_file"
+bob_file_sha=$(sha256sum "$bob_file" | cut -d' ' -f1)
+alice_saved="$work_dir/alice-saved-$run_tag.bin"
+file_message="ui smoke file from alice $run_tag"
+bob_file_message="ui smoke file from bob $run_tag"
+remove_reason="ui smoke removal $run_tag"
 # The registration mode the server had, restored on exit whatever happens (step 13 changes it).
 original_mode=""
 
@@ -395,16 +421,13 @@ assert-text "Mark as read"
 wait-gone "Join voice" 1000
 screenshot $screenshot_dir/26-text-only-menu.bmp
 key Escape
-# Server settings from the rail button's menu, scrolled to the end (the offset clamps there),
-# where the Admin section's rooms list sits above the server key. Under --all the server has
-# every earlier proof's accounts, so the page is long.
+# Server settings from the rail button's menu, scrolled down to the Admin section's rooms list
+# (Storage follows it). Under --all the server has every earlier proof's accounts, so the page
+# is long and its length depends on them: scroll-until, never a fixed scroll.
 right-click-id rail-server 1
 click "Server settings"
 wait-text "Display name on this server" 5000
-scroll 760 400 100
-scroll 760 400 100
-scroll 760 400 100
-wait-text "Create room…" 5000
+scroll-until "Create room…" 760 400 3 30000
 screenshot $screenshot_dir/27-admin-rooms.bmp
 click-id server-settings-close 1
 # Access modes: an Admin invite room from the form, bob invited from his member menu, and the
@@ -530,6 +553,57 @@ $badge_after_approval
 # erin's new account joins the list above, which pushes her request down.
 scroll-until "Approved" 760 400 2 10000
 screenshot $screenshot_dir/44-request-approved.bmp
+click-id server-settings-close 1
+# Attachments (F4). The native dialogs cannot be driven: attach-file adds a file as if it was
+# picked, save-path answers the next Save…; drop-file drops one on the window
+# (SDL_EVENT_DROP_FILE). Chip indexes count from 0 in the order added.
+click "# general"
+wait-text "Message #general (Enter to send, Shift+Enter for newline)" 5000
+attach-file $alice_file
+drop-file $huge_file
+wait-text "Attachment is too large" 5000
+wait-text "Waiting for 1 upload to finish…" 5000
+screenshot $screenshot_dir/45-composer-chips.bmp
+click-id room-file-chip-remove 1 1 1
+wait-gone "Attachment is too large" 5000
+wait-gone "Waiting for 1 upload to finish…" 30000
+click "Message #general (Enter to send, Shift+Enter for newline)"
+type "$file_message"
+screenshot $screenshot_dir/46-composer-ready.bmp
+click-id room-send 1 1
+wait-text "$file_message" 10000
+wait-text "Save…" 10000
+assert-text "$alice_file_name"
+screenshot $screenshot_dir/47-file-card.bmp
+# bob saves it, then sends alice an encrypted file in their conversation.
+click-id dm-conversation 1 $user_bob
+wait-text "$bob_file_name" 120000
+save-path $alice_saved
+click "Save…"
+wait-text "Cancel" 5000
+screenshot $screenshot_dir/48-file-saving.bmp
+wait-text "Saved as $(basename "$alice_saved")" 30000
+screenshot $screenshot_dir/49-file-saved.bmp
+# Admin: remove her own file from its card's menu, with a reason.
+click "# general"
+wait-text "$alice_file_name" 10000
+right-click "$alice_file_name"
+wait-text "Remove attachment…" 5000
+screenshot $screenshot_dir/50-file-menu.bmp
+click "Remove attachment…"
+wait-text "Reason (optional)" 5000
+click-id attachment-remove-reason 1
+type "$remove_reason"
+screenshot $screenshot_dir/51-remove-confirm.bmp
+click-id attachment-remove-confirm 1
+wait-gone "Reason (optional)" 10000
+wait-text "Attachment removed by an admin" 10000
+screenshot $screenshot_dir/52-file-removed.bmp
+# Admin → Storage, at the end of the Admin section.
+click-id server-settings 1
+wait-text "Display name on this server" 5000
+scroll-until "Free space" 760 400 3 60000
+screenshot $screenshot_dir/53-admin-storage.bmp
 click-id server-settings-close 1
 quit
 EOF
@@ -662,6 +736,49 @@ echo "    bob< $reconnected"
 expect_ok bob wait room_list 5000
 expect_ok bob voice-join 1
 
+# wait_for_shot NAME: waits (up to 4 minutes) until alice's window took screenshot NAME.
+wait_for_shot() {
+	local shot="\"file\":\"$screenshot_dir/$1\"" attempt
+	for ((attempt = 0; attempt < 1200; attempt++)); do
+		grep -Fq -- "$shot" "$work_dir/alice.out" && return 0
+		kill -0 "$gui_pid" 2>/dev/null || fail "alice's window exited before $1"
+		sleep 0.2
+	done
+	fail "alice's window never took $1"
+}
+
+echo "==> [ui] alice sends a file to #general from the window; bob saves it and checks it"
+wait_for_shot 47-file-card.bmp
+file_pattern="^\\{\"event\":\"room_chat\",.*\"senderNickname\":\"$nickname_alice\","
+file_pattern+=".*\"name\":\"$alice_file_name\""
+file_line=$(wait_for_match bob "$file_pattern" "$reconnect_start") ||
+	fail "[files] bob did not receive alice's file"
+echo "    bob< $file_line"
+[[ "$file_line" == *"\"sha256\":\"$alice_file_sha\""*'"encrypted":false,"removed":false'* ]] ||
+	fail "[files] bob's room_chat does not list alice's file as she signed it"
+[[ "$file_line" == *"\"protection\":\"plain\",\"content\":\"$file_message\"}" ]] ||
+	fail "[files] bob did not verify alice's message with its file"
+[[ "$file_line" =~ \"messageID\":([0-9]+), ]] || fail "[files] no message ID in $file_line"
+file_message_id=${BASH_REMATCH[1]}
+[[ "$file_line" =~ \"blobID\":\"([0-9a-f]{32})\" ]] || fail "[files] no blob ID in $file_line"
+alice_blob=${BASH_REMATCH[1]}
+bob_saved="$work_dir/bob-saved-$run_tag.bin"
+download_start=$(wc -l <"$work_dir/bob.out")
+expect_ok bob attach-download 1 "$file_message_id" 0 "$bob_saved"
+wait_for_match bob '^\{"event":"attachment_done",.*"direction":"download"' "$download_start" \
+	>/dev/null || fail "[files] bob could not save alice's file"
+[[ "$(sha256sum "$bob_saved" | cut -d' ' -f1)" == "$alice_file_sha" ]] ||
+	fail "[files] bob's copy of alice's file does not match"
+
+echo "==> [ui] bob sends alice an encrypted file; she saves it through its card"
+upload_start=$(wc -l <"$work_dir/bob.out")
+expect_ok bob attach-upload "@$user_alice" "$bob_file"
+upload_line=$(wait_for_match bob '^\{"event":"attachment_done",.*"direction":"upload"' \
+	"$upload_start") || fail "[files] bob's upload did not finish"
+[[ "$upload_line" == *'"encrypted":true'* ]] || fail "[files] bob's file to alice was not sealed"
+[[ "$upload_line" =~ \"blobID\":\"([0-9a-f]{32})\" ]] || fail "[files] no blob in $upload_line"
+expect_ok bob dm "$user_alice" --attach "${BASH_REMATCH[1]}" "$bob_file_message"
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -745,6 +862,23 @@ echo "    erin< $erin_created"
 # The sign-in that created the account used the approved request up (D14).
 [[ $(run_sql "SELECT count(*) FROM registration_requests WHERE id = $request_erin") == 0 ]] ||
 	fail "[registration] erin's approved request was not used up by her sign-up"
+
+echo "==> [ui] alice saved bob's file through its card"
+[[ -f "$alice_saved" && ! -e "$alice_saved.part" ]] || fail "[files] alice's save left no file"
+[[ "$(sha256sum "$alice_saved" | cut -d' ' -f1)" == "$bob_file_sha" ]] ||
+	fail "[files] alice's copy of bob's file does not match"
+
+echo "==> [ui] alice removed her file from its menu; bob sees it removed"
+removed_line=$(wait_for_match bob \
+	"^\\{\"event\":\"attachment_removed\",.*\"blobID\":\"$alice_blob\"" "$reconnect_start") ||
+	fail "[files] bob never heard that alice's file was removed"
+echo "    bob< $removed_line"
+history_start=$(wc -l <"$work_dir/bob.out")
+expect_ok bob history 1
+history_line=$(wait_for_match bob "^\\{\"event\":\"room_history\"," "$history_start") ||
+	fail "[files] bob got no history"
+[[ "$history_line" == *"\"blobID\":\"$alice_blob\""*'"removed":true'* ]] ||
+	fail "[files] bob's history does not list alice's file removed"
 
 stop_client erin
 stop_client alice-watch

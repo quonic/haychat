@@ -70,6 +70,13 @@ State :: struct {
 	// worker is running.
 	attachmentUploads:              [dynamic]UploadedAttachment,
 	attachmentPendingUploads:       [dynamic]PendingAttachmentUpload,
+	// F4 (attachment_ui.odin): the drafts' file chips, the file cards' saves, the open Remove
+	// attachment confirmation, and the queue the native file dialogs answer into
+	// (file_dialog.odin; made on first use).
+	composerFiles:                  [dynamic]ComposerFile,
+	attachmentSaves:                [dynamic]AttachmentSave,
+	attachmentRemoveDialog:         AttachmentRemoveDialog,
+	fileDialogs:                    ^FileDialogQueue,
 	// Wakes the UI loop when the worker queues events; kept so the worker can be restarted
 	// after a settings change.
 	networkWake:                    NetworkWorkerEventQueuedProc,
@@ -239,6 +246,8 @@ State_transferWorker :: proc(state: ^State) -> ^ClientTransferWorker {
 State_stopTransfers :: proc(state: ^State) {
 	ClientTransferWorker_stop(state.transferWorker)
 	state.transferWorker = nil
+	// A new worker numbers its transfers from 1 again: chips and saves of this one end here.
+	State_attachmentUITransfersStopped(state)
 }
 
 // Stops the network worker without closing any session, applying the events it had already
@@ -268,6 +277,7 @@ State_deinit :: proc(state: ^State) {
 	State_voiceShutdown(state)
 	State_stopTransfers(state)
 	ClientNetworkWorker_stop(state.networkWorker)
+	State_attachmentUIDeinit(state)
 	State_attachmentsDeinit(state)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)

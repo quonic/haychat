@@ -283,10 +283,10 @@ State_sendChannelChat :: proc(
 	state: ^State,
 	checkPermission := true,
 	attachments: []common.AttachmentBlobID = nil,
-) {
+) -> bool {
 	if state.selected_channel_id == 0 {
 		State_setChatStatus(state, "No channel selected")
-		return
+		return false
 	}
 	draft := State_selectedRoomDraft(state)
 	newMessage := normalizeTabs(string(draft[:]))
@@ -295,11 +295,11 @@ State_sendChannelChat :: proc(
 	transport, transportOK := State_selectedTransport(state)
 	if !transportOK {
 		State_setChatStatus(state, "No server transport selected")
-		return
+		return false
 	}
 	if transport.serverID != state.selected_server_id {
 		State_setChatStatus(state, "Selected transport does not match the active server")
-		return
+		return false
 	}
 	// Protocol 24: the server refuses it too; saying so here keeps the draft.
 	if checkPermission &&
@@ -310,7 +310,7 @@ State_sendChannelChat :: proc(
 		.SendMessages,
 	) {
 		State_setChatStatus(state, ROOM_SEND_NOT_PERMITTED_NOTE)
-		return
+		return false
 	}
 	if checkPermission &&
 	   len(attachments) > 0 &&
@@ -321,7 +321,7 @@ State_sendChannelChat :: proc(
 		   .AttachFiles,
 	   ) {
 		State_setChatStatus(state, common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE)
-		return
+		return false
 	}
 	// A message with files may have no text (D15).
 	if len(attachments) > 0 && len(strings.trim_space(newMessage)) == 0 {
@@ -333,11 +333,11 @@ State_sendChannelChat :: proc(
 	if State_roomIsEncrypted(state, state.selected_server_id, state.selected_channel_id) {
 		if len(strings.trim_space(newMessage)) == 0 && len(attachments) == 0 {
 			State_setChatStatus(state, "Cannot send an empty message")
-			return
+			return false
 		}
 		if len(newMessage) > common.CHAT_MESSAGE_MAX_BYTES {
 			State_setChatStatus(state, "Message is too long")
-			return
+			return false
 		}
 		_, entries, attachError := State_attachmentsForMessage(
 			state,
@@ -350,7 +350,7 @@ State_sendChannelChat :: proc(
 		defer attachmentEntriesWipe(entries)
 		if len(attachError) > 0 {
 			State_setChatStatus(state, attachError)
-			return
+			return false
 		}
 		ok, queued, errorMessage := State_roomChainsSend(
 			state,
@@ -362,7 +362,7 @@ State_sendChannelChat :: proc(
 		wipeString(newMessage)
 		if !ok {
 			State_setChatStatus(state, errorMessage)
-			return
+			return false
 		}
 		draft = State_selectedRoomDraft(state)
 		wipeBytes(draft[:])
@@ -370,7 +370,7 @@ State_sendChannelChat :: proc(
 		if !queued {
 			State_clearChatStatus(state)
 		}
-		return
+		return true
 	}
 	refs, _, attachError := State_attachmentsForMessage(
 		state,
@@ -382,7 +382,7 @@ State_sendChannelChat :: proc(
 	)
 	if len(attachError) > 0 {
 		State_setChatStatus(state, attachError)
-		return
+		return false
 	}
 	// Protocol 22 (#90): every plaintext message is signed by this profile (protocol 27: with
 	// its attachments, under the v2 label).
@@ -395,7 +395,7 @@ State_sendChannelChat :: proc(
 	)
 	if len(signError) > 0 {
 		State_setChatStatus(state, signError)
-		return
+		return false
 	}
 	// The worker may replace lastError at any time, so copy it while holding the lock.
 	ClientNetworkWorker_lock(state.networkWorker)
@@ -412,6 +412,7 @@ State_sendChannelChat :: proc(
 	} else {
 		State_setChatStatus(state, "Failed to send room chat message")
 	}
+	return sent
 }
 
 State_loadOlderRoomHistory :: proc(state: ^State) {
