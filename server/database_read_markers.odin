@@ -29,7 +29,7 @@ DATABASE_MARK_ROOM_READ_SQL ::
 	"SELECT EXISTS (SELECT 1 FROM target), s.last_read_message_id::text, (" +
 	"SELECT count(*) FROM (SELECT 1 FROM chat_messages cm WHERE cm.room_id = $2::bigint " +
 	"AND cm.id > s.last_read_message_id AND cm.sender_user_id <> $1::bigint " +
-	"LIMIT $4::bigint) capped)::text " +
+	DATABASE_UNREAD_ROOM_NOT_DELETED_SQL + "LIMIT $4::bigint) capped)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // The conversation's newest message is the larger of the two directions' newest, each read
@@ -51,7 +51,8 @@ DATABASE_MARK_DIRECT_READ_SQL ::
 	"SELECT EXISTS (SELECT 1 FROM target), s.last_read_message_id::text, (" +
 	"SELECT count(*) FROM (SELECT 1 FROM direct_messages d " +
 	"WHERE d.sender_user_id = $2::bigint AND d.recipient_user_id = $1::bigint " +
-	"AND d.id > s.last_read_message_id LIMIT $4::bigint) capped)::text " +
+	"AND d.id > s.last_read_message_id " + DATABASE_UNREAD_DIRECT_NOT_DELETED_SQL +
+	"LIMIT $4::bigint) capped)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecuteMarkRead :: proc(

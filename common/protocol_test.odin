@@ -140,6 +140,17 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	// Protocol 29 (#138: the attachment removal log).
 	{.ClientAdminListAttachmentRemovals, 216},
 	{.ServerAdminAttachmentRemovals, 217},
+	// Protocol 30 (#76: editing and deleting messages).
+	{.ClientEditRoomMessage, 218},
+	{.ServerRoomMessageEdited, 219},
+	{.ClientDeleteRoomMessage, 220},
+	{.ServerRoomMessageDeleted, 221},
+	{.ClientEditDirectMessage, 222},
+	{.ServerDirectMessageEdited, 223},
+	{.ClientDeleteDirectMessage, 224},
+	{.ServerDirectMessageDeleted, 225},
+	{.ClientFetchMessageEdits, 226},
+	{.ServerMessageEdits, 227},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -523,10 +534,12 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// attachment moderation (F3: ClientAdminAttachmentUsage ... ServerAttachmentRemoved,
 	// AdminAction.RemoveAttachment and ServerAdminActionResult.blobId); 29 added the removal log
 	// (#138: ClientAdminListAttachmentRemovals, ServerAdminAttachmentRemovals, and
-	// chatMessageId and directMessageId in ServerAttachmentRemoved).
+	// chatMessageId and directMessageId in ServerAttachmentRemoved); 30 added editing and
+	// deleting messages (#76: ClientEditRoomMessage ... ServerMessageEdits, and editCount,
+	// lastEdit, deleted and deletion on stored messages and conversation summaries).
 	assert(
-		protocolVersion == 29,
-		fmt.tprintf("expected protocol version 29 for attachments, got %d", protocolVersion),
+		protocolVersion == 30,
+		fmt.tprintf("expected protocol version 30 for message edits, got %d", protocolVersion),
 	)
 }
 
@@ -1457,6 +1470,10 @@ testDirectHistoryPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 			delete(message.timestamp)
 			delete(message.content)
 			delete(message.envelope)
+			lastEdit := message.lastEdit
+			MessageEdit_deinit(&lastEdit)
+			deletion := message.deletion
+			MessageDeletion_deinit(&deletion)
 		}
 		delete(decoded.messages)
 	}
@@ -1568,6 +1585,10 @@ testDirectConversationsPayloadRoundTripsOverCBOR :: proc(t: ^testing.T) {
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
 			delete(conversation.lastEnvelope)
+			lastEdit := conversation.lastEdit
+			MessageEdit_deinit(&lastEdit)
+			lastDeletion := conversation.lastDeletion
+			MessageDeletion_deinit(&lastDeletion)
 		}
 		delete(decoded.conversations)
 	}
@@ -1865,4 +1886,102 @@ testAttachmentRefsRoundTripOverCBOR :: proc(t: ^testing.T) {
 	)
 	defer ClientDirectMessagePayload_deinit(&direct)
 	assert(direct.content == "hi" && len(direct.attachments) == 0, "expected no attachments")
+}
+
+// Protocol 30 (#76): MessageEditsKind is a wire value, and edits, tombstones and the edit list
+// survive CBOR in stored messages and in their own payloads.
+@(test)
+testMessageEditPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	assert(
+		int(MessageEditsKind.None) == 0 &&
+		int(MessageEditsKind.Room) == 1 &&
+		int(MessageEditsKind.Direct) == 2,
+		"expected MessageEditsKind to stay None 0, Room 1, Direct 2",
+	)
+	assert(MESSAGE_EDITS_MAX == 100, "expected at most 100 edits per message (D12)")
+
+	stored := StoredChatMessage {
+		id = 12,
+		senderId = 7,
+		roomId = 3,
+		timestamp = "2026-11-19 10:00:00+00",
+		content = "first",
+		editCount = 2,
+		lastEdit = MessageEdit {
+			id = 5,
+			clientMessageId = {0 = 1, 1 = 2, 15 = 3},
+			timestamp = "2026-11-19 10:05:00+00",
+			content = "second",
+			signature = {0 = 9, 63 = 9},
+		},
+	}
+	storedBytes, storedErr := cbor.marshal(stored)
+	assert(storedErr == nil, "expected StoredChatMessage encoding to succeed")
+	defer delete(storedBytes)
+	decoded: StoredChatMessage
+	assert(cbor.unmarshal(storedBytes, &decoded) == nil, "expected StoredChatMessage to decode")
+	defer StoredChatMessage_deinit(&decoded)
+	assert(
+		decoded.editCount == 2 &&
+		decoded.lastEdit.id == 5 &&
+		decoded.lastEdit.content == "second" &&
+		decoded.lastEdit.clientMessageId == stored.lastEdit.clientMessageId &&
+		decoded.lastEdit.signature == stored.lastEdit.signature &&
+		!decoded.deleted,
+		fmt.tprintf("expected the latest edit to survive, got %v", decoded.lastEdit),
+	)
+
+	tombstone := ServerRoomMessageDeletedPayload {
+		roomId = 3,
+		messageId = 12,
+		senderId = 7,
+		deletion = MessageDeletion{deletedAt = "2026-11-19 11:00:00+00", signature = {0 = 4}},
+	}
+	tombstoneBytes, tombstoneErr := cbor.marshal(tombstone)
+	assert(tombstoneErr == nil, "expected ServerRoomMessageDeleted encoding to succeed")
+	defer delete(tombstoneBytes)
+	decodedTombstone: ServerRoomMessageDeletedPayload
+	assert(
+		cbor.unmarshal(tombstoneBytes, &decodedTombstone) == nil,
+		"expected ServerRoomMessageDeleted to decode",
+	)
+	defer ServerRoomMessageDeletedPayload_deinit(&decodedTombstone)
+	assert(
+		decodedTombstone.messageId == 12 &&
+		decodedTombstone.senderId == 7 &&
+		decodedTombstone.deletion.deletedAt == tombstone.deletion.deletedAt &&
+		decodedTombstone.deletion.signature == tombstone.deletion.signature,
+		fmt.tprintf("expected the tombstone to survive, got %v", decodedTombstone),
+	)
+
+	list := ServerMessageEditsPayload {
+		kind           = .Direct,
+		conversationId = 9,
+		messageId      = 40,
+	}
+	defer delete(list.edits)
+	append(&list.edits, MessageEdit{id = 1, content = "a", sealed = []u8{1, 2}})
+	append(&list.edits, MessageEdit{id = 2, content = "b"})
+	listBytes, listErr := cbor.marshal(list)
+	assert(listErr == nil, "expected ServerMessageEdits encoding to succeed")
+	defer delete(listBytes)
+	decodedList: ServerMessageEditsPayload
+	assert(cbor.unmarshal(listBytes, &decodedList) == nil, "expected ServerMessageEdits to decode")
+	defer ServerMessageEditsPayload_deinit(&decodedList)
+	assert(
+		decodedList.kind == .Direct &&
+		len(decodedList.edits) == 2 &&
+		decodedList.edits[0].id == 1 &&
+		len(decodedList.edits[0].sealed) == 2 &&
+		decodedList.edits[1].content == "b",
+		fmt.tprintf("expected the edit list to survive, got %v", decodedList),
+	)
+
+	refusal := messageRefusal(MESSAGE_NOT_AUTHOR_MESSAGE, 42)
+	defer delete(refusal)
+	assert(
+		refusal == "You can only edit or delete your own messages (message 42)",
+		fmt.tprintf("expected the refusal to name the message, got %q", refusal),
+	)
 }

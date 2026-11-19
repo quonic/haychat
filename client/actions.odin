@@ -148,6 +148,11 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 			clientMessageId = message.clientMessageId,
 			signature = message.signature,
 			attachments = common.AttachmentRefs_clone(message.attachments[:]),
+			// Protocol 30: checked once the message itself is (message_edits.odin).
+			editCount = message.editCount,
+			lastEdit = common.MessageEdit_clone(message.lastEdit),
+			deleted = message.deleted,
+			deletion = common.MessageDeletion_clone(message.deletion),
 		},
 		// Every message is opened or checked by room_chains.odin after the merge: a sealed one
 		// is opened, a plaintext one's signature checked (protocol 22). Until then it is
@@ -486,6 +491,7 @@ State_receiveRoomChat :: proc(
 		   summary.lastReadMessageId,
 	   ) {
 		summary.unreadCount = min(summary.unreadCount + 1, common.UNREAD_COUNT_CAP)
+		State_messageNoteCountedUnread(state, serverID, .Room, roomID, messageID)
 	}
 	State_clearChatStatus(state)
 }
@@ -537,7 +543,13 @@ State_receiveRoomHistory :: proc(
 	cache := State_serverRoomCache(state, serverID)
 	roomCache := ServerRoomCache_roomCache(cache, roomID)
 	for message in messages {
-		RoomCache_mergeMessage(roomCache, message)
+		if !RoomCache_mergeMessage(roomCache, message) {
+			// Protocol 30: a cached message takes the server's latest edit and tombstone.
+			if entry := State_roomMessageEntry(state, serverID, roomID, message.id);
+			   entry != nil {
+				State_roomEntryMergeServer(state, serverID, roomID, entry, message)
+			}
+		}
 	}
 	roomCache.initialHistoryLoaded = true
 	roomCache.isLoadingHistory = false
@@ -820,6 +832,12 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			&event.registrationRequest,
 			event.pendingCount,
 		)
+	case .MessageEdited:
+		State_messageEdited(state, event)
+	case .MessageDeleted:
+		State_messageDeleted(state, event)
+	case .MessageEditsReceived:
+		State_messageEditsReceived(state, event)
 	case .AttachmentRemoved:
 		_, _ = State_attachmentRemoved(state, event.serverID, event.attachmentRemoved)
 	case .AttachmentUsageReceived:

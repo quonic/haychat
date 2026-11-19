@@ -14,7 +14,7 @@
 | --- | --- |
 | [deploy/README.md](../deploy/README.md) | Running a server for real users: the server image, quadlet units, first-time setup, firewall, backups and their restore order (database first, then attachments), attachment storage and its SQL helpers, upgrades, and release builds |
 | [server-configuration.md](server-configuration.md) | Every `HAYCHAT_*` environment variable (attachment limits included), startup exit status, schema migrations, and the `[Status]` log line |
-| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, registration (invite codes, approval, restricted accounts), roles, rooms and room permissions, attachments (Attach files, who may download, what is kept) and their moderation, admin actions, direct messages, and unread counts |
+| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, registration (invite codes, approval, restricted accounts), roles, rooms and room permissions, attachments (Attach files, who may download, what is kept) and their moderation, admin actions, direct messages, editing and deleting messages, and unread counts |
 
 ## Developing HayChat
 
@@ -46,3 +46,4 @@ describe the current state.
 | [plan/e2ee-voice-design.md](plan/e2ee-voice-design.md) | End-to-end encrypted voice in encrypted rooms (E6, protocol 21) |
 | [plan/2026-11-18-roles-and-registration.md](plan/2026-11-18-roles-and-registration.md) | Roles and permissions, room permissions, and registration with invite codes (#43, protocols 23-25) |
 | [plan/2026-11-19-file-attachments.md](plan/2026-11-19-file-attachments.md) | File attachments design: storage, transfer, access checks, client-side encryption, moderation (#118; F1-F5, protocols 26-28), with the round's status and follow-ups |
+| [plan/2026-11-19-message-edit-delete.md](plan/2026-11-19-message-edit-delete.md) | Editing and deleting messages: signed edits and deletes, tombstones, edit history, admin moderation (#76; M1-M3) |

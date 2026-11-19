@@ -62,6 +62,9 @@ DirectMessageEntry :: struct {
 	// message's attachment list was changed on the server.
 	files:         [dynamic]MessageFile,
 	filesChanged:  bool,
+	// Protocol 30 (message_edits.odin): the latest edit shown, the tombstone's verdict and the
+	// cached edit list.
+	edit:          MessageEditView,
 }
 
 // A conversation list entry: the server's summary, with lastContent holding the opened preview
@@ -115,6 +118,7 @@ DirectMessageEntry_deinit :: proc(entry: ^DirectMessageEntry) {
 	wipeString(entry.content)
 	StoredDirectMessage_deinit(&entry.message)
 	MessageFiles_deinit(&entry.files)
+	MessageEditView_deinit(&entry.edit)
 	entry^ = {}
 }
 
@@ -338,6 +342,8 @@ StoredDirectMessage_clone :: proc(
 	clone.timestamp = strings.clone(message.timestamp)
 	clone.content = strings.clone(message.content)
 	clone.attachments = common.AttachmentRefs_clone(message.attachments[:])
+	clone.lastEdit = common.MessageEdit_clone(message.lastEdit)
+	clone.deletion = common.MessageDeletion_clone(message.deletion)
 	clone.envelope = nil
 	if len(message.envelope) > 0 {
 		clone.envelope = make([]u8, len(message.envelope))
@@ -399,6 +405,8 @@ ServerDirectCache_noteLatestMessage :: proc(
 		delete(summary.lastEnvelope)
 		summary.lastEnvelope = nil
 		common.AttachmentRefs_deinit(&summary.lastAttachments)
+		common.MessageEdit_deinit(&summary.lastEdit)
+		common.MessageDeletion_deinit(&summary.lastDeletion)
 		if len(summary.peerNickname) == 0 {
 			delete(summary.peerNickname)
 			summary.peerNickname = strings.clone(peerNickname)
@@ -414,6 +422,16 @@ ServerDirectCache_noteLatestMessage :: proc(
 	summary.lastClientMessageId = entry.clientMessageId
 	summary.lastSignature = entry.signature
 	summary.lastAttachments = common.AttachmentRefs_clone(entry.attachments[:])
+	// Protocol 30: the newest message's edits and tombstone, and its shown version.
+	summary.lastEditCount = entry.editCount
+	summary.lastEdit = common.MessageEdit_clone(entry.lastEdit)
+	summary.lastDeleted = entry.deleted
+	summary.lastDeletion = common.MessageDeletion_clone(entry.deletion)
+	if entry.edit.status == .Verified {
+		wipeString(summary.lastContent)
+		delete(summary.lastContent)
+		summary.lastContent = strings.clone(entry.edit.shownContent)
+	}
 	if len(entry.envelope) > 0 {
 		summary.lastEnvelope = make([]u8, len(entry.envelope))
 		copy(summary.lastEnvelope, entry.envelope)
@@ -634,6 +652,7 @@ State_receiveDirectMessage :: proc(
 		   summary.lastReadMessageId,
 	   ) {
 		summary.unreadCount = min(summary.unreadCount + 1, common.UNREAD_COUNT_CAP)
+		State_messageNoteCountedUnread(state, serverID, .Direct, peerUserID, message.id)
 	}
 }
 
@@ -672,6 +691,8 @@ State_receiveDirectHistory :: proc(
 				existing.files[:],
 				message.attachments[:],
 			)
+			// Protocol 30: and its latest edit and tombstone.
+			State_directEntryMergeServer(state, serverID, existing, message)
 			continue
 		}
 		entry := State_openDirectEntry(state, serverID, keys, message)

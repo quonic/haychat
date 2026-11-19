@@ -245,6 +245,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,` +
 		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z",` +
+		`"editCount":0,"edited":false,"editStatus":"none","deleted":false,` +
+		`"removedByServer":false,` +
 		`"attachments":[],"attachmentsChanged":false,"encrypted":false,` +
 		`"decryptError":"","epoch":0,"protection":"pending","content":""}`,
 		"the room_chat JSON",
@@ -297,6 +299,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_history","serverID":1,"roomID":4,"hasOlder":true,` +
 		`"messages":[{"id":9,"senderID":2,"senderNickname":"","timestamp":"t",` +
+		`"editCount":0,"edited":false,"editStatus":"none","deleted":false,` +
+		`"removedByServer":false,` +
 		`"attachments":[],"attachmentsChanged":false,` +
 		`"encrypted":false,"decryptError":"","epoch":0,"protection":"pending","content":""}]}`,
 		"the room_history JSON",
@@ -817,6 +821,8 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_message","serverID":1,"id":12,"senderID":3,"senderNickname":"alice",` +
 		`"recipientID":4,"recipientNickname":"bob","timestamp":"t",` +
+		`"editCount":0,"edited":false,"editStatus":"none","deleted":false,` +
+		`"removedByServer":false,` +
 		`"attachments":[],"attachmentsChanged":false,"encrypted":false,` +
 		`"signed":false,"decryptError":"unsigned","protection":"hidden","content":""}` +
 		"\n",
@@ -849,7 +855,10 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_history","serverID":1,"peerUserID":3,"hasOlder":true,"messages":[` +
 		`{"id":9,"senderID":3,"senderNickname":"alice","recipientID":4,` +
-		`"recipientNickname":"bob","timestamp":"t","attachments":[],` +
+		`"recipientNickname":"bob","timestamp":"t",` +
+		`"editCount":0,"edited":false,"editStatus":"none","deleted":false,` +
+		`"removedByServer":false,` +
+		`"attachments":[],` +
 		`"attachmentsChanged":false,"encrypted":false,"signed":true,` +
 		`"decryptError":"","protection":"signed","content":"old"}]}` +
 		"\n",

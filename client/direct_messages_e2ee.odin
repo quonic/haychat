@@ -115,6 +115,11 @@ openDirectMessageContent :: proc(
 	content: string,
 	security: DirectMessageSecurity,
 ) {
+	// Protocol 30 (D6, D7): a tombstone has nothing to open; message_edits.odin settles who
+	// deleted it. It is shown, as "Message deleted" or "Removed by the server".
+	if message.deleted {
+		return "", {protection = .Signed}
+	}
 	sender, hasSender := senderIdentity.?
 	if len(message.envelope) > 0 {
 		recipient, hasRecipient := recipientIdentity.?
@@ -221,6 +226,8 @@ State_openDirectEntry :: proc(
 	)
 	entry.files = opened.files
 	entry.filesChanged = opened.changed
+	// Protocol 30: the tombstone, or the latest edit once the message itself is shown.
+	State_directEntrySettleEdits(state, serverID, &entry)
 	return entry
 }
 
@@ -256,6 +263,8 @@ State_openDirectPreview :: proc(
 	delete(entry.lastContent)
 	entry.lastContent = content
 	entry.security = security
+	// Protocol 30: the preview is the tombstone, or the latest edit when it verifies.
+	State_directPreviewSettleEdits(state, serverID, keys, entry)
 }
 
 // What follows from a message just opened: an encrypted one marks the conversation encrypted,
@@ -340,6 +349,7 @@ State_directReopenPending :: proc(state: ^State, serverID: int) {
 			delete(entry.content)
 			entry.content = content
 			entry.security = security
+			State_directEntrySettleEdits(state, serverID, entry)
 			DirectConversationCache_checkReplay(conversation, entryIndex)
 			State_directNote(state, .Opened, serverID, peerUserID, entry.id)
 			if security.protection == .Encrypted {

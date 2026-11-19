@@ -610,6 +610,10 @@ testMainRouterListsDirectConversations :: proc(t: ^testing.T) {
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
 			delete(conversation.lastEnvelope)
+			lastEdit := conversation.lastEdit
+			common.MessageEdit_deinit(&lastEdit)
+			lastDeletion := conversation.lastDeletion
+			common.MessageDeletion_deinit(&lastDeletion)
 		}
 		delete(listPayload.conversations)
 	}
@@ -923,7 +927,7 @@ testDirectMessageSQLChecksRecipientInOneStatement :: proc(t: ^testing.T) {
 		strings.contains(
 			DATABASE_POST_DIRECT_MESSAGE_SQL,
 			"FROM recipient WHERE (SELECT ok FROM allowed) AND (SELECT ok FROM bind_ok) " +
-			"ON CONFLICT",
+			"AND NOT EXISTS (SELECT 1 FROM direct_message_edits e",
 		),
 		"expected the post statement to insert only for an existing recipient other than self",
 	)

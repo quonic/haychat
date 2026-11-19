@@ -346,6 +346,9 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseAttachmentRequest:
 		delete(r.blobIds)
 		delete(r.reason)
+	case common.DatabaseMessageChangeRequest:
+		request := r
+		common.DatabaseMessageChangeRequest_deinit(&request)
 	case common.DatabaseRegistrationModeRequest, common.DatabaseRestrictedUsersRequest:
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
@@ -372,6 +375,10 @@ IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
 	delete(message.sealed)
 	attachments := message.attachments
 	common.AttachmentRefs_deinit(&attachments)
+	lastEdit := message.lastEdit
+	common.MessageEdit_deinit(&lastEdit)
+	deletion := message.deletion
+	common.MessageDeletion_deinit(&deletion)
 }
 
 IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
@@ -382,6 +389,10 @@ IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
 	delete(message.envelope)
 	attachments := message.attachments
 	common.AttachmentRefs_deinit(&attachments)
+	lastEdit := message.lastEdit
+	common.MessageEdit_deinit(&lastEdit)
+	deletion := message.deletion
+	common.MessageDeletion_deinit(&deletion)
 }
 
 // Exhaustive on purpose: a new result variant must decide what it owns.
@@ -435,6 +446,10 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(conversation.lastEnvelope)
 			lastAttachments := conversation.lastAttachments
 			common.AttachmentRefs_deinit(&lastAttachments)
+			lastEdit := conversation.lastEdit
+			common.MessageEdit_deinit(&lastEdit)
+			lastDeletion := conversation.lastDeletion
+			common.MessageDeletion_deinit(&lastDeletion)
 		}
 		delete(r.conversations)
 	case common.DatabaseUserDirectoryResult:
@@ -474,6 +489,9 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.userIds)
 	case common.DatabaseRestrictedUsersResult:
 		delete(r.userIds)
+	case common.DatabaseMessageChangeResult:
+		result := r
+		common.DatabaseMessageChangeResult_deinit(&result)
 	case common.DatabaseAttachmentResult:
 		delete(r.blobs)
 		delete(r.removal.readerUserIds)

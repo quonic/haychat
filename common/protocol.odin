@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 29
+protocolVersion: ProtocolVersion = 30
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -468,6 +468,18 @@ MessageType :: enum {
 	// Admins only, checked in the database statement.
 	ClientAdminListAttachmentRemovals, // ClientAdminListAttachmentRemovalsPayload: a page
 	ServerAdminAttachmentRemovals, // ServerAdminAttachmentRemovalsPayload: the page, newest first
+	// Editing and deleting messages (protocol 30, #76, common/message_edits.odin), appended so
+	// no existing wire value moves.
+	ClientEditRoomMessage, // ClientEditRoomMessagePayload: the author edits a room message
+	ServerRoomMessageEdited, // ServerRoomMessageEditedPayload: a stored edit, to its readers
+	ClientDeleteRoomMessage, // ClientDeleteRoomMessagePayload: the author's or an admin's delete
+	ServerRoomMessageDeleted, // ServerRoomMessageDeletedPayload: a tombstone, to its readers
+	ClientEditDirectMessage, // ClientEditDirectMessagePayload: the sender edits a direct message
+	ServerDirectMessageEdited, // ServerDirectMessageEditedPayload: to both sides
+	ClientDeleteDirectMessage, // ClientDeleteDirectMessagePayload: the sender's delete
+	ServerDirectMessageDeleted, // ServerDirectMessageDeletedPayload: to both sides
+	ClientFetchMessageEdits, // ClientFetchMessageEditsPayload: every edit of one message
+	ServerMessageEdits, // ServerMessageEditsPayload: the edits, oldest first
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -770,6 +782,13 @@ StoredChatMessage :: struct {
 	// Protocol 27: the message's attachments in the order it listed them, with removed set by
 	// the server (attachments.state Removed).
 	attachments:     [dynamic]AttachmentRef,
+	// Protocol 30 (#76, message_edits.odin): how many times the author edited it and the latest
+	// version (zero when never), and whether it is a tombstone. A deleted message carries no
+	// content, sealed bytes, signature, attachments or edit; deletion says how it was deleted.
+	editCount:       int,
+	lastEdit:        MessageEdit,
+	deleted:         bool,
+	deletion:        MessageDeletion,
 }
 
 StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
@@ -778,6 +797,8 @@ StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
 	delete(message.content)
 	delete(message.sealed)
 	AttachmentRefs_deinit(&message.attachments)
+	MessageEdit_deinit(&message.lastEdit)
+	MessageDeletion_deinit(&message.deletion)
 	message^ = {}
 }
 
@@ -1385,6 +1406,11 @@ StoredDirectMessage :: struct {
 	signature:         SignatureBytes,
 	// Protocol 27: as in StoredChatMessage (plaintext complete, sealed blobId and size only).
 	attachments:       [dynamic]AttachmentRef,
+	// Protocol 30: as in StoredChatMessage (a sealed edit's sealed bytes are its envelope).
+	editCount:         int,
+	lastEdit:          MessageEdit,
+	deleted:           bool,
+	deletion:          MessageDeletion,
 }
 
 // ServerDirectMessage: a stored plaintext message, sent to every authenticated session of
@@ -1543,6 +1569,12 @@ DirectConversationSummary :: struct {
 	// Protocol 27: the latest message's attachments, as in StoredDirectMessage, so a plaintext
 	// preview's v2 signature can be checked. Owned.
 	lastAttachments:     [dynamic]AttachmentRef,
+	// Protocol 30: the latest message's edits and tombstone, as in StoredDirectMessage, so the
+	// preview shows its latest version or that it was deleted. Owned.
+	lastEditCount:       int,
+	lastEdit:            MessageEdit,
+	lastDeleted:         bool,
+	lastDeletion:        MessageDeletion,
 	// Read state (protocol 11): the newest message ID the requester marked read in this
 	// conversation (0 when never), and the peer's messages after it, capped at
 	// UNREAD_COUNT_CAP. Without a marker every message from the peer is unread.
@@ -2176,6 +2208,8 @@ DatabaseQueryRequest :: union {
 	DatabaseRestrictedUsersRequest,
 	// Attachments (protocol 26, common/attachment_protocol.odin).
 	DatabaseAttachmentRequest,
+	// Message edits and deletes (protocol 30, common/message_edits.odin).
+	DatabaseMessageChangeRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -2485,6 +2519,7 @@ DatabaseQueryResult :: union {
 	DatabaseSharedRoomsResult,
 	DatabaseRestrictedUsersResult,
 	DatabaseAttachmentResult,
+	DatabaseMessageChangeResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound

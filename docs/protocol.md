@@ -74,6 +74,7 @@ version below therefore needs clients and servers rebuilt together.
 | 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), the refusals "Invalid message attachments", "An attachment cannot be sent with this message" and "You cannot attach files in this room", with schema migration 15 (`attachment_count` on both message tables, the `attachments.position`/`name`/`media_type` columns, and Attach files added to every room's Everyone grant). The message inserts bind the listed blobs, and whoever may read a message may download its files |
 | 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed, and a reader's download of it is refused with "Attachment removed by an admin". No schema migration |
 | 29 | Attachment removal log (#138, [below](#attachment-removal-log-protocol-29)): `ClientAdminListAttachmentRemovals{beforeId}` and `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}` (wire values 216 and 217, `AttachmentRemovalEntry`), and `chatMessageId`/`directMessageId` in `ServerAttachmentRemoved`, with schema migration 16 (`attachment_removals`). Every removal, by an admin or `deploy/sql/remove-attachment.sql`, keeps a row with its reason that admins list in the client |
+| 30 | Editing and deleting messages (#76, [below](#editing-and-deleting-messages-protocol-30)): `ClientEditRoomMessage` … `ServerMessageEdits` (wire values 218 to 227), `MessageEdit`, `MessageDeletion` and `MessageEditsKind`, `editCount`/`lastEdit`/`deleted`/`deletion` on `StoredChatMessage` and `StoredDirectMessage` and `lastEditCount`/`lastEdit`/`lastDeleted`/`lastDeletion` on `DirectConversationSummary`, and the signatures `"haychat-room-edit-v1"`, `"haychat-dm-edit-v1"`, `"haychat-room-delete-v1"` and `"haychat-dm-delete-v1"`, with schema migration 17 (edit and tombstone columns on both message tables, `chat_message_edits`, `direct_message_edits`). Authors edit and delete their messages, admins delete any room message, and a deleted message leaves a tombstone with its ID |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -299,6 +300,79 @@ Issue #138. Admins see past removals and their reasons in the client.
   the blob directory within an hour of it (or at the server's next start); a file uploaded less
   than an hour before the deletion waits for a later pass. The room's unsent uploads go after
   `HAYCHAT_ATTACHMENT_PENDING_HOURS`.
+
+## Editing and deleting messages (protocol 30)
+
+Issue #76, plan `docs/plan/2026-11-19-message-edit-delete.md` (decisions D1-D14). The author
+edits and deletes their own room and direct messages; admins delete any room message. A delete
+leaves a tombstone with the same ID, so history pagination and read markers stay stable.
+
+- **Edits.** `ClientEditRoomMessage{roomId, messageId, originalClientMessageId,
+  clientMessageId, content, signature, sealed}` and `ClientEditDirectMessage{peerUserId,
+  messageId, originalClientMessageId, clientMessageId, content, signature, envelope}`.
+  `clientMessageId` is the edit's own new random ID; `originalClientMessageId` repeats the
+  message's, which the signature covers and the server compares with the stored message. A
+  plaintext edit is signed by the author (`signRoomMessageEdit`, `signDirectMessageEdit`;
+  layouts at the top of `common/e2ee.odin`) and checked by the router against the session's
+  identity key. An edit of a sealed message must be sealed (D11): a `SealedRoomMessage` at the
+  room's current epoch on the sender's chain, checked like a new sealed message, or a direct
+  message envelope, verified by the database worker against the recipient's current identity
+  key; the server stores it byte for byte. An edit changes the text only (D9): the message keeps
+  its files, and a plaintext edit may be empty only when the message has some. At most
+  `MESSAGE_EDITS_MAX` (100) edits per message (D12), with no time limit.
+- **What an edit needs (D10).** What a new message there needs at the time of the edit:
+  membership, SendMessages, a room type with chat and, sealed, the room's current log version;
+  in a direct conversation the restricted-account rule and, sealed, the recipient's current
+  key. The message must be the author's, not deleted, and one the author can still read (the
+  From join cut). A client message ID or chain index the sender used before, for a message or an
+  edit, is refused, and so is a new message reusing an edit's.
+- **Deletes.** `ClientDeleteRoomMessage{roomId, messageId, originalClientMessageId,
+  signature}`: the author signs (`signRoomMessageDelete`), in encrypted rooms too, and needs
+  only to be able to read the message; a zero signature asks for an admin's moderation delete
+  (D5; the admin role, checked in the statement; the admin need not be a member).
+  `ClientDeleteDirectMessage{peerUserId, messageId, originalClientMessageId, signature}`: only
+  the sender, always signed (`signDirectMessageDelete`). A delete erases the content, sealed
+  bytes, signature and every edit (D7); the tombstone keeps the ID, sender, time, client message
+  ID and chain position, so replay checks still hold. Its files become Removed tombstones in the
+  same statement (D8): their downloads end with "Attachment removed by an admin", the files are
+  deleted, and every reader hears `ServerAttachmentRemoved` for each before the tombstone. An
+  admin's delete also writes the files to the removal log (reason "Message deleted").
+- **Notices.** `ServerRoomMessageEdited{roomId, messageId, senderId, editCount, edit}` and
+  `ServerRoomMessageDeleted{roomId, messageId, senderId, deletion}` go to every session of each
+  account that may read the message (room members past the From join cut) and to the admin who
+  deleted it; `ServerDirectMessageEdited{senderId, recipientId, messageId, editCount, edit}` and
+  `ServerDirectMessageDeleted{senderId, recipientId, messageId, deletion}` to both sides.
+  `MessageEdit{id, clientMessageId, timestamp, content, signature, sealed}` is one version;
+  `MessageDeletion{deletedAt, signature}` has a zero signature for an admin's delete.
+- **History.** Room and direct history pages carry each message's `editCount`, its latest edit
+  (`lastEdit`, D14) and whether it is a tombstone (`deleted`, `deletion`); a tombstone carries
+  no content, sealed bytes, signature, attachments or edit. The conversation list carries the
+  same for its newest message. `ClientFetchMessageEdits{kind, conversationId, messageId}` (kind
+  Room 1 with the room, Direct 2 with the peer) is answered by `ServerMessageEdits{kind,
+  conversationId, messageId, edits}`, oldest first; the original is the message itself, and a
+  deleted message has none.
+- **Unread counts.** Edits do not count as unread and do not move read markers; a deleted
+  message does not count as unread (D13).
+- **Refusals.** `ServerProtocolError` with the refused message named: "Invalid message edit
+  (message N)", "Invalid message edit signature (message N)", "Invalid message delete signature
+  (message N)", "Message not found (message N)", "You can only edit or delete your own messages
+  (message N)", "This message was deleted (message N)", "An edit must be sealed exactly when its
+  message is (message N)", "This message cannot be edited again (message N)", "Duplicate
+  message edit (message N)", "Admin permission required (message N)", and the D10 refusals of a
+  new message ("Not a room member", "You cannot send messages in this room", "Chat is disabled in
+  this room", "Room key is out of date", "You no longer share a room with this person",
+  "Invalid encrypted direct message") with " (message N)" added.
+- **Clients.** A client shows an edit only when its signature verifies against the author's
+  pinned identity key; one that does not is not shown, and the last good version stays, marked
+  "An edit could not be verified". A tombstone always hides the content: it reads "Message
+  deleted" when the author's signature verifies, and "Removed by the server" otherwise (D6).
+  Clients cannot tell which admin removed a message. Clients of this release do not open sealed
+  edits yet (plan package M2): they keep the previous version and mark the message "edited, not
+  verified yet", and they refuse to send one.
+
+The server can still withhold edits, reorder them, show an older version as the latest, or
+delete a message and show it as "Removed by the server". It cannot forge an edit or an author's
+delete, or move either to another message.
 
 ## Roles and server permissions (protocol 23)
 

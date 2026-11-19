@@ -1061,6 +1061,175 @@ DATABASE_ATTACHMENT_REMOVALS_CHECKS ::
 	"('attachment_removals blob index', " +
 	"to_regclass('attachment_removals_by_blob_id') IS NOT NULL)"
 
+// Migration 17 (editing and deleting messages, protocol 30, #76,
+// docs/plan/2026-11-19-message-edit-delete.md).
+//
+// - chat_messages and direct_messages: edit_count (0..MESSAGE_EDITS_MAX, D12), edited_at (the
+//   latest edit's time), deleted_at, deleted_by_user_id (the account that deleted it: the author
+//   or, for a room message, an admin; NULL once that account is gone) and delete_signature (the
+//   author's signature, 64 bytes; NULL for an admin's delete, D6). *_deleted_fields: only a
+//   tombstone has a deleter or a signature.
+// - chat_messages_content_or_sealed, chat_messages_sealed_fields,
+//   direct_messages_content_or_envelope and direct_messages_signed are replaced under the same
+//   names so that a tombstone passes (D7): content '', no sealed bytes or envelope, no
+//   signature, no attachments, and its client_message_id (and a sealed room message's epoch,
+//   chain_id and chain_index) kept, so the unique indexes still refuse a reused ID or chain
+//   index. Every other row is checked as before.
+// - chat_message_edits and direct_message_edits: one row per edit, oldest first by id, cascading
+//   with their message and sender. A plaintext edit has content (0..4000 characters; empty only
+//   for a message with attachments, which the edit statement checks, D9) and a signature; a
+//   sealed one its sealed bytes (a room's SealedRoomMessage with the chain position the server
+//   read from it, or a direct message's envelope) and an empty content. (sender_user_id,
+//   client_message_id) is unique, and so is a room edit's (sender_user_id, chain_id,
+//   chain_index); the edit and post statements also check the other table, so an ID or chain
+//   index is used once across messages and edits. A delete deletes the message's edits (D7).
+//
+// Every existing message has no edit and is not deleted, which every new check accepts. Never
+// edit it; append a migration instead.
+DATABASE_MIGRATION_17_MESSAGE_EDITS_SQL ::
+	"ALTER TABLE chat_messages ADD COLUMN edit_count SMALLINT NOT NULL DEFAULT 0, " +
+	"ADD COLUMN edited_at TIMESTAMPTZ NULL, ADD COLUMN deleted_at TIMESTAMPTZ NULL, " +
+	"ADD COLUMN deleted_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"ADD COLUMN delete_signature BYTEA NULL, " +
+	"ADD CONSTRAINT chat_messages_edit_count_check CHECK (edit_count BETWEEN 0 AND 100), " +
+	"ADD CONSTRAINT chat_messages_delete_signature_size " +
+	"CHECK (octet_length(delete_signature) = 64), " +
+	"ADD CONSTRAINT chat_messages_deleted_fields CHECK (deleted_at IS NOT NULL OR " +
+	"(deleted_by_user_id IS NULL AND delete_signature IS NULL)), " +
+	"DROP CONSTRAINT chat_messages_content_or_sealed, " +
+	"ADD CONSTRAINT chat_messages_content_or_sealed CHECK (" +
+	"(deleted_at IS NOT NULL AND content = '' AND sealed IS NULL AND attachment_count = 0) OR " +
+	"(deleted_at IS NULL AND ((sealed IS NULL AND (char_length(content) BETWEEN 1 AND 4000 OR " +
+	"(content = '' AND attachment_count > 0))) OR " +
+	"(sealed IS NOT NULL AND content = '' AND octet_length(sealed) BETWEEN 1 AND 8192)))), " +
+	"DROP CONSTRAINT chat_messages_sealed_fields, " +
+	"ADD CONSTRAINT chat_messages_sealed_fields CHECK (" +
+	"(deleted_at IS NOT NULL AND sealed IS NULL AND signature IS NULL " +
+	"AND client_message_id IS NOT NULL AND ((epoch IS NULL AND chain_id IS NULL " +
+	"AND chain_index IS NULL) OR (epoch IS NOT NULL AND chain_id IS NOT NULL " +
+	"AND chain_index IS NOT NULL))) OR (deleted_at IS NULL AND (" +
+	"(sealed IS NULL AND client_message_id IS NOT NULL AND signature IS NOT NULL " +
+	"AND epoch IS NULL AND chain_id IS NULL AND chain_index IS NULL) OR " +
+	"(sealed IS NOT NULL AND client_message_id IS NOT NULL AND signature IS NULL " +
+	"AND epoch IS NOT NULL AND chain_id IS NOT NULL AND chain_index IS NOT NULL)))); " +
+	"ALTER TABLE direct_messages ADD COLUMN edit_count SMALLINT NOT NULL DEFAULT 0, " +
+	"ADD COLUMN edited_at TIMESTAMPTZ NULL, ADD COLUMN deleted_at TIMESTAMPTZ NULL, " +
+	"ADD COLUMN deleted_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"ADD COLUMN delete_signature BYTEA NULL, " +
+	"ADD CONSTRAINT direct_messages_edit_count_check CHECK (edit_count BETWEEN 0 AND 100), " +
+	"ADD CONSTRAINT direct_messages_delete_signature_size " +
+	"CHECK (octet_length(delete_signature) = 64), " +
+	"ADD CONSTRAINT direct_messages_deleted_fields CHECK (deleted_at IS NOT NULL OR " +
+	"(deleted_by_user_id IS NULL AND delete_signature IS NULL)), " +
+	"DROP CONSTRAINT direct_messages_content_or_envelope, " +
+	"ADD CONSTRAINT direct_messages_content_or_envelope CHECK (" +
+	"(deleted_at IS NOT NULL AND content = '' AND envelope IS NULL AND attachment_count = 0) " +
+	"OR (deleted_at IS NULL AND ((envelope IS NULL AND (char_length(content) BETWEEN 1 AND " +
+	"4000 OR (content = '' AND attachment_count > 0))) OR " +
+	"(envelope IS NOT NULL AND content = '' AND octet_length(envelope) BETWEEN 1 AND 8192)))), " +
+	"DROP CONSTRAINT direct_messages_signed, " +
+	"ADD CONSTRAINT direct_messages_signed CHECK (envelope IS NOT NULL OR " +
+	"signature IS NOT NULL OR (deleted_at IS NOT NULL AND client_message_id IS NOT NULL)); " +
+	"CREATE TABLE chat_message_edits (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"message_id BIGINT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE, " +
+	"sender_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"client_message_id BYTEA NOT NULL, " +
+	"content TEXT NOT NULL DEFAULT '', " +
+	"sealed BYTEA NULL, " +
+	"signature BYTEA NULL, " +
+	"chain_id BYTEA NULL, " +
+	"chain_index INTEGER NULL, " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"CONSTRAINT chat_message_edits_client_message_id_size " +
+	"CHECK (octet_length(client_message_id) = 16), " +
+	"CONSTRAINT chat_message_edits_content_or_sealed CHECK (" +
+	"(sealed IS NULL AND signature IS NOT NULL AND octet_length(signature) = 64 " +
+	"AND char_length(content) <= 4000 " +
+	"AND chain_id IS NULL AND chain_index IS NULL) OR " +
+	"(sealed IS NOT NULL AND signature IS NULL AND content = '' " +
+	"AND octet_length(sealed) BETWEEN 1 AND 8192 AND octet_length(chain_id) = 16 " +
+	"AND chain_index BETWEEN 0 AND 999))); " +
+	"CREATE INDEX chat_message_edits_by_message_id ON chat_message_edits (message_id, id); " +
+	"CREATE UNIQUE INDEX chat_message_edits_sender_client_message_id " +
+	"ON chat_message_edits (sender_user_id, client_message_id); " +
+	"CREATE UNIQUE INDEX chat_message_edits_sender_chain_index " +
+	"ON chat_message_edits (sender_user_id, chain_id, chain_index) WHERE chain_id IS NOT NULL; " +
+	"CREATE TABLE direct_message_edits (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"message_id BIGINT NOT NULL REFERENCES direct_messages(id) ON DELETE CASCADE, " +
+	"sender_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"client_message_id BYTEA NOT NULL, " +
+	"content TEXT NOT NULL DEFAULT '', " +
+	"envelope BYTEA NULL, " +
+	"signature BYTEA NULL, " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"CONSTRAINT direct_message_edits_client_message_id_size " +
+	"CHECK (octet_length(client_message_id) = 16), " +
+	"CONSTRAINT direct_message_edits_content_or_envelope CHECK (" +
+	"(envelope IS NULL AND signature IS NOT NULL AND octet_length(signature) = 64 " +
+	"AND char_length(content) <= 4000) OR " +
+	"(envelope IS NOT NULL AND signature IS NULL AND content = '' " +
+	"AND octet_length(envelope) BETWEEN 1 AND 8192))); " +
+	"CREATE INDEX direct_message_edits_by_message_id ON direct_message_edits (message_id, id); " +
+	"CREATE UNIQUE INDEX direct_message_edits_sender_client_message_id " +
+	"ON direct_message_edits (sender_user_id, client_message_id);"
+
+// What migration 17 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_MESSAGE_EDITS_CHECKS ::
+	"('message edit columns', (SELECT count(*) = 10 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name IN ('chat_messages', " +
+	"'direct_messages') AND column_name IN ('edit_count', 'edited_at', 'deleted_at', " +
+	"'deleted_by_user_id', 'delete_signature'))), " +
+	"('message edit and tombstone checks', (SELECT count(*) = 6 FROM pg_constraint " +
+	"WHERE contype = 'c' AND ((conrelid = to_regclass('chat_messages') AND conname IN " +
+	"('chat_messages_edit_count_check', 'chat_messages_delete_signature_size', " +
+	"'chat_messages_deleted_fields')) OR (conrelid = to_regclass('direct_messages') " +
+	"AND conname IN ('direct_messages_edit_count_check', " +
+	"'direct_messages_delete_signature_size', 'direct_messages_deleted_fields'))))), " +
+	"('message checks allow tombstones', (SELECT count(*) = 4 FROM pg_constraint " +
+	"WHERE contype = 'c' AND pg_get_constraintdef(oid) LIKE '%deleted_at IS NOT NULL%' " +
+	"AND ((conrelid = to_regclass('chat_messages') AND conname IN " +
+	"('chat_messages_content_or_sealed', 'chat_messages_sealed_fields')) " +
+	"OR (conrelid = to_regclass('direct_messages') AND conname IN " +
+	"('direct_messages_content_or_envelope', 'direct_messages_signed'))))), " +
+	"('message deleters set null', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE contype = 'f' AND confdeltype = 'n' AND confrelid = to_regclass('users') " +
+	"AND conrelid IN (to_regclass('chat_messages'), to_regclass('direct_messages')))), " +
+	"('chat_message_edits table', to_regclass('chat_message_edits') IS NOT NULL), " +
+	"('chat_message_edits columns', (SELECT count(*) = 10 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'chat_message_edits' " +
+	"AND column_name IN ('id', 'message_id', 'sender_user_id', 'client_message_id', " +
+	"'content', 'sealed', 'signature', 'chain_id', 'chain_index', 'created_at'))), " +
+	"('chat_message_edits checks', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('chat_message_edits') AND contype = 'c' AND conname IN " +
+	"('chat_message_edits_client_message_id_size', 'chat_message_edits_content_or_sealed'))), " +
+	"('chat_message_edits cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('chat_message_edits') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('chat message edits message index', " +
+	"to_regclass('chat_message_edits_by_message_id') IS NOT NULL), " +
+	"('chat message edits client message id index', " +
+	"to_regclass('chat_message_edits_sender_client_message_id') IS NOT NULL), " +
+	"('chat message edits chain index index', " +
+	"to_regclass('chat_message_edits_sender_chain_index') IS NOT NULL), " +
+	"('direct_message_edits table', to_regclass('direct_message_edits') IS NOT NULL), " +
+	"('direct_message_edits columns', (SELECT count(*) = 8 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'direct_message_edits' " +
+	"AND column_name IN ('id', 'message_id', 'sender_user_id', 'client_message_id', " +
+	"'content', 'envelope', 'signature', 'created_at'))), " +
+	"('direct_message_edits checks', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_message_edits') AND contype = 'c' AND conname IN " +
+	"('direct_message_edits_client_message_id_size', " +
+	"'direct_message_edits_content_or_envelope'))), " +
+	"('direct_message_edits cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('direct_message_edits') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('direct message edits message index', " +
+	"to_regclass('direct_message_edits_by_message_id') IS NOT NULL), " +
+	"('direct message edits client message id index', " +
+	"to_regclass('direct_message_edits_sender_client_message_id') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -1153,6 +1322,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "attachment removals",
 		sql = DATABASE_MIGRATION_16_ATTACHMENT_REMOVALS_SQL,
 		checks = DATABASE_ATTACHMENT_REMOVALS_CHECKS,
+	},
+	{
+		version = 17,
+		name = "message edits",
+		sql = DATABASE_MIGRATION_17_MESSAGE_EDITS_SQL,
+		checks = DATABASE_MESSAGE_EDITS_CHECKS,
 	},
 }
 
@@ -1284,6 +1459,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS +
 	", " +
 	DATABASE_ATTACHMENT_REMOVALS_CHECKS +
+	", " +
+	DATABASE_MESSAGE_EDITS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

@@ -131,6 +131,27 @@ import "core:unicode/utf8"
 //   The verifier picks the label from the attachment count, so a server that adds or strips
 //   attachments makes the signature fail either way. AttachmentRef.removed is not signed.
 //
+// Signed edits and deletes (protocol 30, #76, docs/plan/2026-11-19-message-edit-delete.md).
+//   Every one is signed by the author's identity key. original is the edited or deleted
+//   message's clientMessageId and edit the edit's own new random one (never equal); content is
+//   0..CHAT_MESSAGE_MAX_BYTES bytes (empty only for a message with attachments, which the
+//   server checks):
+//
+//     "haychat-room-edit-v1" || serverIdentityPublicKey (32) || roomId (i64)
+//       || senderUserId (i64) || original (16) || edit (16) || contentLength u32 || content
+//     "haychat-dm-edit-v1" || serverIdentityPublicKey (32) || senderUserId (i64)
+//       || recipientUserId (i64) || original (16) || edit (16) || contentLength u32 || content
+//     "haychat-room-delete-v1" || serverIdentityPublicKey (32) || roomId (i64)
+//       || senderUserId (i64) || original (16)
+//     "haychat-dm-delete-v1" || serverIdentityPublicKey (32) || senderUserId (i64)
+//       || recipientUserId (i64) || original (16)
+//
+//   The labels are their own (no label is a prefix of another), so an edit's signature is
+//   never a message's, a delete's or the other conversation kind's. Binding original, the
+//   conversation and the sender, they cannot be moved to another message. An edit of a sealed
+//   message is a SealedRoomMessage or a direct message envelope instead (D11), signed as those
+//   are.
+//
 // SealedRoomMessage, version 1 (design 6.5). At most SEALED_ROOM_MESSAGE_MAX_BYTES in total.
 //
 //   0       1   version = 1
@@ -234,6 +255,11 @@ SAFETY_NUMBER_DOMAIN :: "haychat-safety-number-v1"
 // AAD (common/voice_e2ee.odin). Prefix-free against every label above.
 VOICE_KEY_AAD_DOMAIN :: "haychat-voice-key-v1"
 VOICE_FRAME_AAD_DOMAIN :: "haychat-voice-frame-v1"
+// Protocol 30 (#76): signed edits and deletes. Prefix-free against every label above.
+ROOM_MESSAGE_EDIT_DOMAIN :: "haychat-room-edit-v1"
+DIRECT_MESSAGE_EDIT_DOMAIN :: "haychat-dm-edit-v1"
+ROOM_MESSAGE_DELETE_DOMAIN :: "haychat-room-delete-v1"
+DIRECT_MESSAGE_DELETE_DOMAIN :: "haychat-dm-delete-v1"
 
 // Every failure of the envelope, room message, padding and plaintext procedures. Each has its
 // own value so tests and logs can tell them apart; the UI shows one message for all of them
@@ -1824,6 +1850,270 @@ makePlaintextRoomMessagePrefix :: proc(
 	e2eeWriteInt(&writer, fields.senderUserID)
 	e2eeWriteBytes(&writer, fields.clientMessageID[:])
 	return prefix
+}
+
+// ---------------------------------------------------------------------------------------------
+// Signed edits and deletes (protocol 30, #76; layouts at the top of this file). The server
+// checks them against the session's identity key, clients against the author's pin.
+
+// The fields an edit or a delete binds. conversationID is the room for a room message and the
+// recipient for a direct message; edit is zero for a delete.
+MessageChangeFields :: struct {
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
+	conversationID:          int,
+	senderUserID:            int,
+	original:                ClientMessageID,
+	edit:                    ClientMessageID,
+}
+
+MESSAGE_CHANGE_PREFIX_MAX_SIZE :: AUTH_IDENTITY_PUBLIC_KEY_SIZE + 8 + 8 +
+	2 * CLIENT_MESSAGE_ID_SIZE
+MESSAGE_EDIT_BODY_MAX_SIZE :: 4 + CHAT_MESSAGE_MAX_BYTES
+
+// Signs a room message edit (ROOM_MESSAGE_EDIT_DOMAIN): conversationID is the room.
+signRoomMessageEdit :: proc(
+	fields: MessageChangeFields,
+	content: string,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	return signMessageEdit(ROOM_MESSAGE_EDIT_DOMAIN, fields, content, senderIdentityPrivateKey)
+}
+
+verifyRoomMessageEdit :: proc(
+	fields: MessageChangeFields,
+	content: string,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	return verifyMessageEdit(
+		ROOM_MESSAGE_EDIT_DOMAIN,
+		fields,
+		content,
+		senderIdentityPublicKey,
+		signature,
+	)
+}
+
+// Signs a direct message edit (DIRECT_MESSAGE_EDIT_DOMAIN): conversationID is the recipient.
+signDirectMessageEdit :: proc(
+	fields: MessageChangeFields,
+	content: string,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	return signMessageEdit(DIRECT_MESSAGE_EDIT_DOMAIN, fields, content, senderIdentityPrivateKey)
+}
+
+verifyDirectMessageEdit :: proc(
+	fields: MessageChangeFields,
+	content: string,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	return verifyMessageEdit(
+		DIRECT_MESSAGE_EDIT_DOMAIN,
+		fields,
+		content,
+		senderIdentityPublicKey,
+		signature,
+	)
+}
+
+// Signs the author's delete of a room message (ROOM_MESSAGE_DELETE_DOMAIN). fields.edit is
+// ignored.
+signRoomMessageDelete :: proc(
+	fields: MessageChangeFields,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	return signMessageDelete(ROOM_MESSAGE_DELETE_DOMAIN, fields, senderIdentityPrivateKey)
+}
+
+verifyRoomMessageDelete :: proc(
+	fields: MessageChangeFields,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	return verifyMessageDelete(
+		ROOM_MESSAGE_DELETE_DOMAIN,
+		fields,
+		senderIdentityPublicKey,
+		signature,
+	)
+}
+
+// Signs the author's delete of a direct message (DIRECT_MESSAGE_DELETE_DOMAIN).
+signDirectMessageDelete :: proc(
+	fields: MessageChangeFields,
+	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	return signMessageDelete(DIRECT_MESSAGE_DELETE_DOMAIN, fields, senderIdentityPrivateKey)
+}
+
+verifyDirectMessageDelete :: proc(
+	fields: MessageChangeFields,
+	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	return verifyMessageDelete(
+		DIRECT_MESSAGE_DELETE_DOMAIN,
+		fields,
+		senderIdentityPublicKey,
+		signature,
+	)
+}
+
+@(private = "file")
+messageChangeFieldsValid :: proc(fields: MessageChangeFields, isEdit: bool) -> bool {
+	if fields.conversationID <= 0 ||
+	   fields.senderUserID <= 0 ||
+	   !clientMessageIDIsSet(fields.original) {
+		return false
+	}
+	return !isEdit || (clientMessageIDIsSet(fields.edit) && fields.edit != fields.original)
+}
+
+// serverKey || roomId || senderUserID (a room) or serverKey || senderUserID || recipientId (a
+// direct message, the domain says which) || original, and edit for an edit. Returns the
+// prefix's length.
+@(private = "file")
+makeMessageChangePrefix :: proc(
+	domain: string,
+	fields: MessageChangeFields,
+	isEdit: bool,
+	dst: ^[MESSAGE_CHANGE_PREFIX_MAX_SIZE]u8,
+) -> int {
+	fields := fields
+	size := MESSAGE_CHANGE_PREFIX_MAX_SIZE
+	if !isEdit {
+		size -= CLIENT_MESSAGE_ID_SIZE
+	}
+	writer := e2eeWriter(dst[:size])
+	e2eeWriteBytes(&writer, fields.serverIdentityPublicKey[:])
+	if domain == DIRECT_MESSAGE_EDIT_DOMAIN || domain == DIRECT_MESSAGE_DELETE_DOMAIN {
+		e2eeWriteInt(&writer, fields.senderUserID)
+		e2eeWriteInt(&writer, fields.conversationID)
+	} else {
+		e2eeWriteInt(&writer, fields.conversationID)
+		e2eeWriteInt(&writer, fields.senderUserID)
+	}
+	e2eeWriteBytes(&writer, fields.original[:])
+	if isEdit {
+		e2eeWriteBytes(&writer, fields.edit[:])
+	}
+	return size
+}
+
+// contentLength u32 || content. False for content an edit may never carry.
+@(private = "file")
+makeMessageEditBody :: proc(
+	content: string,
+	dst: ^[MESSAGE_EDIT_BODY_MAX_SIZE]u8,
+) -> (
+	int,
+	bool,
+) {
+	if len(content) > CHAT_MESSAGE_MAX_BYTES {
+		return 0, false
+	}
+	size := 4 + len(content)
+	writer := e2eeWriter(dst[:size])
+	e2eeWriteU32(&writer, u32(len(content)))
+	e2eeWriteString(&writer, content)
+	return size, true
+}
+
+@(private = "file")
+signMessageEdit :: proc(
+	domain: string,
+	fields: MessageChangeFields,
+	content: string,
+	privateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	if !messageChangeFieldsValid(fields, true) {
+		return {}, false
+	}
+	prefix: [MESSAGE_CHANGE_PREFIX_MAX_SIZE]u8
+	prefixLength := makeMessageChangePrefix(domain, fields, true, &prefix)
+	body: [MESSAGE_EDIT_BODY_MAX_SIZE]u8
+	bodyLength, ok := makeMessageEditBody(content, &body)
+	if !ok {
+		return {}, false
+	}
+	return signWithDomain(privateKey, domain, prefix[:prefixLength], body[:bodyLength])
+}
+
+@(private = "file")
+verifyMessageEdit :: proc(
+	domain: string,
+	fields: MessageChangeFields,
+	content: string,
+	publicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	if !messageChangeFieldsValid(fields, true) {
+		return false
+	}
+	prefix: [MESSAGE_CHANGE_PREFIX_MAX_SIZE]u8
+	prefixLength := makeMessageChangePrefix(domain, fields, true, &prefix)
+	body: [MESSAGE_EDIT_BODY_MAX_SIZE]u8
+	bodyLength, ok := makeMessageEditBody(content, &body)
+	if !ok {
+		return false
+	}
+	result := verifyWithDomain(
+		publicKey,
+		domain,
+		prefix[:prefixLength],
+		body[:bodyLength],
+		signature,
+	)
+	return result == .None
+}
+
+@(private = "file")
+signMessageDelete :: proc(
+	domain: string,
+	fields: MessageChangeFields,
+	privateKey: IdentityPrivateKeyBytes,
+) -> (
+	SignatureBytes,
+	bool,
+) {
+	if !messageChangeFieldsValid(fields, false) {
+		return {}, false
+	}
+	prefix: [MESSAGE_CHANGE_PREFIX_MAX_SIZE]u8
+	prefixLength := makeMessageChangePrefix(domain, fields, false, &prefix)
+	return signWithDomain(privateKey, domain, prefix[:prefixLength], nil)
+}
+
+@(private = "file")
+verifyMessageDelete :: proc(
+	domain: string,
+	fields: MessageChangeFields,
+	publicKey: IdentityPublicKeyBytes,
+	signature: SignatureBytes,
+) -> bool {
+	if !messageChangeFieldsValid(fields, false) || signature == {} {
+		return false
+	}
+	prefix: [MESSAGE_CHANGE_PREFIX_MAX_SIZE]u8
+	prefixLength := makeMessageChangePrefix(domain, fields, false, &prefix)
+	return verifyWithDomain(publicKey, domain, prefix[:prefixLength], nil, signature) == .None
 }
 
 // ---------------------------------------------------------------------------------------------

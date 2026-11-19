@@ -118,6 +118,9 @@ RoomMessageEntry :: struct {
 	// message's attachment list was changed on the server.
 	files:         [dynamic]MessageFile,
 	filesChanged:  bool,
+	// Protocol 30 (message_edits.odin): the latest edit shown, the tombstone's verdict and the
+	// cached edit list.
+	edit:          MessageEditView,
 }
 
 RoomMessageEntry_deinit :: proc(entry: ^RoomMessageEntry) {
@@ -126,6 +129,7 @@ RoomMessageEntry_deinit :: proc(entry: ^RoomMessageEntry) {
 	}
 	common.StoredChatMessage_deinit(&entry.message)
 	MessageFiles_deinit(&entry.files)
+	MessageEditView_deinit(&entry.edit)
 	entry^ = {}
 }
 
@@ -560,6 +564,27 @@ State_roomChainSaveStore :: proc(state: ^State, serverID: int) {
 // Opens or settles one cached message of roomID with keys. A sealed message that opens gets
 // its text in entry.content; one that waits stays Pending with why.
 State_roomOpenEntry :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	keys: RoomChainKeys,
+	entry: ^RoomMessageEntry,
+) {
+	// Protocol 30 (D6, D7): a tombstone is shown as one whatever it held; nothing of it is
+	// opened. Otherwise the latest edit is checked once the message itself is.
+	if entry.deleted {
+		entry.security = {protection = .Plain}
+		if State_roomIsEncrypted(state, serverID, roomID) {
+			entry.security = {protection = .Encrypted}
+		}
+		State_roomEntrySettleEdits(state, serverID, roomID, entry)
+		return
+	}
+	State_roomOpenEntryContent(state, serverID, roomID, keys, entry)
+	State_roomEntrySettleEdits(state, serverID, roomID, entry)
+}
+
+@(private = "file")
+State_roomOpenEntryContent :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	keys: RoomChainKeys,
@@ -1974,11 +1999,19 @@ roomMessageDisplay :: proc(
 	placeholder: bool,
 	badge: string,
 ) {
+	// Protocol 30: a tombstone (D6) and the latest verified edit (message_edits.odin).
+	if entry.deleted {
+		return messageDeletedText(entry.edit), true, ""
+	}
 	switch entry.security.protection {
 	case .Plain:
-		return entry.content, false, ""
+		return messageEditShownText(entry.content, entry.edit, entry.editCount, allocator),
+			false,
+			""
 	case .Encrypted:
-		return entry.content, false, "🔒"
+		return messageEditShownText(entry.content, entry.edit, entry.editCount, allocator),
+			false,
+			"🔒"
 	case .Failed:
 		return DIRECT_UNDECRYPTABLE_TEXT, true, ""
 	case .Hidden:

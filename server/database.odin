@@ -433,18 +433,20 @@ DATABASE_LIST_ROOMS_FOR_USER_SQL ::
 	DATABASE_ROOMS_WITH_UNREAD_SQL +
 	"ORDER BY r.name"
 
-// The requester's ($1) rooms r with their marker m and unread count unread.n (capped at $2):
-// the unread rule itself, which the read marker migration tests run on schemas older than
-// the room list's other columns.
+// The requester's ($1) rooms r with their marker m and unread count unread.n (capped at $2;
+// protocol 30, D13: deleted messages never count): the unread rule itself, which the read
+// marker migration tests run on schemas older than the room list's other columns.
 DATABASE_ROOMS_WITH_UNREAD_SQL ::
 	"FROM rooms r JOIN room_members rm ON rm.room_id = r.id AND rm.user_id = $1::bigint " +
 	"LEFT JOIN room_read_markers m ON m.user_id = rm.user_id AND m.room_id = r.id " +
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
 	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NOT NULL AND cm.room_id = r.id " +
 	"AND cm.id > m.last_read_message_id AND cm.sender_user_id <> rm.user_id " +
+	DATABASE_UNREAD_ROOM_NOT_DELETED_SQL +
 	"UNION ALL " +
 	"SELECT 1 FROM chat_messages cm WHERE m.user_id IS NULL AND cm.room_id = r.id " +
 	"AND cm.created_at > rm.joined_at AND cm.sender_user_id <> rm.user_id " +
+	DATABASE_UNREAD_ROOM_NOT_DELETED_SQL +
 	"LIMIT $2::bigint) capped) unread "
 
 databaseExecuteListRoomsForUser :: proc(
@@ -566,6 +568,9 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 // column: the sender's, Ready, unbound, uploaded to this room, encrypted exactly when the
 // message is sealed, with the size and, for plaintext, the hash the message names); the insert
 // stores the count and the bound CTE binds the blobs to the new message, all in this statement.
+//
+// Protocol 30 (#76): a client message ID or chain index the sender already used for an edit
+// (chat_message_edits) stores nothing either, like one used for a message: a duplicate.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
 	"perms AS (SELECT " + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$2" +
@@ -597,7 +602,10 @@ DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"(SELECT count(*) FROM bind_in)::smallint " +
 	"WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
 	"AND (SELECT ok FROM may_send) AND (SELECT ok FROM may_attach) " +
-	"AND (SELECT ok FROM bind_ok) ON CONFLICT DO NOTHING RETURNING id, created_at), " +
+	"AND (SELECT ok FROM bind_ok) AND NOT EXISTS (SELECT 1 FROM chat_message_edits e " +
+	"WHERE e.sender_user_id = $2 AND (e.client_message_id = decode($5::text, 'hex') " +
+	"OR ($4::text <> '' AND e.chain_id = decode($7::text, 'hex') " +
+	"AND e.chain_index = $8::integer))) ON CONFLICT DO NOTHING RETURNING id, created_at), " +
 	DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL + "chat_message_id" +
 	DATABASE_ATTACHMENT_BIND_UPDATE_CLOSE_SQL +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
@@ -778,7 +786,9 @@ DATABASE_HISTORY_SINCE_CLOSE_SQL :: ") AND hs_r.access <> 1 AND hs_r.history_vis
 // chat_messages_by_room_id_and_created_at, so a page that reaches the cut stops there instead
 // of scanning every older message; the created_at test stays as the rule itself.
 //
-// Protocol 27: the last column is the message's attachments (DATABASE_MESSAGE_ATTACHMENTS_*).
+// Protocol 27: column 9 is the message's attachments (DATABASE_MESSAGE_ATTACHMENTS_*). Protocol
+// 30 (#76): the ten columns after it are the edit count, the latest edit and the tombstone
+// (DATABASE_MESSAGE_EDIT_COLUMNS_SQL); a deleted message lists no attachments.
 DATABASE_GET_ROOM_HISTORY_SQL ::
 	"WITH member AS (SELECT EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $1 AND user_id = $2) AS ok, " +
@@ -790,15 +800,20 @@ DATABASE_GET_ROOM_HISTORY_SQL ::
 	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
 	"c.nickname, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
 	"COALESCE(encode(c.sealed, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), ''), " +
+	"CASE WHEN me.deleted_at IS NULL THEN " +
 	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "chat_message_id = c.id" +
-	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " " +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " ELSE '' END, " +
+	DATABASE_MESSAGE_EDIT_COLUMNS_SQL + " " +
 	"FROM member m CROSS JOIN first_visible f LEFT JOIN LATERAL (" +
 	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname, " +
 	"cm.client_message_id, cm.sealed, cm.signature " +
 	"FROM chat_messages cm JOIN users u ON u.id = cm.sender_user_id " +
 	"WHERE m.ok AND cm.room_id = $1 AND ($3::bigint = 0 OR cm.id < $3::bigint) " +
 	"AND cm.id >= f.id AND (m.since IS NULL OR cm.created_at > m.since) " +
-	"ORDER BY cm.id DESC LIMIT $4) c ON true ORDER BY c.id DESC"
+	"ORDER BY cm.id DESC LIMIT $4) c ON true " +
+	DATABASE_ROOM_MESSAGE_EDITS_JOIN_OPEN_SQL + "c.id" +
+	DATABASE_ROOM_MESSAGE_EDITS_JOIN_MIDDLE_SQL + "c.id" + DATABASE_MESSAGE_EDITS_JOIN_CLOSE_SQL +
+	"ORDER BY c.id DESC"
 
 // A hex column as owned bytes, nil for NULL, '' or malformed hex.
 databaseGetOwnedHexBytes :: proc(result: pg.Result, row: i32, column: i32) -> []u8 {
@@ -888,6 +903,8 @@ databaseExecuteGetRoomHistory :: proc(
 		attachmentsText := databaseGetText(result, row, 9)
 		message.attachments = databaseParseAttachmentRefs(attachmentsText)
 		delete(attachmentsText)
+		message.editCount, message.lastEdit, message.deleted, message.deletion =
+			databaseGetMessageEditColumns(result, row, 10)
 		append(&messages, message)
 	}
 	return databaseSuccess(
@@ -1263,6 +1280,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteRestrictedUsers(conn)
 	case common.DatabaseAttachmentRequest:
 		return databaseExecuteAttachmentRequest(conn, r)
+	case common.DatabaseMessageChangeRequest:
+		return databaseExecuteMessageChange(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

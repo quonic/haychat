@@ -7,7 +7,7 @@ sealed room message, a member log Create entry, the plaintext fallback signature
 plaintext room message, the safety number, a RoomKeyForward envelope, and, for encrypted voice,
 a VoiceKey envelope and a sealed voice payload; for attachments (protocol 27) the v2 plaintext
 signatures, the sealed plaintext with an "attachments" array, Padme and the encrypted file
-format) with Python's `cryptography` package (OpenSSL), not with the Odin code.
+format; for protocol 30 the signed edits and deletes) with Python's `cryptography` package (OpenSSL), not with the Odin code.
 The Odin tests (common/e2ee_test.odin, common/voice_e2ee_test.odin and
 common/attachment_e2ee_test.odin) compare their own output byte for byte with the values
 printed here.
@@ -464,6 +464,27 @@ def plain_v2_vectors():
     show("KAT_PLAIN_V2_SIGNATURE", ALICE_PRIVATE.sign(signed))
 
 
+def edit_delete_vectors():
+    """alice's signed edits and deletes (protocol 30, #76): a room edit, a DM edit, and the two
+    deletes, of the messages room_plain_vector and fallback_vector sign."""
+    room_original = label_bytes("haychat-e2ee-test-room-plain-client-message-id", 16)
+    dm_original = label_bytes("haychat-e2ee-test-plain-client-message-id", 16)
+    edit_id = label_bytes("haychat-e2ee-test-edit-client-message-id", 16)
+    content = "room hello, edited".encode()
+    signed = b"haychat-room-edit-v1" + SERVER_PUBLIC + i64(ROOM_ID) + i64(ALICE_ID)
+    signed += room_original + edit_id + u32(len(content)) + content
+    show("KAT_ROOM_EDIT_SIGNATURE", ALICE_PRIVATE.sign(signed))
+    content = "plain hello, edited".encode()
+    signed = b"haychat-dm-edit-v1" + SERVER_PUBLIC + i64(ALICE_ID) + i64(BOB_ID)
+    signed += dm_original + edit_id + u32(len(content)) + content
+    show("KAT_DM_EDIT_SIGNATURE", ALICE_PRIVATE.sign(signed))
+    signed = b"haychat-room-delete-v1" + SERVER_PUBLIC + i64(ROOM_ID) + i64(ALICE_ID)
+    signed += room_original
+    show("KAT_ROOM_DELETE_SIGNATURE", ALICE_PRIVATE.sign(signed))
+    signed = b"haychat-dm-delete-v1" + SERVER_PUBLIC + i64(ALICE_ID) + i64(BOB_ID) + dm_original
+    show("KAT_DM_DELETE_SIGNATURE", ALICE_PRIVATE.sign(signed))
+
+
 def cbor_head(major, value):
     if value < 24:
         return bytes([major << 5 | value])
@@ -559,6 +580,7 @@ def main():
     plain_v2_vectors()
     sealed_attachments_vector()
     attachment_vectors()
+    edit_delete_vectors()
 
 
 if __name__ == "__main__":
