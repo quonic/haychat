@@ -130,7 +130,7 @@ expect_ok a admin-rename "$user_b" lock "$renamed_b"
 expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"rename\",\"userID\":$user_b," \
 	"$start_a" "client a got no admin_result for the rename"
 renamed_pattern="^\\{\"event\":\"account_updated\",.*\"nickname\":\"$renamed_b\","
-renamed_pattern+="\"nicknameLocked\":true,\"permissions\":\\[\\]\\}$"
+renamed_pattern+="\"nicknameLocked\":true,\"permissions\":\\[\\],"
 expect_event b "$renamed_pattern" "$start_b" "client b did not see its new locked name"
 expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,\"nickname\":\"$renamed_b\"," \
 	"$start_a" "client a did not see user_updated with b's new name"
@@ -141,7 +141,7 @@ connected_b=$(tail -n +"$((start_b + 1))" "$work_dir/b.out" | grep -F '{"event":
 	tail -n 1)
 echo "    b< $connected_b"
 locked_name="\"nickname\":\"$renamed_b\",\"isAdmin\":false,\"nicknameLocked\":true,"
-locked_name+="\"permissions\":[]}"
+locked_name+="\"permissions\":[],"
 [[ "$connected_b" == *"$locked_name"* ]] ||
 	fail "client b's reconnect did not keep the locked name $renamed_b: $connected_b"
 echo "==> [admin] rename passed"
@@ -246,7 +246,7 @@ expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-assign\",\"us
 	"$start_a" "client a got no admin_result for the assignment"
 expect_event b "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"roleIds\":\\[$role_id\\]" \
 	"$start_b" "client b did not see its new role in user_updated"
-expect_event b '^\{"event":"account_updated",.*"permissions":\["manage-rooms"\]\}$' \
+expect_event b '^\{"event":"account_updated",.*"permissions":\["manage-rooms"\],' \
 	"$start_b" "client b did not see account_updated with manage-rooms"
 expect_ok b status
 [[ "$last_result" == *'"permissions":["manage-rooms"]'* ]] ||
@@ -260,7 +260,7 @@ start_b=$(lines b)
 expect_ok a roles-delete "$role_id"
 expect_event b "^\\{\"event\":\"role_deleted\",\"serverID\":1,\"roleID\":$role_id\\}$" \
 	"$start_b" "client b did not see the role deleted"
-expect_event b '^\{"event":"account_updated",.*"permissions":\[\]\}$' "$start_b" \
+expect_event b '^\{"event":"account_updated",.*"permissions":\[\],' "$start_b" \
 	"client b did not lose manage-rooms with the role"
 start_b=$(lines b)
 expect_ok b room-create text "adm-refused-again-$run_tag"

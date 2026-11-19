@@ -357,8 +357,13 @@ headlessWriteRegistrationCreated :: proc(harness: ^HeadlessHarness, event: ^Clie
 
 // --invite-code: the code goes out once, when the first registration_required arrives.
 headlessAutoRegister :: proc(harness: ^HeadlessHarness, event: ^ClientTransportRuntimeEvent) {
-	if len(harness.autoInviteCode) == 0 || harness.autoRegisterSent ||
-	   event.registrationRequestStatus == .Pending {
+	if len(harness.autoInviteCode) == 0 || harness.autoRegisterSent {
+		return
+	}
+	if event.registrationRequestStatus == .Pending {
+		// The request went out with an earlier session: nothing to send, startup is done.
+		harness.autoRegisterSent = true
+		harness.autoRegisterAnswered = true
 		return
 	}
 	harness.autoRegisterSent = true
