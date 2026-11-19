@@ -236,7 +236,7 @@ expect_ok a roles-save 0 manage-rooms "$role_name"
 role_line=$(wait_for_match a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\"," \
 	"$start_a") || fail "client a got no admin_result for the role"
 echo "    a< $role_line"
-[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the role's admin_result has no roleID"
+[[ "$role_line" =~ \"roleID\":([0-9]+)[,}] ]] || fail "the role's admin_result has no roleID"
 role_id=${BASH_REMATCH[1]}
 expect_event b "^\\{\"event\":\"role_updated\",.*\"id\":$role_id,\"name\":\"$role_name\"," \
 	"$start_b" "client b did not see the new role"
@@ -299,7 +299,7 @@ expect_ok a roles-save 0 none "$speaker_role"
 save_pattern="^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\","
 role_line=$(wait_for_match a "$save_pattern" "$start_a") ||
 	fail "client a got no admin_result for the speakers role"
-[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the speakers role has no roleID"
+[[ "$role_line" =~ \"roleID\":([0-9]+)[,}] ]] || fail "the speakers role has no roleID"
 speakers=${BASH_REMATCH[1]}
 start_a=$(lines a)
 expect_ok a room-permissions-set "$quiet" speak "$speakers=send"
