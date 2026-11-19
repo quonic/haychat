@@ -541,8 +541,9 @@ HeadlessAdminResultJSON :: struct {
 	roleID:    int,
 	inviteID:  int,
 	requestID: int,
-	// Protocol 28: the attachment an attachment-remove removed (hex; "" for other actions).
-	blobID:    string,
+	// Protocol 28: the attachment an attachment-remove removed (hex), left out for every other
+	// action so their lines stay as they were.
+	blobID:    string `json:"blobID,omitempty"`,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
