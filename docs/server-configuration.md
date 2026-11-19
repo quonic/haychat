@@ -51,7 +51,7 @@ Paths are resolved relative to the server's working directory.
 | `HAYCHAT_MAX_FILE_SIZE` | `10485760` | Bytes |
 | `HAYCHAT_MAX_STORAGE_CAPACITY` | `1073741824` | Bytes |
 | `HAYCHAT_SERVER_PRIVATE_KEY`, `HAYCHAT_SERVER_PUBLIC_KEY` | unset | A fixed server identity (hex). When both are unset, the server loads or generates `HAYCHAT_SERVER_IDENTITY_FILE` |
-| `HAYCHAT_ADMIN_PUBLIC_KEY` | unset | Hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname. `./dev.sh key [PROFILE]` prints a dev client profile's key |
+| `HAYCHAT_ADMIN_PUBLIC_KEY` | unset | Hex Ed25519 client public key allowed to claim keyless accounts that hold server roles, such as the seeded `admin`. Without it, those accounts cannot be claimed over the network. Ordinary keyless accounts are still bound to the first key that connects with their nickname (on an Open server). Since protocol 25 this key may also always sign up, in every registration mode, unrestricted and without approval. `./dev.sh key [PROFILE]` prints a dev client profile's key |
 
 ### Voice
 
@@ -66,6 +66,20 @@ range; a value that does not parse uses the default.
 | `HAYCHAT_VOICE_MAX_PARTICIPANTS` | `25` (1 to 200) | Voice sessions per room. An account has one voice session, so a user joining from a second device takes the first device's place. A join into a full room is refused with "voice room is full" |
 | `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` | `60` (1 to 1000) | Per-connection rate limit for voice datagrams, as a token bucket with a burst of a third of the rate. A client sends 50 per second while talking, so values below 50 cut speech up |
 | `HAYCHAT_VOICE_MAX_FRAME_BYTES` | `512` (64 to 512) | The largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes. In an encrypted room it counts the Opus bytes inside the sealed payload, without its 18 bytes of overhead |
+
+## Registration Mode
+
+Who may sign up is not an environment variable: it is stored in the database
+(`server_settings.registration_mode`, protocol 25) so admins can change it live from the
+client. A new or upgraded server is **Open**. Two SQL helpers change things without a client
+(see [deploy/README.md](../deploy/README.md#first-time-setup)):
+
+- `deploy/sql/set-registration-mode.sql` (`psql -v mode=open|invite|approval -f ...`) sets the
+  mode; new sign-ins follow it at once.
+- `deploy/sql/create-invite.sql` (`psql -v uses=1 -v days=7 -v note=... -f ...`) prints a new
+  invite code, for an operator who has no admin account yet. Only its sha256 is stored.
+
+`HAYCHAT_ADMIN_PUBLIC_KEY` can always sign up, whatever the mode.
 
 ## Startup and Exit Status
 
@@ -86,6 +100,7 @@ once), and recorded in the `schema_migrations` table.
 | 1 | The v0.1.0-rc1 schema (baseline) |
 | 2 | Read markers behind unread counts (protocol 11) |
 | 3 | The name lock and ban columns of `users` and the room type of `rooms` (protocol 14); existing accounts stay unlocked and unbanned, existing rooms become text and voice |
+| 13 | Registration (protocol 25): `server_settings` (the registration mode, migrated as Open), `invites`, `invite_roles`, `registration_requests`, and `users.restricted`/`invite_id`; existing accounts stay unrestricted |
 
 - An empty database gets every migration.
 - A database created before migrations existed (v0.1.0-rc1 and earlier dev databases) is adopted

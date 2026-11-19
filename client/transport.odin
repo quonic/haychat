@@ -751,6 +751,27 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		transport.authenticatedPermissions = authSuccess.permissions & common.SERVER_PERMISSIONS_ALL
 		return result, true
 
+	case .ServerRegistrationRequired:
+		// Protocol 25 (#43, D12): the key must sign up with an invite code. This client cannot
+		// yet (G2 adds the sign-up), so it stops here as a failure that is not retried.
+		if transport.transport.phase != .AwaitingAuthResult {
+			ClientServerTransport_fail(transport, "unexpected registration notice")
+			return result, false
+		}
+		required: common.ServerRegistrationRequiredPayload
+		if cbor.unmarshal(outerPacket.payload, &required) != nil {
+			common.ServerRegistrationRequiredPayload_deinit(&required)
+			ClientServerTransport_fail(transport, "invalid registration notice")
+			return result, false
+		}
+		defer common.ServerRegistrationRequiredPayload_deinit(&required)
+		message := strings.concatenate(
+			{CLIENT_REGISTRATION_REQUIRED_MESSAGE, ": ", required.message},
+		)
+		defer delete(message)
+		ClientServerTransport_fail(transport, message)
+		return result, false
+
 	case .ServerAuthFailure:
 		authFailure: common.ServerAuthFailurePayload
 		if cbor.unmarshal(outerPacket.payload, &authFailure) != nil {

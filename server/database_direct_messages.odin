@@ -14,20 +14,25 @@ import "shared:pg"
 // message), so an envelope is stored only while the recipient still has that key. A client
 // message ID the sender used before stores nothing (direct_messages_sender_client_message_id).
 // It always returns exactly one row: whether the recipient was accepted, then the stored ID
-// and time (NULL when nothing was stored) and both nicknames.
+// and time (NULL when nothing was stored), both nicknames, and (protocol 25, D17) whether the
+// two accounts may exchange messages: neither is restricted, they share a room, or one is an
+// admin (database_registration.odin). Nothing is stored when they may not.
 DATABASE_POST_DIRECT_MESSAGE_SQL ::
 	"WITH recipient AS (SELECT id, nickname FROM users " +
 	"WHERE id = $2::bigint AND id <> $1::bigint " +
 	"AND ($7::text = '' OR public_key = decode($7::text, 'hex'))), " +
+	"allowed AS (SELECT " + DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" +
+	DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$2" + DATABASE_USERS_MAY_MEET_CLOSE_SQL + " AS ok), " +
 	"stored AS (INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
 	"client_message_id, signature, envelope) " +
 	"SELECT $1::bigint, recipient.id, $3::text, decode(NULLIF($4::text, ''), 'hex'), " +
 	"decode(NULLIF($5::text, ''), 'hex'), decode(NULLIF($6::text, ''), 'hex') FROM recipient " +
+	"WHERE (SELECT ok FROM allowed) " +
 	"ON CONFLICT (sender_user_id, client_message_id) WHERE client_message_id IS NOT NULL " +
 	"DO NOTHING RETURNING id, created_at) " +
 	"SELECT EXISTS (SELECT 1 FROM recipient), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $1::bigint), ''), " +
-	"COALESCE((SELECT nickname FROM recipient), '') " +
+	"COALESCE((SELECT nickname FROM recipient), ''), (SELECT ok FROM allowed)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // The identity key of the recipient $2 of a message from $1, as hex ('' for an account without
@@ -41,8 +46,16 @@ DATABASE_DIRECT_MESSAGE_RECIPIENT_KEY_SQL ::
 // not exist or the page is empty. Messages in both directions between $1 and $2 form one
 // conversation. The caller passes limit + 1 as $4 to detect older messages. The protocol 17
 // columns come as hex, '' when NULL.
+//
+// Protocol 25 (D17): a peer the requester may not meet (a restricted account on either side,
+// no shared room, no admin) counts as missing unless the two already have a conversation, whose
+// history stays readable after the last shared room is gone.
 DATABASE_GET_DIRECT_HISTORY_SQL ::
-	"WITH peer AS (SELECT EXISTS (SELECT 1 FROM users WHERE id = $2::bigint) AS ok) " +
+	"WITH peer AS (SELECT (EXISTS (SELECT 1 FROM users WHERE id = $2::bigint) AND (" +
+	DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" + DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$2" +
+	DATABASE_USERS_MAY_MEET_CLOSE_SQL + " OR EXISTS (SELECT 1 FROM direct_messages h " +
+	"WHERE (h.sender_user_id = $1::bigint AND h.recipient_user_id = $2::bigint) " +
+	"OR (h.sender_user_id = $2::bigint AND h.recipient_user_id = $1::bigint)))) AS ok) " +
 	"SELECT p.ok, d.id::text, d.sender_user_id::text, d.recipient_user_id::text, " +
 	"d.created_at::text, d.content, d.sender_nickname, d.recipient_nickname, " +
 	"COALESCE(encode(d.client_message_id, 'hex'), ''), COALESCE(encode(d.envelope, 'hex'), ''), " +
@@ -87,8 +100,16 @@ DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"AND d.id > COALESCE(m.last_read_message_id, 0) LIMIT $3::bigint) capped) unread " +
 	"ORDER BY c.id DESC"
 
-// Every account, the requester included. Online flags are not stored; the router adds them.
+// Every account the requester ($1) may see, the requester included. Online flags are not
+// stored; the router adds them.
+//
+// Protocol 25 (D17): admins and holders of ApproveRegistrations see every account; anyone else
+// sees an account unless one of the two is restricted, and then only when they share a room or
+// the account is an admin. The eighth column is the account's restriction.
 DATABASE_LIST_USERS_SQL ::
+	"WITH viewer AS (SELECT u.id, u.restricted, ((" + DATABASE_ACTOR_PERMISSIONS_SQL + " & " +
+	DATABASE_PERMISSION_APPROVE_REGISTRATIONS_SQL + ") <> 0) AS sees_all " +
+	"FROM users u WHERE u.id = $1::bigint) " +
 	"SELECT u.id::text, u.nickname, EXISTS (SELECT 1 FROM user_server_roles usr " +
 	"JOIN server_roles sr ON sr.id = usr.role_id WHERE usr.user_id = u.id " +
 	"AND sr.name = 'admin')::text, (u.banned_at IS NOT NULL)::text, " +
@@ -97,7 +118,13 @@ DATABASE_LIST_USERS_SQL ::
 	"WHERE k.user_id = u.id))::text, " +
 	// Protocol 23: the account's role IDs, comma separated.
 	"COALESCE((SELECT string_agg(usr.role_id::text, ',' ORDER BY usr.role_id) " +
-	"FROM user_server_roles usr WHERE usr.user_id = u.id), '') FROM users u " +
+	"FROM user_server_roles usr WHERE usr.user_id = u.id), ''), u.restricted::text " +
+	"FROM users u CROSS JOIN viewer v WHERE u.id = v.id OR v.sees_all " +
+	"OR (NOT v.restricted AND NOT u.restricted) " +
+	"OR EXISTS (SELECT 1 FROM room_members ma JOIN room_members mb ON mb.room_id = ma.room_id " +
+	"WHERE ma.user_id = v.id AND mb.user_id = u.id) " +
+	"OR EXISTS (SELECT 1 FROM user_server_roles ah JOIN server_roles ar ON ar.id = ah.role_id " +
+	"WHERE ah.user_id = u.id AND ar.builtin) " +
 	"ORDER BY lower(u.nickname), u.id"
 
 databaseExecutePostDirectMessage :: proc(
@@ -173,6 +200,9 @@ databaseExecutePostDirectMessage :: proc(
 		return databaseResultError(&result)
 	}
 
+	if databaseGetBool(result, 0, 0) && !databaseGetBool(result, 0, 5) {
+		return databaseSuccess(common.DatabasePostDirectMessageResult{outcome = .Restricted})
+	}
 	if !databaseGetBool(result, 0, 0) {
 		// The recipient checked above lost the key the envelope names in between.
 		outcome := common.DirectMessagePostOutcome.UnknownRecipient
@@ -434,8 +464,14 @@ databaseExecuteListDirectConversations :: proc(
 	)
 }
 
-databaseExecuteListUsers :: proc(conn: pg.Conn) -> common.DatabaseQueryResponse {
-	result := databaseExecParams(conn, DATABASE_LIST_USERS_SQL, nil)
+databaseExecuteListUsers :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseUserDirectoryRequest,
+) -> common.DatabaseQueryResponse {
+	viewerParam := databaseIntParam(request.viewerUserId)
+	defer delete(viewerParam)
+	params := [?][^]byte{transmute([^]byte)viewerParam}
+	result := databaseExecParams(conn, DATABASE_LIST_USERS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}
@@ -462,6 +498,7 @@ databaseExecuteListUsers :: proc(conn: pg.Conn) -> common.DatabaseQueryResponse 
 				isBanned = databaseGetBool(result, row, 3),
 				identityPublicKey = databaseGetIdentityPublicKey(result, row, 4),
 				hasEncryptionKey = databaseGetBool(result, row, 5),
+				isRestricted = databaseGetBool(result, row, 7),
 			},
 		)
 	}

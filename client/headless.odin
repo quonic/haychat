@@ -497,6 +497,10 @@ HEADLESS_ADMIN_ACTION_NAMES := [common.AdminAction]string {
 	.SaveRole = "role-save",
 	.DeleteRole = "role-delete",
 	.SetUserRoles = "role-assign",
+	.RevokeInvite = "invite-revoke",
+	.SetRegistrationMode = "registration-mode",
+	.DecideRegistration = "registration-decide",
+	.SetRestricted = "restricted",
 }
 
 // The words room-create and room-edit take for a room type, and what room_created,

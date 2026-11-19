@@ -1318,3 +1318,63 @@ testSignedMessagesMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		"expected schema validation to require migration 10's checks",
 	)
 }
+
+// Migration 13 (protocol 25, #43 G1) from version 12 with rows: every account stays and is
+// unrestricted, the server starts Open, and the new tables are empty.
+@(test)
+testRegistrationMigrationUpgradesVersion12AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "registration_v12")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:12])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 12 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:13])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 12, version = 13},
+		fmt.tprintf("expected only migration 13 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:13])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept,
+		"expected every account, room and message intact",
+	)
+	state := databaseMigrationTestValue(
+		conn,
+		"SELECT (SELECT registration_mode FROM server_settings)::text || ':' || " +
+		"(SELECT count(*) FROM users WHERE restricted OR invite_id IS NOT NULL)::text || ':' || " +
+		"(SELECT count(*) FROM invites)::text || ':' || " +
+		"(SELECT count(*) FROM registration_requests)::text",
+	)
+	assert(
+		state == "1:0:0:0",
+		fmt.tprintf("expected Open, nobody restricted and no codes or requests, got %q", state),
+	)
+	probes := [?]string {
+		"UPDATE server_settings SET registration_mode = 4",
+		"INSERT INTO server_settings (id) VALUES (2)",
+		"INSERT INTO invites (code_hash) VALUES ('\\x00')",
+		"INSERT INTO invites (code_hash, max_uses, uses) VALUES (decode(repeat('00', 32), " +
+		"'hex'), 1, 2)",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"OR unique_violation THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+}

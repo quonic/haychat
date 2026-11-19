@@ -168,7 +168,7 @@ testAdminServerMessagesBecomeRuntimeEvents :: proc(t: ^testing.T) {
 		event := testAdminTranslate(
 			&transport,
 			.ServerAdminActionResult,
-			BadResult{action = 9, userId = 1, message = "?"},
+			BadResult{action = 99, userId = 1, message = "?"},
 		)
 		defer ClientTransportRuntimeEvent_deinit(&event)
 		testing.expect(t, event.kind == .ProtocolError, "expected an unknown action refused")

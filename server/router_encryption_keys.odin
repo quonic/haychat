@@ -116,20 +116,16 @@ MainRouterState_handlePublishEncryptionKeyResult :: proc(
 	if !published.stored {
 		return
 	}
-	payload := common.ServerUserKeyChangedPayload {
-		bundle = published.bundle,
-	}
-	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				recipientPeerID,
-				.ServerUserKeyChanged,
-				payload,
-			)
-		}
-	}
+	// Protocol 25 (D17): only to sessions that may see the account.
+	userID := published.bundle.userId
+	MainRouterState_sendAboutUser(
+		pm,
+		state,
+		userID,
+		MainRouterState_userIsRestricted(state, userID),
+		0,
+		MainRouterVisibilityPayload{kind = .KeyChanged, keyBundle = published.bundle},
+	)
 }
 
 MainRouterState_handleFetchUserKeysResult :: proc(

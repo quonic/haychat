@@ -468,6 +468,11 @@ describeConnectFailure :: proc(
 			". An admin has to lift the ban before you can connect again.",
 			allocator,
 		)
+	case .RegistrationRequired:
+		return strings.clone(
+			len(detail) > 0 ? detail : CLIENT_REGISTRATION_REQUIRED_MESSAGE,
+			allocator,
+		)
 	case .None, .Unreachable, .Other:
 	}
 	if len(detail) == 0 {
@@ -607,7 +612,8 @@ buildConnectionBanner :: proc(
 		     .ServerKeyChanged,
 		     .ProtocolMismatch,
 		     .InvalidName,
-		     .InvalidIdentity:
+		     .InvalidIdentity,
+		     .RegistrationRequired:
 			banner.text = fmt.aprintf(
 				"Could not connect to %s: %s",
 				serverName,

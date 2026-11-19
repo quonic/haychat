@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 24
+protocolVersion: ProtocolVersion = 25
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -73,14 +73,42 @@ ServerHello :: struct {
 	signature:                SignatureBytes,
 }
 
+// ClientRegister (wire value 14; protocol 25, #43 G1, plan D12-D14) is encrypted: a session
+// may send it only after ServerRegistrationRequired activated the transport. inviteCode is the
+// code as the user typed it (at most INVITE_CODE_TEXT_MAX_BYTES; spaces and dashes are
+// ignored, see parseInviteCode; empty only on an Open server, which then creates a plain
+// account), and reason the applicant's 0..REGISTRATION_REASON_MAX_CHARS characters, required
+// (1..) when the code needs approval. The account's name is the session's ClientHello
+// nickname. Both strings are owned once decoded (ClientRegisterRequest_deinit).
 ClientRegisterRequest :: struct {
-	nickname: string,
+	inviteCode: string,
+	reason:     string,
 }
 
+ClientRegisterRequest_deinit :: proc(request: ^ClientRegisterRequest) {
+	wipeAndDeleteString(&request.inviteCode)
+	delete(request.reason)
+	request.reason = ""
+}
+
+// ServerRegisterResponse (wire value 15; protocol 25) answers one ClientRegister, encrypted.
+// Created: the account exists and the session is authenticated from now on, with auth carrying
+// what ServerAuthSuccess would have (no second handshake). Pending: a sign-up request waits
+// for an approver; the session stays registering and is completed live when it is approved
+// (another ServerRegisterResponse, Created) or answered Declined. Refused: message says why
+// (an invalid code is always INVITE_CODE_INVALID_MESSAGE); the session stays registering until
+// it runs out of attempts or time. Declined: an approver declined the request, message holds
+// the reason. message and auth's strings are owned once decoded.
 ServerRegisterResponsePayload :: struct {
-	success: bool,
+	status:  RegisterStatus,
 	message: string,
-	userId:  int,
+	auth:    ServerAuthSuccessPayload,
+}
+
+ServerRegisterResponsePayload_deinit :: proc(payload: ^ServerRegisterResponsePayload) {
+	delete(payload.message)
+	payload.message = ""
+	ServerAuthSuccessPayload_deinit(&payload.auth)
 }
 
 ClientAuthProof :: struct {
@@ -98,9 +126,12 @@ ServerAuthChallengePayload :: struct {
 	challenge: AuthChallengeBytes,
 }
 
+// registering (protocol 25, plan D12): the client asks to sign up with an invite code even
+// when the server is Open. A key that already owns an account signs in as usual.
 ClientAuthRequestPayload :: struct {
-	sessionID: SessionID,
-	signature: SignatureBytes,
+	sessionID:   SessionID,
+	signature:   SignatureBytes,
+	registering: bool,
 }
 
 // isAdmin (protocol 8) tells the client whether the account holds the server's admin role at
@@ -117,13 +148,18 @@ ClientAuthRequestPayload :: struct {
 // permissions (protocol 23, #95) is the account's effective server permissions: the union of
 // its roles' permissions, or every permission for an admin. Like isAdmin it only decides which
 // controls a client offers; the server checks the permission again in every statement.
+//
+// registrationMode and isRestricted (protocol 25, #43): the server's registration mode, which
+// ServerRegistrationMode keeps current, and whether the account is restricted (plan D11, D17).
 ServerAuthSuccessPayload :: struct {
-	userId:         int,
-	message:        string,
-	isAdmin:        bool,
-	nickname:       string,
-	nicknameLocked: bool,
-	permissions:    ServerPermissions,
+	userId:           int,
+	message:          string,
+	isAdmin:          bool,
+	nickname:         string,
+	nicknameLocked:   bool,
+	permissions:      ServerPermissions,
+	registrationMode: RegistrationMode,
+	isRestricted:     bool,
 }
 
 ServerAuthFailurePayload :: struct {
@@ -390,6 +426,21 @@ MessageType :: enum {
 	ClientAdminSetRoomPermissions, // ClientAdminSetRoomPermissionsPayload: a room's grants
 	ClientAdminFetchRoomPermissions, // ClientAdminFetchRoomPermissionsPayload: read them
 	ServerAdminRoomPermissions, // ServerAdminRoomPermissionsPayload: a room's grants
+	// Registration (protocol 25, #43 G1), appended so no existing wire value moves.
+	// ClientRegister and ServerRegisterResponse above carry the sign-up itself.
+	ServerRegistrationRequired, // ServerRegistrationRequiredPayload: plaintext, sign up first
+	ClientAdminSetRegistrationMode, // ClientAdminSetRegistrationModePayload: admins
+	ServerRegistrationMode, // ServerRegistrationModePayload: the mode changed, to everyone
+	ClientCreateInvite, // ClientCreateInvitePayload: CreateInvites holders
+	ServerInviteCreated, // ServerInviteCreatedPayload: the new code, the only time it is sent
+	ClientListInvites, // ClientListInvitesPayload: every code (admins) or one's own
+	ServerInviteList, // ServerInviteListPayload: answer to ClientListInvites
+	ClientRevokeInvite, // ClientRevokeInvitePayload: admins, or the code's creator
+	ClientListRegistrationRequests, // ClientListRegistrationRequestsPayload: approvers
+	ServerRegistrationRequests, // ServerRegistrationRequestsPayload: answer, with the count
+	ClientDecideRegistration, // ClientDecideRegistrationPayload: approve or decline a request
+	ServerRegistrationRequestUpdated, // ServerRegistrationRequestUpdatedPayload: to approvers
+	ClientAdminSetRestricted, // ClientAdminSetRestrictedPayload: admins: set or lift it
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -1365,6 +1416,10 @@ UserSummary :: struct {
 	// included, ascending. Owned once decoded (UserSummary_deinit). ServerUserPresence carries
 	// none.
 	roleIds:           [dynamic]int,
+	// Protocol 25 (#43, plan D11): whether the account is restricted. Restricted accounts see
+	// only accounts they share a room with (plus admins), and are seen only by those, admins
+	// and approvers (D17).
+	isRestricted:      bool,
 }
 
 // Frees a UserSummary's owned fields: the nickname and roleIds.
@@ -1590,6 +1645,11 @@ AdminAction :: enum u8 {
 	SaveRole     = 4,
 	DeleteRole   = 5,
 	SetUserRoles = 6,
+	// Protocol 25 (#43): registration.
+	RevokeInvite        = 7,
+	SetRegistrationMode = 8,
+	DecideRegistration  = 9,
+	SetRestricted       = 10,
 }
 
 // ClientAdminSetRole: grant (isAdmin true) or revoke the admin role.
@@ -1620,8 +1680,8 @@ ClientAdminKickUserPayload :: struct {
 // ClientAdminBanUser: banned true bans the account (users.banned_at, users.ban_reason), ends
 // every session of it with ServerSessionEnded{Banned}, and refuses its sign-in with
 // ServerAuthFailure "This account is banned from this server" (plus ": reason" when set).
-// banned false lifts the ban. Sign-up is open, so a banned person can still connect with a new
-// key as a new account. reason is owned once decoded.
+// banned false lifts the ban. On an Open server a banned person can still connect with a new
+// key as a new account; registration (protocol 25) closes that. reason is owned once decoded.
 ClientAdminBanUserPayload :: struct {
 	userId: int,
 	banned: bool,
@@ -1631,11 +1691,16 @@ ClientAdminBanUserPayload :: struct {
 // ServerAdminActionResult: the requester's action succeeded. message is a sentence for people
 // and owned once decoded. roleId (protocol 23) names the role a SaveRole or DeleteRole acted on
 // (a created role's new ID); userId is 0 for them.
+//
+// Protocol 25: inviteId names the code a RevokeInvite revoked and requestId the request a
+// DecideRegistration decided; userId is the target of SetRestricted.
 ServerAdminActionResultPayload :: struct {
-	action:  AdminAction,
-	userId:  int,
-	message: string,
-	roleId:  int,
+	action:    AdminAction,
+	userId:    int,
+	message:   string,
+	roleId:    int,
+	inviteId:  int,
+	requestId: int,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
@@ -1648,11 +1713,15 @@ ServerUserUpdatedPayload :: struct {
 // every session of that account. nickname is owned once decoded. Protocol 23 (#95): permissions
 // is the account's effective set after the change; it is also sent when only that set changed
 // (a role granted or taken away, a held role edited or deleted).
+//
+// Protocol 25: isRestricted is the account's restriction after the change (an admin set or
+// lifted it with ClientAdminSetRestricted).
 ServerAccountUpdatedPayload :: struct {
 	isAdmin:        bool,
 	nickname:       string,
 	nicknameLocked: bool,
 	permissions:    ServerPermissions,
+	isRestricted:   bool,
 }
 
 // Roles and server permissions (protocol 23, #95, plan 2026-11-18 D1-D4).
@@ -2024,6 +2093,13 @@ DatabaseQueryRequest :: union {
 	DatabaseRoomKeyRequestCheckRequest,
 	DatabaseRoleRequest,
 	DatabaseRoomPermissionsRequest,
+	// Registration (protocol 25, common/registration.odin).
+	DatabaseRegisterRequest,
+	DatabaseInviteRequest,
+	DatabaseRegistrationRequestsRequest,
+	DatabaseRegistrationModeRequest,
+	DatabaseSharedRoomsRequest,
+	DatabaseRestrictedUsersRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -2032,6 +2108,8 @@ DatabaseUserIdentityRequest :: struct {
 	// Only this key may claim a keyless account that already holds server roles.
 	adminPublicKey:    IdentityPublicKeyBytes,
 	hasAdminPublicKey: bool,
+	// Protocol 25: the client asked to sign up with a code (ClientAuthRequestPayload).
+	registering:       bool,
 }
 
 DatabaseRoomListRequest :: struct {
@@ -2225,8 +2303,11 @@ DatabaseDirectConversationListRequest :: struct {
 	userId: int,
 }
 
-// Returns every account. Online flags come from the router, not the database.
-DatabaseUserDirectoryRequest :: struct {}
+// Returns every account viewerUserId may see (protocol 25, plan D17). Online flags come from
+// the router, not the database.
+DatabaseUserDirectoryRequest :: struct {
+	viewerUserId: int,
+}
 
 // Checks membership (or the peer), clamps, and moves the marker forward in one statement.
 DatabaseMarkReadRequest :: struct {
@@ -2250,6 +2331,8 @@ DatabaseAdminUserRequest :: struct {
 	locked:       bool,
 	banned:       bool,
 	reason:       string,
+	// Protocol 25: SetRestricted's new restriction.
+	restricted:   bool,
 }
 
 // Stores a bundle the router already verified against the session's identity key (protocol
@@ -2315,6 +2398,12 @@ DatabaseQueryResult :: union {
 	DatabaseRoomKeyRequestCheckResult,
 	DatabaseRoleResult,
 	DatabaseRoomPermissionsResult,
+	DatabaseRegisterResult,
+	DatabaseInviteResult,
+	DatabaseRegistrationRequestsResult,
+	DatabaseRegistrationModeResult,
+	DatabaseSharedRoomsResult,
+	DatabaseRestrictedUsersResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound
@@ -2338,6 +2427,15 @@ DatabaseUserIdentityResult :: struct {
 	nicknameLocked:   bool,
 	banned:           bool,
 	banReason:        string,
+	// Protocol 25 (#43): needsRegistration is set (userId 0) when the key has no account and
+	// the server will not create one for it: the router answers ServerRegistrationRequired.
+	// requestStatus is the key's sign-up request (decisionReason, owned, a decline's reason).
+	// registrationMode is the server's mode and isRestricted the account's restriction.
+	needsRegistration: bool,
+	registrationMode:  RegistrationMode,
+	requestStatus:     RegistrationRequestStatus,
+	decisionReason:    string,
+	isRestricted:      bool,
 }
 
 DatabaseRoomListResult :: struct {
@@ -2428,6 +2526,7 @@ DatabaseRoomMemberOutcome :: enum u8 {
 	RoleRoom, // Protocol 24: an add, removal or leave of a Role room (its roles decide)
 	EncryptedRoom, // Protocol 18: an add or leave of an encrypted room (use the member log)
 	LogDamaged, // Protocol 18: an encrypted room's stored log does not replay
+	RestrictedTarget, // Protocol 25 (D11): a restricted target, by someone not managing members
 }
 
 // memberUserIDs (owned) are the room's members after the action, ascending; access is the
@@ -2459,6 +2558,7 @@ DirectMessagePostOutcome :: enum u8 {
 	UnknownRecipient, // No such account, or the sender itself
 	InvalidEnvelope, // The envelope does not verify against the accounts' identity keys
 	Duplicate, // The sender already stored a message with this clientMessageId
+	Restricted, // Protocol 25 (D17): a restricted account on a side and no shared room
 }
 
 // storedMessage (owned) is set only when outcome is Stored.
@@ -2525,6 +2625,8 @@ DatabaseAdminUserResult :: struct {
 	nicknameLocked:   bool,
 	previousNickname: string,
 	permissions:      ServerPermissions,
+	// Protocol 25: the Public rooms a lifted restriction joined (owned, ascending).
+	addedRoomIDs:     [dynamic]int,
 }
 
 // Which role statement a DatabaseRoleRequest runs (protocol 23, server/database_roles.odin).

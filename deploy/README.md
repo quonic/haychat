@@ -19,6 +19,8 @@ and the release builds that produce the image and the client downloads. Testers 
 | `deploy/Containerfile`           | Multi-stage build of the server image: Fedora 44 with the pinned Odin toolchain builds the server; a `fedora-minimal:44` stage runs it |
 | `deploy/quadlet/`                | systemd units (podman quadlet): `haychat.pod`, `haychat-db.container`, `haychat-server.container`                                      |
 | `deploy/sql/make-admin.sql`      | Gives one existing account the admin role                                                                                              |
+| `deploy/sql/create-invite.sql`   | Prints a new invite code, for a server that is not Open and has no admin yet                                                           |
+| `deploy/sql/set-registration-mode.sql` | Sets the registration mode (`open`, `invite`, `approval`) without a client                                                       |
 | `deploy/release-artifacts.sh`    | Builds the server binary and client archives for a release                                                                             |
 | `deploy/client-README-*.txt`     | The `README.txt` shipped in each client archive                                                                                        |
 | `THIRD_PARTY_NOTICES.md`         | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt`                                    |
@@ -56,7 +58,7 @@ the dev image and CI use.
 | Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key)                                                                                                                                                  |
 | Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
-| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the three
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
@@ -239,8 +241,35 @@ room's type (see [docs/rooms-and-accounts.md](https://git.spyingwind.com/quonic/
    reopen it (or wait for its next reconnect). The room controls then appear. Admins you
    appoint from the client afterwards get the role at once, without reconnecting.
 
-A banned account cannot sign in, but sign-up is open: a banned person can connect again with a
-new identity key as a new account.
+A banned account cannot sign in. While sign-up is open, a banned person can connect again with
+a new identity key as a new account; close sign-up to stop that (below).
+
+### Registration Mode and Invite Codes
+
+A new or upgraded server is **Open**: anyone who connects gets an account. An admin changes the
+mode from the client (Server settings, Admin), or you set it with SQL:
+
+```sh
+podman exec -i haychat-db psql -U haychat -d haychat -v mode=invite <deploy/sql/set-registration-mode.sql
+```
+
+`mode` is `open`, `invite` (a valid invite code is needed) or `approval` (a valid code makes a
+sign-up request with a written reason, which an account with Approve registrations accepts or
+declines). New sign-ins follow it at once.
+
+To close sign-up before anyone has an account, either set `HAYCHAT_ADMIN_PUBLIC_KEY` to your
+client's key (that key may always sign up, in every mode, and you then run `make-admin.sql`
+for it as above), or print an invite code and sign up with it:
+
+```sh
+podman exec -i haychat-db psql -U haychat -d haychat -v uses=1 -v days=7 \
+	-v note='first admin' <deploy/sql/create-invite.sql
+```
+
+It prints the code once (only its sha256 is stored). `uses` (default 1, 0 for no limit),
+`days` (default 7, 0 for never) and `note` are optional, and `-v skip_approval=true` lets the
+code sign up without approval in `approval` mode. Then run `make-admin.sql` for the name you
+signed up with. Admins and accounts with Create invites make further codes from the client.
 
 `server/sql/auth_bootstrap.sql` (also in the image) is the **test fixture** the dev
 environment uses. It creates the accounts `admin` (ID 1) and `haypeer` (ID 2) and resets `#general`,

@@ -96,6 +96,10 @@ databaseAdminTestRun :: proc(
 	result.user.roleIds = make([dynamic]int, len(roleIDs), context.temp_allocator)
 	copy(result.user.roleIds[:], roleIDs[:])
 	delete(roleIDs)
+	added := result.addedRoomIDs
+	result.addedRoomIDs = make([dynamic]int, len(added), context.temp_allocator)
+	copy(result.addedRoomIDs[:], added[:])
+	delete(added)
 	return result
 }
 
@@ -429,7 +433,10 @@ testAdminActionStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 			.BannedTarget,
 			"making a banned account an admin",
 		)
-		directory := databaseExecuteRequest(conn, common.DatabaseUserDirectoryRequest{})
+		directory := databaseExecuteRequest(
+			conn,
+			common.DatabaseUserDirectoryRequest{viewerUserId = admin},
+		)
 		defer IPC__database_query_response_deinit(directory)
 		users, usersOK := directory.result.(common.DatabaseUserDirectoryResult)
 		assert(directory.success && usersOK, "expected the directory")

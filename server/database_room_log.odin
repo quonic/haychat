@@ -56,7 +56,7 @@ DATABASE_ROOM_LOG_ENTRIES_SQL ::
 // The identity keys of the accounts in $1 (a Postgres array literal); accounts without a key
 // are left out, like unknown ones.
 DATABASE_ROOM_LOG_KEYS_SQL ::
-	"SELECT id::text, encode(public_key, 'hex') FROM users " +
+	"SELECT id::text, encode(public_key, 'hex'), restricted::text FROM users " +
 	"WHERE id = ANY($1::bigint[]) AND public_key IS NOT NULL"
 
 DATABASE_ROOM_LOG_INSERT_SQL ::
@@ -125,7 +125,9 @@ RoomLogLockedRoom :: struct {
 // The accounts' identity keys, the server's stand-in for pins during validation.
 @(private = "file")
 RoomLogKeyTable :: struct {
-	keys: map[int]common.IdentityPublicKeyBytes,
+	keys:       map[int]common.IdentityPublicKeyBytes,
+	// Protocol 25 (D11): the named accounts that are restricted.
+	restricted: map[int]bool,
 }
 
 // A named account without a key reports a zero pin, so any key the entry names mismatches.
@@ -373,6 +375,9 @@ databaseRoomLogLoadKeys :: proc(conn: pg.Conn, userIDs: []int, table: ^RoomLogKe
 		key: common.IdentityPublicKeyBytes
 		if idOK && databaseGetHexBytes(result, row, 1, key[:]) {
 			table.keys[userID] = key
+			if databaseGetBool(result, row, 2) {
+				table.restricted[userID] = true
+			}
 		}
 	}
 	return true
@@ -532,6 +537,10 @@ roomLogServerAllows :: proc(
 		if !room.actorManagesMembers && !(room.access == .MemberInvite && room.actorIsMember) {
 			return .NotAuthorized
 		}
+		// Protocol 25 (D11): only member managers add a restricted account.
+		if room.targetRestricted && !room.actorManagesMembers {
+			return .NotAuthorized
+		}
 	case .SetAccess:
 		if !room.actorManagesRooms {
 			return .NotAuthorized
@@ -548,6 +557,7 @@ RoomLogLockedRoomView :: struct {
 	actorManagesRooms:   bool,
 	actorIsMember:       bool,
 	actorManagesMembers: bool,
+	targetRestricted:    bool,
 }
 
 databaseExecuteAppendRoomLog :: proc(
@@ -635,9 +645,11 @@ databaseAppendRoomLogInTransaction :: proc(
 		append(&named, manager.userID)
 	}
 	table := RoomLogKeyTable {
-		keys = make(map[int]common.IdentityPublicKeyBytes),
+		keys       = make(map[int]common.IdentityPublicKeyBytes),
+		restricted = make(map[int]bool),
 	}
 	defer delete(table.keys)
+	defer delete(table.restricted)
 	if len(named) > 0 && !databaseRoomLogLoadKeys(conn, named[:], &table) {
 		return {}, databaseConnectionError(conn), true
 	}
@@ -657,6 +669,7 @@ databaseAppendRoomLogInTransaction :: proc(
 		actorManagesRooms   = room.actorManagesRooms,
 		actorIsMember       = room.actorIsMember,
 		actorManagesMembers = room.actorManagesMembers,
+		targetRestricted    = table.restricted[decoded.targetUserID],
 	}
 	if allowed := roomLogServerAllows(view, request.actorUserId, entry); allowed != .Applied {
 		return {outcome = allowed}, {}, false

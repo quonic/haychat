@@ -920,7 +920,10 @@ testDirectMessageSQLChecksRecipientInOneStatement :: proc(t: ^testing.T) {
 	_ = t
 	assert(
 		strings.contains(DATABASE_POST_DIRECT_MESSAGE_SQL, "id <> $1") &&
-		strings.contains(DATABASE_POST_DIRECT_MESSAGE_SQL, "FROM recipient ON CONFLICT"),
+		strings.contains(
+			DATABASE_POST_DIRECT_MESSAGE_SQL,
+			"FROM recipient WHERE (SELECT ok FROM allowed) ON CONFLICT",
+		),
 		"expected the post statement to insert only for an existing recipient other than self",
 	)
 	assert(

@@ -3,6 +3,7 @@ package server
 import "../common"
 import "base:runtime"
 import "core:c/libc"
+import "core:crypto"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
@@ -52,6 +53,16 @@ PendingDBRequestType :: enum {
 	// Room permissions (router_room_permissions.odin, protocol 24): a fetch or a set of a room's
 	// grants, whose one statement checks ManageRooms or the room's EditRoom.
 	RoomPermissions,
+	// Registration (router_registration.odin, protocol 25): a message about an account waiting
+	// for the database to say who may see it (no peer), the restricted accounts loaded at start
+	// (no peer), a ClientRegister, an invite create, list or revoke, a request list or
+	// decision, and the registration mode.
+	VisibleRecipients,
+	LoadRestrictedUsers,
+	Register,
+	InviteAction,
+	RegistrationRequests,
+	RegistrationMode,
 }
 
 PendingDBRequest :: struct {
@@ -91,12 +102,17 @@ PendingDBRequest :: struct {
 	roleID:           int,
 	// RoomPermissions (protocol 24): a fetch or a set of a room's grants.
 	roomPermissionsAction: common.DatabaseRoomPermissionsAction,
+	// VisibleRecipients (protocol 25): the message (owned) and the session it skips.
+	visibility:            MainRouterVisibilityPayload,
+	excludePeerID:         u32,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
 	delete(request.name)
 	delete(request.description)
 	delete(request.recipientUserIDs)
+	visibility := request.visibility
+	MainRouterVisibilityPayload_deinit(&visibility)
 }
 
 RouterPeerSession :: struct {
@@ -109,9 +125,18 @@ RouterPeerSession :: struct {
 	serverEphemeralPublicKey:  common.KeyExchangePublicKeyBytes,
 	sessionID:                 common.SessionID,
 	authChallenge:             common.AuthChallengeBytes,
-	allowRegistration:         bool,
 	isAuthenticated:           bool,
 	authenticatedUserID:       int,
+	// The account's effective server permissions (protocol 25 reads ApproveRegistrations for
+	// D17 and D18), kept current with ServerAccountUpdated.
+	permissions:               common.ServerPermissions,
+	// Registration (protocol 25, router_registration.odin): the session got
+	// ServerRegistrationRequired and may send only ClientRegister and Ping; when it started,
+	// how many ClientRegisters it sent, and whether one is in the database now.
+	isRegistering:             bool,
+	registeringSince:          time.Tick,
+	registerAttempts:          int,
+	registerInFlight:          bool,
 }
 
 @(private)
@@ -148,10 +173,7 @@ queueMainInterruptShutdown :: proc(pm: ^ProcessManager) {
 DATABASE_STARTUP_ACK_TIMEOUT :: 6 * time.Second
 
 RouterPeerSession_init :: proc() -> RouterPeerSession {
-	return RouterPeerSession {
-		transport = common.TransportState_init(.Server),
-		allowRegistration = true,
-	}
+	return RouterPeerSession{transport = common.TransportState_init(.Server)}
 }
 
 RouterPeerSession_deinit :: proc(session: ^RouterPeerSession) {
@@ -182,6 +204,11 @@ MainRouterState :: struct {
 	// Voice datagrams that reached the router. The network thread's relay consumes channel 2,
 	// so this stays 0 unless something routes voice here by mistake.
 	unexpectedVoiceDatagrams: u64,
+	// Protocol 25 (router_registration.odin): every restricted account (loaded at start, kept
+	// current by the router), and the invite code each pending ClientCreateInvite generated,
+	// by request ID, wiped once answered.
+	restrictedUserIDs:        map[int]bool,
+	pendingInviteCodes:       map[u64]common.InviteCodeBytes,
 }
 
 MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
@@ -193,6 +220,8 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 		voiceRooms              = make(map[int]VoiceRoomState),
 		peerVoiceRoom           = make(map[u32]int),
 		roomLogVersions         = make(map[int]int),
+		restrictedUserIDs       = make(map[int]bool),
+		pendingInviteCodes      = make(map[u64]common.InviteCodeBytes),
 	}
 
 	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
@@ -226,7 +255,18 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
 	delete(state.roomLogVersions)
+	delete(state.restrictedUserIDs)
+	MainRouterState_wipeInviteCodes(state)
+	delete(state.pendingInviteCodes)
 	MainRouterState_voiceFreeState(state)
+}
+
+// Wipes and forgets every pending invite code.
+MainRouterState_wipeInviteCodes :: proc(state: ^MainRouterState) {
+	for _, &code in state.pendingInviteCodes {
+		crypto.zero_explicit(&code, size_of(code))
+	}
+	clear(&state.pendingInviteCodes)
 }
 
 MainRouterState_generateRequestID :: proc(state: ^MainRouterState) -> u64 {
@@ -282,7 +322,8 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 	defer delete(requestIDs)
 
 	for requestID, request in state.pendingDatabaseRequests {
-		if request.peerID == peerID {
+		// A ClientRegister stays: its answer still tells the approvers of a new request.
+		if request.peerID == peerID && request.requestType != .Register {
 			append(&requestIDs, requestID)
 		}
 	}
@@ -291,13 +332,14 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 		request := state.pendingDatabaseRequests[requestID]
 		PendingDBRequest_deinit(request)
 		delete_key(&state.pendingDatabaseRequests, requestID)
+		MainRouterState_forgetInviteCode(state, requestID)
 	}
 }
 
 MainRouterState_isPlaintextHandshakeResponse :: proc(messageType: common.MessageType) -> bool {
 	#partial switch messageType {
 	case .ServerHello,
-	     .ServerRegisterResponse,
+	     .ServerRegistrationRequired,
 	     .ServerAuthChallenge,
 	     .ServerAuthSuccess,
 	     .ServerAuthFailure:
@@ -322,9 +364,10 @@ MainRouterState_sendPeerMessage :: proc(
 	messageType: common.MessageType,
 	payload: any,
 ) -> bool {
+	// Registering sessions (protocol 25) have an active transport too.
 	if session, ok := MainRouterState_getPeerSession(state, peerID);
 	   ok &&
-	   session.isAuthenticated &&
+	   (session.isAuthenticated || session.isRegistering) &&
 	   !MainRouterState_isPlaintextHandshakeResponse(messageType) {
 		sealedPacket, sealOK := common.sealPacketForSession(
 			&session.transport,
@@ -408,6 +451,7 @@ MainRouterState_protocolViolation :: proc(
 		wasAuthenticated := session.isAuthenticated
 		session.transport.phase = .Failed
 		session.isAuthenticated = false
+		session.isRegistering = false
 		MainRouterState_setPeerSession(state, peerID, session)
 		// The session no longer counts as online, and its later disconnect event will not
 		// see it as authenticated, so presence and voice must be settled here.
@@ -474,6 +518,8 @@ MainRouterState_completeAuthentication :: proc(
 	nickname := "",
 	nicknameLocked := false,
 	permissions := common.ServerPermissions{},
+	registrationMode := common.RegistrationMode.Open,
+	isRestricted := false,
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
 	if session, sessionOK := &state.peerSessions[peerID]; !sessionOK || session.isAuthenticated {
@@ -494,17 +540,21 @@ MainRouterState_completeAuthentication :: proc(
 			nickname = stored.clientNickname,
 			nicknameLocked = nicknameLocked,
 			permissions = permissions,
+			registrationMode = registrationMode,
+			isRestricted = isRestricted,
 		},
 	) {
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
 		return
 	}
+	MainRouterState_setUserRestricted(state, userID, isRestricted)
 
 	session, _ := MainRouterState_getPeerSession(state, peerID)
 	// Counted before this session joins, so only a user's first session announces them.
 	wasOnline := MainRouterState_isUserOnline(state, userID)
 	session.isAuthenticated = true
 	session.authenticatedUserID = userID
+	session.permissions = permissions
 	// The voice halves move to the network thread's relay (Q8). Taken from this copy before it
 	// is stored, so the stored session holds zeros and the router never touches voice crypto.
 	voiceSend, voiceReceive := common.TransportState_takeVoiceState(&session.transport)
@@ -620,6 +670,7 @@ MainRouterState_clearTransientRuntimeState :: proc(state: ^MainRouterState) {
 	delete(state.connectedPeers)
 	delete(state.peerSessions)
 	delete(state.pendingDatabaseRequests)
+	MainRouterState_wipeInviteCodes(state)
 	state.connectedPeers = make(map[u32]bool)
 	state.peerSessions = make(map[u32]RouterPeerSession)
 	state.pendingDatabaseRequests = make(map[u64]PendingDBRequest)
@@ -670,8 +721,25 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		     .AppendRoomLog,
 		     .FetchRoomLog,
 		     .StoreRoomKeyEnvelope,
-		     .FetchRoomKeys:
+		     .FetchRoomKeys,
+		     .InviteAction,
+		     .RegistrationRequests,
+		     .RegistrationMode:
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
+			MainRouterState_forgetInviteCode(state, requestID)
+		case .Register:
+			if session, sessionOK := &state.peerSessions[request.peerID];
+			   sessionOK && session.isRegistering {
+				session.registerInFlight = false
+				MainRouterState_sendRegisterResponse(
+					pm,
+					state,
+					request.peerID,
+					.Refused,
+					message,
+				)
+			}
+		case .VisibleRecipients, .LoadRestrictedUsers:
 		case .RoomKeyRequestCheck:
 		// Never answered (router_room_keys.odin).
 		case .JoinVoiceMemberCheck:
@@ -834,37 +902,6 @@ MainRouterState_handleClientHello :: proc(
 	}
 }
 
-MainRouterState_handleClientRegister :: proc(
-	pm: ^ProcessManager,
-	state: ^MainRouterState,
-	peerID: u32,
-	payload: []u8,
-) {
-	req: common.ClientRegisterRequest
-	if cbor.unmarshal(payload, &req) != nil {
-		MainRouterState_protocolViolation(pm, state, peerID, "Invalid ClientRegister payload")
-		return
-	}
-
-	session, ok := MainRouterState_getPeerSession(state, peerID)
-	if !ok || session.transport.phase != .AwaitingChallengeResponse || !session.allowRegistration {
-		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientRegister")
-		return
-	}
-
-	MainRouterState_sendPeerMessage(
-		pm,
-		state,
-		peerID,
-		common.MessageType.ServerRegisterResponse,
-		common.ServerRegisterResponsePayload {
-			success = false,
-			message = "registration not implemented",
-			userId = 0,
-		},
-	)
-}
-
 MainRouterState_handleClientAuthRequest :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -949,6 +986,7 @@ MainRouterState_handleClientAuthRequest :: proc(
 			publicKey = session.clientIdentityPublicKey,
 			adminPublicKey = state.adminPublicKey,
 			hasAdminPublicKey = state.hasAdminPublicKey,
+			registering = req.registering,
 		},
 	)
 }
@@ -1432,6 +1470,20 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientVoiceKey(pm, state, peerID, packet.payload)
 	case .ClientRequestVoiceKey:
 		MainRouterState_handleClientRequestVoiceKey(pm, state, peerID, packet.payload)
+	case .ClientAdminSetRegistrationMode:
+		MainRouterState_handleClientAdminSetRegistrationMode(pm, state, peerID, packet.payload)
+	case .ClientCreateInvite:
+		MainRouterState_handleClientCreateInvite(pm, state, peerID, packet.payload)
+	case .ClientListInvites:
+		MainRouterState_handleClientListInvites(pm, state, peerID, packet.payload)
+	case .ClientRevokeInvite:
+		MainRouterState_handleClientRevokeInvite(pm, state, peerID, packet.payload)
+	case .ClientListRegistrationRequests:
+		MainRouterState_handleClientListRegistrationRequests(pm, state, peerID, packet.payload)
+	case .ClientDecideRegistration:
+		MainRouterState_handleClientDecideRegistration(pm, state, peerID, packet.payload)
+	case .ClientAdminSetRestricted:
+		MainRouterState_handleClientAdminSetRestricted(pm, state, peerID, packet.payload)
 	case .ClientStoreFile:
 		req: common.ClientStoreFileRequest
 		err := cbor.unmarshal(packet.payload, &req)
@@ -1528,7 +1580,8 @@ MainRouterState_handlePlaintextPacket :: proc(
 	case .ClientHello:
 		MainRouterState_handleClientHello(pm, state, peerID, packet.payload)
 	case .ClientRegister:
-		MainRouterState_handleClientRegister(pm, state, peerID, packet.payload)
+		// Protocol 25 (D12): only encrypted, from a registering session.
+		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientRegister")
 	case .ClientAuthRequest:
 		MainRouterState_handleClientAuthRequest(pm, state, peerID, packet.payload)
 	case .EncryptedPacket:
@@ -1579,6 +1632,10 @@ MainRouterState_handleNetworkDataReceived :: proc(
 
 	if session.isAuthenticated {
 		MainRouterState_handleEncryptedPacket(pm, state, msg.peerId, packet)
+		return
+	}
+	if session.isRegistering {
+		MainRouterState_handleRegisteringPacket(pm, state, msg.peerId, packet)
 		return
 	}
 
@@ -1633,6 +1690,16 @@ MainRouterState_handleDatabaseResult :: proc(
 	switch request.requestType {
 	case .ResolveUserIdentity:
 		identity, identityOK := response.result.(common.DatabaseUserIdentityResult)
+		if session, sessionOK := MainRouterState_getPeerSession(state, request.peerID);
+		   sessionOK && session.isRegistering {
+			// An approval re-ran the statement for a registering session (D14).
+			MainRouterState_handleRegisteringIdentityResult(pm, state, request.peerID, response)
+			return
+		}
+		if response.success && identityOK && identity.userId <= 0 && identity.needsRegistration {
+			MainRouterState_beginRegistration(pm, state, request.peerID, identity)
+			return
+		}
 		if !response.success || !identityOK || identity.userId <= 0 {
 			MainRouterState_sendAuthFailure(
 				pm,
@@ -1671,6 +1738,8 @@ MainRouterState_handleDatabaseResult :: proc(
 			identity.nickname,
 			identity.nicknameLocked,
 			identity.permissions,
+			identity.registrationMode,
+			identity.isRestricted,
 		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
@@ -2048,6 +2117,18 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleFetchRoomKeysResult(pm, state, request, response)
 	case .RoomKeyRequestCheck:
 		MainRouterState_handleRoomKeyRequestCheckResult(pm, state, request, response)
+	case .VisibleRecipients:
+		MainRouterState_handleVisibleRecipientsResult(pm, state, request, response)
+	case .LoadRestrictedUsers:
+		MainRouterState_handleRestrictedUsersResult(state, response)
+	case .Register:
+		MainRouterState_handleRegisterResult(pm, state, request, response)
+	case .InviteAction:
+		MainRouterState_handleInviteResult(pm, state, request, response)
+	case .RegistrationRequests:
+		MainRouterState_handleRegistrationRequestsResult(pm, state, request, response)
+	case .RegistrationMode:
+		MainRouterState_handleRegistrationModeResult(pm, state, request, response)
 	}
 }
 
@@ -2190,8 +2271,11 @@ mainLoop :: proc(pm: ^ProcessManager) {
 	running := true
 	routerState := MainRouterState_init(pm)
 	defer MainRouterState_deinit(&routerState)
+	// Protocol 25 (D17): which accounts are restricted, before presence goes out.
+	MainRouterState_loadRestrictedUsers(pm, &routerState)
 
 	lastStatusLog := time.now()
+	lastRegistrationSweep := time.tick_now()
 	for running {
 		if mainInterruptRequested {
 			queueMainInterruptShutdown(pm)
@@ -2229,6 +2313,12 @@ mainLoop :: proc(pm: ^ProcessManager) {
 				restartProcess(pm, .Database)
 			}
 			ProcessManager_pumpRestarts(pm)
+		}
+
+		// D13: registering sessions have REGISTER_SESSION_SECONDS; checked once a second.
+		if time.tick_since(lastRegistrationSweep) >= time.Second {
+			lastRegistrationSweep = time.tick_now()
+			MainRouterState_expireRegisteringSessions(pm, &routerState, lastRegistrationSweep)
 		}
 
 		if time.since(lastStatusLog) >= SERVER_STATUS_LOG_INTERVAL {

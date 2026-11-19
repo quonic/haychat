@@ -66,6 +66,7 @@ version below therefore needs clients and servers rebuilt together.
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 | 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
+| 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
@@ -141,6 +142,80 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions)
 - Wire values: `ClientAdminSetRoomPermissions` 187, `ClientAdminFetchRoomPermissions` 188,
   `ServerAdminRoomPermissions` 189. The older never-sent placeholders `ClientChangeRoomPermissions`,
   `ServerRoomPermissions` and `ServerRoomPermissionsChange` stay unused.
+
+## Registration (protocol 25)
+
+Package G1 of [the roles and registration plan](plan/2026-11-18-roles-and-registration.md)
+(decisions D7-D17); G2 builds the client and G3 the proof and the user documentation.
+
+- **Handshake (D12, D13).** `ClientHello` → `ServerHello` + `ServerAuthChallenge` →
+  `ClientAuthRequest{sessionID, signature, registering}` as before. The server activates its
+  transport, then runs the identity statement. A key that owns an account signs in with
+  `ServerAuthSuccess` whatever the mode and `registering` say. A key without one gets an
+  account at once only when the server is Open and `registering` is false, the key has an
+  approved request, or it is `HAYCHAT_ADMIN_PUBLIC_KEY` (D15: never restricted, never pending,
+  in every mode). Otherwise the answer is the **plaintext**
+  `ServerRegistrationRequired{mode, status, message}` (`status`: None 0, Pending 1, Declined 3
+  with the approver's reason in `message`), and both sides activate the transport exactly as on
+  `ServerAuthSuccess`. The session is then registering: the server accepts only encrypted
+  `ClientRegister` and `Ping` (ignored); anything else ends the session with a sealed
+  `ServerProtocolError`, and a plaintext `ClientRegister` is refused. The invite code never
+  travels in plaintext.
+- **`ClientRegister{inviteCode, reason}`** (sealed; the name is the `ClientHello` nickname):
+  `inviteCode` at most 64 bytes, read by `common.parseInviteCode` (spaces and dashes ignored,
+  either case, O for 0, I and L for 1); empty only on an Open server, which then creates a plain
+  account. `reason` 0..500 characters, needed (1..) when the code needs approval. One at a time.
+- **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
+  authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`
+  and presence follow as after a sign-in, with no second handshake), `Pending` 1 (a request
+  waits; the session stays registering and gets `Created` or `Declined` when an approver
+  decides), `Refused` 2 (`message` says why; the session stays registering), `Declined` 3 (an
+  approver declined; the session is disconnected). A session gets 5 answers and 10 minutes
+  before it is ended with `Refused` ("Too many sign-up attempts" or "Sign-up took too long");
+  at most 64 sessions register at once, more get `ServerAuthFailure` "Too many sign-ups are in
+  progress; try again later". An invalid code is always "This invite code is not valid", whether
+  it is unknown, revoked, expired or used up.
+- **Modes (D7, D8):** `RegistrationMode` Open 1, InviteOnly 2, InviteApproval 3
+  (`server_settings.registration_mode`, migrated as Open). `ClientAdminSetRegistrationMode{mode}`
+  (admins) is answered by `ServerAdminActionResult{SetRegistrationMode 8}`; a change sends
+  `ServerRegistrationMode{mode}` to every session. `ServerAuthSuccess.registrationMode` carries
+  it at sign-in. `deploy/sql/set-registration-mode.sql` sets it without a client.
+- **Invite codes (D9, D10):** 20 random bytes shown as 8 groups of 4 Crockford base32 symbols;
+  the server stores only their sha256. `ClientCreateInvite{note, expiresInSeconds, maxUses,
+  roleIds, roomId, skipApproval}` (CreateInvites; note ≤ 200 bytes, expiry 0 = never or ≤ 365
+  days, uses 0 = unlimited or ≤ 1000) is answered by `ServerInviteCreated{invite, code}`, the
+  only time the code is sent. Non-admins must set an expiry of at most 7 days, may not attach
+  roles, a room or skip approval, and hold at most 25 usable codes. A room code targets an
+  unencrypted Member or Admin invite room, and accounts it creates are restricted to it.
+  `ClientListInvites` (every code for admins, one's own otherwise) → `ServerInviteList{invites}`;
+  `ClientRevokeInvite{inviteId}` (admins any, others their own) → `ServerAdminActionResult
+  {RevokeInvite 7, inviteId}`. A use is counted when a sign-up or a request is accepted.
+- **Requests (D14, D18):** in Invite + approval mode a valid code without skip approval makes a
+  request (one per key). `ClientListRegistrationRequests{includeDecided}` (ApproveRegistrations)
+  → `ServerRegistrationRequests{requests, pendingCount}`; an approver's client sends it after
+  sign-in for the badge. `ClientDecideRegistration{id, approve, reason}` → `ServerAdminActionResult
+  {DecideRegistration 9, requestId}`. A new request and every decision send
+  `ServerRegistrationRequestUpdated{request, pendingCount}` to every approver session. Approval
+  creates nothing: the key's next sign-in (or at once, a still-registering session of it)
+  creates the account with the code's roles, room and restriction and the name it signs in
+  with then.
+- **Restricted accounts (D11, D17):** `UserSummary.isRestricted`. A restricted account never
+  joins Public rooms automatically; only holders of ManageMembers in a room add it there
+  ("Only a member manager can add this restricted account"). It sees, and exchanges direct
+  messages with, only accounts it shares a room with and admins, and only those, admins and
+  approvers see it: `ServerUserList`, `ServerUserPresence`, `ServerUserUpdated` and
+  `ServerUserKeyChanged` are filtered per recipient, and a membership change involving a
+  restricted account sends the affected sessions a fresh `ServerUserList`. A refused direct
+  message is "You no longer share a room with this person"; older history stays readable.
+  `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
+  `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting
+  it joins the Public rooms.
+- Wire values: `ServerRegistrationRequired` 190, `ClientAdminSetRegistrationMode` 191,
+  `ServerRegistrationMode` 192, `ClientCreateInvite` 193, `ServerInviteCreated` 194,
+  `ClientListInvites` 195, `ServerInviteList` 196, `ClientRevokeInvite` 197,
+  `ClientListRegistrationRequests` 198, `ServerRegistrationRequests` 199,
+  `ClientDecideRegistration` 200, `ServerRegistrationRequestUpdated` 201,
+  `ClientAdminSetRestricted` 202; `ClientRegister` 14 and `ServerRegisterResponse` 15 keep theirs.
 
 ## Account encryption keys (protocol 16)
 
