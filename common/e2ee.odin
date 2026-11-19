@@ -7,6 +7,7 @@ import crypto_hash "core:crypto/hash"
 import "core:crypto/hkdf"
 import "core:crypto/x25519"
 import "core:encoding/endian"
+import "core:strings"
 import "core:time"
 import "core:unicode/utf8"
 
@@ -63,7 +64,24 @@ import "core:unicode/utf8"
 //   CHAT_MESSAGE_MAX_BYTES bytes of UTF-8. encodeSealedDirectMessagePlaintext writes the one
 //   canonical encoding A1 67 "content" <text header> <bytes>; the decoder accepts a map of up to
 //   16 unique text keys in any order and skips unknown ones, so later fields (replies, edits)
-//   can be added inside. It refuses indefinite lengths and trailing bytes.
+//   can be added inside. It refuses indefinite lengths and trailing bytes. Sealed room messages
+//   carry the same plaintext.
+//
+//   Protocol 27 (attachments plan D12, D15): an optional "attachments" key, an array of 1..
+//   ATTACHMENTS_PER_MESSAGE_MAX maps, each with exactly these keys (unknown ones skipped):
+//
+//     "blobId" bytes(16)   the server's blob ID, which the outer attachment list repeats
+//     "key"    bytes(32)   the file key (common/attachment_e2ee.odin)
+//     "sha256" bytes(32)   SHA-256 of the stored blob (header and every sealed chunk)
+//     "size"   uint        the file's size before padding
+//     "name"   text        attachmentNameIsValid
+//     "type"   text        attachmentMediaTypeIsValid
+//
+//   With attachments the content may be empty (0..CHAT_MESSAGE_MAX_BYTES bytes); without them
+//   it may not. encodeSealedMessagePlaintext writes the canonical form: the map A1 or A2 with
+//   "content" first, every entry map A6 with its keys in the order above, and every head in its
+//   shortest form. Old messages have no "attachments" key and decode as before. Blob IDs are
+//   distinct within a message.
 //
 // SenderKeyDistribution plaintext, version 1 (design 6.4), 69 bytes, sealed in a SenderKey
 //   envelope:
@@ -97,6 +115,21 @@ import "core:unicode/utf8"
 //   The opener checks that the plaintext repeats the AAD's fields. Voice keys are never stored
 //   or forwarded by anyone: the server keeps the latest envelope per voice participant in
 //   memory only.
+//
+// Signed plaintext messages with attachments (protocol 27, attachments plan D14). A message
+//   with no attachment signs the v1 bytes (signPlaintextDirectMessage,
+//   signPlaintextRoomMessage), so stored history still verifies; one with 1..
+//   ATTACHMENTS_PER_MESSAGE_MAX attachments signs, under "haychat-dm-plain-v2" or
+//   "haychat-room-plain-v2", the same fields prefix as v1 followed by
+//
+//     contentLength u32 || content (0..CHAT_MESSAGE_MAX_BYTES bytes)
+//     || count u8 (1..ATTACHMENTS_PER_MESSAGE_MAX)
+//     || for each attachment, in the message's order:
+//          blobId (16) || sha256 (32) || size u64 || nameLength u16 || name
+//          || typeLength u16 || type
+//
+//   The verifier picks the label from the attachment count, so a server that adds or strips
+//   attachments makes the signature fail either way. AttachmentRef.removed is not signed.
 //
 // SealedRoomMessage, version 1 (design 6.5). At most SEALED_ROOM_MESSAGE_MAX_BYTES in total.
 //
@@ -185,6 +218,9 @@ DIRECT_MESSAGE_AAD_DOMAIN :: "haychat-dm-v1"
 PLAINTEXT_DIRECT_MESSAGE_DOMAIN :: "haychat-dm-plain-v1"
 // Protocol 22 (#90): a plaintext room message's signature. Prefix-free against every label.
 PLAINTEXT_ROOM_MESSAGE_DOMAIN :: "haychat-room-plain-v1"
+// Protocol 27 (attachments plan D14): the same messages when they carry attachments.
+PLAINTEXT_DIRECT_MESSAGE_V2_DOMAIN :: "haychat-dm-plain-v2"
+PLAINTEXT_ROOM_MESSAGE_V2_DOMAIN :: "haychat-room-plain-v2"
 ROOM_KEY_AAD_DOMAIN :: "haychat-room-key-v1"
 // Its own label (E0's note): no AAD label is a prefix of another.
 ROOM_KEY_FORWARD_AAD_DOMAIN :: "haychat-room-key-forward-v1"
@@ -959,8 +995,23 @@ openVerifiedEnvelope :: proc(
 // ---------------------------------------------------------------------------------------------
 // Encrypted direct messages (design 4.4, 4.5).
 
+// One file of a sealed message (protocol 27): what the "attachments" entries carry. size is
+// the file's size before padding; sha256 is the stored blob's. key is wiped by
+// SealedDirectMessagePlaintext_deinit.
+SealedAttachment :: struct {
+	blobId:    AttachmentBlobID,
+	key:       AttachmentFileKey,
+	sha256:    AttachmentSHA256,
+	size:      u64,
+	name:      string,
+	mediaType: string,
+}
+
+// The opened plaintext of a sealed direct or room message. content and the attachments' names
+// and media types are owned (allocator); attachments is nil for a message without them.
 SealedDirectMessagePlaintext :: struct {
-	content: string,
+	content:     string,
+	attachments: [dynamic]SealedAttachment,
 }
 
 SealedDirectMessagePlaintext_deinit :: proc(
@@ -969,43 +1020,87 @@ SealedDirectMessagePlaintext_deinit :: proc(
 ) {
 	delete(plaintext.content, allocator)
 	plaintext.content = ""
+	for &attachment in plaintext.attachments {
+		crypto.zero_explicit(&attachment.key, size_of(attachment.key))
+		delete(attachment.name, allocator)
+		delete(attachment.mediaType, allocator)
+	}
+	delete(plaintext.attachments)
+	plaintext.attachments = nil
 }
 
-// The canonical CBOR of SealedDirectMessagePlaintext with CHAT_MESSAGE_MAX_BYTES of content:
-// map header (1), "content" (1 + 7), text header (3), content.
-DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE :: 1 + 8 + 3 + CHAT_MESSAGE_MAX_BYTES
+// The canonical CBOR of one "attachments" entry at its largest: the map head (1), "blobId"
+// (7 + 17), "key" (4 + 34), "sha256" (7 + 34), "size" (5 + 9), "name" (5 + 2 + 255) and
+// "type" (5 + 2 + 100).
+SEALED_ATTACHMENT_ENTRY_MAX_SIZE :: 1 + 24 + 38 + 41 + 14 + (7 + ATTACHMENT_NAME_MAX_BYTES) +
+	(7 + ATTACHMENT_MEDIA_TYPE_MAX_BYTES)
+
+// The canonical CBOR of a sealed message plaintext at its largest: the map head (1),
+// "content" (1 + 7) with its text head (3) and CHAT_MESSAGE_MAX_BYTES of content, and (protocol
+// 27) "attachments" (1 + 11), the array head (1) and ATTACHMENTS_PER_MESSAGE_MAX entries. A
+// sealed message of this size still fits SEALED_ENVELOPE_MAX_BYTES (about 6.4 KB).
+DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE :: 1 + 8 + 3 + CHAT_MESSAGE_MAX_BYTES + 12 + 1 +
+	ATTACHMENTS_PER_MESSAGE_MAX * SEALED_ATTACHMENT_ENTRY_MAX_SIZE
 
 // Writes CBOR {"content": content} into dst. content must be 1..CHAT_MESSAGE_MAX_BYTES bytes of
 // valid UTF-8.
 encodeSealedDirectMessagePlaintext :: proc(content: string, dst: []u8) -> (n: int, ok: bool) {
-	if !directMessageContentIsValid(content) {
+	return encodeSealedMessagePlaintext(content, nil, dst)
+}
+
+// Writes the canonical CBOR of a sealed message plaintext (see the top of this file) into dst:
+// {"content": content}, plus "attachments" when there are any. content is valid UTF-8 of 1..
+// CHAT_MESSAGE_MAX_BYTES bytes, or empty with attachments; at most ATTACHMENTS_PER_MESSAGE_MAX
+// attachments with set, distinct blob IDs, valid names and valid media types.
+encodeSealedMessagePlaintext :: proc(
+	content: string,
+	attachments: []SealedAttachment,
+	dst: []u8,
+) -> (
+	n: int,
+	ok: bool,
+) {
+	if !sealedMessageFieldsAreValid(content, attachments) {
 		return 0, false
 	}
-	headerSize := 1
-	if len(content) >= 24 {
-		headerSize = len(content) < 256 ? 2 : 3
+	total := 1 + 8 + cborHeadSize(u64(len(content))) + len(content)
+	if len(attachments) > 0 {
+		total += 12 + 1
+		for attachment in attachments {
+			total += sealedAttachmentEntrySize(attachment)
+		}
 	}
-	total := 1 + 8 + headerSize + len(content)
 	if len(dst) < total {
 		return 0, false
 	}
 	writer := e2eeWriter(dst[:total])
-	e2eeWriteU8(&writer, 0xA1) // map of one pair
-	e2eeWriteU8(&writer, 0x67) // text of 7 bytes
-	e2eeWriteString(&writer, "content")
-	switch headerSize {
-	case 1:
-		e2eeWriteU8(&writer, 0x60 | u8(len(content)))
-	case 2:
-		e2eeWriteU8(&writer, 0x78)
-		e2eeWriteU8(&writer, u8(len(content)))
-	case:
-		e2eeWriteU8(&writer, 0x79)
-		endian.unchecked_put_u16be(writer.buffer[writer.offset:], u16(len(content)))
-		writer.offset += 2
+	e2eeWriteU8(&writer, len(attachments) > 0 ? 0xA2 : 0xA1)
+	cborWriteText(&writer, "content")
+	cborWriteText(&writer, content)
+	if len(attachments) > 0 {
+		cborWriteText(&writer, "attachments")
+		cborWriteHead(&writer, 4, u64(len(attachments)))
+		for attachment in attachments {
+			attachment := attachment
+			e2eeWriteU8(&writer, 0xA6)
+			cborWriteText(&writer, "blobId")
+			cborWriteHead(&writer, 2, ATTACHMENT_BLOB_ID_SIZE)
+			e2eeWriteBytes(&writer, attachment.blobId[:])
+			cborWriteText(&writer, "key")
+			cborWriteHead(&writer, 2, ATTACHMENT_FILE_KEY_SIZE)
+			e2eeWriteBytes(&writer, attachment.key[:])
+			cborWriteText(&writer, "sha256")
+			cborWriteHead(&writer, 2, ATTACHMENT_SHA256_SIZE)
+			e2eeWriteBytes(&writer, attachment.sha256[:])
+			cborWriteText(&writer, "size")
+			cborWriteHead(&writer, 0, attachment.size)
+			cborWriteText(&writer, "name")
+			cborWriteText(&writer, attachment.name)
+			cborWriteText(&writer, "type")
+			cborWriteText(&writer, attachment.mediaType)
+		}
 	}
-	e2eeWriteString(&writer, content)
-	return total, true
+	return total, writer.offset == total
 }
 
 // Decodes an opened direct message plaintext with a strict CBOR reader: one definite-length map
@@ -1013,6 +1108,9 @@ encodeSealedDirectMessagePlaintext :: proc(content: string, dst: []u8) -> (n: in
 // added. The content is copied with allocator; free it with
 // SealedDirectMessagePlaintext_deinit. (core:encoding/cbor is not used here: it accepts trailing
 // bytes and leaks the first value of a repeated key, which a peer could repeat at will.)
+//
+// Protocol 27: an "attachments" array is decoded too (see the top of this file); the content
+// may then be empty. Anything malformed in it refuses the whole plaintext.
 decodeSealedDirectMessagePlaintext :: proc(
 	data: []u8,
 	allocator := context.allocator,
@@ -1020,16 +1118,111 @@ decodeSealedDirectMessagePlaintext :: proc(
 	plaintext: SealedDirectMessagePlaintext,
 	err: E2EEError,
 ) {
-	content, ok := cborFindContent(data)
-	if !ok || !directMessageContentIsValid(string(content)) {
+	fields, ok := cborFindMessageFields(data)
+	defer crypto.zero_explicit(&fields.attachments, size_of(fields.attachments))
+	attachments := fields.attachments[:fields.attachmentCount]
+	if !ok || !sealedMessageFieldsAreValid(string(fields.content), attachments) {
 		return {}, .BadPlaintext
 	}
-	cloned, cloneErr := make([]u8, len(content), allocator)
+	cloned, cloneErr := make([]u8, len(fields.content), allocator)
 	if cloneErr != nil {
 		return {}, .BadPlaintext
 	}
-	copy(cloned, content)
-	return SealedDirectMessagePlaintext{content = string(cloned)}, .None
+	copy(cloned, fields.content)
+	plaintext.content = string(cloned)
+	if len(attachments) > 0 {
+		plaintext.attachments = make([dynamic]SealedAttachment, 0, len(attachments), allocator)
+		for attachment in attachments {
+			copied := attachment
+			copied.name = strings.clone(attachment.name, allocator)
+			copied.mediaType = strings.clone(attachment.mediaType, allocator)
+			append(&plaintext.attachments, copied)
+		}
+	}
+	return plaintext, .None
+}
+
+// The checks both the encoder and the decoder apply (D15, D16).
+@(private = "file")
+sealedMessageFieldsAreValid :: proc(content: string, attachments: []SealedAttachment) -> bool {
+	if !messageContentLengthIsValid(len(content), len(attachments)) ||
+	   !utf8.valid_string(content) {
+		return false
+	}
+	for attachment, index in attachments {
+		if !attachmentBlobIDIsSet(attachment.blobId) ||
+		   !attachmentNameIsValid(attachment.name) ||
+		   !attachmentMediaTypeIsValid(attachment.mediaType) {
+			return false
+		}
+		for earlier in attachments[:index] {
+			if earlier.blobId == attachment.blobId {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// The canonical size of one "attachments" entry: the map head, six keys, and their values.
+@(private = "file")
+sealedAttachmentEntrySize :: proc(attachment: SealedAttachment) -> int {
+	size := 1
+	size += 1 + len("blobId") + 1 + ATTACHMENT_BLOB_ID_SIZE
+	size += 1 + len("key") + 2 + ATTACHMENT_FILE_KEY_SIZE
+	size += 1 + len("sha256") + 2 + ATTACHMENT_SHA256_SIZE
+	size += 1 + len("size") + cborHeadSize(attachment.size)
+	size += 1 + len("name") + cborHeadSize(u64(len(attachment.name))) + len(attachment.name)
+	size += 1 + len("type") + cborHeadSize(u64(len(attachment.mediaType)))
+	size += len(attachment.mediaType)
+	return size
+}
+
+// The size of a CBOR head whose argument is value, in its shortest form.
+@(private = "file")
+cborHeadSize :: proc(value: u64) -> int {
+	switch {
+	case value < 24:
+		return 1
+	case value < 0x100:
+		return 2
+	case value < 0x10000:
+		return 3
+	case value < 0x1_0000_0000:
+		return 5
+	}
+	return 9
+}
+
+// Writes a CBOR head of the major type with value as its argument, in its shortest form.
+@(private = "file")
+cborWriteHead :: proc(writer: ^E2EEWriter, major: u8, value: u64) {
+	head := major << 5
+	switch cborHeadSize(value) {
+	case 1:
+		e2eeWriteU8(writer, head | u8(value))
+	case 2:
+		e2eeWriteU8(writer, head | 24)
+		e2eeWriteU8(writer, u8(value))
+	case 3:
+		e2eeWriteU8(writer, head | 25)
+		endian.unchecked_put_u16be(writer.buffer[writer.offset:], u16(value))
+		writer.offset += 2
+	case 5:
+		e2eeWriteU8(writer, head | 26)
+		endian.unchecked_put_u32be(writer.buffer[writer.offset:], u32(value))
+		writer.offset += 4
+	case:
+		e2eeWriteU8(writer, head | 27)
+		endian.unchecked_put_u64be(writer.buffer[writer.offset:], value)
+		writer.offset += 8
+	}
+}
+
+@(private = "file")
+cborWriteText :: proc(writer: ^E2EEWriter, text: string) {
+	cborWriteHead(writer, 3, u64(len(text)))
+	e2eeWriteString(writer, text)
 }
 
 // Most keys a plaintext map may have, and how deep a skipped value may nest.
@@ -1138,47 +1331,160 @@ cborSkipValue :: proc(cursor: ^CborCursor, depth: int) -> bool {
 	return false
 }
 
-// The "content" text of a CBOR map that is exactly data, or false.
+// What a sealed message plaintext map holds: its "content" text and its "attachments", all
+// borrowing data.
 @(private = "file")
-cborFindContent :: proc(data: []u8) -> (content: []u8, ok: bool) {
+CborMessageFields :: struct {
+	content:         []u8,
+	attachments:     [ATTACHMENTS_PER_MESSAGE_MAX]SealedAttachment,
+	attachmentCount: int,
+}
+
+// The "content" text (required) and the "attachments" array (optional, 1..
+// ATTACHMENTS_PER_MESSAGE_MAX entries) of a CBOR map that is exactly data, or false. Only the
+// structure is checked here; sealedMessageFieldsAreValid checks the values.
+@(private = "file")
+cborFindMessageFields :: proc(data: []u8) -> (fields: CborMessageFields, ok: bool) {
 	cursor := CborCursor {
 		data = data,
 	}
 	major, count, headOK := cborReadHead(&cursor)
 	if !headOK || major != 5 || count > CBOR_PLAINTEXT_MAX_KEYS {
-		return nil, false
+		return {}, false
 	}
 	keys: [CBOR_PLAINTEXT_MAX_KEYS]string
 	found := false
 	for index in 0 ..< int(count) {
 		key, keyOK := cborReadString(&cursor, 3)
 		if !keyOK {
-			return nil, false
+			return {}, false
 		}
 		keys[index] = string(key)
 		for earlier in keys[:index] {
 			if earlier == keys[index] {
-				return nil, false
+				return {}, false
 			}
 		}
-		if keys[index] == "content" {
-			content, found = cborReadString(&cursor, 3)
+		switch keys[index] {
+		case "content":
+			fields.content, found = cborReadString(&cursor, 3)
 			if !found {
-				return nil, false
+				return {}, false
 			}
-		} else if !cborSkipValue(&cursor, 1) {
-			return nil, false
+		case "attachments":
+			arrayMajor, entries, arrayOK := cborReadHead(&cursor)
+			if !arrayOK ||
+			   arrayMajor != 4 ||
+			   entries == 0 ||
+			   entries > ATTACHMENTS_PER_MESSAGE_MAX {
+				return {}, false
+			}
+			for entry in 0 ..< int(entries) {
+				if !cborReadSealedAttachment(&cursor, &fields.attachments[entry]) {
+					return {}, false
+				}
+			}
+			fields.attachmentCount = int(entries)
+		case:
+			if !cborSkipValue(&cursor, 1) {
+				return {}, false
+			}
 		}
 	}
 	if !found || cursor.offset != len(data) {
-		return nil, false
+		return {}, false
 	}
-	return content, true
+	return fields, true
+}
+
+@(private = "file")
+SealedAttachmentField :: enum {
+	BlobID,
+	Key,
+	SHA256,
+	Size,
+	Name,
+	Type,
+}
+
+// One "attachments" entry: a map with unique text keys holding exactly one each of blobId,
+// key, sha256 (byte strings of their sizes), size (an unsigned integer), name and type (text);
+// unknown keys are skipped. The strings borrow the cursor's data.
+@(private = "file")
+cborReadSealedAttachment :: proc(cursor: ^CborCursor, attachment: ^SealedAttachment) -> bool {
+	major, count, headOK := cborReadHead(cursor)
+	if !headOK || major != 5 || count > CBOR_PLAINTEXT_MAX_KEYS {
+		return false
+	}
+	keys: [CBOR_PLAINTEXT_MAX_KEYS]string
+	seen: bit_set[SealedAttachmentField]
+	for index in 0 ..< int(count) {
+		key, keyOK := cborReadString(cursor, 3)
+		if !keyOK {
+			return false
+		}
+		keys[index] = string(key)
+		for earlier in keys[:index] {
+			if earlier == keys[index] {
+				return false
+			}
+		}
+		switch keys[index] {
+		case "blobId":
+			bytes, bytesOK := cborReadString(cursor, 2)
+			if !bytesOK || len(bytes) != ATTACHMENT_BLOB_ID_SIZE {
+				return false
+			}
+			copy(attachment.blobId[:], bytes)
+			seen += {.BlobID}
+		case "key":
+			bytes, bytesOK := cborReadString(cursor, 2)
+			if !bytesOK || len(bytes) != ATTACHMENT_FILE_KEY_SIZE {
+				return false
+			}
+			copy(attachment.key[:], bytes)
+			seen += {.Key}
+		case "sha256":
+			bytes, bytesOK := cborReadString(cursor, 2)
+			if !bytesOK || len(bytes) != ATTACHMENT_SHA256_SIZE {
+				return false
+			}
+			copy(attachment.sha256[:], bytes)
+			seen += {.SHA256}
+		case "size":
+			sizeMajor, size, sizeOK := cborReadHead(cursor)
+			if !sizeOK || sizeMajor != 0 {
+				return false
+			}
+			attachment.size = size
+			seen += {.Size}
+		case "name":
+			text, textOK := cborReadString(cursor, 3)
+			if !textOK {
+				return false
+			}
+			attachment.name = string(text)
+			seen += {.Name}
+		case "type":
+			text, textOK := cborReadString(cursor, 3)
+			if !textOK {
+				return false
+			}
+			attachment.mediaType = string(text)
+			seen += {.Type}
+		case:
+			if !cborSkipValue(cursor, 2) {
+				return false
+			}
+		}
+	}
+	return seen == {.BlobID, .Key, .SHA256, .Size, .Name, .Type}
 }
 
 // Seals content as a DirectMessage envelope with exactly two wraps, the sender's first, so the
 // sender can read its own history. senderIdentityPrivateKey must belong to
-// aadFields.senderIdentityPublicKey.
+// aadFields.senderIdentityPublicKey. attachments (protocol 27) go inside the seal; with them the
+// content may be empty.
 sealDirectMessage :: proc(
 	aadFields: DirectMessageAADFields,
 	content: string,
@@ -1186,6 +1492,7 @@ sealDirectMessage :: proc(
 	recipientEncryptionPublicKey: EncryptionPublicKeyBytes,
 	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
 	dst: []u8,
+	attachments: []SealedAttachment = nil,
 ) -> (
 	n: int,
 	err: E2EEError,
@@ -1196,7 +1503,7 @@ sealDirectMessage :: proc(
 	}
 	plaintext: [DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE]u8
 	defer crypto.zero_explicit(&plaintext, size_of(plaintext))
-	plaintextLength, encodeOK := encodeSealedDirectMessagePlaintext(content, plaintext[:])
+	plaintextLength, encodeOK := encodeSealedMessagePlaintext(content, attachments, plaintext[:])
 	if !encodeOK {
 		return 0, .BadPlaintext
 	}
@@ -1273,18 +1580,36 @@ PLAINTEXT_DIRECT_MESSAGE_FIELDS_SIZE :: AUTH_IDENTITY_PUBLIC_KEY_SIZE + 8 + 8 +
 // Signs "haychat-dm-plain-v1" || serverIdentityPublicKey (32) || senderUserId (i64)
 // || recipientUserId (i64) || clientMessageId (16) || content. content must be
 // 1..CHAT_MESSAGE_MAX_BYTES bytes.
+//
+// Protocol 27 (D14): with attachments the label is "haychat-dm-plain-v2" and the body is the
+// v2 body (see the top of this file); content may then be empty, and the attachments must pass
+// attachmentRefsAreValid for a plaintext message.
 signPlaintextDirectMessage :: proc(
 	fields: PlaintextDirectMessageFields,
 	content: string,
 	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+	attachments: []AttachmentRef = nil,
 ) -> (
 	SignatureBytes,
 	bool,
 ) {
+	prefix := makePlaintextDirectMessagePrefix(fields)
+	if len(attachments) > 0 {
+		body: [PLAINTEXT_V2_BODY_MAX_SIZE]u8
+		bodyLength, ok := makePlaintextV2Body(content, attachments, body[:])
+		if !ok {
+			return {}, false
+		}
+		return signWithDomain(
+			senderIdentityPrivateKey,
+			PLAINTEXT_DIRECT_MESSAGE_V2_DOMAIN,
+			prefix[:],
+			body[:bodyLength],
+		)
+	}
 	if len(content) == 0 || len(content) > CHAT_MESSAGE_MAX_BYTES {
 		return {}, false
 	}
-	prefix := makePlaintextDirectMessagePrefix(fields)
 	return signWithDomain(
 		senderIdentityPrivateKey,
 		PLAINTEXT_DIRECT_MESSAGE_DOMAIN,
@@ -1294,17 +1619,33 @@ signPlaintextDirectMessage :: proc(
 }
 
 // True when signature is the sender's (senderIdentityPublicKey, the client's pin) over these
-// fields and content.
+// fields, content and (protocol 27, the v2 label) attachments.
 verifyPlaintextDirectMessage :: proc(
 	fields: PlaintextDirectMessageFields,
 	content: string,
 	senderIdentityPublicKey: IdentityPublicKeyBytes,
 	signature: SignatureBytes,
+	attachments: []AttachmentRef = nil,
 ) -> bool {
+	prefix := makePlaintextDirectMessagePrefix(fields)
+	if len(attachments) > 0 {
+		body: [PLAINTEXT_V2_BODY_MAX_SIZE]u8
+		bodyLength, ok := makePlaintextV2Body(content, attachments, body[:])
+		if !ok {
+			return false
+		}
+		v2Result := verifyWithDomain(
+			senderIdentityPublicKey,
+			PLAINTEXT_DIRECT_MESSAGE_V2_DOMAIN,
+			prefix[:],
+			body[:bodyLength],
+			signature,
+		)
+		return v2Result == .None
+	}
 	if len(content) == 0 || len(content) > CHAT_MESSAGE_MAX_BYTES {
 		return false
 	}
-	prefix := makePlaintextDirectMessagePrefix(fields)
 	result := verifyWithDomain(
 		senderIdentityPublicKey,
 		PLAINTEXT_DIRECT_MESSAGE_DOMAIN,
@@ -1313,6 +1654,55 @@ verifyPlaintextDirectMessage :: proc(
 		signature,
 	)
 	return result == .None
+}
+
+// The largest v2 body: the content with its length, the count, and four entries at their
+// largest.
+PLAINTEXT_V2_ATTACHMENT_MAX_SIZE :: ATTACHMENT_BLOB_ID_SIZE + ATTACHMENT_SHA256_SIZE + 8 + 2 +
+	ATTACHMENT_NAME_MAX_BYTES + 2 + ATTACHMENT_MEDIA_TYPE_MAX_BYTES
+PLAINTEXT_V2_BODY_MAX_SIZE :: 4 + CHAT_MESSAGE_MAX_BYTES + 1 +
+	ATTACHMENTS_PER_MESSAGE_MAX * PLAINTEXT_V2_ATTACHMENT_MAX_SIZE
+
+// Writes the v2 body (protocol 27, see the top of this file) into dst: contentLength u32 ||
+// content || count u8 || each attachment's blobId, sha256, size u64, name and type, the
+// strings with u16 lengths. False for content or attachments a plaintext message may not carry.
+@(private = "file")
+makePlaintextV2Body :: proc(
+	content: string,
+	attachments: []AttachmentRef,
+	dst: []u8,
+) -> (
+	n: int,
+	ok: bool,
+) {
+	if len(attachments) == 0 ||
+	   !messageContentLengthIsValid(len(content), len(attachments)) ||
+	   !attachmentRefsAreValid(attachments, sealed = false, fromServer = true) {
+		return 0, false
+	}
+	total := 4 + len(content) + 1
+	for attachment in attachments {
+		total += ATTACHMENT_BLOB_ID_SIZE + ATTACHMENT_SHA256_SIZE + 8 + 2 + len(attachment.name)
+		total += 2 + len(attachment.mediaType)
+	}
+	if len(dst) < total {
+		return 0, false
+	}
+	writer := e2eeWriter(dst[:total])
+	e2eeWriteU32(&writer, u32(len(content)))
+	e2eeWriteString(&writer, content)
+	e2eeWriteU8(&writer, u8(len(attachments)))
+	for attachment in attachments {
+		attachment := attachment
+		e2eeWriteBytes(&writer, attachment.blobId[:])
+		e2eeWriteBytes(&writer, attachment.sha256[:])
+		e2eeWriteU64(&writer, attachment.size)
+		e2eeWriteU16(&writer, u16(len(attachment.name)))
+		e2eeWriteString(&writer, attachment.name)
+		e2eeWriteU16(&writer, u16(len(attachment.mediaType)))
+		e2eeWriteString(&writer, attachment.mediaType)
+	}
+	return total, true
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1332,18 +1722,35 @@ PLAINTEXT_ROOM_MESSAGE_FIELDS_SIZE :: AUTH_IDENTITY_PUBLIC_KEY_SIZE + 8 + 8 +
 // Signs "haychat-room-plain-v1" || serverIdentityPublicKey (32) || roomId (i64)
 // || senderUserId (i64) || clientMessageId (16) || content. content must be
 // 1..CHAT_MESSAGE_MAX_BYTES bytes, the room ID and sender positive and clientMessageId set.
+//
+// Protocol 27 (D14): with attachments the label is "haychat-room-plain-v2" and the body is the
+// v2 body (see the top of this file); content may then be empty.
 signPlaintextRoomMessage :: proc(
 	fields: PlaintextRoomMessageFields,
 	content: string,
 	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
+	attachments: []AttachmentRef = nil,
 ) -> (
 	SignatureBytes,
 	bool,
 ) {
-	if !plaintextRoomMessageInputsValid(fields, content) {
+	if !plaintextRoomMessageInputsValid(fields, content, len(attachments)) {
 		return {}, false
 	}
 	prefix := makePlaintextRoomMessagePrefix(fields)
+	if len(attachments) > 0 {
+		body: [PLAINTEXT_V2_BODY_MAX_SIZE]u8
+		bodyLength, ok := makePlaintextV2Body(content, attachments, body[:])
+		if !ok {
+			return {}, false
+		}
+		return signWithDomain(
+			senderIdentityPrivateKey,
+			PLAINTEXT_ROOM_MESSAGE_V2_DOMAIN,
+			prefix[:],
+			body[:bodyLength],
+		)
+	}
 	return signWithDomain(
 		senderIdentityPrivateKey,
 		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
@@ -1353,17 +1760,34 @@ signPlaintextRoomMessage :: proc(
 }
 
 // True when signature is the sender's (senderIdentityPublicKey: the session's for the server,
-// the pin for a client) over these fields and content.
+// the pin for a client) over these fields, content and (protocol 27, the v2 label)
+// attachments.
 verifyPlaintextRoomMessage :: proc(
 	fields: PlaintextRoomMessageFields,
 	content: string,
 	senderIdentityPublicKey: IdentityPublicKeyBytes,
 	signature: SignatureBytes,
+	attachments: []AttachmentRef = nil,
 ) -> bool {
-	if !plaintextRoomMessageInputsValid(fields, content) {
+	if !plaintextRoomMessageInputsValid(fields, content, len(attachments)) {
 		return false
 	}
 	prefix := makePlaintextRoomMessagePrefix(fields)
+	if len(attachments) > 0 {
+		body: [PLAINTEXT_V2_BODY_MAX_SIZE]u8
+		bodyLength, ok := makePlaintextV2Body(content, attachments, body[:])
+		if !ok {
+			return false
+		}
+		result := verifyWithDomain(
+			senderIdentityPublicKey,
+			PLAINTEXT_ROOM_MESSAGE_V2_DOMAIN,
+			prefix[:],
+			body[:bodyLength],
+			signature,
+		)
+		return result == .None
+	}
 	result := verifyWithDomain(
 		senderIdentityPublicKey,
 		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
@@ -1378,10 +1802,10 @@ verifyPlaintextRoomMessage :: proc(
 plaintextRoomMessageInputsValid :: proc(
 	fields: PlaintextRoomMessageFields,
 	content: string,
+	attachmentCount: int,
 ) -> bool {
 	return(
-		len(content) > 0 &&
-		len(content) <= CHAT_MESSAGE_MAX_BYTES &&
+		messageContentLengthIsValid(len(content), attachmentCount) &&
 		fields.roomID > 0 &&
 		fields.senderUserID > 0 &&
 		clientMessageIDIsSet(fields.clientMessageID) \

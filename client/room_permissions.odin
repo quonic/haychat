@@ -28,11 +28,12 @@ ROOM_SEND_NOT_PERMITTED_NOTE :: "You cannot send messages in this room"
 VOICE_SPEAK_NOT_PERMITTED_NOTE :: "You cannot speak in this room"
 
 // Every room permission in the order forms and the harness list them.
-ROOM_PERMISSION_ORDER := [4]common.RoomPermission {
+ROOM_PERMISSION_ORDER := [5]common.RoomPermission {
 	.SendMessages,
 	.SpeakInVoice,
 	.ManageMembers,
 	.EditRoom,
+	.AttachFiles,
 }
 
 roomPermissionLabel :: proc(permission: common.RoomPermission) -> string {
@@ -45,6 +46,8 @@ roomPermissionLabel :: proc(permission: common.RoomPermission) -> string {
 		return "Manage members"
 	case .EditRoom:
 		return "Edit room"
+	case .AttachFiles:
+		return "Attach files"
 	}
 	return ""
 }
@@ -60,6 +63,8 @@ roomPermissionWord :: proc(permission: common.RoomPermission) -> string {
 		return "manage-members"
 	case .EditRoom:
 		return "edit-room"
+	case .AttachFiles:
+		return "attach-files"
 	}
 	return ""
 }
@@ -145,7 +150,7 @@ State_canEditRoom :: proc(state: ^State, serverID, roomID: int) -> bool {
 State_roomGrantable :: proc(state: ^State, serverID, roomID: int) -> common.RoomPermissions {
 	grantable := State_roomPermissions(state, serverID, roomID)
 	if State_hasPermission(state, serverID, .ManageRooms) {
-		grantable += {.SendMessages, .SpeakInVoice, .EditRoom}
+		grantable += {.SendMessages, .SpeakInVoice, .EditRoom, .AttachFiles}
 	}
 	return grantable
 }

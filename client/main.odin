@@ -66,6 +66,10 @@ State :: struct {
 	// Protocol 26 (attachment_transfer.odin): started on the first transfer, stopped before the
 	// network worker it sends through.
 	transferWorker:                 ^ClientTransferWorker,
+	// Protocol 27 (attachments.odin): finished uploads a message may name, and uploads the
+	// worker is running.
+	attachmentUploads:              [dynamic]UploadedAttachment,
+	attachmentPendingUploads:       [dynamic]PendingAttachmentUpload,
 	// Wakes the UI loop when the worker queues events; kept so the worker can be restarted
 	// after a settings change.
 	networkWake:                    NetworkWorkerEventQueuedProc,
@@ -264,6 +268,7 @@ State_deinit :: proc(state: ^State) {
 	State_voiceShutdown(state)
 	State_stopTransfers(state)
 	ClientNetworkWorker_stop(state.networkWorker)
+	State_attachmentsDeinit(state)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)
 	delete(state.chat_status_message)

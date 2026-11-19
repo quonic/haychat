@@ -552,6 +552,7 @@ ClientServerTransport_connected :: proc(
 		sessionGeneration = transport.sessionGeneration,
 		registrationMode  = transport.authenticatedRegistrationMode,
 		isRestricted      = transport.authenticatedIsRestricted,
+		attachmentLimits  = transport.authenticatedAttachments,
 	}
 	if transport.connection.newlyPinned {
 		event.serverPublicKey = strings.clone(transport.pinnedServerPublicKey)

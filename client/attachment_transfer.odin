@@ -16,10 +16,20 @@ package client
 //     takes the network worker's lock to send (control messages, or a chunk sealed with
 //     transport.transport.fileSend, which only it uses).
 //
-// F1 transfers plaintext bytes only; F2 adds the encrypted format (common/attachment_e2ee.odin).
-// A download is written to OUT.part next to OUT and renamed when every byte arrived (D19).
+// Protocol 27 (F2): an upload to an encrypted conversation is sealed here in the read path
+// (common/attachment_e2ee.odin, AttachmentSealer): a random file key per file, every chunk
+// sealed exactly once, and every sealed wire chunk kept in memory until the server acknowledged
+// it, so a resume after a reconnect resends the same bytes and nothing is sealed twice (D12).
+// An encrypted upload therefore cannot be resumed after a restart of the client. A download
+// for a message (ClientTransferWorker_downloadVerified) checks the stored size and the whole
+// blob's SHA-256 against the signed or sealed message and, for an encrypted file, opens it
+// chunk by chunk (AttachmentOpener), writing only authenticated file bytes and checking that the
+// padding is zero. A download is written to OUT.part next to OUT and renamed when every byte
+// arrived and checked (D19); a failed check deletes the part file and reports
+// common.ATTACHMENT_CHANGED_MESSAGE.
 
 import "../common"
+import "core:crypto"
 import "core:crypto/sha2"
 import "core:encoding/cbor"
 import "core:fmt"
@@ -59,13 +69,32 @@ ClientTransferEvent :: struct {
 	path:      string,
 	message:   string, // Error: why
 	elapsedMS: i64,
+	// Protocol 27: whether the stored bytes are the encrypted format, the file's own size
+	// (total is the stored size), and for an upload's Done the file key the sealed message
+	// must carry (wiped by ClientTransferEvent_deinit).
+	encrypted: bool,
+	fileSize:  u64,
+	key:       common.AttachmentFileKey,
 }
 
 ClientTransferEvent_deinit :: proc(event: ^ClientTransferEvent) {
 	delete(event.path)
 	delete(event.message)
+	crypto.zero_explicit(&event.key, size_of(event.key))
 	event.path = ""
 	event.message = ""
+}
+
+// What a download for a message must find (protocol 27): the stored size and hash the signed or
+// sealed message names and, for an encrypted file, its key and size. set false is the raw
+// download of F1 (only the owner's own unbound blob is downloadable without a message).
+ClientTransferExpect :: struct {
+	set:        bool,
+	storedSize: u64,
+	sha256:     common.AttachmentSHA256,
+	encrypted:  bool,
+	key:        common.AttachmentFileKey,
+	fileSize:   u64,
 }
 
 @(private = "file")
@@ -85,6 +114,8 @@ ClientTransferCommand :: struct {
 	recipientUserID: int,
 	path:            string, // owned
 	blobId:          common.AttachmentBlobID,
+	encrypted:       bool, // Upload: seal the file (protocol 27)
+	expect:          ClientTransferExpect, // Download: what to check (protocol 27)
 }
 
 ClientTransferInboundKind :: enum u8 {
@@ -126,10 +157,12 @@ ClientTransferState :: enum u8 {
 	Finished, // done or failed; an upload with a blob ID stays for attach-resume
 }
 
+// A chunk in flight. An encrypted upload keeps its sealed bytes (owned) until the ack (D12).
 @(private = "file")
 ClientTransferChunk :: struct {
 	offset: u64,
 	length: u64,
+	data:   []u8,
 }
 
 @(private = "file")
@@ -155,6 +188,20 @@ ClientTransfer :: struct {
 	generation:   u64,
 	started:      time.Tick,
 	lastProgress: time.Tick,
+	// Protocol 27, an encrypted upload: the sealer (key, layout, chunks sealed so far), the
+	// file's size, and the sealed bytes not yet cut into wire chunks (pending, owned, of
+	// pendingLength bytes).
+	encrypted:     bool,
+	sealer:        common.AttachmentSealer,
+	fileSize:      u64,
+	pending:       []u8,
+	pendingLength: int,
+	// Protocol 27, a download for a message: what to check, and for an encrypted file the
+	// opener (borrowing openerBuffer, owned) and the file bytes written so far.
+	expect:        ClientTransferExpect,
+	opener:        common.AttachmentOpener,
+	openerBuffer:  []u8,
+	written:       u64,
 }
 
 ClientTransferWorker :: struct {
@@ -175,6 +222,10 @@ ClientTransferWorker :: struct {
 	plaintext:     []u8,
 	sealed:        []u8,
 	chunk:         []u8,
+	// Protocol 27: the sealer's scratch plaintext and output, and the opener's output.
+	sealScratch:   []u8,
+	sealOutput:    []u8,
+	openOutput:    []u8,
 }
 
 // Starts the transfer worker for the network worker's transports and binds it to each of them.
@@ -194,6 +245,9 @@ ClientTransferWorker_start :: proc(
 	worker.plaintext = make([]u8, common.ATTACHMENT_PACKET_MAX_SIZE)
 	worker.sealed = make([]u8, common.ATTACHMENT_SEALED_PACKET_MAX_SIZE)
 	worker.chunk = make([]u8, common.ATTACHMENT_CHUNK_BYTES)
+	worker.sealScratch = make([]u8, common.ATTACHMENT_E2EE_CHUNK_BYTES)
+	worker.sealOutput = make([]u8, common.ATTACHMENT_E2EE_SEAL_OUTPUT_MAX)
+	worker.openOutput = make([]u8, common.ATTACHMENT_E2EE_CHUNK_BYTES)
 	ClientNetworkWorker_lock(network)
 	for index in 0 ..< len(transports) {
 		transports[index].transfers = worker
@@ -244,6 +298,11 @@ ClientTransferWorker_stop :: proc(worker: ^ClientTransferWorker) {
 	delete(worker.plaintext)
 	delete(worker.sealed)
 	delete(worker.chunk)
+	crypto.zero_explicit(raw_data(worker.sealScratch), len(worker.sealScratch))
+	crypto.zero_explicit(raw_data(worker.openOutput), len(worker.openOutput))
+	delete(worker.sealScratch)
+	delete(worker.sealOutput)
+	delete(worker.openOutput)
 	free(worker)
 }
 
@@ -259,12 +318,14 @@ clientTransferQueue :: proc(worker: ^ClientTransferWorker, command: ClientTransf
 	return queued.id
 }
 
-// Uploads path to a room (roomID) or a direct conversation (recipientUserID). Returns the local
-// transfer ID that its events carry.
+// Uploads path to a room (roomID) or a direct conversation (recipientUserID), sealed with a
+// fresh file key when encrypted (protocol 27). Returns the local transfer ID that its events
+// carry; the Done event of an encrypted upload carries the key and the file's size.
 ClientTransferWorker_upload :: proc(
 	worker: ^ClientTransferWorker,
 	serverID, roomID, recipientUserID: int,
 	path: string,
+	encrypted := false,
 ) -> int {
 	return clientTransferQueue(
 		worker,
@@ -274,6 +335,7 @@ ClientTransferWorker_upload :: proc(
 			roomID = roomID,
 			recipientUserID = recipientUserID,
 			path = strings.clone(path),
+			encrypted = encrypted,
 		},
 	)
 }
@@ -304,6 +366,31 @@ ClientTransferWorker_download :: proc(
 			serverID = serverID,
 			blobId = blobId,
 			path = strings.clone(path),
+		},
+	)
+}
+
+// Downloads a message's file into path (through path.part) and checks it against expect: the
+// stored size, the whole blob's hash and, for an encrypted file, every chunk and the padding
+// (protocol 27). A failed check deletes the part file and reports
+// common.ATTACHMENT_CHANGED_MESSAGE.
+ClientTransferWorker_downloadVerified :: proc(
+	worker: ^ClientTransferWorker,
+	serverID: int,
+	blobId: common.AttachmentBlobID,
+	path: string,
+	expect: ClientTransferExpect,
+) -> int {
+	verified := expect
+	verified.set = true
+	return clientTransferQueue(
+		worker,
+		ClientTransferCommand {
+			kind = .Download,
+			serverID = serverID,
+			blobId = blobId,
+			path = strings.clone(path),
+			expect = verified,
 		},
 	)
 }
@@ -514,8 +601,35 @@ clientTransferRun :: proc(data: rawptr) {
 clientTransferFree :: proc(transfer: ^ClientTransfer) {
 	delete(transfer.path)
 	delete(transfer.partPath)
+	clientTransferDropUnacked(transfer)
 	delete(transfer.unacked)
+	clientTransferWipeCrypto(transfer)
 	free(transfer)
+}
+
+@(private = "file")
+clientTransferDropUnacked :: proc(transfer: ^ClientTransfer) {
+	for chunk in transfer.unacked {
+		delete(chunk.data)
+	}
+	clear(&transfer.unacked)
+}
+
+// Wipes and frees what an encrypted transfer holds: the sealer (its key), the sealed bytes not
+// yet sent, the opener and its buffer. Called when the transfer can never continue.
+@(private = "file")
+clientTransferWipeCrypto :: proc(transfer: ^ClientTransfer) {
+	common.AttachmentSealer_wipe(&transfer.sealer)
+	if len(transfer.pending) > 0 {
+		crypto.zero_explicit(raw_data(transfer.pending), len(transfer.pending))
+	}
+	delete(transfer.pending)
+	transfer.pending = nil
+	transfer.pendingLength = 0
+	common.AttachmentOpener_wipe(&transfer.opener)
+	delete(transfer.openerBuffer)
+	transfer.openerBuffer = nil
+	crypto.zero_explicit(&transfer.expect.key, size_of(transfer.expect.key))
 }
 
 @(private = "file")
@@ -548,10 +662,15 @@ clientTransferEmit :: proc(
 		path      = strings.clone(transfer.path),
 		message   = strings.clone(message),
 		elapsedMS = i64(time.duration_milliseconds(time.tick_since(transfer.started))),
+		encrypted = transfer.encrypted || transfer.expect.encrypted,
+		fileSize  = transfer.fileSize,
 	}
 	if kind == .Done {
 		hash := transfer.hash
 		sha2.final(&hash, event.sha256[:])
+		if transfer.direction == .Upload && transfer.encrypted {
+			event.key = transfer.sealer.key
+		}
 	}
 	transfer.lastProgress = time.tick_now()
 	sync.mutex_lock(&worker.mutex)
@@ -572,6 +691,9 @@ clientTransferFail :: proc(
 	transfer.failed = true
 	clientTransferClose(transfer, discardPart = true)
 	clientTransferEmit(worker, transfer, .Error, message)
+	if transfer.direction == .Download {
+		clientTransferWipeCrypto(transfer)
+	}
 }
 
 // A transfer the command or packet names, newest first.
@@ -690,11 +812,29 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 		}
 		transfer.file = file
 		size, sizeErr := os.file_size(file)
-		if sizeErr != nil || size <= 0 {
+		if sizeErr != nil || size < 0 || (size == 0 && !command.encrypted) {
 			clientTransferFail(worker, transfer, "the file is empty or unreadable")
 			return
 		}
+		transfer.fileSize = u64(size)
 		transfer.size = u64(size)
+		if command.encrypted {
+			// A fresh key for this file only (D12); the stored size is the sealed layout's.
+			key, keyOK := common.generateAttachmentFileKey()
+			sealer, sealerErr := common.AttachmentSealer_init(key, u64(size))
+			crypto.zero_explicit(&key, size_of(key))
+			if !keyOK || sealerErr != .None {
+				clientTransferFail(worker, transfer, "cannot encrypt the file")
+				return
+			}
+			transfer.encrypted = true
+			transfer.sealer = sealer
+			transfer.size = sealer.layout.storedSize
+			transfer.pending = make(
+				[]u8,
+				common.ATTACHMENT_CHUNK_BYTES + common.ATTACHMENT_E2EE_SEAL_OUTPUT_MAX,
+			)
+		}
 		transfer.requestId = worker.nextRequestID
 		worker.nextRequestID += 1
 		generation, sent := clientTransferSendControl(
@@ -706,6 +846,7 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 				roomId = command.roomID,
 				recipientUserId = command.recipientUserID,
 				size = transfer.size,
+				encrypted = command.encrypted,
 			},
 		)
 		if !sent {
@@ -749,7 +890,11 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 		transfer.state = .Beginning
 		transfer.failed = false
 		transfer.requestId = 0
-		clear(&transfer.unacked)
+		// A plaintext upload reads its chunks again from the file; an encrypted one keeps the
+		// sealed chunks in flight and resends exactly those (D12).
+		if !transfer.encrypted {
+			clientTransferDropUnacked(transfer)
+		}
 		generation, sent := clientTransferSendControl(
 			worker,
 			transfer.serverID,
@@ -772,6 +917,7 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 			blobId    = command.blobId,
 			hasBlobId = true,
 			started   = time.tick_now(),
+			expect    = command.expect,
 		}
 		append(&worker.transfers, transfer)
 		if active := clientTransferFind(worker, command.serverID, command.blobId, .Download, true);
@@ -804,6 +950,8 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 				clientTransferFail(worker, transfer, "cancelled")
 				// A cancelled upload is a tombstone on the server: it cannot be resumed.
 				transfer.hasBlobId = direction == .Download
+				clientTransferDropUnacked(transfer)
+				clientTransferWipeCrypto(transfer)
 			}
 		}
 	}
@@ -840,8 +988,12 @@ clientTransferHandleInbound :: proc(
 		}
 		transfer.blobId = inbound.blobId
 		transfer.hasBlobId = true
+		if transfer.encrypted {
+			clientTransferResumeSealed(worker, transfer, inbound.offset)
+			return
+		}
 		// The running hash covers every byte from the start: rebuild it up to the server's
-		// offset on a resume (D9; F1 never re-encrypts, nothing is encrypted yet).
+		// offset on a resume (D9).
 		sha2.init_256(&transfer.hash)
 		position := u64(0)
 		for position < inbound.offset {
@@ -869,6 +1021,7 @@ clientTransferHandleInbound :: proc(
 			return
 		}
 		transfer.done += transfer.unacked[0].length
+		delete(transfer.unacked[0].data)
 		ordered_remove(&transfer.unacked, 0)
 		clientTransferPumpUpload(worker, transfer)
 	case .Done:
@@ -884,9 +1037,11 @@ clientTransferHandleInbound :: proc(
 		if inbound.sha256 != mine || inbound.size != transfer.size {
 			transfer.failed = true
 			clientTransferEmit(worker, transfer, .Error, "the server stored different bytes")
+			clientTransferWipeCrypto(transfer)
 			return
 		}
 		clientTransferEmit(worker, transfer, .Done)
+		clientTransferWipeCrypto(transfer)
 	case .DownloadBegin:
 		transfer := clientTransferFind(worker, inbound.serverID, inbound.blobId, .Download, true)
 		if transfer == nil || transfer.state != .Beginning {
@@ -895,6 +1050,30 @@ clientTransferHandleInbound :: proc(
 		if inbound.offset != 0 || inbound.size == 0 {
 			clientTransferFail(worker, transfer, "unexpected download start")
 			return
+		}
+		transfer.fileSize = inbound.size
+		if transfer.expect.set {
+			// The message names the stored size; for an encrypted file the layout of the
+			// sealed size must give it too (AttachmentOpener_init).
+			if inbound.size != transfer.expect.storedSize {
+				clientTransferFail(worker, transfer, common.ATTACHMENT_CHANGED_MESSAGE)
+				return
+			}
+			if transfer.expect.encrypted {
+				transfer.openerBuffer = make([]u8, common.ATTACHMENT_E2EE_SEALED_CHUNK_MAX)
+				opener, openerErr := common.AttachmentOpener_init(
+					transfer.expect.key,
+					transfer.expect.fileSize,
+					inbound.size,
+					transfer.openerBuffer,
+				)
+				if openerErr != .None {
+					clientTransferFail(worker, transfer, common.ATTACHMENT_CHANGED_MESSAGE)
+					return
+				}
+				transfer.opener = opener
+				transfer.fileSize = transfer.expect.fileSize
+			}
 		}
 		file, err := os.open(transfer.partPath, {.Write, .Create, .Trunc}, os.perm(0o600))
 		if err != nil {
@@ -921,10 +1100,42 @@ clientTransferHandleInbound :: proc(
 			clientTransferFail(worker, transfer, "the server sent an unexpected chunk")
 			return
 		}
-		n, err := os.write_at(transfer.file, inbound.data, i64(inbound.offset))
-		if err != nil || n != len(inbound.data) {
-			clientTransferFail(worker, transfer, "cannot write the file")
-			return
+		if transfer.expect.set && transfer.expect.encrypted {
+			// Only authenticated file bytes reach the part file; padding is checked, not
+			// written.
+			remaining := inbound.data
+			for len(remaining) > 0 {
+				consumed, produced, openErr := common.AttachmentOpener_feed(
+					&transfer.opener,
+					remaining,
+					worker.openOutput,
+				)
+				if openErr != .None {
+					clientTransferFail(worker, transfer, common.ATTACHMENT_CHANGED_MESSAGE)
+					return
+				}
+				if produced > 0 {
+					n, err := os.write_at(
+						transfer.file,
+						worker.openOutput[:produced],
+						i64(transfer.written),
+					)
+					crypto.zero_explicit(raw_data(worker.openOutput), produced)
+					if err != nil || n != produced {
+						clientTransferFail(worker, transfer, "cannot write the file")
+						return
+					}
+					transfer.written += u64(produced)
+				}
+				remaining = remaining[consumed:]
+			}
+		} else {
+			n, err := os.write_at(transfer.file, inbound.data, i64(inbound.offset))
+			if err != nil || n != len(inbound.data) {
+				clientTransferFail(worker, transfer, "cannot write the file")
+				return
+			}
+			transfer.written += length
 		}
 		sha2.update(&transfer.hash, inbound.data)
 		transfer.done += length
@@ -941,6 +1152,10 @@ clientTransferHandleInbound :: proc(
 			return
 		}
 		if transfer.done == transfer.size {
+			if transfer.expect.set && !clientTransferDownloadChecks(transfer) {
+				clientTransferFail(worker, transfer, common.ATTACHMENT_CHANGED_MESSAGE)
+				return
+			}
 			syncOK := os.sync(transfer.file) == nil
 			clientTransferClose(transfer)
 			if !syncOK || os.rename(transfer.partPath, transfer.path) != nil {
@@ -948,7 +1163,9 @@ clientTransferHandleInbound :: proc(
 				return
 			}
 			transfer.state = .Finished
+			transfer.fileSize = transfer.written
 			clientTransferEmit(worker, transfer, .Done)
+			clientTransferWipeCrypto(transfer)
 		} else if time.tick_since(transfer.lastProgress) >= CLIENT_TRANSFER_PROGRESS_INTERVAL {
 			clientTransferEmit(worker, transfer, .Progress)
 		}
@@ -975,7 +1192,30 @@ clientTransferHandleInbound :: proc(
 // Sends an upload's next chunks while the window allows, and the finish once all are acked.
 @(private = "file")
 clientTransferPumpUpload :: proc(worker: ^ClientTransferWorker, transfer: ^ClientTransfer) {
-	for transfer.nextSend < transfer.size &&
+	for transfer.encrypted &&
+	    transfer.nextSend < transfer.size &&
+	    len(transfer.unacked) < common.ATTACHMENT_WINDOW_CHUNKS {
+		data, ok := clientTransferNextSealedChunk(worker, transfer)
+		if !ok {
+			clientTransferFail(worker, transfer, "cannot read or encrypt the file")
+			return
+		}
+		// Kept before it is sent, so a lost connection resends exactly these bytes (D12).
+		chunk := ClientTransferChunk {
+			offset = transfer.nextSend,
+			length = u64(len(data)),
+			data   = data,
+		}
+		append(&transfer.unacked, chunk)
+		sha2.update(&transfer.hash, data)
+		transfer.nextSend += chunk.length
+		if !clientTransferSendChunk(worker, transfer, chunk) {
+			clientTransferFail(worker, transfer, NOT_CONNECTED_MESSAGE)
+			return
+		}
+	}
+	for !transfer.encrypted &&
+	    transfer.nextSend < transfer.size &&
 	    len(transfer.unacked) < common.ATTACHMENT_WINDOW_CHUNKS {
 		length := min(u64(common.ATTACHMENT_CHUNK_BYTES), transfer.size - transfer.nextSend)
 		n, err := os.read_at(transfer.file, worker.chunk[:length], i64(transfer.nextSend))
@@ -1004,6 +1244,13 @@ clientTransferPumpUpload :: proc(worker: ^ClientTransferWorker, transfer: ^Clien
 		final: common.AttachmentSHA256
 		hash := transfer.hash
 		sha2.final(&hash, final[:])
+		if transfer.encrypted {
+			sealed, finishErr := common.AttachmentSealer_finish(&transfer.sealer)
+			if finishErr != .None || sealed != final {
+				clientTransferFail(worker, transfer, "cannot encrypt the file")
+				return
+			}
+		}
 		if _, sent := clientTransferSendControl(
 			worker,
 			transfer.serverID,
@@ -1017,6 +1264,130 @@ clientTransferPumpUpload :: proc(worker: ^ClientTransferWorker, transfer: ^Clien
 	} else if time.tick_since(transfer.lastProgress) >= CLIENT_TRANSFER_PROGRESS_INTERVAL {
 		clientTransferEmit(worker, transfer, .Progress)
 	}
+}
+
+// Sends one chunk of an upload on channel 5 (data borrowed).
+@(private = "file")
+clientTransferSendChunk :: proc(
+	worker: ^ClientTransferWorker,
+	transfer: ^ClientTransfer,
+	chunk: ClientTransferChunk,
+) -> bool {
+	return clientTransferSendPacket(
+		worker,
+		transfer,
+		common.AttachmentPacket {
+			kind = .UploadChunk,
+			blobId = transfer.blobId,
+			offset = chunk.offset,
+			data = chunk.data,
+		},
+	)
+}
+
+// The next wire chunk of an encrypted upload's stored bytes (owned): seals file chunks, each
+// exactly once and in order, until enough sealed bytes are pending, and cuts the chunk off.
+@(private = "file")
+clientTransferNextSealedChunk :: proc(
+	worker: ^ClientTransferWorker,
+	transfer: ^ClientTransfer,
+) -> (
+	data: []u8,
+	ok: bool,
+) {
+	need := int(min(u64(common.ATTACHMENT_CHUNK_BYTES), transfer.size - transfer.nextSend))
+	for transfer.pendingLength < need {
+		count, done := common.AttachmentSealer_nextFileBytes(&transfer.sealer)
+		if done {
+			return nil, false
+		}
+		fileBytes := worker.chunk[:count]
+		if count > 0 {
+			n, err := os.read_at(transfer.file, fileBytes, i64(transfer.sealer.fileBytes))
+			if err != nil || n != count {
+				crypto.zero_explicit(raw_data(fileBytes), count)
+				return nil, false
+			}
+		}
+		sealedLength, sealErr := common.AttachmentSealer_next(
+			&transfer.sealer,
+			fileBytes,
+			worker.sealScratch,
+			worker.sealOutput,
+		)
+		crypto.zero_explicit(raw_data(worker.chunk), count)
+		if sealErr != .None ||
+		   transfer.pendingLength + sealedLength > len(transfer.pending) {
+			return nil, false
+		}
+		copy(transfer.pending[transfer.pendingLength:], worker.sealOutput[:sealedLength])
+		transfer.pendingLength += sealedLength
+	}
+	data = make([]u8, need)
+	copy(data, transfer.pending[:need])
+	copy(transfer.pending, transfer.pending[need:transfer.pendingLength])
+	transfer.pendingLength -= need
+	return data, true
+}
+
+// Ready for an encrypted upload: the first one starts at 0; a resume (D9) must start at the
+// first chunk still in flight (or at the next one when none is), whose sealed bytes are resent
+// unchanged. Anything else cannot be resumed, since no chunk is ever sealed twice.
+@(private = "file")
+clientTransferResumeSealed :: proc(
+	worker: ^ClientTransferWorker,
+	transfer: ^ClientTransfer,
+	offset: u64,
+) {
+	if transfer.nextSend == 0 && len(transfer.unacked) == 0 {
+		if offset != 0 {
+			clientTransferFail(worker, transfer, "the server reported bytes this upload never sent")
+			return
+		}
+		sha2.init_256(&transfer.hash)
+	}
+	// The server may have stored chunks whose acks were lost with the session.
+	for len(transfer.unacked) > 0 &&
+	    transfer.unacked[0].offset + transfer.unacked[0].length <= offset {
+		transfer.done += transfer.unacked[0].length
+		delete(transfer.unacked[0].data)
+		ordered_remove(&transfer.unacked, 0)
+	}
+	expected := transfer.nextSend
+	if len(transfer.unacked) > 0 {
+		expected = transfer.unacked[0].offset
+	}
+	if offset != expected || offset != transfer.done {
+		clientTransferFail(
+			worker,
+			transfer,
+			"an encrypted upload can only continue where the server stopped acknowledging it",
+		)
+		return
+	}
+	transfer.state = .Sending
+	clientTransferEmit(worker, transfer, .Progress)
+	for chunk in transfer.unacked {
+		if !clientTransferSendChunk(worker, transfer, chunk) {
+			clientTransferFail(worker, transfer, NOT_CONNECTED_MESSAGE)
+			return
+		}
+	}
+	clientTransferPumpUpload(worker, transfer)
+}
+
+// The checks a download for a message makes once every byte arrived (D2, D12): the whole
+// stored blob's SHA-256 is the message's and, for an encrypted file, the last chunk was opened
+// and every byte of the layout consumed.
+@(private = "file")
+clientTransferDownloadChecks :: proc(transfer: ^ClientTransfer) -> bool {
+	if transfer.expect.encrypted {
+		return common.AttachmentOpener_finish(&transfer.opener, transfer.expect.sha256) == .None
+	}
+	digest: common.AttachmentSHA256
+	hash := transfer.hash
+	sha2.final(&hash, digest[:])
+	return digest == transfer.expect.sha256 && transfer.written == transfer.expect.storedSize
 }
 
 // Fails every transfer whose session is gone: the server ended its side with the session (an

@@ -128,6 +128,11 @@ SQL_TESTS+=,server.testAttachmentsMigrationUpgradesVersion13AgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentBeginStatementAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentUploadStepsAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentSweeperAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentsOnMessagesMigrationUpgradesVersion14AgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentBindingInRoomMessagesAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentBindingInDirectMessagesAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentDownloadCheckAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

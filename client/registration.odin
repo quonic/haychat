@@ -382,6 +382,7 @@ State_registrationConnectionChanged :: proc(state: ^State, event: ^ClientTranspo
 	case .Connected:
 		connection.registrationMode = event.registrationMode
 		connection.isRestricted = event.isRestricted
+		connection.attachmentLimits = event.attachmentLimits
 		connection.signUpRequestStatus = .None
 		ServerConnection_setSignUp(connection, .None, "")
 		State_wipeSignUpFormFor(state, event.serverID)

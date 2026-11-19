@@ -776,25 +776,33 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 		)
 		strings.write_string(&builder, rooms)
 		strings.write_string(&builder, ";dm=")
-		directs := databaseExecuteRequest(
-			conn,
-			common.DatabaseDirectConversationListRequest{userId = userID},
+		// The conversation list statement without its protocol 27 attachments column, which
+		// reads a table these older schemas lack.
+		withoutAttachments, _ := strings.replace_all(
+			DATABASE_LIST_DIRECT_CONVERSATIONS_SQL,
+			DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "direct_message_id = c.id" +
+			DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL,
+			"''",
+			context.temp_allocator,
 		)
-		defer IPC__database_query_response_deinit(directs)
-		directList, directListOK := directs.result.(common.DatabaseDirectConversationListResult)
-		assert(
-			directs.success && directListOK,
-			fmt.tprintf("expected a conversation list: %v", directs),
-		)
-		for conversation, conversationIndex in directList.conversations {
-			fmt.sbprintf(
-				&builder,
-				"%s%d=%d",
-				conversationIndex > 0 ? "," : "",
-				conversation.peerUserId,
-				conversation.unreadCount,
+		directSQL := withoutAttachments
+		parameters := []int{userID, common.DIRECT_CONVERSATIONS_MAX, common.UNREAD_COUNT_CAP}
+		for value, index in parameters {
+			directSQL, _ = strings.replace_all(
+				directSQL,
+				fmt.tprintf("$%d::bigint", index + 1),
+				fmt.tprintf("%d", value),
+				context.temp_allocator,
 			)
 		}
+		directs := databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT COALESCE(string_agg(peer_id || '=' || n, ','), '') FROM (%s) listed",
+				directSQL,
+			),
+		)
+		strings.write_string(&builder, directs)
 	}
 	return strings.to_string(builder)
 }
@@ -1473,5 +1481,129 @@ testAttachmentsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 	assert(
 		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "attachments message links set null"),
 		"expected schema validation to require migration 14's checks",
+	)
+}
+
+// Migration 15 (protocol 27): from version 14 with rooms, messages and an unbound blob, every
+// row is kept, every room gains AttachFiles, and the new checks accept an empty content only
+// with attachments.
+@(test)
+testAttachmentsOnMessagesMigrationUpgradesVersion14AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "attachments_on_messages_v14")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:14])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 14 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL +
+		"; UPDATE rooms SET everyone_permissions = 2 WHERE name = 'lounge'; " +
+		"INSERT INTO attachments (blob_id, owner_user_id, room_id, encrypted, size, state, " +
+		"sha256) VALUES (decode(repeat('0a', 16), 'hex'), 1, 1, false, 5, 1, " +
+		"decode(repeat('0b', 32), 'hex'))",
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+	messages := databaseMigrationTestValue(
+		conn,
+		"SELECT string_agg(id || ':' || content, ',' ORDER BY id) FROM chat_messages",
+	)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:15])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 14, version = 15},
+		fmt.tprintf("expected only migration 15 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:15])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept &&
+		databaseMigrationTestValue(
+			conn,
+			"SELECT string_agg(id || ':' || content, ',' ORDER BY id) FROM chat_messages",
+		) ==
+			messages,
+		"expected every account, room and message intact",
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT string_agg(name || '=' || everyone_permissions, ',' ORDER BY id) FROM rooms",
+		) ==
+		"general=19,lounge=18",
+		"expected AttachFiles added to every room's everyone grant",
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT (SELECT count(*) FROM chat_messages WHERE attachment_count <> 0) + " +
+			"(SELECT count(*) FROM direct_messages WHERE attachment_count <> 0) || '/' || " +
+			"(SELECT state || ':' || (position IS NULL AND name IS NULL)::text FROM attachments)",
+		) ==
+		"0/1:true",
+		"expected no message with attachments and the blob unchanged",
+	)
+	created := databaseMigrationTestValue(
+		conn,
+		"INSERT INTO rooms (name) VALUES ('after') RETURNING everyone_permissions::text",
+	)
+	assert(created == "19", fmt.tprintf("expected the new default grant, got %s", created))
+
+	accepted := [?]string {
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+		"signature, attachment_count) VALUES (1, 1, '', decode(repeat('31', 16), 'hex'), " +
+		"decode(repeat('ab', 64), 'hex'), 1)",
+		"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
+		"client_message_id, signature, attachment_count) VALUES (1, 2, '', " +
+		"decode(repeat('32', 16), 'hex'), decode(repeat('ab', 64), 'hex'), 4)",
+	}
+	for statement in accepted {
+		databaseDefaultRoomTestExec(conn, "store an attachments-only message", statement)
+	}
+	probes := [?]string {
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+		"signature) VALUES (1, 1, '', decode(repeat('41', 16), 'hex'), " +
+		"decode(repeat('ab', 64), 'hex'))",
+		"INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
+		"client_message_id, signature) VALUES (1, 2, '', decode(repeat('42', 16), 'hex'), " +
+		"decode(repeat('ab', 64), 'hex'))",
+		"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+		"signature, attachment_count) VALUES (1, 1, 'x', decode(repeat('43', 16), 'hex'), " +
+		"decode(repeat('ab', 64), 'hex'), 5)",
+		"UPDATE attachments SET position = 4",
+		"UPDATE attachments SET name = ''",
+		"UPDATE attachments SET media_type = repeat('t', 101)",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+}
+
+@(test)
+testAttachmentsOnMessagesMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[14]
+	assert(
+		migration.version == 15 && migration.name == "attachments on messages",
+		fmt.tprintf("expected migration 15 to be attachments on messages, got %v", migration),
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN"),
+		"expected migration 15 to drop no table or column",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "message content allows attachments"),
+		"expected schema validation to require migration 15's checks",
 	)
 }

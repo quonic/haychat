@@ -58,6 +58,10 @@ DirectMessageSecurity :: struct {
 DirectMessageEntry :: struct {
 	using message: common.StoredDirectMessage,
 	security:      DirectMessageSecurity,
+	// Protocol 27 (attachments.odin): the files the client checked, and whether a sealed
+	// message's attachment list was changed on the server.
+	files:         [dynamic]MessageFile,
+	filesChanged:  bool,
 }
 
 // A conversation list entry: the server's summary, with lastContent holding the opened preview
@@ -110,6 +114,7 @@ ServerDirectCache :: struct {
 DirectMessageEntry_deinit :: proc(entry: ^DirectMessageEntry) {
 	wipeString(entry.content)
 	StoredDirectMessage_deinit(&entry.message)
+	MessageFiles_deinit(&entry.files)
 	entry^ = {}
 }
 
@@ -332,6 +337,7 @@ StoredDirectMessage_clone :: proc(
 	clone.recipientNickname = strings.clone(message.recipientNickname)
 	clone.timestamp = strings.clone(message.timestamp)
 	clone.content = strings.clone(message.content)
+	clone.attachments = common.AttachmentRefs_clone(message.attachments[:])
 	clone.envelope = nil
 	if len(message.envelope) > 0 {
 		clone.envelope = make([]u8, len(message.envelope))
@@ -392,6 +398,7 @@ ServerDirectCache_noteLatestMessage :: proc(
 		delete(summary.lastContent)
 		delete(summary.lastEnvelope)
 		summary.lastEnvelope = nil
+		common.AttachmentRefs_deinit(&summary.lastAttachments)
 		if len(summary.peerNickname) == 0 {
 			delete(summary.peerNickname)
 			summary.peerNickname = strings.clone(peerNickname)
@@ -406,6 +413,7 @@ ServerDirectCache_noteLatestMessage :: proc(
 	summary.lastContent = strings.clone(entry.content)
 	summary.lastClientMessageId = entry.clientMessageId
 	summary.lastSignature = entry.signature
+	summary.lastAttachments = common.AttachmentRefs_clone(entry.attachments[:])
 	if len(entry.envelope) > 0 {
 		summary.lastEnvelope = make([]u8, len(entry.envelope))
 		copy(summary.lastEnvelope, entry.envelope)
@@ -592,6 +600,10 @@ State_receiveDirectMessage :: proc(
 	peerUserID := directMessagePeerUserID(message, selfUserID)
 	if peerUserID <= 0 {
 		return
+	}
+	// Protocol 27: this account's own message bound these uploads.
+	if message.senderId == selfUserID {
+		State_attachmentsNoteBound(state, serverID, message.attachments[:])
 	}
 	keys := State_directOpenKeys(state, serverID)
 	defer DirectOpenKeys_wipe(&keys)

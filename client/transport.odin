@@ -234,6 +234,10 @@ ClientTransportRuntimeEvent :: struct {
 	registrationRequests:      [dynamic]common.RegistrationRequestSummary,
 	registrationRequest:       common.RegistrationRequestSummary,
 	pendingCount:              int,
+	// Protocol 27: the attachment limits ServerAuthSuccess announced (Connected), and a room
+	// message's attachments (RoomChatReceived, owned).
+	attachmentLimits:          common.AttachmentLimits,
+	attachments:               [dynamic]common.AttachmentRef,
 }
 
 ClientServerTransport :: struct {
@@ -267,6 +271,9 @@ ClientServerTransport :: struct {
 	// ServerAuthSuccess or ServerRegisterResponse{Created}.
 	authenticatedRegistrationMode: common.RegistrationMode,
 	authenticatedIsRestricted: bool,
+	// Protocol 27 (D18): the server's attachment limits and this account's stored bytes, from
+	// ServerAuthSuccess or ServerRegisterResponse{Created}.
+	authenticatedAttachments:  common.AttachmentLimits,
 	// Protocol 25 (#43 G2): ClientAuthRequestPayload.registering for every attempt (the
 	// server's "Use an invite code" setting, or an invite link being followed). Set by the UI
 	// thread under the worker lock (ClientServerTransport_setRegistering).
@@ -349,6 +356,7 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.authenticatedPermissions = {}
 	transport.authenticatedRegistrationMode = {}
 	transport.authenticatedIsRestricted = false
+	transport.authenticatedAttachments = {}
 	transport.registerInFlight = false
 	transport.registrationPending = false
 	delete(transport.registrationRefusal)
@@ -459,6 +467,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 		delete(entry)
 	}
 	delete(event.logEntries)
+	common.AttachmentRefs_deinit(&event.attachments)
 	event^ = {}
 }
 
@@ -468,6 +477,7 @@ StoredDirectMessage_deinit :: proc(message: ^common.StoredDirectMessage) {
 	delete(message.timestamp)
 	delete(message.content)
 	delete(message.envelope)
+	common.AttachmentRefs_deinit(&message.attachments)
 	message^ = {}
 }
 
@@ -501,6 +511,7 @@ DirectConversationSummary_deinit :: proc(conversation: ^common.DirectConversatio
 	delete(conversation.lastTimestamp)
 	delete(conversation.lastContent)
 	delete(conversation.lastEnvelope)
+	common.AttachmentRefs_deinit(&conversation.lastAttachments)
 	conversation^ = {}
 }
 
@@ -914,6 +925,7 @@ ClientServerTransport_takeAuthSuccess :: proc(
 	transport.authenticatedPermissions = authSuccess.permissions & common.SERVER_PERMISSIONS_ALL
 	transport.authenticatedRegistrationMode = authSuccess.registrationMode
 	transport.authenticatedIsRestricted = authSuccess.isRestricted
+	transport.authenticatedAttachments = authSuccess.attachments
 }
 
 ClientServerTransport_buildEncryptedPacketBytes :: proc(
@@ -952,6 +964,19 @@ RoomChatSend :: struct {
 	content:         string,
 	clientMessageID: common.ClientMessageID,
 	signature:       common.SignatureBytes,
+	// Protocol 27: the files the signature covers (borrowed for the send).
+	attachments:     []common.AttachmentRef,
+}
+
+// A borrowed list as the [dynamic] array a payload marshals (the temporary allocator holds the
+// array; the references are shallow copies).
+attachmentRefsPayload :: proc(refs: []common.AttachmentRef) -> [dynamic]common.AttachmentRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	list := make([dynamic]common.AttachmentRef, 0, len(refs), context.temp_allocator)
+	append(&list, ..refs)
+	return list
 }
 
 ClientServerTransport_buildRoomChatPacketBytes :: proc(
@@ -969,6 +994,7 @@ ClientServerTransport_buildRoomChatPacketBytes :: proc(
 			content = send.content,
 			clientMessageId = send.clientMessageID,
 			signature = send.signature,
+			attachments = attachmentRefsPayload(send.attachments),
 		},
 	)
 }
@@ -1068,6 +1094,9 @@ DirectMessageSend :: struct {
 	envelope:        []u8,
 	content:         string,
 	signature:       common.SignatureBytes,
+	// Protocol 27: complete references for a plaintext message (signed), blob IDs and sizes
+	// for a sealed one.
+	attachments:     []common.AttachmentRef,
 }
 
 // Direct messages share the room chat channel and the not-connected handling of every other
@@ -1085,6 +1114,7 @@ ClientServerTransport_sendDirectMessage :: proc(
 				recipientUserId = send.recipientUserID,
 				clientMessageId = send.clientMessageID,
 				envelope = send.envelope,
+				attachments = attachmentRefsPayload(send.attachments),
 			},
 		)
 	}
@@ -1096,6 +1126,7 @@ ClientServerTransport_sendDirectMessage :: proc(
 			content = send.content,
 			clientMessageId = send.clientMessageID,
 			signature = send.signature,
+			attachments = attachmentRefsPayload(send.attachments),
 		},
 	)
 }
@@ -1522,6 +1553,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				clientMessageID = chatPayload.clientMessageId,
 				sealed = chatPayload.sealed,
 				signature = chatPayload.signature,
+				attachments = chatPayload.attachments,
 			},
 			true
 
@@ -1864,6 +1896,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 					content = payload.content,
 					clientMessageId = payload.clientMessageId,
 					signature = payload.signature,
+					attachments = payload.attachments,
 				},
 			},
 			true
@@ -1892,6 +1925,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 					timestamp = payload.timestamp,
 					clientMessageId = payload.clientMessageId,
 					envelope = payload.envelope,
+					attachments = payload.attachments,
 				},
 			},
 			true

@@ -1226,6 +1226,8 @@ attachmentRefusalMessage :: proc(outcome: common.DatabaseAttachmentOutcome) -> s
 		return common.ATTACHMENT_NOT_MEMBER_MESSAGE
 	case .SendDenied:
 		return common.ROOM_SEND_NOT_PERMITTED_MESSAGE
+	case .AttachDenied:
+		return common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE
 	case .ChatDisabled:
 		return CHAT_DISABLED_MESSAGE
 	case .EncryptionMismatch:
@@ -1734,4 +1736,19 @@ MainRouterState_attachmentsSweep :: proc(pm: ^ProcessManager, state: ^MainRouter
 
 MainRouterState_attachmentCounts :: proc(state: ^MainRouterState) -> (uploads, downloads: int) {
 	return len(state.attachments.uploads), len(state.attachments.downloads)
+}
+
+// What ServerAuthSuccess.attachments announces (protocol 27, D18): whether uploads are on, the
+// largest blob, the account quota (0 = none) and the account's stored bytes from the identity
+// statement. A client refuses early with it; every limit is checked again at begin.
+MainRouterState_attachmentLimits :: proc(
+	pm: ^ProcessManager,
+	usedBytes: u64,
+) -> common.AttachmentLimits {
+	return common.AttachmentLimits {
+		enabled = pm.config.attachmentsEnabled,
+		maxBytes = u64(max(pm.config.attachmentMaxBytes, 0)),
+		quotaBytes = u64(max(pm.config.attachmentAccountQuotaBytes, 0)),
+		usedBytes = usedBytes,
+	}
 }

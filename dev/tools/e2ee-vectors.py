@@ -5,10 +5,12 @@ This rebuilds every layout of docs/plan/e2ee-design.md that common/e2ee_test.odi
 (the encryption key bundle, a direct message envelope and its wrap key, the sender chain, a
 sealed room message, a member log Create entry, the plaintext fallback signature, a signed
 plaintext room message, the safety number, a RoomKeyForward envelope, and, for encrypted voice,
-a VoiceKey envelope and a sealed voice payload) with Python's `cryptography` package (OpenSSL),
-not with the Odin code.
-The Odin tests (common/e2ee_test.odin and common/voice_e2ee_test.odin) compare their own
-output byte for byte with the values printed here.
+a VoiceKey envelope and a sealed voice payload; for attachments (protocol 27) the v2 plaintext
+signatures, the sealed plaintext with an "attachments" array, Padme and the encrypted file
+format) with Python's `cryptography` package (OpenSSL), not with the Odin code.
+The Odin tests (common/e2ee_test.odin, common/voice_e2ee_test.odin and
+common/attachment_e2ee_test.odin) compare their own output byte for byte with the values
+printed here.
 
 `cryptography` has no XChaCha20-Poly1305, so HChaCha20 (draft-irtf-cfrg-xchacha-03,
 section 2.2) is written out below and checked against the draft's test vector; the AEAD is
@@ -419,6 +421,124 @@ def voice_payload_vector():
     show("KAT_VOICE_PAYLOAD", payload)
 
 
+# Attachments (protocol 27, docs/plan/2026-11-19-file-attachments.md D12-D16) ---------------
+
+ATTACHMENTS = [
+    {
+        "blob": label_bytes("haychat-e2ee-test-attachment-blob-1", 16),
+        "sha": label_bytes("haychat-e2ee-test-attachment-sha-1"),
+        "key": label_bytes("haychat-e2ee-test-attachment-key-1"),
+        "size": 1234,
+        "name": "report.pdf",
+        "type": "application/pdf",
+    },
+    {
+        "blob": label_bytes("haychat-e2ee-test-attachment-blob-2", 16),
+        "sha": label_bytes("haychat-e2ee-test-attachment-sha-2"),
+        "key": label_bytes("haychat-e2ee-test-attachment-key-2"),
+        "size": 70000,
+        "name": "photo of the caf\u00e9.jpg",
+        "type": "image/jpeg",
+    },
+]
+
+
+def plain_v2_body(content, attachments):
+    body = u32(len(content.encode())) + content.encode() + bytes([len(attachments)])
+    for a in attachments:
+        name, kind = a["name"].encode(), a["type"].encode()
+        body += a["blob"] + a["sha"] + u64(a["size"])
+        body += u16(len(name)) + name + u16(len(kind)) + kind
+    return body
+
+
+def plain_v2_vectors():
+    """alice's signed plaintext room message and DM fallback with two attachments (D14)."""
+    room_id = label_bytes("haychat-e2ee-test-room-plain-client-message-id", 16)
+    signed = b"haychat-room-plain-v2" + SERVER_PUBLIC + i64(ROOM_ID) + i64(ALICE_ID) + room_id
+    signed += plain_v2_body("two files", ATTACHMENTS)
+    show("KAT_ROOM_PLAIN_V2_SIGNATURE", ALICE_PRIVATE.sign(signed))
+    dm_id = label_bytes("haychat-e2ee-test-plain-client-message-id", 16)
+    signed = b"haychat-dm-plain-v2" + SERVER_PUBLIC + i64(ALICE_ID) + i64(BOB_ID) + dm_id
+    signed += plain_v2_body("", ATTACHMENTS[:1])
+    show("KAT_PLAIN_V2_SIGNATURE", ALICE_PRIVATE.sign(signed))
+
+
+def cbor_head(major, value):
+    if value < 24:
+        return bytes([major << 5 | value])
+    if value < 0x100:
+        return bytes([major << 5 | 24, value])
+    if value < 0x10000:
+        return bytes([major << 5 | 25]) + struct.pack(">H", value)
+    if value < 0x100000000:
+        return bytes([major << 5 | 26]) + struct.pack(">I", value)
+    return bytes([major << 5 | 27]) + struct.pack(">Q", value)
+
+
+def cbor_text(text):
+    data = text.encode()
+    return cbor_head(3, len(data)) + data
+
+
+def cbor_bytes(data):
+    return cbor_head(2, len(data)) + data
+
+
+def sealed_attachments_vector():
+    """The canonical sealed plaintext with an "attachments" array (D15)."""
+    out = b"\xa2" + cbor_text("content") + cbor_text("two files") + cbor_text("attachments")
+    out += cbor_head(4, len(ATTACHMENTS))
+    for a in ATTACHMENTS:
+        out += b"\xa6"
+        out += cbor_text("blobId") + cbor_bytes(a["blob"])
+        out += cbor_text("key") + cbor_bytes(a["key"])
+        out += cbor_text("sha256") + cbor_bytes(a["sha"])
+        out += cbor_text("size") + cbor_head(0, a["size"])
+        out += cbor_text("name") + cbor_text(a["name"])
+        out += cbor_text("type") + cbor_text(a["type"])
+    show("KAT_SEALED_ATTACHMENTS_PLAINTEXT", out)
+
+
+def padme(length):
+    if length < 2:
+        return length
+    e = length.bit_length() - 1
+    s = e.bit_length()
+    mask = (1 << (e - s)) - 1
+    return (length + mask) & ~mask
+
+
+CHUNK = 65536
+
+
+def encrypt_attachment(key, data):
+    padded = data + b"\0" * (padme(len(data)) - len(data))
+    count = max(1, -(-len(padded) // CHUNK))
+    out = bytes([1]) + u32(CHUNK)
+    for index in range(count):
+        chunk = padded[index * CHUNK : (index + 1) * CHUNK]
+        last = 1 if index == count - 1 else 0
+        aad = b"haychat-attachment-v1" + bytes([1]) + u32(CHUNK) + u64(index) + bytes([last])
+        out += xchacha_seal(key, u64(index) + b"\0" * 16, chunk, aad)
+    assert len(out) == 5 + len(padded) + 16 * count
+    return out
+
+
+def attachment_vectors():
+    """Padme and the encrypted file format (D12, D13)."""
+    print("// padme: " + ", ".join(f"{n} -> {padme(n)}" for n in (0, 1, 2, 9, 100, 1000, 65536, 70000, 1234567, 26214400)))
+    key = label_bytes("haychat-e2ee-test-attachment-key-1")
+    small = encrypt_attachment(key, b"hello, file")
+    show("KAT_ATTACHMENT_SMALL_BLOB", small)
+    # 150000 deterministic bytes: three chunks, the last one shorter, with padding.
+    data = b"".join(label_bytes(f"haychat-e2ee-test-attachment-data-{i}") for i in range(4688))[:150000]
+    large = encrypt_attachment(key, data)
+    print(f"// KAT_ATTACHMENT_LARGE_STORED_SIZE :: {len(large)}")
+    show("KAT_ATTACHMENT_LARGE_DATA_SHA256", hashlib.sha256(data).digest())
+    show("KAT_ATTACHMENT_LARGE_BLOB_SHA256", hashlib.sha256(large).digest())
+
+
 def main():
     check_hchacha20()
     print("// Generated by dev/tools/e2ee-vectors.py")
@@ -436,6 +556,9 @@ def main():
     room_key_forward_vector()
     voice_key_vector()
     voice_payload_vector()
+    plain_v2_vectors()
+    sealed_attachments_vector()
+    attachment_vectors()
 
 
 if __name__ == "__main__":

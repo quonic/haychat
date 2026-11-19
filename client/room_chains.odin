@@ -114,6 +114,10 @@ RoomMessageSecurity :: struct {
 RoomMessageEntry :: struct {
 	using message: common.StoredChatMessage,
 	security:      RoomMessageSecurity,
+	// Protocol 27 (attachments.odin): the files the client checked, and whether a sealed
+	// message's attachment list was changed on the server.
+	files:         [dynamic]MessageFile,
+	filesChanged:  bool,
 }
 
 RoomMessageEntry_deinit :: proc(entry: ^RoomMessageEntry) {
@@ -121,6 +125,7 @@ RoomMessageEntry_deinit :: proc(entry: ^RoomMessageEntry) {
 		wipeString(entry.content)
 	}
 	common.StoredChatMessage_deinit(&entry.message)
+	MessageFiles_deinit(&entry.files)
 	entry^ = {}
 }
 
@@ -132,9 +137,50 @@ RoomChainDistribution :: enum u8 {
 	Stored, // The server stored it: messages may use the chain
 }
 
+// A message waiting for the chain: its text (owned, wiped) and (protocol 27) the files it
+// lists, sealed inside it (owned: names and media types; the file keys are wiped).
+RoomChainQueued :: struct {
+	content:     string,
+	attachments: [dynamic]common.SealedAttachment,
+}
+
+RoomChainQueued_deinit :: proc(item: ^RoomChainQueued) {
+	wipeString(item.content)
+	delete(item.content)
+	sealedAttachments_deinit(&item.attachments)
+	item^ = {}
+}
+
+// Owned copies of borrowed sealed entries (nil for none).
+sealedAttachments_clone :: proc(
+	entries: []common.SealedAttachment,
+) -> [dynamic]common.SealedAttachment {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([dynamic]common.SealedAttachment, 0, len(entries))
+	for entry in entries {
+		copied := entry
+		copied.name = strings.clone(entry.name)
+		copied.mediaType = strings.clone(entry.mediaType)
+		append(&cloned, copied)
+	}
+	return cloned
+}
+
+sealedAttachments_deinit :: proc(entries: ^[dynamic]common.SealedAttachment) {
+	for &entry in entries {
+		crypto.zero_explicit(&entry.key, size_of(entry.key))
+		delete(entry.name)
+		delete(entry.mediaType)
+	}
+	delete(entries^)
+	entries^ = nil
+}
+
 RoomChainInFlight :: struct {
 	clientMessageID: common.ClientMessageID,
-	content:         string, // Owned, wiped
+	using item:      RoomChainQueued,
 }
 
 RoomChainRef :: struct {
@@ -161,7 +207,7 @@ RoomChainRoom :: struct {
 	distribution:     RoomChainDistribution,
 	// Messages waiting for the chain (owned, wiped), oldest first, and the ones sent whose
 	// echo has not arrived.
-	queued:           [dynamic]string,
+	queued:           [dynamic]RoomChainQueued,
 	inFlight:         [dynamic]RoomChainInFlight,
 	// This session's fetch of the room's envelopes, and the chains it asked senders for.
 	keysFetching:     bool,
@@ -182,18 +228,16 @@ RoomChainRoom_dropSending :: proc(room: ^RoomChainRoom) {
 }
 
 RoomChainRoom_clearInFlight :: proc(room: ^RoomChainRoom) {
-	for entry in room.inFlight {
-		wipeString(entry.content)
-		delete(entry.content)
+	for &entry in room.inFlight {
+		RoomChainQueued_deinit(&entry.item)
 	}
 	clear(&room.inFlight)
 }
 
 RoomChainRoom_deinit :: proc(room: ^RoomChainRoom) {
 	RoomChainRoom_dropSending(room)
-	for text in room.queued {
-		wipeString(text)
-		delete(text)
+	for &item in room.queued {
+		RoomChainQueued_deinit(&item)
 	}
 	delete(room.queued)
 	RoomChainRoom_clearInFlight(room)
@@ -339,6 +383,8 @@ RoomChainRequest :: struct {
 	clientMessageID: common.ClientMessageID, // SealedMessage
 	chainID:         common.ChainID, // KeyEnvelope, RequestKey
 	bytes:           []u8, // SealedMessage, KeyEnvelope; borrowed for the call
+	// SealedMessage (protocol 27): the outer list, blob IDs and stored sizes; borrowed.
+	attachments:     []common.AttachmentRef,
 }
 
 RoomChainSendBridge :: #type proc(
@@ -362,6 +408,7 @@ ClientServerTransport_sendRoomChainRequest :: proc(
 				roomId = request.roomID,
 				clientMessageId = request.clientMessageID,
 				sealed = request.bytes,
+				attachments = attachmentRefsPayload(request.attachments),
 			},
 		)
 	case .KeyEnvelope:
@@ -528,6 +575,10 @@ State_roomOpenEntry :: proc(
 		entry.security = State_roomCheckPlain(state, serverID, roomID, keys, entry^)
 		if entry.security.protection == .Hidden {
 			roomEntryHide(entry, entry.security)
+		} else if entry.security.protection == .Plain {
+			// Protocol 27: the v2 signature covered every reference.
+			MessageFiles_deinit(&entry.files)
+			entry.files = messageFilesFromPlain(entry.attachments[:])
 		}
 		return
 	}
@@ -666,6 +717,14 @@ State_roomOpenEntry :: proc(
 	}
 	delete(entry.content)
 	entry.content = opened.content
+	opened.content = ""
+	// Protocol 27: the files inside the seal, checked against what the server bound.
+	MessageFiles_deinit(&entry.files)
+	entry.files, entry.filesChanged = messageFilesFromSealed(
+		entry.attachments[:],
+		opened.attachments[:],
+	)
+	common.SealedDirectMessagePlaintext_deinit(&opened)
 	entry.security = {protection = .Encrypted, header = header}
 }
 
@@ -1438,11 +1497,13 @@ State_roomChainsComposerNote :: proc(state: ^State, serverID, roomID: int) -> st
 
 // Queues content (borrowed) for roomID and sends what can go. Returns whether it is queued
 // (waiting for the chain) rather than sent already. The text is cleared from the caller's
-// draft by the caller once this returns true for ok.
+// draft by the caller once this returns true for ok. attachments (protocol 27, borrowed) are
+// the sealed entries of the files it lists (State_attachmentsForMessage).
 State_roomChainsSend :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	content: string,
+	attachments: []common.SealedAttachment = nil,
 ) -> (
 	ok: bool,
 	queued: bool,
@@ -1452,7 +1513,13 @@ State_roomChainsSend :: proc(
 		return false, false, note
 	}
 	room := State_roomChainRoom(state, serverID, roomID)
-	append(&room.queued, strings.clone(content))
+	append(
+		&room.queued,
+		RoomChainQueued {
+			content = strings.clone(content),
+			attachments = sealedAttachments_clone(attachments),
+		},
+	)
 	State_roomChainsPump(state, serverID, roomID)
 	room = State_roomChainRoom(state, serverID, roomID)
 	queued = len(room.queued) > 0
@@ -1646,11 +1713,22 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			State_roomChainsPump(state, serverID, roomID)
 			break
 		}
-		content := room.queued[0]
+		item := room.queued[0]
+		content := item.content
 		send := RoomChainRequest {
 			kind   = .SealedMessage,
 			roomID = roomID,
 		}
+		// Protocol 27: outside the seal, only each file's blob ID and stored size.
+		outer := make([]common.AttachmentRef, len(item.attachments), context.temp_allocator)
+		for attachment, attachmentIndex in item.attachments {
+			layout, _ := common.attachmentEncryptedLayout(attachment.size)
+			outer[attachmentIndex] = {
+				blobId = attachment.blobId,
+				size   = layout.storedSize,
+			}
+		}
+		send.attachments = outer
 		if !common.generateRandomBytes(send.clientMessageID[:]) {
 			break
 		}
@@ -1661,7 +1739,11 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			break
 		}
 		plaintext: [common.DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE]u8
-		plaintextSize, encodeOK := common.encodeSealedDirectMessagePlaintext(content, plaintext[:])
+		plaintextSize, encodeOK := common.encodeSealedMessagePlaintext(
+			content,
+			item.attachments[:],
+			plaintext[:],
+		)
 		buffer: [common.SEALED_ROOM_MESSAGE_MAX_BYTES]u8
 		n := 0
 		sealErr := common.E2EEError.BadPlaintext
@@ -1697,7 +1779,10 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			State_setChatStatus(state, sendError)
 			break
 		}
-		append(&room.inFlight, RoomChainInFlight{send.clientMessageID, content})
+		append(
+			&room.inFlight,
+			RoomChainInFlight{clientMessageID = send.clientMessageID, item = item},
+		)
 		ordered_remove(&room.queued, 0)
 		sent += 1
 	}
@@ -1722,13 +1807,19 @@ State_roomChainsRefuseQueue :: proc(state: ^State, serverID, roomID: int, reason
 		return
 	}
 	RoomChainRoom_dropSending(room)
+	// The text goes back to the draft; files listed with it stay uploaded and can be attached
+	// again (State.attachmentUploads).
 	texts := make([dynamic]string, 0, len(room.inFlight) + len(room.queued))
 	defer delete(texts)
-	for entry in room.inFlight {
+	for &entry in room.inFlight {
 		append(&texts, entry.content)
+		sealedAttachments_deinit(&entry.attachments)
 	}
 	clear(&room.inFlight)
-	append(&texts, ..room.queued[:])
+	for &item in room.queued {
+		append(&texts, item.content)
+		sealedAttachments_deinit(&item.attachments)
+	}
 	clear(&room.queued)
 	if len(texts) == 0 {
 		return
@@ -1768,10 +1859,9 @@ State_roomChainsMessageEchoed :: proc(
 	if room == nil {
 		return
 	}
-	for entry, index in room.inFlight {
+	for &entry, index in room.inFlight {
 		if entry.clientMessageID == clientMessageID {
-			wipeString(entry.content)
-			delete(entry.content)
+			RoomChainQueued_deinit(&entry.item)
 			ordered_remove(&room.inFlight, index)
 			return
 		}
@@ -1786,7 +1876,12 @@ State_roomChainsProtocolError :: proc(state: ^State, serverID: int, message: str
 		message == common.SEALED_ROOM_MESSAGE_INVALID_MESSAGE ||
 		message == common.ROOM_MESSAGE_DUPLICATE_MESSAGE ||
 		message == common.ROOM_KEY_ENVELOPE_INVALID_MESSAGE ||
-		message == common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE
+		message == common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE ||
+		// Protocol 27: the files a message listed were refused; its text goes back to the
+		// draft and the uploads can be attached again.
+		message == common.ATTACHMENT_BIND_REFUSED_MESSAGE ||
+		message == common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE ||
+		message == common.ATTACHMENT_REFS_INVALID_MESSAGE
 	affected := make([dynamic]int, 0, 4, context.temp_allocator)
 	for &chains in state.roomChains {
 		if chains.serverID != serverID {
@@ -1805,9 +1900,9 @@ State_roomChainsProtocolError :: proc(state: ^State, serverID: int, message: str
 		switch {
 		case staleKey:
 			// The epoch moved on: what was in flight goes again, first, with a new chain.
-			resend := make([dynamic]string, 0, len(room.inFlight) + len(room.queued))
+			resend := make([dynamic]RoomChainQueued, 0, len(room.inFlight) + len(room.queued))
 			for entry in room.inFlight {
-				append(&resend, entry.content)
+				append(&resend, entry.item)
 			}
 			clear(&room.inFlight)
 			append(&resend, ..room.queued[:])

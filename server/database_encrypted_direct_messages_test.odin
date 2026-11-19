@@ -574,3 +574,200 @@ testEncryptedDirectMessagesMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		"expected schema validation to require migration 6's checks",
 	)
 }
+
+// A Ready blob of owner's in its direct conversation with peer, written in SQL.
+@(private = "file")
+sealedTestBlob :: proc(
+	conn: pg.Conn,
+	owner, peer: int,
+	encrypted: bool,
+	size: u64,
+	fill: u8,
+) -> (
+	blob: common.AttachmentBlobID,
+	sha: common.AttachmentSHA256,
+) {
+	for index in 0 ..< len(blob) {
+		blob[index] = fill + u8(index)
+	}
+	for index in 0 ..< len(sha) {
+		sha[index] = fill ~ u8(index)
+	}
+	blobHex := common.encodeBytesToHex(blob[:])
+	defer delete(blobHex)
+	shaHex := common.encodeBytesToHex(sha[:])
+	defer delete(shaHex)
+	databaseDefaultRoomTestExec(
+		conn,
+		"store a Ready blob",
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, peer_user_id, encrypted, size, " +
+			"received, state, sha256) VALUES (decode('%s', 'hex'), %d, %d, %v, %d, %d, 1, " +
+			"decode('%s', 'hex'))",
+			blobHex,
+			owner,
+			peer,
+			encrypted,
+			size,
+			size,
+			shaHex,
+		),
+	)
+	return
+}
+
+// Protocol 27 (D1, D11): both direct message inserts bind the blobs they list, and refuse the
+// whole message when one belongs to someone else, another conversation, or another encryption.
+@(test)
+testAttachmentBindingInDirectMessagesAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "dm_attachments")
+	_, serverKey, serverOK := common.generateIdentityKeyPair()
+	assert(serverOK, "expected server key generation to succeed")
+	alice := sealedTestAccount()
+	bob := sealedTestAccount()
+	{
+		identity := databaseIdentityTestResolve(conn, "dmatt-alice", alice.identityPublicKey)
+		delete(identity.previousNickname)
+		alice.userID = identity.userId
+		identity = databaseIdentityTestResolve(conn, "dmatt-bob", bob.identityPublicKey)
+		delete(identity.previousNickname)
+		bob.userID = identity.userId
+	}
+	carol := databaseAdminTestUser(conn, "dmatt-carol")
+
+	plainPost :: proc(
+		conn: pg.Conn,
+		sender, recipient: int,
+		refs: []common.AttachmentRef,
+		fill: u8,
+	) -> common.DatabasePostDirectMessageResult {
+		request := common.DatabasePostDirectMessageRequest {
+			senderId        = sender,
+			recipientId     = recipient,
+			content         = strings.clone(""),
+			clientMessageId = sealedTestClientMessageID(fill),
+			signature       = DATABASE_TEST_SIGNATURE,
+			attachments     = common.AttachmentRefs_clone(refs),
+		}
+		defer IPC__database_query_request_deinit(request)
+		return sealedTestPost(conn, request)
+	}
+	ref :: proc(
+		blob: common.AttachmentBlobID,
+		size: u64,
+		sha: common.AttachmentSHA256,
+	) -> common.AttachmentRef {
+		return {blobId = blob, size = size, sha256 = sha, name = "a.bin", mediaType = "x/y"}
+	}
+
+	// A plaintext direct message binds its blob and history lists it with every field.
+	plain, plainSHA := sealedTestBlob(conn, alice.userID, bob.userID, false, 300, 0x10)
+	plainRefs := [1]common.AttachmentRef{ref(plain, 300, plainSHA)}
+	stored := plainPost(conn, alice.userID, bob.userID, plainRefs[:], 1)
+	defer IPC__stored_direct_message_deinit(stored.storedMessage)
+	assert(
+		stored.outcome == .Stored && len(stored.storedMessage.attachments) == 1,
+		fmt.tprintf("expected the plaintext message with a file stored, got %v", stored.outcome),
+	)
+	plainHex := common.encodeBytesToHex(plain[:])
+	defer delete(plainHex)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT state || '/' || direct_message_id || '/' || position || '/' || name || " +
+				"'/' || (SELECT attachment_count FROM direct_messages WHERE id = %d) " +
+				"FROM attachments WHERE blob_id = decode('%s', 'hex')",
+				stored.storedMessage.id,
+				plainHex,
+			),
+		) ==
+		fmt.tprintf("2/%d/0/a.bin/1", stored.storedMessage.id),
+		"expected the blob bound to the direct message",
+	)
+	history := databaseSQLTestHistory(conn, bob.userID, alice.userID, 0, 10)
+	defer IPC__database_query_response_deinit(history)
+	page := history.result.(common.DatabaseDirectHistoryResult)
+	listed := page.messages[len(page.messages) - 1].attachments
+	assert(
+		len(listed) == 1 &&
+		listed[0].blobId == plain &&
+		listed[0].sha256 == plainSHA &&
+		listed[0].name == "a.bin" &&
+		listed[0].mediaType == "x/y",
+		fmt.tprintf("expected the file in direct history, got %v", listed),
+	)
+	conversations := databaseExecuteRequest(
+		conn,
+		common.DatabaseDirectConversationListRequest{userId = bob.userID},
+	)
+	defer IPC__database_query_response_deinit(conversations)
+	summaries := conversations.result.(common.DatabaseDirectConversationListResult).conversations
+	assert(
+		len(summaries) == 1 && len(summaries[0].lastAttachments) == 1,
+		"expected the conversation list to carry the latest message's attachments",
+	)
+
+	// Refusals: another conversation's blob, someone else's, bound twice, and encryption.
+	refuse :: proc(result: common.DatabasePostDirectMessageResult, why: string) {
+		assert(
+			result.outcome == .AttachmentsRefused,
+			fmt.tprintf("expected %s refused, got %v", why, result.outcome),
+		)
+	}
+	toCarol, toCarolSHA := sealedTestBlob(conn, alice.userID, carol, false, 10, 0x20)
+	toCarolRefs := [1]common.AttachmentRef{ref(toCarol, 10, toCarolSHA)}
+	refuse(plainPost(conn, alice.userID, bob.userID, toCarolRefs[:], 2), "another conversation")
+	bobs, bobSHA := sealedTestBlob(conn, bob.userID, alice.userID, false, 10, 0x30)
+	bobRefs := [1]common.AttachmentRef{ref(bobs, 10, bobSHA)}
+	refuse(plainPost(conn, alice.userID, bob.userID, bobRefs[:], 3), "someone else's blob")
+	refuse(plainPost(conn, alice.userID, bob.userID, plainRefs[:], 4), "a blob bound twice")
+	encrypted, encryptedSHA := sealedTestBlob(conn, alice.userID, bob.userID, true, 400, 0x40)
+	encryptedPlainRefs := [1]common.AttachmentRef{ref(encrypted, 400, encryptedSHA)}
+	refuse(
+		plainPost(conn, alice.userID, bob.userID, encryptedPlainRefs[:], 5),
+		"an encrypted blob in a plaintext message",
+	)
+
+	// A sealed direct message binds its encrypted blob and refuses a plaintext one.
+	plainForSeal, _ := sealedTestBlob(conn, alice.userID, bob.userID, false, 50, 0x50)
+	sealedPost :: proc(
+		conn: pg.Conn,
+		serverKey: common.IdentityPublicKeyBytes,
+		alice, bob: SealedTestAccount,
+		outer: []common.AttachmentRef,
+		fill: u8,
+	) -> common.DatabasePostDirectMessageResult {
+		id := sealedTestClientMessageID(fill)
+		envelope := sealedTestEnvelope(serverKey, alice, bob, id, "sealed with a file")
+		request := sealedTestRequest(serverKey, alice, bob, id, envelope)
+		request.attachments = common.AttachmentRefs_clone(outer)
+		defer IPC__database_query_request_deinit(request)
+		return sealedTestPost(conn, request)
+	}
+	wrongOuter := [1]common.AttachmentRef{{blobId = plainForSeal, size = 50}}
+	refuse(
+		sealedPost(conn, serverKey, alice, bob, wrongOuter[:], 6),
+		"a sealed message with a plaintext blob",
+	)
+	outer := [1]common.AttachmentRef{{blobId = encrypted, size = 400}}
+	sealed := sealedPost(conn, serverKey, alice, bob, outer[:], 7)
+	defer IPC__stored_direct_message_deinit(sealed.storedMessage)
+	assert(sealed.outcome == .Stored, fmt.tprintf("expected the sealed message, got %v", sealed))
+	sealedHistory := databaseSQLTestHistory(conn, alice.userID, bob.userID, 0, 10)
+	defer IPC__database_query_response_deinit(sealedHistory)
+	sealedPage := sealedHistory.result.(common.DatabaseDirectHistoryResult)
+	sealedListed := sealedPage.messages[len(sealedPage.messages) - 1].attachments
+	assert(
+		len(sealedListed) == 1 &&
+		sealedListed[0].blobId == encrypted &&
+		sealedListed[0].size == 400 &&
+		sealedListed[0].sha256 == {} &&
+		sealedListed[0].name == "",
+		fmt.tprintf("expected only the sealed blob's ID and size, got %v", sealedListed),
+	)
+}

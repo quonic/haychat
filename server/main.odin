@@ -543,6 +543,7 @@ MainRouterState_completeAuthentication :: proc(
 	permissions := common.ServerPermissions{},
 	registrationMode := common.RegistrationMode.Open,
 	isRestricted := false,
+	attachmentUsedBytes := u64(0),
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
 	if session, sessionOK := &state.peerSessions[peerID]; !sessionOK || session.isAuthenticated {
@@ -565,6 +566,7 @@ MainRouterState_completeAuthentication :: proc(
 			permissions = permissions,
 			registrationMode = registrationMode,
 			isRestricted = isRestricted,
+			attachments = MainRouterState_attachmentLimits(pm, attachmentUsedBytes),
 		},
 	) {
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
@@ -1039,6 +1041,10 @@ CHAT_DISABLED_MESSAGE :: "Chat is disabled in this room"
 // database statement then checks membership, that the room is encrypted and that the epoch is
 // its current log version, and stores the bytes unchanged. Fixed-size byte fields decode through
 // CBOR's temporary allocator, so it is the heap here.
+//
+// Protocol 27: attachments are checked for shape here (ATTACHMENT_REFS_INVALID_MESSAGE): up to
+// ATTACHMENTS_PER_MESSAGE_MAX, complete and covered by the v2 signature for plaintext, blob IDs
+// and sizes only for a sealed message; the database binds them in the insert.
 MainRouterState_handleClientChatMessage :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -1059,6 +1065,10 @@ MainRouterState_handleClientChatMessage :: proc(
 		return
 	}
 
+	if !common.attachmentRefsAreValid(req.attachments[:], sealed = len(req.sealed) > 0) {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ATTACHMENT_REFS_INVALID_MESSAGE)
+		return
+	}
 	if len(req.sealed) > 0 {
 		message, valid := MainRouterState_checkSealedRoomMessage(
 			state,
@@ -1084,9 +1094,11 @@ MainRouterState_handleClientChatMessage :: proc(
 			epoch           = message.header.epoch,
 			chainId         = message.header.chainID,
 			chainIndex      = int(message.header.index),
+			attachments     = req.attachments,
 		}
-		// The request takes the decoded bytes; the database side frees them.
+		// The request takes the decoded bytes and references; the database side frees them.
 		req.sealed = nil
+		req.attachments = nil
 		MainRouterState_enqueueChannelDatabaseRequest(
 			pm,
 			state,
@@ -1098,8 +1110,7 @@ MainRouterState_handleClientChatMessage :: proc(
 	}
 
 	if req.roomId <= 0 ||
-	   len(req.content) == 0 ||
-	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES {
+	   !common.messageContentLengthIsValid(len(req.content), len(req.attachments)) {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid room chat message")
 		return
 	}
@@ -1115,6 +1126,7 @@ MainRouterState_handleClientChatMessage :: proc(
 		req.content,
 		session.clientIdentityPublicKey,
 		req.signature,
+		req.attachments[:],
 	) {
 		MainRouterState_sendProtocolError(
 			pm,
@@ -1125,17 +1137,20 @@ MainRouterState_handleClientChatMessage :: proc(
 		return
 	}
 
+	request := common.DatabasePostRoomChatMessageRequest {
+		roomId          = req.roomId,
+		senderId        = session.authenticatedUserID,
+		content         = strings.clone(req.content),
+		clientMessageId = req.clientMessageId,
+		signature       = req.signature,
+		attachments     = req.attachments,
+	}
+	req.attachments = nil
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
 		peerID,
-		common.DatabasePostRoomChatMessageRequest {
-			roomId = req.roomId,
-			senderId = session.authenticatedUserID,
-			content = strings.clone(req.content),
-			clientMessageId = req.clientMessageId,
-			signature = req.signature,
-		},
+		request,
 		PendingDBRequest{requestType = .PostChatMessage, roomID = req.roomId},
 	)
 }
@@ -1738,6 +1753,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			identity.permissions,
 			identity.registrationMode,
 			identity.isRestricted,
+			identity.attachmentUsedBytes,
 		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
@@ -1804,6 +1820,10 @@ MainRouterState_handleDatabaseResult :: proc(
 			refusal = common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE
 		case posted.staleEpoch:
 			refusal = common.ROOM_KEY_OUT_OF_DATE_MESSAGE
+		case posted.attachDenied:
+			refusal = common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE
+		case posted.attachmentsRefused:
+			refusal = common.ATTACHMENT_BIND_REFUSED_MESSAGE
 		case posted.duplicate:
 			refusal = common.ROOM_MESSAGE_DUPLICATE_MESSAGE
 		}
@@ -1821,6 +1841,7 @@ MainRouterState_handleDatabaseResult :: proc(
 			clientMessageId = posted.storedMessage.clientMessageId,
 			sealed          = posted.storedMessage.sealed,
 			signature       = posted.storedMessage.signature,
+			attachments     = posted.storedMessage.attachments,
 		}
 		for recipientPeerID, recipientSession in state.peerSessions {
 			if recipientSession.isAuthenticated &&

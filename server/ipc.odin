@@ -303,6 +303,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabasePostRoomChatMessageRequest:
 		delete(r.content)
 		delete(r.sealed)
+		attachments := r.attachments
+		common.AttachmentRefs_deinit(&attachments)
 	case common.DatabaseStoreRoomKeyEnvelopeRequest:
 		delete(r.envelope)
 		delete(r.recipientUserIDs)
@@ -319,6 +321,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabasePostDirectMessageRequest:
 		delete(r.content)
 		delete(r.envelope)
+		attachments := r.attachments
+		common.AttachmentRefs_deinit(&attachments)
 	case common.DatabaseAdminUserRequest:
 		delete(r.nickname)
 		delete(r.reason)
@@ -365,6 +369,8 @@ IPC__stored_chat_message_deinit :: proc(message: common.StoredChatMessage) {
 	delete(message.timestamp)
 	delete(message.content)
 	delete(message.sealed)
+	attachments := message.attachments
+	common.AttachmentRefs_deinit(&attachments)
 }
 
 IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
@@ -373,6 +379,8 @@ IPC__stored_direct_message_deinit :: proc(message: common.StoredDirectMessage) {
 	delete(message.timestamp)
 	delete(message.content)
 	delete(message.envelope)
+	attachments := message.attachments
+	common.AttachmentRefs_deinit(&attachments)
 }
 
 // Exhaustive on purpose: a new result variant must decide what it owns.
@@ -424,6 +432,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 			delete(conversation.lastTimestamp)
 			delete(conversation.lastContent)
 			delete(conversation.lastEnvelope)
+			lastAttachments := conversation.lastAttachments
+			common.AttachmentRefs_deinit(&lastAttachments)
 		}
 		delete(r.conversations)
 	case common.DatabaseUserDirectoryResult:

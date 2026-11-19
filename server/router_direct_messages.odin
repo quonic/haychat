@@ -118,6 +118,10 @@ MainRouterState_authenticatedUserID :: proc(
 // An unsigned message (every client before protocol 17) is refused: no such client can connect
 // after the protocol bump anyway.
 //
+// Protocol 27: up to ATTACHMENTS_PER_MESSAGE_MAX complete attachment references (else
+// ATTACHMENT_REFS_INVALID_MESSAGE), signed with the v2 label; the content may then be empty.
+// The database binds them in the insert.
+//
 // Fixed-size byte fields decode through CBOR's temporary allocator, so it is the heap here.
 MainRouterState_handleClientDirectMessage :: proc(
 	pm: ^ProcessManager,
@@ -127,14 +131,17 @@ MainRouterState_handleClientDirectMessage :: proc(
 ) {
 	req: common.ClientDirectMessagePayload
 	err := cbor.unmarshal(payload, &req, temp_allocator = context.allocator)
-	defer delete(req.content)
+	defer common.ClientDirectMessagePayload_deinit(&req)
 	if err != nil {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientDirectMessage payload")
 		return
 	}
+	if !common.attachmentRefsAreValid(req.attachments[:], sealed = false) {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ATTACHMENT_REFS_INVALID_MESSAGE)
+		return
+	}
 	if req.recipientUserId <= 0 ||
-	   len(req.content) == 0 ||
-	   len(req.content) > common.CHAT_MESSAGE_MAX_BYTES ||
+	   !common.messageContentLengthIsValid(len(req.content), len(req.attachments)) ||
 	   !common.clientMessageIDIsSet(req.clientMessageId) {
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid direct message")
 		return
@@ -168,6 +175,7 @@ MainRouterState_handleClientDirectMessage :: proc(
 		req.content,
 		session.clientIdentityPublicKey,
 		req.signature,
+		req.attachments[:],
 	) {
 		MainRouterState_sendProtocolError(
 			pm,
@@ -178,17 +186,21 @@ MainRouterState_handleClientDirectMessage :: proc(
 		return
 	}
 
+	request := common.DatabasePostDirectMessageRequest {
+		senderId        = senderID,
+		recipientId     = req.recipientUserId,
+		content         = strings.clone(req.content),
+		clientMessageId = req.clientMessageId,
+		signature       = req.signature,
+		attachments     = req.attachments,
+	}
+	// The request takes the decoded references; the database side frees them.
+	req.attachments = nil
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
 		peerID,
-		common.DatabasePostDirectMessageRequest {
-			senderId = senderID,
-			recipientId = req.recipientUserId,
-			content = strings.clone(req.content),
-			clientMessageId = req.clientMessageId,
-			signature = req.signature,
-		},
+		request,
 		PendingDBRequest{requestType = .PostDirectMessage, targetUserID = req.recipientUserId},
 	)
 }
@@ -198,6 +210,8 @@ MainRouterState_handleClientDirectMessage :: proc(
 // worker checks the signature against both accounts' identity keys before it stores the
 // envelope byte for byte (databaseCheckSealedDirectMessage). The recipient's key lives only in
 // the database, so that check runs there, next to the insert that requires the same key.
+// Protocol 27: the outer attachment list carries only blob IDs and sizes (else
+// ATTACHMENT_REFS_INVALID_MESSAGE); the insert binds them.
 MainRouterState_handleClientSealedDirectMessage :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -237,6 +251,10 @@ MainRouterState_handleClientSealedDirectMessage :: proc(
 		)
 		return
 	}
+	if !common.attachmentRefsAreValid(req.attachments[:], sealed = true) {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ATTACHMENT_REFS_INVALID_MESSAGE)
+		return
+	}
 	if req.recipientUserId == senderID {
 		MainRouterState_sendProtocolError(
 			pm,
@@ -264,9 +282,11 @@ MainRouterState_handleClientSealedDirectMessage :: proc(
 		envelope                = req.envelope,
 		serverIdentityPublicKey = state.serverIdentityPublicKey,
 		senderIdentityPublicKey = session.clientIdentityPublicKey,
+		attachments             = req.attachments,
 	}
-	// The request takes the decoded envelope; the database side frees it.
+	// The request takes the decoded envelope and references; the database side frees them.
 	req.envelope = nil
+	req.attachments = nil
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
@@ -412,6 +432,8 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 		refusal = common.DIRECT_MESSAGE_DUPLICATE_MESSAGE
 	case .Restricted:
 		refusal = common.DIRECT_MESSAGE_RESTRICTED_MESSAGE
+	case .AttachmentsRefused:
+		refusal = common.ATTACHMENT_BIND_REFUSED_MESSAGE
 	}
 	if len(refusal) > 0 {
 		MainRouterState_sendProtocolError(pm, state, request.peerID, refusal)
@@ -428,6 +450,7 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 		content           = stored.content,
 		clientMessageId   = stored.clientMessageId,
 		signature         = stored.signature,
+		attachments       = stored.attachments,
 	}
 	sealedPayload := common.ServerSealedDirectMessagePayload {
 		id                = stored.id,
@@ -438,6 +461,7 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 		timestamp         = stored.timestamp,
 		clientMessageId   = stored.clientMessageId,
 		envelope          = stored.envelope,
+		attachments       = stored.attachments,
 	}
 	for recipientPeerID, recipientSession in state.peerSessions {
 		if !recipientSession.isAuthenticated ||

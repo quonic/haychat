@@ -561,7 +561,7 @@ testRoomChainsStaleEpochSendsAgainWithANewChain :: proc(t: ^testing.T) {
 	roomChainTestApply(alice, &refusal)
 	room := State_roomChainRoom(alice, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
 	assert(
-		len(room.queued) == 2 && room.queued[1] == "after the add" && !room.hasSending,
+		len(room.queued) == 2 && room.queued[1].content == "after the add" && !room.hasSending,
 		"expected the messages in flight queued again in order, the chain dropped",
 	)
 	adds := [2]^State{&pair.bob, &carol}

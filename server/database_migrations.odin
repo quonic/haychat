@@ -922,6 +922,76 @@ DATABASE_ATTACHMENTS_CHECKS ::
 	"('attachments sweep index', " +
 	"to_regclass('attachments_by_state_and_last_chunk_at') IS NOT NULL)"
 
+// Migration 15 (attachments on messages, protocol 27, attachments plan F2: D14-D16, D20).
+//
+// - chat_messages.attachment_count and direct_messages.attachment_count: how many blobs the
+//   message carries (0..4), set by the insert that binds them. chat_messages_content_or_sealed
+//   and direct_messages_content_or_envelope are replaced under the same names: a plaintext
+//   message's content is 1..4000 characters, or empty when it has attachments (D15).
+// - attachments.position (0..3, the blob's place in its message's list), name and media_type
+//   (a plaintext message's file name, 1..255 bytes, and media type, 1..100 bytes, which its v2
+//   signature covers; NULL for a sealed message's blob, whose name is inside the seal). Set by
+//   the binding insert; a tombstone keeps them, so the message's signature still verifies.
+// - rooms.everyone_permissions gains AttachFiles (16) in every existing room, and its default
+//   becomes 19 (common.ROOM_PERMISSIONS_DEFAULT), so nothing changes until a manager takes the
+//   bit away.
+//
+// Every existing message has content and no attachments, which the new checks accept. Never
+// edit it; append a migration instead.
+DATABASE_MIGRATION_15_ATTACHMENTS_ON_MESSAGES_SQL ::
+	"ALTER TABLE chat_messages ADD COLUMN attachment_count SMALLINT NOT NULL DEFAULT 0, " +
+	"ADD CONSTRAINT chat_messages_attachment_count_check " +
+	"CHECK (attachment_count BETWEEN 0 AND 4), " +
+	"DROP CONSTRAINT chat_messages_content_or_sealed, " +
+	"ADD CONSTRAINT chat_messages_content_or_sealed CHECK (" +
+	"(sealed IS NULL AND (char_length(content) BETWEEN 1 AND 4000 OR " +
+	"(content = '' AND attachment_count > 0))) OR " +
+	"(sealed IS NOT NULL AND content = '' AND octet_length(sealed) BETWEEN 1 AND 8192)); " +
+	"ALTER TABLE direct_messages ADD COLUMN attachment_count SMALLINT NOT NULL DEFAULT 0, " +
+	"ADD CONSTRAINT direct_messages_attachment_count_check " +
+	"CHECK (attachment_count BETWEEN 0 AND 4), " +
+	"DROP CONSTRAINT direct_messages_content_or_envelope, " +
+	"ADD CONSTRAINT direct_messages_content_or_envelope CHECK (" +
+	"(envelope IS NULL AND (char_length(content) BETWEEN 1 AND 4000 OR " +
+	"(content = '' AND attachment_count > 0))) OR " +
+	"(envelope IS NOT NULL AND content = '' AND octet_length(envelope) BETWEEN 1 AND 8192)); " +
+	"ALTER TABLE attachments ADD COLUMN position SMALLINT NULL, " +
+	"ADD COLUMN name TEXT NULL, ADD COLUMN media_type TEXT NULL, " +
+	"ADD CONSTRAINT attachments_position_check CHECK (position BETWEEN 0 AND 3), " +
+	"ADD CONSTRAINT attachments_name_size CHECK (octet_length(name) BETWEEN 1 AND 255), " +
+	"ADD CONSTRAINT attachments_media_type_size " +
+	"CHECK (octet_length(media_type) BETWEEN 1 AND 100); " +
+	"UPDATE rooms SET everyone_permissions = everyone_permissions | 16; " +
+	"ALTER TABLE rooms ALTER COLUMN everyone_permissions SET DEFAULT 19;"
+
+// What migration 15 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS ::
+	"('message attachment counts', (SELECT count(*) = 2 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name IN ('chat_messages', " +
+	"'direct_messages') AND column_name = 'attachment_count' AND data_type = 'smallint' " +
+	"AND is_nullable = 'NO')), " +
+	"('message attachment count checks', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE contype = 'c' AND ((conrelid = to_regclass('chat_messages') " +
+	"AND conname = 'chat_messages_attachment_count_check') " +
+	"OR (conrelid = to_regclass('direct_messages') " +
+	"AND conname = 'direct_messages_attachment_count_check')))), " +
+	"('message content allows attachments', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE contype = 'c' AND pg_get_constraintdef(oid) LIKE '%attachment_count > 0%' " +
+	"AND ((conrelid = to_regclass('chat_messages') " +
+	"AND conname = 'chat_messages_content_or_sealed') " +
+	"OR (conrelid = to_regclass('direct_messages') " +
+	"AND conname = 'direct_messages_content_or_envelope')))), " +
+	"('attachments message columns', (SELECT count(*) = 3 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'attachments' " +
+	"AND column_name IN ('position', 'name', 'media_type') AND is_nullable = 'YES')), " +
+	"('attachments message checks', (SELECT count(*) = 3 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachments') AND contype = 'c' AND conname IN " +
+	"('attachments_position_check', 'attachments_name_size', " +
+	"'attachments_media_type_size'))), " +
+	"('rooms everyone permissions default', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
+	"AND column_name = 'everyone_permissions' AND column_default = '19'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -1002,6 +1072,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "attachments",
 		sql = DATABASE_MIGRATION_14_ATTACHMENTS_SQL,
 		checks = DATABASE_ATTACHMENTS_CHECKS,
+	},
+	{
+		version = 15,
+		name = "attachments on messages",
+		sql = DATABASE_MIGRATION_15_ATTACHMENTS_ON_MESSAGES_SQL,
+		checks = DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS,
 	},
 }
 
@@ -1129,6 +1205,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_REGISTRATION_CHECKS +
 	", " +
 	DATABASE_ATTACHMENTS_CHECKS +
+	", " +
+	DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

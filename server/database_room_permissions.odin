@@ -63,11 +63,17 @@ DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL :: "1"
 DATABASE_ROOM_PERMISSION_SPEAK_IN_VOICE_SQL :: "2"
 DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL :: "4"
 DATABASE_ROOM_PERMISSION_EDIT_ROOM_SQL :: "8"
+// Protocol 27 (attachments plan D20).
+DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL :: "16"
 // Every room permission, what a grant may hold.
-DATABASE_ROOM_PERMISSIONS_ALL_SQL :: "15"
-// What ManageRooms lets its holder grant in any room: SendMessages, SpeakInVoice, EditRoom.
+DATABASE_ROOM_PERMISSIONS_ALL_SQL :: "31"
+// What rooms.everyone_permissions starts at (common.ROOM_PERMISSIONS_DEFAULT): SendMessages,
+// SpeakInVoice and, since migration 15, AttachFiles.
+DATABASE_ROOM_PERMISSIONS_DEFAULT_SQL :: "19"
+// What ManageRooms lets its holder grant in any room: SendMessages, SpeakInVoice, EditRoom
+// and (protocol 27) AttachFiles.
 @(private = "file")
-DATABASE_ROOM_PERMISSIONS_ROOM_MANAGER_GRANTS_SQL :: "11"
+DATABASE_ROOM_PERMISSIONS_ROOM_MANAGER_GRANTS_SQL :: "27"
 
 // The requester's ($1) permissions in the room $2.
 DATABASE_ACTOR_ROOM_PERMISSIONS_SQL ::
@@ -156,8 +162,8 @@ databaseParseRoomRoleGrants :: proc(text: string) -> [dynamic]common.RoomRoleGra
 // to holders of ManageRooms and not_permitted to everyone else. Set then refuses a grant to a
 // role that does not exist or is the built-in one (unknown_role), and any bit it adds or takes
 // away that the requester may not grant (not_grantable): the requester's own room permissions,
-// plus SendMessages, SpeakInVoice and EditRoom for a holder of ManageRooms, and every bit for an
-// admin. A role sent with no permissions loses its grant, like one left out.
+// plus SendMessages, SpeakInVoice, EditRoom and AttachFiles for a holder of ManageRooms, and
+// every bit for an admin. A role sent with no permissions loses its grant, like one left out.
 //
 // One row: outcome, whether a grant changed, the everyone mask and the role grants
 // ("role:mask,...") after the statement, the access roles (comma separated), the requester's
