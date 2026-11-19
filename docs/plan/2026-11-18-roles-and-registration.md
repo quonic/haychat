@@ -207,28 +207,33 @@ first-run and add-server form (G2), and wiping `sealPacketForSession`'s CBOR buf
   their next `ServerUserList`: an admin sees no Restricted badge or Lift restriction for a new
   room-code account until they sign in again. The server could send `ServerUserUpdated` with
   the full `UserSummary` (through `MainRouterState_sendAboutUser`) when it creates an account.
-  Found by `dev/registration-proof.sh` (G3).
+  Found by `dev/registration-proof.sh` (G3). #102
 - **D17 side channels** (G1): `ClientFetchUserKeys`, the direct conversation mark-read refusal,
   and voice participant names in a shared room still tell a restricted account that another
-  account exists by its ID.
+  account exists by its ID. #103
 - **A restricted account in a room made Public** (G1) gets no fresh `ServerUserList` when the
-  switch changes that room's members.
+  switch changes that room's members. #104
 - **Per-IP sign-up limit** (G1, Later): only the per-session limits (5 answers, 10 minutes) and
-  the 64 concurrent registering sessions exist.
-- **Ping has no reply** anywhere (G1).
+  the 64 concurrent registering sessions exist. #105
+- **An approved room-code request whose room changed** (G1 review) creates a restricted account
+  with no rooms when the room was deleted or made Public or Role before the account exists. #115
+- **The restricted set lives in router memory** (G1 review): a `users.restricted` change made
+  in SQL needs a restart, and this is undocumented. #116
+- **Ping has no reply** anywhere (G1). #106
 - **Sign-up requests in the GUI** (G2) list pending requests and those decided while the screen
-  was open; older decided ones only through the harness's `registration-list all`.
+  was open; older decided ones only through the harness's `registration-list all`. #107
 - **An invite link's registering flag** (G2) is lost if a settings change rebuilds the transport
-  before the user signs up.
+  before the user signs up. #108
 - **The `instance` file** (G2) is overwritten by a second plain GUI start, and the first
-  window's exit removes it; the next link then opens a second window.
+  window's exit removes it; the next link then opens a second window. #109
 - **Windows link hand-off** (G2) compiles but is untested at runtime, and
-  `registerSchemeHandler*` still builds its shell commands wrongly (older than G2).
+  `registerSchemeHandler*` still builds its shell commands wrongly (older than G2). #110
 - **CBOR growth buffers** (G3): `sealPacketForSession` wipes the final buffers, but copies that
-  `cbor.marshal` outgrew while encoding are freed unwiped; a wiping allocator would close it.
+  `cbor.marshal` outgrew while encoding are freed unwiped; a wiping allocator would close it. #111
 - **Room permissions page** (R2) is not pushed another manager's change; it refreshes when it is
-  opened again. The Admin section's room list could gain a **Permissions…** button (R2).
+  opened again. The Admin section's room list could gain a **Permissions…** button (R2). #112
 - **The Admin section's room list** (R1, older) does not refresh by itself when another admin
-  changes a room the admin is not in.
+  changes a room the admin is not in. #73
 - **Later** (unchanged): a role hierarchy so kick, ban and rename can be delegated, invite codes
   for encrypted rooms (a manager's client signs the Add), and the per-IP limit above.
+  #113, #114, #105
