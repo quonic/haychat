@@ -511,7 +511,8 @@ testHeadlessRoleCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		accountLine,
 		`{"event":"account_updated","serverID":7,"isAdmin":false,"nickname":"bob",` +
-		`"nicknameLocked":false,"permissions":["manage-rooms","manage-room-members"]}`,
+		`"nicknameLocked":false,"permissions":["manage-rooms","manage-room-members"],` +
+		`"isRestricted":false}`,
 		"the account_updated JSON with permissions",
 	)
 	_ = fmt.tprintf("")

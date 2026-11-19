@@ -23,6 +23,8 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	defer viewContextMenu(state, ctx)
 	// Under the context menu, above everything else.
 	defer viewVerifyDialog(state, ctx)
+	// A haychat:// link waiting for the user's answer (plan D19).
+	defer viewLinkConfirm(state, ctx)
 	// The Voice settings section holds the device lists and the microphone test only while
 	// it is on screen.
 	voicePanelVisible :=
@@ -59,6 +61,9 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 		viewServerSettings(state, ctx, root, &banner)
 	} else if State_roomEditorVisible(state) {
 		viewRoomEditor(state, ctx, root, &banner)
+	} else if State_signUpVisible(state) {
+		// Protocol 25: this server needs a sign-up first (view_registration.odin).
+		viewSignUp(state, ctx, root)
 	} else if state.selected_dm_peer_id != 0 {
 		viewDirectChat(state, ctx, root, &banner)
 	} else {
@@ -208,7 +213,7 @@ connectionStatusColor :: proc(ctx: ^ui.Context, status: ClientConnectionStatus) 
 		return ctx.theme.success
 	case .Failed:
 		return ctx.theme.danger
-	case .Idle, .Connecting, .Handshaking, .Disconnected:
+	case .Idle, .Connecting, .Handshaking, .Disconnected, .Registering:
 	}
 	return ctx.theme.warning
 }
@@ -390,7 +395,8 @@ viewSidebar :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Connec
 	area := r
 	// The gear opens this server's own settings (server_settings.odin).
 	settingsID := ui.idOf("server-settings", state.selected_server_id)
-	settingsText := banner.hasServer ? "⚙" : ""
+	// The approver badge (D18) rides on the gear: "⚙ 2" while sign-ups wait.
+	settingsText := banner.hasServer ? serverSettingsGearText(state, state.selected_server_id) : ""
 	serverName := selectedServerName(state)
 	openSettings := viewHeader(ctx, &area, serverName, "", settingsText, settingsID)
 	// Last, after the rows are drawn, since it closes the room form.

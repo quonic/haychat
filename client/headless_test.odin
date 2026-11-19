@@ -375,7 +375,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,` +
-		`"nicknameLocked":false,"permissions":[]}`,
+		`"nicknameLocked":false,"permissions":[],"registrationMode":"","isRestricted":false,` +
+		`"registered":false}`,
 		"the connected JSON",
 	)
 	delete(line)
@@ -385,7 +386,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":true,` +
-		`"nicknameLocked":false,"permissions":[]}`,
+		`"nicknameLocked":false,"permissions":[],"registrationMode":"","isRestricted":false,` +
+		`"registered":false}`,
 		"the connected JSON for an admin",
 	)
 	delete(line)
@@ -666,7 +668,8 @@ testHeadlessCountsConnectAttemptsUntilConnected :: proc(t: ^testing.T) {
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n" +
 		`{"event":"connecting","serverID":803,"attempt":2}` + "\n" +
 		`{"event":"connected","serverID":803,"userID":4,"nickname":"dora","isAdmin":false,` +
-		`"nicknameLocked":false,"permissions":[]}` +
+		`"nicknameLocked":false,"permissions":[],"registrationMode":"","isRestricted":false,` +
+		`"registered":false}` +
 		"\n" +
 		`{"event":"connecting","serverID":803,"attempt":1}` + "\n",
 		"the lifecycle lines",
@@ -895,7 +898,7 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"user_list","serverID":1,"users":[{"id":4,"nickname":"bob","isOnline":false,` +
 		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
-		`"isAdmin":false,"isBanned":false,"roleIds":[]}]}`,
+		`"isAdmin":false,"isBanned":false,"roleIds":[],"isRestricted":false}]}`,
 		"the user_list JSON",
 	)
 	delete(line)
@@ -939,10 +942,10 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 		`{"ok":true,"cmd":"users","serverID":803,"loaded":true,"loading":false,"users":[` +
 		`{"id":3,"nickname":"alice","isOnline":true,"lastReadMessageId":0,"unreadCount":0,` +
 		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
-		`"isAdmin":false,"isBanned":false,"roleIds":[]},` +
+		`"isAdmin":false,"isBanned":false,"roleIds":[],"isRestricted":false},` +
 		`{"id":4,"nickname":"bob","isOnline":false,"lastReadMessageId":0,"unreadCount":0,` +
 		`"identityPublicKey":"","hasEncryptionKey":false,"keyState":"unknown",` +
-		`"isAdmin":false,"isBanned":false,"roleIds":[]}]}` +
+		`"isAdmin":false,"isBanned":false,"roleIds":[],"isRestricted":false}]}` +
 		"\n",
 		"the users result",
 	)

@@ -53,6 +53,13 @@ main :: proc() {
 	if uiScriptRequested(os.args[1:]) {
 		os.exit(uiScriptMain(os.args[1:]))
 	}
+	// A haychat:// link (plan D19) goes to a HayChat window that already runs, if any.
+	if link := schemeLinkArgument(os.args[1:]); len(link) > 0 {
+		initConfigHome()
+		if schemeHandler(link) {
+			os.exit(0)
+		}
+	}
 	if !runApp() {
 		os.exit(1)
 	}
@@ -180,6 +187,9 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			if readMarkerWait >= 0 {
 				waitMS = min(waitMS, u64(time.duration_milliseconds(readMarkerWait)) + 1)
 			}
+			if state.linkHandoffWatch {
+				waitMS = min(waitMS, LINK_HANDOFF_POLL_MS)
+			}
 			if State_voiceNeedsRedraws(&state) {
 				now := u64(SDL.GetTicks())
 				waitMS = voicePollAtMS > now ? min(waitMS, voicePollAtMS - now) : 0
@@ -206,6 +216,10 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 			break
 		}
 		if State_drainNetworkEvents(&state) {
+			redraw = true
+		}
+		// A link another process passed on shows its confirmation.
+		if State_pollLinkHandoff(&state) {
 			redraw = true
 		}
 		// Encrypted voice (voice_e2ee.odin): timed rotations, epoch grace and key requests.

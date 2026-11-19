@@ -71,6 +71,10 @@ AdminUserControls :: struct {
 	// "Ban…" or "Unban"; banning says which.
 	ban:      AdminControl,
 	banning:  bool,
+	// Protocol 25 (registration.odin): a restricted account (D11) and "Lift restriction",
+	// drawn only for one.
+	isRestricted: bool,
+	restriction:  AdminControl,
 }
 
 ADMIN_REASON_SELF_REVOKE :: "You cannot remove your own admin role."
@@ -109,6 +113,10 @@ adminUserControls :: proc(user: common.UserSummary, isSelf: bool) -> (controls: 
 	controls.isAdmin = user.isAdmin
 	controls.isBanned = user.isBanned
 	controls.isOnline = user.isOnline
+	controls.isRestricted = user.isRestricted
+	if user.isRestricted {
+		controls.restriction = {label = "Lift restriction", enabled = true}
+	}
 
 	controls.rename = {label = "Rename…", enabled = true}
 
@@ -394,6 +402,10 @@ AdminSectionView :: struct {
 	status:       string,
 	statusTone:   AdminStatusTone,
 	statusUserID: int,
+	// Protocol 25 (registration_view_model.odin): the mode picker, invites and sign-up
+	// requests, and the pending count for the badge (D18).
+	registration: RegistrationAdminView,
+	pendingCount: int,
 }
 
 // By name (as memberLess orders equal online states), then by ID: unlike the sidebar, the
@@ -420,6 +432,8 @@ buildAdminSectionView :: proc(
 	}
 	isAdmin := State_isServerAdmin(state, serverID)
 	view.visible = true
+	view.registration = buildRegistrationAdminView(state, serverID, allocator)
+	view.pendingCount = State_pendingRegistrationCount(state, serverID)
 	view.showMembers = isAdmin
 	view.showRoles = isAdmin
 	view.canManageRooms = State_hasPermission(state, serverID, .ManageRooms)
@@ -432,7 +446,7 @@ buildAdminSectionView :: proc(
 			"change it back."
 	} else {
 		view.note =
-			"A role an admin gave you lets you manage rooms here. The server checks every " +
+			"A role an admin gave you lets you use the parts below. The server checks every " +
 			"change."
 	}
 	selfUserID := State_selfUserID(state, serverID)

@@ -39,9 +39,20 @@ ServerConnection :: struct {
 	// The key a server offered that did not match the pin, for "Trust the new key".
 	offeredServerPublicKey:   string,
 	offeredServerFingerprint: string,
+	// Protocol 25 (#43 G2, registration.odin). The server's registration mode (from sign-in,
+	// ServerRegistrationRequired and ServerRegistrationMode) and whether this account is
+	// restricted (sign-in and ServerAccountUpdated).
+	registrationMode:         common.RegistrationMode,
+	isRestricted:             bool,
+	// The sign-up screen: its phase, the server's sentence for it (owned), and the request's
+	// state from ServerRegistrationRequired.
+	signUp:                   SignUpPhase,
+	signUpMessage:            string,
+	signUpRequestStatus:      common.RegistrationRequestStatus,
 }
 
 ServerConnection_deinit :: proc(connection: ^ServerConnection) {
+	delete(connection.signUpMessage)
 	delete(connection.nickname)
 	delete(connection.detail)
 	delete(connection.offeredServerPublicKey)
@@ -192,6 +203,7 @@ State_resetPendingRequests :: proc(state: ^State, serverID: int, reloadHistory: 
 	State_roomLogPendingConnectionReset(state, serverID)
 	State_roomChainsConnectionReset(state, serverID)
 	State_adminConnectionReset(state, serverID)
+	State_registrationConnectionReset(state, serverID)
 	cacheIndex := State_serverRoomCacheIndex(state^, serverID)
 	if cacheIndex < 0 {
 		return
@@ -251,6 +263,8 @@ State_connectionEstablished :: proc(state: ^State, event: ^ClientTransportRuntim
 	State_roomChainsConnected(state, event.serverID)
 	State_voiceConnected(state, event.serverID)
 	State_rolesConnected(state, event.serverID)
+	State_registrationConnectionChanged(state, event)
+	State_registrationConnected(state, event.serverID)
 }
 
 // Takes ownership of the event's message and offered key.
@@ -276,9 +290,11 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	State_resetPendingRequests(state, event.serverID, false)
 	State_voiceConnectionLost(state, event.serverID)
 	// A kick or ban is not undone by Retry's reconnect, and neither is the voice it ended.
+	// A declined sign-up is shown like a ban (D16).
 	if event.failureKind == .Kicked || event.failureKind == .Banned {
 		State_voiceEndedByAdmin(state, event.serverID)
 	}
+	State_registrationConnectionChanged(state, event)
 }
 
 // Takes ownership of the event's message.
@@ -296,6 +312,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	ServerConnection_setDetail(connection, &event.message)
 	State_resetPendingRequests(state, event.serverID, false)
 	State_voiceConnectionLost(state, event.serverID)
+	State_registrationConnectionChanged(state, event)
 }
 
 // ServerAccountUpdated (protocol 14, #41): an admin changed this account's role or name while
@@ -308,9 +325,12 @@ State_accountUpdated :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	}
 	connection := &state.serverConnections[index]
 	wasAdmin := connection.isAdmin
+	hadApprove := State_hasPermission(state, event.serverID, .ApproveRegistrations)
+	hadInvites := State_hasPermission(state, event.serverID, .CreateInvites)
 	connection.isAdmin = event.isAdmin
 	connection.permissions = event.permissions
 	connection.nicknameLocked = event.nicknameLocked
+	connection.isRestricted = event.isRestricted
 	if len(event.nickname) > 0 {
 		delete(connection.nickname)
 		connection.nickname = event.nickname
@@ -331,6 +351,7 @@ State_accountUpdated :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	   State_hasPermission(state, event.serverID, .ManageRoomMembers) {
 		State_noteRoomManagementGained(state, event.serverID)
 	}
+	State_registrationAccountUpdated(state, event.serverID, hadApprove, hadInvites)
 }
 
 // "Retry now": connect immediately instead of waiting for the backoff (or after a failure
@@ -470,7 +491,22 @@ describeConnectFailure :: proc(
 		)
 	case .RegistrationRequired:
 		return strings.clone(
-			len(detail) > 0 ? detail : CLIENT_REGISTRATION_REQUIRED_MESSAGE,
+			len(detail) > 0 ? detail : CLIENT_REGISTRATION_ENDED_MESSAGE,
+			allocator,
+		)
+	case .RegistrationPending:
+		return strings.clone(
+			"Your sign-up request is waiting for approval. Press Check again later.",
+			allocator,
+		)
+	case .RegistrationDeclined:
+		return strings.clone(
+			len(detail) > 0 ? detail : common.REGISTRATION_DECLINED_MESSAGE,
+			allocator,
+		)
+	case .RegistrationBusy:
+		return strings.clone(
+			"Too many people are signing up on this server right now; HayChat tries again.",
 			allocator,
 		)
 	case .None, .Unreachable, .Other:
@@ -533,6 +569,14 @@ buildConnectionBanner :: proc(
 	case .Established:
 		banner.tone = .Quiet
 		banner.summary = fmt.aprintf("Connected as %s", connection.nickname, allocator = allocator)
+	case .Registering:
+		// The sign-up screen explains itself (view_registration.odin).
+		banner.tone = .Progress
+		summary := "Sign-up needed"
+		if connection.signUp == .Pending {
+			summary = "Waiting for approval"
+		}
+		banner.summary = strings.clone(summary, allocator)
 	case .Connecting, .Handshaking:
 		banner.tone = .Progress
 		banner.summary = strings.clone("Connecting…", allocator)
@@ -605,6 +649,16 @@ buildConnectionBanner :: proc(
 				allocator,
 			)
 			banner.text = fmt.aprintf("%s: %s", serverName, reason, allocator = allocator)
+		case .RegistrationRequired, .RegistrationPending, .RegistrationDeclined:
+			// The sign-up screen shows these with its own buttons (Check again, Start again).
+			summary := "Sign-up ended"
+			if connection.failureKind == .RegistrationPending {
+				summary = "Waiting for approval"
+			} else if connection.failureKind == .RegistrationDeclined {
+				summary = "Sign-up declined"
+			}
+			banner.summary = strings.clone(summary, allocator)
+			banner.text = fmt.aprintf("%s: %s", serverName, reason, allocator = allocator)
 		case .None,
 		     .Unreachable,
 		     .Other,
@@ -613,7 +667,7 @@ buildConnectionBanner :: proc(
 		     .ProtocolMismatch,
 		     .InvalidName,
 		     .InvalidIdentity,
-		     .RegistrationRequired:
+		     .RegistrationBusy:
 			banner.text = fmt.aprintf(
 				"Could not connect to %s: %s",
 				serverName,
