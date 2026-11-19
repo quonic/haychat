@@ -258,9 +258,10 @@ role in the statement that reads or changes, so a holder of every other permissi
   server deletes those without a row, or whose row is in a state that has no such file (a part
   file of a finished blob, any file of a tombstone).
 - **Room deletion.** Deleting a room deletes its messages, which unlinks their files (and the
-  room's unsent uploads). The first sweep pass once a file's upload is an hour old deletes it,
-  so a deleted room's files leave the blob directory within two hours of their upload, or at
-  the server's next start; its unsent uploads go after `HAYCHAT_ATTACHMENT_PENDING_HOURS`.
+  room's unsent uploads). The first sweep pass after the deletion deletes them, so they leave
+  the blob directory within an hour of it (or at the server's next start); a file uploaded less
+  than an hour before the deletion waits for a later pass. The room's unsent uploads go after
+  `HAYCHAT_ATTACHMENT_PENDING_HOURS`.
 
 ## Roles and server permissions (protocol 23)
 

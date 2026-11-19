@@ -353,8 +353,8 @@ or without text (`docs/plan/2026-11-19-file-attachments.md`; the wire format is 
   when it begins, so two at once cannot overshoot the quota.
 - **What is kept.** A file stays as long as its message. A file uploaded but never sent is
   deleted after `HAYCHAT_ATTACHMENT_PENDING_HOURS` (24 by default), a stalled upload after an
-  hour without data, a cancelled one after an hour, and the files of a deleted room within
-  about two hours of their upload. An upload whose client quit or crashed is not resumed: the
+  hour without data, a cancelled one after an hour, and the files of a deleted room within an
+  hour of the deletion (never before their upload is an hour old). An upload whose client quit or crashed is not resumed: the
   client uploads the file again. Accounts are never deleted, so their files are not either.
 
 ### Moderation
