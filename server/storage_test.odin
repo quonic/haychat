@@ -162,7 +162,10 @@ testStorageWorkerStoresAndReadsABlob :: proc(t: ^testing.T) {
 
 	storageTestWrite(&worker, blobId, data, 0)
 	finished := storageTestFinish(&worker, blobId, u64(len(data)), storageTestHash(data))
-	assert(finished.ok && !finished.mismatch, fmt.tprintf("expected a stored blob, got %v", finished))
+	assert(
+		finished.ok && !finished.mismatch,
+		fmt.tprintf("expected a stored blob, got %v", finished),
+	)
 	assert(!os.exists(part), "expected the part file to be renamed away")
 	stored := storageBlobPath(&worker, blobId)
 	defer delete(stored)

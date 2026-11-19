@@ -5,6 +5,7 @@ import "core:crypto/sha2"
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:sync"
 import "core:sys/linux"
 import "core:time"
 
@@ -326,8 +327,12 @@ StorageWorker_handle :: proc(
 			if _, open := worker.uploads[file.blobId]; open && file.isPart {
 				continue
 			}
-			path :=
-				file.isPart ? storagePartPath(worker, file.blobId) : storageBlobPath(worker, file.blobId)
+			path: string
+			if file.isPart {
+				path = storagePartPath(worker, file.blobId)
+			} else {
+				path = storageBlobPath(worker, file.blobId)
+			}
 			if os.remove(path) == nil {
 				deleted += 1
 				fmt.printfln("[Storage] Deleted orphan attachment file %s", path)
@@ -600,7 +605,7 @@ storageServerLoop :: proc(pm: ^ProcessManager) {
 		fmt.eprintfln("[Storage] Failed to initialize coordinator endpoint: %v", ipcErr)
 		return
 	}
-	pm.config.storageFd = storageFd
+	sync.atomic_store(&pm.config.storageFd, storageFd)
 	defer IPC_Client_deinit(&pm.config.storageSocket)
 
 	worker := StorageWorker_init(pm.config.attachmentDir)

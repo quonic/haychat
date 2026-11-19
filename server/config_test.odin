@@ -237,7 +237,10 @@ testConfigStartupRefusesAnAttachmentDirectoryHoldingTheServerState :: proc(t: ^t
 	config := configTestStorageConfig(storagePath)
 	config.serverIdentityFilePath = fmt.tprintf("%s/server_identity.json", storagePath)
 	ok := startupPreflightError(config)
-	assert(len(ok) == 0, fmt.tprintf("expected a separate attachment directory to pass, got %q", ok))
+	assert(
+		len(ok) == 0,
+		fmt.tprintf("expected a separate attachment directory to pass, got %q", ok),
+	)
 	attachmentDir := config.attachmentDir
 	for name in ([]string{"", "/incoming", "/blobs"}) {
 		path := fmt.tprintf("%s%s", attachmentDir, name)
@@ -263,6 +266,9 @@ testConfigStartupRefusesAnAttachmentDirectoryHoldingTheServerState :: proc(t: ^t
 	contains := startupPreflightError(config)
 	assert(
 		strings.contains(contains, "must not contain the server identity file"),
-		fmt.tprintf("expected an attachment directory holding the identity refused, got %q", contains),
+		fmt.tprintf(
+			"expected an attachment directory holding the identity refused, got %q",
+			contains,
+		),
 	)
 }

@@ -33,7 +33,10 @@ attachmentSQLTestRun :: proc(
 	request: common.DatabaseAttachmentRequest,
 ) -> common.DatabaseAttachmentResult {
 	response := databaseExecuteRequest(conn, request)
-	assert(response.success, fmt.tprintf("expected %v to run: %s", request.action, response.message))
+	assert(
+		response.success,
+		fmt.tprintf("expected %v to run: %s", request.action, response.message),
+	)
 	result, ok := response.result.(common.DatabaseAttachmentResult)
 	assert(ok, "expected an attachment result")
 	copied := result
@@ -87,7 +90,12 @@ attachmentSQLTestAction :: proc(
 ) -> common.DatabaseAttachmentResult {
 	return attachmentSQLTestRun(
 		conn,
-		common.DatabaseAttachmentRequest{action = action, userId = userID, blobId = blobId, size = size},
+		common.DatabaseAttachmentRequest {
+			action = action,
+			userId = userID,
+			blobId = blobId,
+			size = size,
+		},
 	)
 }
 
@@ -122,7 +130,8 @@ attachmentSQLTestAge :: proc(
 		"age an attachment",
 		fmt.tprintf(
 			"UPDATE attachments SET created_at = now() - make_interval(hours => %d), " +
-			"last_chunk_at = now() - make_interval(hours => %d) WHERE blob_id = decode('%s', 'hex')",
+			"last_chunk_at = now() - make_interval(hours => %d) " +
+			"WHERE blob_id = decode('%s', 'hex')",
 			createdHoursAgo,
 			lastChunkHoursAgo,
 			attachmentSQLTestHex(blobId),
@@ -131,7 +140,12 @@ attachmentSQLTestAge :: proc(
 }
 
 @(private = "file")
-attachmentSQLTestRoom :: proc(conn: pg.Conn, name: string, roomType := 3, encrypted := false) -> int {
+attachmentSQLTestRoom :: proc(
+	conn: pg.Conn,
+	name: string,
+	roomType := 3,
+	encrypted := false,
+) -> int {
 	value := databaseAdminTestValue(
 		conn,
 		fmt.tprintf(
@@ -300,7 +314,8 @@ testAttachmentBeginStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		conn,
 		"age bob's uploads",
 		fmt.tprintf(
-			"UPDATE attachments SET created_at = now() - interval '2 hours' WHERE owner_user_id = %d",
+			"UPDATE attachments SET created_at = now() - interval '2 hours' " +
+			"WHERE owner_user_id = %d",
 			bob,
 		),
 	)

@@ -341,7 +341,10 @@ ClientTransferWorker_popEvent :: proc(
 }
 
 // Called by the network worker with its lock held; takes ownership of inbound.
-ClientTransferWorker_deliver :: proc(worker: ^ClientTransferWorker, inbound: ClientTransferInbound) {
+ClientTransferWorker_deliver :: proc(
+	worker: ^ClientTransferWorker,
+	inbound: ClientTransferInbound,
+) {
 	sync.mutex_lock(&worker.mutex)
 	append(&worker.inbound, inbound)
 	sync.cond_broadcast(&worker.cond)
@@ -557,7 +560,11 @@ clientTransferEmit :: proc(
 }
 
 @(private = "file")
-clientTransferFail :: proc(worker: ^ClientTransferWorker, transfer: ^ClientTransfer, message: string) {
+clientTransferFail :: proc(
+	worker: ^ClientTransferWorker,
+	transfer: ^ClientTransfer,
+	message: string,
+) {
 	if transfer.state == .Finished {
 		return
 	}
@@ -791,7 +798,8 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 			common.ClientAttachmentCancelPayload{blobId = command.blobId},
 		)
 		for direction in ClientTransferDirection {
-			if transfer := clientTransferFind(worker, command.serverID, command.blobId, direction, true);
+			serverID := command.serverID
+			if transfer := clientTransferFind(worker, serverID, command.blobId, direction, true);
 			   transfer != nil {
 				clientTransferFail(worker, transfer, "cancelled")
 				// A cancelled upload is a tombstone on the server: it cannot be resumed.
@@ -802,7 +810,10 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 }
 
 @(private = "file")
-clientTransferHandleInbound :: proc(worker: ^ClientTransferWorker, inbound: ^ClientTransferInbound) {
+clientTransferHandleInbound :: proc(
+	worker: ^ClientTransferWorker,
+	inbound: ^ClientTransferInbound,
+) {
 	switch inbound.kind {
 	case .Ready:
 		transfer: ^ClientTransfer
@@ -812,8 +823,10 @@ clientTransferHandleInbound :: proc(worker: ^ClientTransferWorker, inbound: ^Cli
 			   candidate.state != .Beginning {
 				continue
 			}
-			if (inbound.requestId != 0 && candidate.requestId == inbound.requestId) ||
-			   (inbound.requestId == 0 && candidate.hasBlobId && candidate.blobId == inbound.blobId) {
+			byRequest := inbound.requestId != 0 && candidate.requestId == inbound.requestId
+			byBlob :=
+				inbound.requestId == 0 && candidate.hasBlobId && candidate.blobId == inbound.blobId
+			if byRequest || byBlob {
 				transfer = candidate
 				break
 			}
@@ -885,7 +898,11 @@ clientTransferHandleInbound :: proc(worker: ^ClientTransferWorker, inbound: ^Cli
 		}
 		file, err := os.open(transfer.partPath, {.Write, .Create, .Trunc}, os.perm(0o600))
 		if err != nil {
-			clientTransferFail(worker, transfer, fmt.tprintf("cannot write %s: %v", transfer.partPath, err))
+			clientTransferFail(
+				worker,
+				transfer,
+				fmt.tprintf("cannot write %s: %v", transfer.partPath, err),
+			)
 			return
 		}
 		transfer.file = file

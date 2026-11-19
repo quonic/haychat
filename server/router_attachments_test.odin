@@ -122,7 +122,11 @@ attachTestReadyUpload :: proc(
 		query.request_id,
 		common.DatabaseQueryResponse {
 			success = true,
-			result = common.DatabaseAttachmentResult{action = .Begin, outcome = .Applied, size = size},
+			result = common.DatabaseAttachmentResult {
+				action = .Begin,
+				outcome = .Applied,
+				size = size,
+			},
 		},
 	)
 	open := attachTestPollStorage(h)
@@ -174,7 +178,12 @@ attachTestChunk :: proc(
 	assert(ok, "expected the chunk to encode")
 	sealed := make([]u8, n + common.FILE_PACKET_OVERHEAD)
 	defer delete(sealed)
-	length, sealOK := common.sealFilePacket(&transport.fileSend, transport.sessionID, plain[:n], sealed)
+	length, sealOK := common.sealFilePacket(
+		&transport.fileSend,
+		transport.sessionID,
+		plain[:n],
+		sealed,
+	)
 	assert(sealOK, "expected the client to seal the chunk")
 	MainRouterState_handleNetworkDataReceived(
 		&h.pm,
@@ -196,7 +205,12 @@ attachTestReceiveFilePacket :: proc(
 	assert(send.channel == .FileTransfer, fmt.tprintf("expected channel 5, got %v", send.channel))
 	plain := make([]u8, len(send.data))
 	defer delete(plain)
-	n, result := common.openFilePacket(&transport.fileReceive, transport.sessionID, send.data, plain)
+	n, result := common.openFilePacket(
+		&transport.fileReceive,
+		transport.sessionID,
+		send.data,
+		plain,
+	)
 	assert(result == .Ok, fmt.tprintf("expected the client to open it, got %v", result))
 	decoded, decodeResult := common.decodeAttachmentPacket(plain[:n])
 	assert(decodeResult == .Ok, "expected an attachment packet")
@@ -385,7 +399,15 @@ testRouterAttachmentUploadKeepsTheWindowAndAcksWrittenChunks :: proc(t: ^testing
 	}
 	// Two slots are free again: chunks 8 and 9 fit, chunk 10 overflows the window.
 	for index in 8 ..< 10 {
-		attachTestChunk(&h, &transport, peerID, .UploadChunk, blobId, u64(index * len(chunk)), chunk)
+		attachTestChunk(
+			&h,
+			&transport,
+			peerID,
+			.UploadChunk,
+			blobId,
+			u64(index * len(chunk)),
+			chunk,
+		)
 		command := attachTestPollStorage(&h)
 		StorageRequest_deinit(command.request)
 	}

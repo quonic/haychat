@@ -1159,7 +1159,12 @@ testFilePacketRoundTripBothDirectionsWithStrictCounter :: proc(t: ^testing.T) {
 			endian.unchecked_get_u64le(sealed[1:9]) == u64(round),
 			fmt.tprintf("expected sequence %d", round),
 		)
-		length, result := openFilePacket(&server.fileReceive, server.sessionID, sealed[:n], opened[:])
+		length, result := openFilePacket(
+			&server.fileReceive,
+			server.sessionID,
+			sealed[:n],
+			opened[:],
+		)
 		assert(result == .Ok, fmt.tprintf("expected the server to open it, got %v", result))
 		assert(length == len(plaintext), "expected the plaintext length back")
 		for value, index in plaintext {

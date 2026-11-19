@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:sync"
 import "core:time"
 
 // Attachment transfers in the router (protocol 26, attachments plan F1, D5-D9, D17). The router
@@ -516,7 +517,15 @@ MainRouterState_handleClientAttachmentUploadBegin :: proc(
 	sessionID := session.transport.sessionID
 	req: common.ClientAttachmentUploadBeginPayload
 	if !attachmentDecode(payload, &req) {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, {}, common.ATTACHMENT_INVALID_REQUEST_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			{},
+			common.ATTACHMENT_INVALID_REQUEST_MESSAGE,
+		)
 		return
 	}
 	refusal := ""
@@ -584,7 +593,15 @@ MainRouterState_handleClientAttachmentUploadResume :: proc(
 	sessionID := session.transport.sessionID
 	req: common.ClientAttachmentUploadResumePayload
 	if !attachmentDecode(payload, &req) || !common.attachmentBlobIDIsSet(req.blobId) {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_INVALID_REQUEST_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_INVALID_REQUEST_MESSAGE,
+		)
 		return
 	}
 	refusal := ""
@@ -630,19 +647,43 @@ MainRouterState_handleClientAttachmentUploadFinish :: proc(
 	sessionID := session.transport.sessionID
 	req: common.ClientAttachmentUploadFinishPayload
 	if !attachmentDecode(payload, &req) {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, {}, common.ATTACHMENT_INVALID_REQUEST_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			{},
+			common.ATTACHMENT_INVALID_REQUEST_MESSAGE,
+		)
 		return
 	}
 	upload, active := state.attachments.uploads[req.blobId]
 	if !active || upload.sessionID != sessionID {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_NOT_FOUND_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_NOT_FOUND_MESSAGE,
+		)
 		return
 	}
 	if upload.finishing ||
 	   upload.written != upload.size ||
 	   len(upload.queued) > 0 ||
 	   upload.inStorage > 0 {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_INCOMPLETE_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_INCOMPLETE_MESSAGE,
+		)
 		return
 	}
 	upload.finishing = true
@@ -676,16 +717,40 @@ MainRouterState_handleClientAttachmentDownload :: proc(
 	sessionID := session.transport.sessionID
 	req: common.ClientAttachmentDownloadPayload
 	if !attachmentDecode(payload, &req) || !common.attachmentBlobIDIsSet(req.blobId) {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_INVALID_REQUEST_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_INVALID_REQUEST_MESSAGE,
+		)
 		return
 	}
 	if _, active := state.attachments.downloads[AttachmentDownloadKey{peerID, req.blobId}];
 	   active {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_ALREADY_ACTIVE_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_ALREADY_ACTIVE_MESSAGE,
+		)
 		return
 	}
 	if attachmentSessionDownloads(state, sessionID) >= common.ATTACHMENT_DOWNLOADS_PER_SESSION_MAX {
-		attachmentRefuse(pm, state, peerID, sessionID, 0, req.blobId, common.ATTACHMENT_TOO_MANY_DOWNLOADS_MESSAGE)
+		attachmentRefuse(
+			pm,
+			state,
+			peerID,
+			sessionID,
+			0,
+			req.blobId,
+			common.ATTACHMENT_TOO_MANY_DOWNLOADS_MESSAGE,
+		)
 		return
 	}
 	state.attachments.pendingDownloads[sessionID] += 1
@@ -788,7 +853,15 @@ MainRouterState_handleFilePacket :: proc(
 	case .UploadChunk:
 		upload, active := attachments.uploads[packet.blobId]
 		if !active || upload.sessionID != sessionID {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, packet.blobId, common.ATTACHMENT_NOT_FOUND_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				packet.blobId,
+				common.ATTACHMENT_NOT_FOUND_MESSAGE,
+			)
 			return
 		}
 		length := u64(len(packet.data))
@@ -812,7 +885,15 @@ MainRouterState_handleFilePacket :: proc(
 			return
 		}
 		if len(download.sentOffsets) == 0 || download.sentOffsets[0] != packet.offset {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, packet.blobId, common.ATTACHMENT_FLOW_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				packet.blobId,
+				common.ATTACHMENT_FLOW_MESSAGE,
+			)
 			attachmentRemoveDownload(state, key)
 			return
 		}
@@ -944,7 +1025,15 @@ MainRouterState_handleAttachmentResult :: proc(
 		if result.outcome != .Applied {
 			attachmentCountDown(&attachments.pendingUploads, sessionID)
 			delete_key(&attachments.opening, blobId)
-			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, common.ATTACHMENT_NOT_FOUND_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				blobId,
+				common.ATTACHMENT_NOT_FOUND_MESSAGE,
+			)
 			return
 		}
 		attachmentStorageSend(
@@ -964,7 +1053,15 @@ MainRouterState_handleAttachmentResult :: proc(
 	case .Finish:
 		attachmentRemoveUpload(pm, state, blobId, closeFile = false)
 		if result.outcome != .Applied {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, common.ATTACHMENT_STORAGE_ERROR_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				blobId,
+				common.ATTACHMENT_STORAGE_ERROR_MESSAGE,
+			)
 			return
 		}
 		attachmentSend(
@@ -995,11 +1092,27 @@ MainRouterState_handleAttachmentResult :: proc(
 	case .DownloadCheck:
 		attachmentCountDown(&attachments.pendingDownloads, sessionID)
 		if result.outcome != .Applied {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, common.ATTACHMENT_NOT_FOUND_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				blobId,
+				common.ATTACHMENT_NOT_FOUND_MESSAGE,
+			)
 			return
 		}
 		if request.attachmentOffset > result.size {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, common.ATTACHMENT_INVALID_REQUEST_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				blobId,
+				common.ATTACHMENT_INVALID_REQUEST_MESSAGE,
+			)
 			return
 		}
 		if _, ok := attachmentSession(state, peerID, sessionID); !ok {
@@ -1007,7 +1120,15 @@ MainRouterState_handleAttachmentResult :: proc(
 		}
 		key := AttachmentDownloadKey{peerID, blobId}
 		if _, active := attachments.downloads[key]; active {
-			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, common.ATTACHMENT_ALREADY_ACTIVE_MESSAGE)
+			attachmentRefuse(
+				pm,
+				state,
+				peerID,
+				sessionID,
+				0,
+				blobId,
+				common.ATTACHMENT_ALREADY_ACTIVE_MESSAGE,
+			)
 			return
 		}
 		attachmentSend(
@@ -1574,7 +1695,8 @@ MainRouterState_attachmentsTick :: proc(
 	for _, download in attachments.downloads {
 		attachmentPumpDownload(pm, state, download, now)
 	}
-	if !attachments.scanStarted {
+	// The storage thread registers its IPC endpoint as it starts; the scan waits for it.
+	if !attachments.scanStarted && sync.atomic_load(&pm.config.storageFd) != 0 {
 		attachments.scanStarted = true
 		attachmentStorageSend(pm, state, StorageScan{}, AttachmentPendingStorage{kind = .Scan})
 	}
