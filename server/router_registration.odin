@@ -549,7 +549,10 @@ MainRouterState_handleClientRegister :: proc(
 			hasCode = hasCode,
 			reason = strings.clone(req.reason),
 		},
-		PendingDBRequest{requestType = .Register},
+		PendingDBRequest {
+			requestType = .Register,
+			identityPublicKey = session.clientIdentityPublicKey,
+		},
 	)
 }
 
@@ -666,7 +669,13 @@ MainRouterState_handleRegisterResult :: proc(
 		MainRouterState_setUserRestricted(state, registered.userId, registered.isRestricted)
 	}
 	session, sessionOK := &state.peerSessions[request.peerID]
-	if !sessionOK || !session.isRegistering {
+	if !sessionOK || !session.isRegistering || !session.registerInFlight {
+		return
+	}
+	// A reused peer ID: the answer belongs to the key that asked, not to this session.
+	sessionKey := session.clientIdentityPublicKey
+	requestKey := request.identityPublicKey
+	if !common.constantTimeEqual(sessionKey[:], requestKey[:]) {
 		return
 	}
 	session.registerInFlight = false

@@ -619,3 +619,46 @@ testRestrictedPresenceIsFilteredPerRecipient :: proc(t: ^testing.T) {
 	assert(bobPresence.messageType == .ServerUserPresence, "expected bob, a room mate, told")
 	routerTestExpectNoNetworkMessage(&h, "presence to carol, who shares no room")
 }
+
+// A ClientRegister's answer outlives its peer (approvers still hear of a request), so it must
+// never complete another session that got the same peer ID.
+@(test)
+testRegistrationAnswerIgnoresAReusedPeerID :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	first := routerRegistrationTestBegin(&h, 1)
+	defer common.TransportState_deinit(&first.transport)
+	_, text := routerRegistrationTestCode()
+	defer delete(text)
+	routerRegistrationTestRegister(&h, &first, text)
+	query := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(query.request)
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, 1)
+	h.state.connectedPeers[1] = true
+	MainRouterState_setPeerSession(&h.state, 1, RouterPeerSession_init())
+	second := routerRegistrationTestBegin(&h, 1)
+	defer common.TransportState_deinit(&second.transport)
+	if session, ok := &h.state.peerSessions[1]; ok {
+		session.registerInFlight = true
+	}
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRegisterResult {
+				outcome = .Created,
+				userId = 70,
+				nickname = strings.clone("applicant"),
+			},
+		},
+	)
+	routerTestExpectNoNetworkMessage(&h, "an answer for another key")
+	session, _ := MainRouterState_getPeerSession(&h.state, 1)
+	assert(!session.isAuthenticated && session.isRegistering, "expected the new session untouched")
+}

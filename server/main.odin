@@ -105,6 +105,9 @@ PendingDBRequest :: struct {
 	// VisibleRecipients (protocol 25): the message (owned) and the session it skips.
 	visibility:            MainRouterVisibilityPayload,
 	excludePeerID:         u32,
+	// Register (protocol 25): the applicant's identity key. The request outlives a disconnect
+	// and ENet reuses peer IDs, so its answer applies only to a session with this key.
+	identityPublicKey:     common.IdentityPublicKeyBytes,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
