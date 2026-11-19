@@ -81,6 +81,9 @@ StorageDeleteOrphans :: struct {
 	files: [dynamic]StorageFile, // owned
 }
 
+// The free bytes on the blob directory's volume (protocol 28, ServerAdminAttachmentUsage).
+StorageFreeSpace :: struct {}
+
 StorageRequest :: union {
 	StorageUploadOpen,
 	StorageUploadWrite,
@@ -90,6 +93,7 @@ StorageRequest :: union {
 	StorageDeleteBlobs,
 	StorageScan,
 	StorageDeleteOrphans,
+	StorageFreeSpace,
 }
 
 StorageUploadOpened :: struct {
@@ -131,6 +135,11 @@ StorageOrphansDeleted :: struct {
 	deleted: int,
 }
 
+StorageFreeSpaceResult :: struct {
+	freeBytes: i64,
+	ok:        bool,
+}
+
 StorageResult :: union {
 	StorageUploadOpened,
 	StorageUploadWritten,
@@ -139,6 +148,7 @@ StorageResult :: union {
 	StorageBlobsDeleted,
 	StorageScanResult,
 	StorageOrphansDeleted,
+	StorageFreeSpaceResult,
 }
 
 // Router -> storage worker. requestId 0 asks for no answer.
@@ -162,7 +172,12 @@ StorageRequest_deinit :: proc(request: StorageRequest) {
 		delete(r.blobs)
 	case StorageDeleteOrphans:
 		delete(r.files)
-	case StorageUploadOpen, StorageUploadFinish, StorageUploadClose, StorageRead, StorageScan:
+	case StorageUploadOpen,
+	     StorageUploadFinish,
+	     StorageUploadClose,
+	     StorageRead,
+	     StorageScan,
+	     StorageFreeSpace:
 	case nil:
 	}
 }
@@ -177,7 +192,8 @@ StorageResult_deinit :: proc(result: StorageResult) {
 	     StorageUploadWritten,
 	     StorageUploadFinished,
 	     StorageBlobsDeleted,
-	     StorageOrphansDeleted:
+	     StorageOrphansDeleted,
+	     StorageFreeSpaceResult:
 	case nil:
 	}
 }
@@ -321,6 +337,9 @@ StorageWorker_handle :: proc(
 		return StorageBlobsDeleted{deleted = deleted}, true
 	case StorageScan:
 		return storageScan(worker), true
+	case StorageFreeSpace:
+		freeBytes, ok := worker.freeBytes(worker.dir)
+		return StorageFreeSpaceResult{freeBytes = ok ? max(freeBytes, 0) : 0, ok = ok}, true
 	case StorageDeleteOrphans:
 		deleted := 0
 		for file in r.files {

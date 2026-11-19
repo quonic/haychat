@@ -291,7 +291,8 @@ MainRouterState_adminSuccessMessage :: proc(
 	     .SetUserRoles,
 	     .RevokeInvite,
 	     .SetRegistrationMode,
-	     .DecideRegistration:
+	     .DecideRegistration,
+	     .RemoveAttachment:
 	}
 	return strings.clone("Done")
 }
@@ -478,8 +479,9 @@ MainRouterState_handleAdminUserResult :: proc(
 	     .SetUserRoles,
 	     .RevokeInvite,
 	     .SetRegistrationMode,
-	     .DecideRegistration:
+	     .DecideRegistration,
+	     .RemoveAttachment:
 	// Role actions are DatabaseRoleRequests (router_roles.odin), registration ones
-	// router_registration.odin's.
+	// router_registration.odin's, and attachment removal router_attachment_moderation.odin's.
 	}
 }

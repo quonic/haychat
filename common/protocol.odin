@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 27
+protocolVersion: ProtocolVersion = 28
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -458,6 +458,12 @@ MessageType :: enum {
 	ServerAttachmentDownloadBegin, // ServerAttachmentDownloadBeginPayload: chunks follow
 	ClientAttachmentCancel, // ClientAttachmentCancelPayload: stop an upload or a download
 	ServerAttachmentRefused, // ServerAttachmentRefusedPayload: any refusal, by request or blob
+	// Attachment moderation (protocol 28, attachments plan F3, D22), appended so no existing
+	// wire value moves. Admins only, checked in the database statement.
+	ClientAdminAttachmentUsage, // ClientAdminAttachmentUsagePayload: storage use per account
+	ServerAdminAttachmentUsage, // ServerAdminAttachmentUsagePayload: answer to the usage request
+	ClientAdminRemoveAttachment, // ClientAdminRemoveAttachmentPayload: make a blob a tombstone
+	ServerAttachmentRemoved, // ServerAttachmentRemovedPayload: to whoever may read its message
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -1720,6 +1726,8 @@ AdminAction :: enum u8 {
 	SetRegistrationMode = 8,
 	DecideRegistration  = 9,
 	SetRestricted       = 10,
+	// Protocol 28 (attachments F3): ClientAdminRemoveAttachment.
+	RemoveAttachment    = 11,
 }
 
 // ClientAdminSetRole: grant (isAdmin true) or revoke the admin role.
@@ -1764,6 +1772,8 @@ ClientAdminBanUserPayload :: struct {
 //
 // Protocol 25: inviteId names the code a RevokeInvite revoked and requestId the request a
 // DecideRegistration decided; userId is the target of SetRestricted.
+//
+// Protocol 28: blobId names the attachment a RemoveAttachment removed, and userId its owner.
 ServerAdminActionResultPayload :: struct {
 	action:    AdminAction,
 	userId:    int,
@@ -1771,6 +1781,7 @@ ServerAdminActionResultPayload :: struct {
 	roleId:    int,
 	inviteId:  int,
 	requestId: int,
+	blobId:    AttachmentBlobID,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to

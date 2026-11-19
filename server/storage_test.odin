@@ -378,3 +378,29 @@ testStorageWorkerScanFindsOldFilesAndDeletesOrphans :: proc(t: ^testing.T) {
 	defer delete(storedPath)
 	assert(!os.exists(storedPath), "expected the swept blob gone")
 }
+
+// Protocol 28: the free space an admin's ServerAdminAttachmentUsage reports comes from the
+// worker's freeBytes on the blob directory, and an unreadable volume says so.
+@(test)
+testStorageReportsFreeSpace :: proc(t: ^testing.T) {
+	_ = t
+	worker := StorageWorker_init("/nonexistent-haychat-blob-dir")
+	defer StorageWorker_deinit(&worker)
+	worker.freeBytes = proc(dir: string) -> (i64, bool) {
+		assert(dir == "/nonexistent-haychat-blob-dir", "expected the blob directory asked")
+		return 5 << 30, true
+	}
+	result, answered := StorageWorker_handle(&worker, StorageFreeSpace{})
+	free, ok := result.(StorageFreeSpaceResult)
+	assert(
+		answered && ok && free.ok && free.freeBytes == 5 << 30,
+		fmt.tprintf("expected 5 GiB free, got %v", result),
+	)
+	worker.freeBytes = storageFreeBytes
+	result, answered = StorageWorker_handle(&worker, StorageFreeSpace{})
+	free = result.(StorageFreeSpaceResult)
+	assert(
+		answered && !free.ok && free.freeBytes == 0,
+		fmt.tprintf("expected an unreadable volume reported, got %v", result),
+	)
+}

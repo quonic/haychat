@@ -133,6 +133,9 @@ SQL_TESTS+=,server.testAttachmentBindingInRoomMessagesAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentBindingInDirectMessagesAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentDownloadCheckAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentRemovalAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentUsageAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentSQLRemovalFileIsDeletedByTheHourlyPassAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

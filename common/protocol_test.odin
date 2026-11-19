@@ -132,6 +132,11 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerAttachmentDownloadBegin, 209},
 	{.ClientAttachmentCancel, 210},
 	{.ServerAttachmentRefused, 211},
+	// Protocol 28 (attachments F3).
+	{.ClientAdminAttachmentUsage, 212},
+	{.ServerAdminAttachmentUsage, 213},
+	{.ClientAdminRemoveAttachment, 214},
+	{.ServerAttachmentRemoved, 215},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -153,6 +158,14 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 		int(AdminAction.Kick) == 2 &&
 		int(AdminAction.Ban) == 3,
 		"expected AdminAction to stay SetRole 0, Rename 1, Kick 2, Ban 3",
+	)
+	assert(
+		int(AdminAction.SetRestricted) == 10 && int(AdminAction.RemoveAttachment) == 11,
+		fmt.tprintf(
+			"expected AdminAction SetRestricted 10 and RemoveAttachment 11, got %d and %d",
+			int(AdminAction.SetRestricted),
+			int(AdminAction.RemoveAttachment),
+		),
 	)
 	assert(
 		int(SessionEndedKind.Kicked) == 0 && int(SessionEndedKind.Banned) == 1,
@@ -503,10 +516,12 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// attachment_wire.odin) and retired ClientUploadFile ... ServerDeleteFileResponse; 27 put
 	// attachments on messages (F2: AttachmentRef on every room and direct message payload and
 	// DirectConversationSummary.lastAttachments, the v2 plaintext signatures, the sealed
-	// "attachments" key, RoomPermission.AttachFiles and ServerAuthSuccess.attachments).
+	// "attachments" key, RoomPermission.AttachFiles and ServerAuthSuccess.attachments); 28 added
+	// attachment moderation (F3: ClientAdminAttachmentUsage ... ServerAttachmentRemoved,
+	// AdminAction.RemoveAttachment and ServerAdminActionResult.blobId).
 	assert(
-		protocolVersion == 27,
-		fmt.tprintf("expected protocol version 27 for attachments, got %d", protocolVersion),
+		protocolVersion == 28,
+		fmt.tprintf("expected protocol version 28 for attachments, got %d", protocolVersion),
 	)
 }
 

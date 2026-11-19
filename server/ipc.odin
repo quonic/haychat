@@ -475,6 +475,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.userIds)
 	case common.DatabaseAttachmentResult:
 		delete(r.blobs)
+		delete(r.removal.readerUserIds)
+		delete(r.accounts)
 	case common.DatabaseRegistrationModeResult:
 	case common.DatabaseRoleResult:
 		for &role in r.roles {
