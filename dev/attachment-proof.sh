@@ -29,6 +29,15 @@ set -euo pipefail
 #                 the decrypted file by message.
 #   9. encrypted: (F2) A, made an admin, creates an encrypted room and adds B; A sends the
 #                 file sealed with a message, B opens the message and saves the decrypted file.
+#  10. removal:   (F3, protocol 28) B sends a 25 MiB file to #general and starts saving it;
+#                 admin A removes it mid-download (attach-remove): B's download ends with
+#                 "Attachment removed by an admin", A and B (the readers) hear
+#                 attachment_removed, the file is gone from the blob directory, B's history
+#                 lists it removed with its signed fields, saving it again is refused, and A's
+#                 attach-usage shows B's 25 MiB freed. B, not an admin, cannot remove anything.
+#                 Then the operator helpers: deploy/sql/attachment-usage.sql lists the
+#                 accounts, and deploy/sql/remove-attachment.sql removes A's step 7 file, which
+#                 B's next history fetch lists as removed and the server refuses to send.
 #
 # The latency lines it prints ("[attachments] latency ...") are the F1 measurement of control
 # packets during a transfer: the plan's main risk is file crypto on the router thread and
@@ -36,8 +45,8 @@ set -euo pipefail
 # (default 1000) fails the proof.
 #
 # dev/live-proof.sh --attachments (and --all) runs it against its throwaway server, which
-# exports HAYCHAT_ATTACHMENT_DIR. It needs bash, coreutils, sha256sum and (step 9, make_admin)
-# psql through the HAYCHAT_DATABASE_* variables.
+# exports HAYCHAT_ATTACHMENT_DIR. It needs bash, coreutils, sha256sum and (steps 9 and 10,
+# make_admin and the deploy/sql helpers) psql through the HAYCHAT_DATABASE_* variables.
 #
 # Usage: dev/attachment-proof.sh [HOST:PORT]   (default 127.0.0.1:12345)
 
@@ -328,6 +337,108 @@ opened=$(expect_event b "\"event\":\"room_(chat|opened)\",\"serverID\":[0-9]+,\"
 	fail "B did not open the sealed room message with its file: $opened"
 download b "$room_id" "$(json_field "$opened" messageID)" 0 "$work_dir/b-vault.txt" >/dev/null
 same_file "$work_dir/b-vault.txt"
+
+# proof_psql ARGS...: psql against the server's database (the variables make_admin uses).
+proof_psql() {
+	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
+		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" "$@"
+}
+
+# usage_bytes CLIENT USER_ID: the stored bytes attach-usage reports for USER_ID (0 if unlisted).
+usage_bytes() {
+	local client=$1 user=$2 start line
+	start=$(lines "$client")
+	expect_ok "$client" attach-usage >&2
+	line=$(expect_event "$client" '"event":"attachment_usage"' "$start")
+	[[ "$line" == *'"freeBytesKnown":true'* ]] || fail "expected the free space known: $line"
+	if [[ "$line" =~ \{\"userID\":$user,\"bytes\":([0-9]+), ]]; then
+		printf '%s\n' "${BASH_REMATCH[1]}"
+	else
+		printf '0\n'
+	fi
+}
+
+echo "==> [attachments] 10. an admin removes a file (protocol 28)"
+done_line=$(upload b 1 "$big_file")
+big_blob=$(json_field "$done_line" blobID)
+astart=$(lines a)
+expect_ok b "send 1 --attach $big_blob a large file"
+chat=$(expect_event a "\"event\":\"room_chat\".*\"attachments\":\[\{\"blobID\":\"$big_blob\"" "$astart")
+big_message=$(json_field "$chat" messageID)
+b_before=$(usage_bytes a "$b_id")
+((b_before >= 25 * 1024 * 1024)) || fail "expected B's 25 MiB in the usage, got $b_before"
+echo "[attachments] B stores $b_before bytes before the removal"
+bstart=$(lines b)
+expect_ok b "attach-download 1 $big_message 0 $work_dir/b-big.bin"
+expect_event b '"event":"attachment_progress".*"direction":"download".*"bytes":[1-9]' "$bstart" \
+	>/dev/null
+astart=$(lines a)
+removal_start=$(lines b)
+expect_ok a "attach-remove $big_blob proof of a removal"
+expect_event a "\"event\":\"admin_result\".*\"action\":\"attachment-remove\",\"userID\":$b_id,.*\"blobID\":\"$big_blob\"" \
+	"$astart" >/dev/null
+error_line=$(expect_event b '"event":"attachment_error".*"direction":"download"' "$bstart")
+[[ "$error_line" == *'"error":"Attachment removed by an admin"'* ]] ||
+	fail "expected B's download ended by the removal: $error_line"
+[[ ! -e "$work_dir/b-big.bin" && ! -e "$work_dir/b-big.bin.part" ]] ||
+	fail "expected B's cut-off download to leave no file"
+for client in a b; do
+	start=$astart
+	[[ $client == b ]] && start=$removal_start
+	expect_event "$client" "\"event\":\"attachment_removed\",\"serverID\":[0-9]+,\"blobID\":\"$big_blob\",\"roomID\":1,\"senderID\":$b_id,\"recipientID\":0}" \
+		"$start" >/dev/null
+done
+if [[ -n "$attachment_dir" ]]; then
+	stored="$attachment_dir/blobs/${big_blob:0:2}/$big_blob"
+	for _ in $(seq 1 50); do
+		[[ -e "$stored" ]] || break
+		sleep 0.1
+	done
+	[[ ! -e "$stored" ]] || fail "expected the removed file deleted from $stored"
+fi
+hstart=$(lines b)
+expect_ok b "history 1"
+history=$(expect_event b '"event":"room_history","serverID":[0-9]+,"roomID":1,' "$hstart")
+[[ "$history" == *"{\"blobID\":\"$big_blob\",\"size\":$((25 * 1024 * 1024)),\"fileSize\":$((25 * 1024 * 1024)),\"sha256\":\"$big_sha\",\"name\":\"big.bin\",\"mediaType\":\"application/octet-stream\",\"encrypted\":false,\"removed\":true}"* ]] ||
+	fail "expected B's history to list the file removed with its signed fields"
+again=$(client_command b "attach-download 1 $big_message 0 $work_dir/b-big-again.bin") ||
+	fail "no answer to a second download"
+[[ "$again" == '{"ok":false,'*'Attachment removed by an admin'* ]] ||
+	fail "expected the removed file refused by the client: $again"
+start=$(lines b)
+expect_ok b "attach-download $big_blob $work_dir/b-big-raw.bin"
+expect_event b '"event":"attachment_error".*"error":"Attachment removed by an admin"' "$start" \
+	>/dev/null
+b_after=$(usage_bytes a "$b_id")
+((b_before - b_after == 25 * 1024 * 1024)) ||
+	fail "expected the removal to free B's 25 MiB, $b_before -> $b_after"
+echo "[attachments] B stores $b_after bytes after the removal"
+start=$(lines b)
+expect_ok b "attach-remove $small_blob not an admin"
+expect_event b '"event":"protocol_error".*"Admin permission required"' "$start" >/dev/null
+
+# The operator helpers: usage lists both accounts, and a removal in SQL reaches B on its next
+# history fetch (the file goes with the server's hourly pass, or its next start).
+usage_out=$(proof_psql -v limit=10 -f "$repo_dir/deploy/sql/attachment-usage.sql")
+grep -q "att-a-$run_tag" <<<"$usage_out" || fail "attachment-usage.sql does not list A: $usage_out"
+owner_out=$(proof_psql -v owner="att-a-$run_tag" -f "$repo_dir/deploy/sql/attachment-usage.sql")
+grep -q "$small_blob" <<<"$owner_out" || fail "attachment-usage.sql -v owner does not list A's file"
+proof_psql -v blob="$small_blob" -f "$repo_dir/deploy/sql/remove-attachment.sql" >/dev/null 2>&1 ||
+	fail "remove-attachment.sql failed"
+if proof_psql -v blob="$small_blob" -f "$repo_dir/deploy/sql/remove-attachment.sql" \
+	>/dev/null 2>&1; then
+	fail "remove-attachment.sql removed an already removed attachment"
+fi
+hstart=$(lines b)
+expect_ok b "history 1"
+history=$(expect_event b '"event":"room_history","serverID":[0-9]+,"roomID":1,' "$hstart")
+[[ "$history" == *"{\"blobID\":\"$small_blob\",\"size\":$small_size,\"fileSize\":$small_size,\"sha256\":\"$small_sha\",\"name\":\"notes.txt\",\"mediaType\":\"text/plain\",\"encrypted\":false,\"removed\":true}"* ]] ||
+	fail "expected B's next history fetch to list the SQL removal"
+start=$(lines b)
+expect_ok b "attach-download $small_blob $work_dir/b-small-raw.bin"
+expect_event b '"event":"attachment_error".*"error":"Attachment removed by an admin"' "$start" \
+	>/dev/null
 
 stop_client a
 stop_client b

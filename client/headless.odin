@@ -315,6 +315,10 @@ HeadlessEventKind :: enum {
 	AttachmentProgress,
 	AttachmentDone,
 	AttachmentError,
+	// Attachment moderation (protocol 28, headless_attachments.odin): ServerAttachmentRemoved
+	// and ServerAdminAttachmentUsage.
+	AttachmentRemoved,
+	AttachmentUsage,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -372,6 +376,8 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.AttachmentProgress = "attachment_progress",
 	.AttachmentDone = "attachment_done",
 	.AttachmentError = "attachment_error",
+	.AttachmentRemoved = "attachment_removed",
+	.AttachmentUsage = "attachment_usage",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -535,6 +541,9 @@ HeadlessAdminResultJSON :: struct {
 	roleID:    int,
 	inviteID:  int,
 	requestID: int,
+	// Protocol 28: the attachment an attachment-remove removed (hex), left out for every other
+	// action so their lines stay as they were.
+	blobID:    string `json:"blobID,omitempty"`,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -562,6 +571,7 @@ HEADLESS_ADMIN_ACTION_NAMES := [common.AdminAction]string {
 	.SetRegistrationMode = "registration-mode",
 	.DecideRegistration = "registration-decide",
 	.SetRestricted = "restricted",
+	.RemoveAttachment = "attachment-remove",
 }
 
 // The words room-create and room-edit take for a room type, and what room_created,
@@ -1186,6 +1196,8 @@ headlessRenderRuntimeEvent :: proc(
 		return headlessRenderRoleEvent(event, allocator)
 	case .RoomPermissionsReceived:
 		return headlessRenderRoomPermissionsEvent(event, allocator)
+	case .AttachmentRemoved, .AttachmentUsageReceived:
+		return headlessRenderAttachmentModerationEvent(event, allocator)
 	case .RegistrationRequired,
 	     .RegistrationResult,
 	     .RegistrationModeChanged,
@@ -1528,6 +1540,7 @@ headlessRenderRuntimeEvent :: proc(
 				roleID = event.roleID,
 				inviteID = event.inviteID,
 				requestID = event.requestID,
+				blobID = headlessAdminResultBlob(event.blobID),
 			},
 			allocator,
 		)
@@ -1988,6 +2001,14 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"attach-cancel", 1, 0, .None, "attach-cancel BLOB",
 		"stops an upload (which cannot be resumed after) or a download; attachment_error " +
 		"cancelled", headlessCommandAttachCancel},
+	{"attach-usage", 0, 0, .None, "attach-usage",
+		"admins: the server's attachment storage use; answered by attachment_usage " +
+		"(usedBytes, capacityBytes, freeBytes and the top 100 accounts)",
+		headlessCommandAttachUsage},
+	{"attach-remove", 1, 0, .Optional, "attach-remove BLOB [REASON...]",
+		"admins: removes an attachment (its message stays and lists it as removed); answered " +
+		"by admin_result attachment-remove, and readers hear attachment_removed",
+		headlessCommandAttachRemove},
 	{"chat-latency", 2, 1, .None, "chat-latency ROOM_ID COUNT [INTERVAL_MS]",
 		"sends COUNT room messages INTERVAL_MS apart (default 50) and reports their echo " +
 		"times (p50MS, p95MS, maxMS, meanMS)", headlessCommandChatLatency},

@@ -1541,6 +1541,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAttachmentDownload(pm, state, peerID, packet.payload)
 	case .ClientAttachmentCancel:
 		MainRouterState_handleClientAttachmentCancel(pm, state, peerID, packet.payload)
+	case .ClientAdminRemoveAttachment:
+		MainRouterState_handleClientAdminRemoveAttachment(pm, state, peerID, packet.payload)
+	case .ClientAdminAttachmentUsage:
+		MainRouterState_handleClientAdminAttachmentUsage(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}

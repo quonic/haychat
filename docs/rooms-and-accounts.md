@@ -342,6 +342,30 @@ them.
   client refuses a file that cannot fit before it uploads (see
   [server-configuration.md](server-configuration.md) for the variables).
 
+### Moderation
+
+Since protocol 28 admins look after the server's storage and can remove any file
+([protocol.md](protocol.md#attachment-moderation-protocol-28)). This is for admins only, like
+kick and ban: no role permission grants it. F4 adds the GUI (Server settings → Admin →
+**Storage**, and **Remove attachment** on a file card); until then the harness drives it.
+
+- **Storage use.** An admin sees the bytes stored on the server, the configured capacity, the
+  free space on the server's disk, and the 100 accounts that store the most, with their file
+  counts. Removed files count toward nothing.
+- **Removing a file.** An admin may remove any finished file, including their own: the file is
+  deleted from the server's disk, its message stays and shows "Attachment removed by an admin"
+  where the file was, nobody can download it again, and it stops counting toward its owner's
+  quota. A download in progress is cut off with the same sentence. The message's signature still
+  verifies, because the server keeps everything the sender signed. An optional reason is written
+  to the server's log with the file, the admin and the owner, and is shown to nobody.
+- **Who is told.** Everyone who may read the message hears of the removal at once: the room's
+  members who may read it, or the two sides of a direct conversation, or for a file that was
+  never sent, its owner.
+- **Without a client.** An operator can list usage and remove a file with SQL
+  (`deploy/sql/attachment-usage.sql`, `deploy/sql/remove-attachment.sql`, see
+  [deploy/README.md](../deploy/README.md)). The file is then deleted by the server's hourly pass,
+  and clients see the removal on their next history fetch.
+
 ## Direct Messages
 
 Any two accounts on a server can message each other directly. Direct messages belong to that one

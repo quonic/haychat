@@ -128,6 +128,17 @@ DatabaseAttachmentAction :: enum u8 {
 	Sweep,
 	// The state of each blob ID in blobIds that has a row (the startup orphan scan).
 	Known,
+	// Protocol 28 (F3, D22): an admin (userId, checked in the statement) makes a Ready or Bound
+	// blob a Removed tombstone, keeping every signed field and the message link; the result
+	// names the owner, the conversation and every account that may read the message.
+	Remove,
+	// Protocol 28: storage use (admins only, checked in the statement): the stored bytes and the
+	// top ATTACHMENT_USAGE_ACCOUNTS_MAX accounts by bytes, tombstones excluded.
+	Usage,
+	// Protocol 28: the newest bound tombstones (limit), whose files the hourly pass deletes
+	// again. A removal made in SQL (deploy/sql/remove-attachment.sql) cannot delete the file
+	// itself; the storage worker's delete is idempotent.
+	TombstoneFiles,
 }
 
 DatabaseAttachmentRequest :: struct {
@@ -168,6 +179,11 @@ DatabaseAttachmentOutcome :: enum u8 {
 	CapacityExceeded,
 	// Protocol 27 (D20): the requester may send in the room but lacks AttachFiles.
 	AttachDenied,
+	// Protocol 28: the requester of Remove or Usage is not an admin.
+	NotAdmin,
+	// Protocol 28: DownloadCheck of a blob an admin removed, by an account that may read its
+	// message (it learns nothing its history does not show).
+	Removed,
 }
 
 DatabaseAttachmentBlob :: struct {
@@ -181,8 +197,24 @@ DatabaseAttachmentResult :: struct {
 	size:     u64,
 	received: u64,
 	sha256:   AttachmentSHA256,
-	// Sweep: the deleted rows. Known: the rows found. Owned.
+	// Sweep: the deleted rows. Known: the rows found. TombstoneFiles: the tombstones. Owned.
 	blobs:    [dynamic]DatabaseAttachmentBlob,
+	// Remove (protocol 28): the blob's owner, its conversation as ServerAttachmentRemoved names
+	// it, the message it was bound to (0 for none), and the accounts that may read it (owned).
+	removal:  DatabaseAttachmentRemoval,
+	// Usage (protocol 28): every stored byte (tombstones excluded) and the top accounts (owned).
+	usedBytes: u64,
+	accounts: [dynamic]AttachmentAccountUsage,
+}
+
+DatabaseAttachmentRemoval :: struct {
+	ownerUserId:     int,
+	roomId:          int,
+	senderId:        int,
+	recipientId:     int,
+	chatMessageId:   int,
+	directMessageId: int,
+	readerUserIds:   [dynamic]int,
 }
 
 // ── Attachments on messages (protocol 27, attachments plan F2: D14-D16, D18) ──────────────
@@ -351,4 +383,92 @@ messageContentLengthIsValid :: proc(contentLength: int, attachmentCount: int) ->
 		return false
 	}
 	return contentLength > 0 || attachmentCount > 0
+}
+
+// ── Moderation (protocol 28, attachments plan F3, D22) ───────────────────────────────────
+
+// Admins only, with no assignable permission: the server checks the admin role in the statement
+// that reads or changes, and refuses anyone else with a ServerProtocolError.
+
+// Most accounts ServerAdminAttachmentUsage lists, by stored bytes.
+ATTACHMENT_USAGE_ACCOUNTS_MAX :: 100
+// A removal's optional reason: at most this many bytes of UTF-8 with no control characters.
+// The server logs it with the blob, the admin and the owner; it is never stored or sent on.
+ATTACHMENT_REMOVE_REASON_MAX_BYTES :: 500
+
+// What a removed file's card says, and the refusal of a download cut short by a removal
+// (ServerAttachmentRefused). Clients may match it; never reword it.
+ATTACHMENT_REMOVED_MESSAGE :: "Attachment removed by an admin"
+ATTACHMENT_REMOVE_REASON_INVALID_MESSAGE ::
+	"The reason must be at most 500 bytes, without control characters"
+
+// ClientAdminAttachmentUsage: asks for ServerAdminAttachmentUsage.
+ClientAdminAttachmentUsagePayload :: struct {}
+
+// One account's stored attachments: bytes and blobs that are not Removed (uploads in progress
+// count, since their declared size is reserved).
+AttachmentAccountUsage :: struct {
+	userId: int,
+	bytes:  u64,
+	count:  int,
+}
+
+// ServerAdminAttachmentUsage: usedBytes is every stored byte that is not a tombstone,
+// capacityBytes HAYCHAT_ATTACHMENT_CAPACITY_BYTES (0 = no cap), freeBytes the free space on the
+// blob directory's volume (freeBytesKnown false when the server could not read it), and
+// accounts the top ATTACHMENT_USAGE_ACCOUNTS_MAX by bytes, largest first (owned once decoded).
+ServerAdminAttachmentUsagePayload :: struct {
+	usedBytes:      u64,
+	capacityBytes:  u64,
+	freeBytes:      u64,
+	freeBytesKnown: bool,
+	accounts:       [dynamic]AttachmentAccountUsage,
+}
+
+ServerAdminAttachmentUsagePayload_deinit :: proc(payload: ^ServerAdminAttachmentUsagePayload) {
+	delete(payload.accounts)
+	payload.accounts = nil
+}
+
+// ClientAdminRemoveAttachment: makes a Ready or Bound blob a Removed tombstone and deletes its
+// file. The message stays, with every signed field, and lists the file as removed. Answered by
+// ServerAdminActionResult{RemoveAttachment, userId = the owner, blobId}, or a
+// ServerProtocolError ("Admin permission required", ATTACHMENT_NOT_FOUND_MESSAGE for an
+// unknown, Uploading or already Removed blob). reason is optional (attachmentRemoveReasonIsValid)
+// and owned once decoded.
+ClientAdminRemoveAttachmentPayload :: struct {
+	blobId: AttachmentBlobID,
+	reason: string,
+}
+
+ClientAdminRemoveAttachmentPayload_deinit :: proc(payload: ^ClientAdminRemoveAttachmentPayload) {
+	delete(payload.reason)
+	payload.reason = ""
+}
+
+// ServerAttachmentRemoved: an admin removed blobId. It goes to every session of each account
+// that may read the message: a room message's members who may read its history (From join
+// members who joined after it get nothing), both sides of a direct message, and the owner of an
+// unbound Ready blob. roomId names a room message's room; senderId and recipientId a direct
+// message's two sides (senderId is the owner for a room message, and recipientId 0). An unbound
+// blob names the conversation it was uploaded to.
+ServerAttachmentRemovedPayload :: struct {
+	blobId:      AttachmentBlobID,
+	roomId:      int,
+	senderId:    int,
+	recipientId: int,
+}
+
+// A removal reason: 0..ATTACHMENT_REMOVE_REASON_MAX_BYTES bytes of valid UTF-8 with no control
+// character (C0, DEL or C1), so it fits one log line.
+attachmentRemoveReasonIsValid :: proc(reason: string) -> bool {
+	if len(reason) > ATTACHMENT_REMOVE_REASON_MAX_BYTES || !utf8.valid_string(reason) {
+		return false
+	}
+	for r in reason {
+		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
+			return false
+		}
+	}
+	return true
 }

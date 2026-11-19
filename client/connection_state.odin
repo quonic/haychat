@@ -48,6 +48,11 @@ ServerConnection :: struct {
 	// sign-in, the stored bytes then counted up by this client's own uploads
 	// (State_attachmentLimits, attachments.odin).
 	attachmentLimits:         common.AttachmentLimits,
+	// Protocol 28 (attachment_moderation.odin): the last ServerAdminAttachmentUsage (accounts
+	// owned), whether one arrived, and whether a request waits for its answer.
+	attachmentUsage:          common.ServerAdminAttachmentUsagePayload,
+	hasAttachmentUsage:       bool,
+	attachmentUsagePending:   bool,
 	// The sign-up screen: its phase, the server's sentence for it (owned), and the request's
 	// state from ServerRegistrationRequired.
 	signUp:                   SignUpPhase,
@@ -56,6 +61,7 @@ ServerConnection :: struct {
 }
 
 ServerConnection_deinit :: proc(connection: ^ServerConnection) {
+	common.ServerAdminAttachmentUsagePayload_deinit(&connection.attachmentUsage)
 	delete(connection.signUpMessage)
 	delete(connection.nickname)
 	delete(connection.detail)
@@ -279,6 +285,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.retryable = event.retryable
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = true
+	connection.attachmentUsagePending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}
@@ -309,6 +316,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.retryable = true
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = false
+	connection.attachmentUsagePending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}

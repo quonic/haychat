@@ -125,8 +125,15 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 	if message.id <= 0 {
 		return false
 	}
-	for existing in cache.messages {
+	for &existing in cache.messages {
 		if existing.id == message.id {
+			// Protocol 28: a page fetched again carries the server's removed flags (a removal
+			// made in SQL reaches clients only this way).
+			messageAttachmentsNoteRemoved(
+				existing.attachments[:],
+				existing.files[:],
+				message.attachments[:],
+			)
 			return false
 		}
 	}
@@ -776,6 +783,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.roleID,
 			event.inviteID,
 			event.requestID,
+			event.blobID,
 		)
 		State_registrationAdminResult(
 			state,
@@ -808,6 +816,10 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			&event.registrationRequest,
 			event.pendingCount,
 		)
+	case .AttachmentRemoved:
+		State_attachmentRemoved(state, event.serverID, event.attachmentRemoved)
+	case .AttachmentUsageReceived:
+		State_attachmentUsageReceived(state, event.serverID, &event.attachmentUsage)
 	case .RoleListReceived:
 		State_receiveRoleList(state, event.serverID, &event.roles)
 	case .RoleUpdated:

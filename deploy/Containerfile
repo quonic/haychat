@@ -58,7 +58,8 @@ RUN echo 'haychat:x:10001:10001:HayChat server:/var/lib/haychat:/sbin/nologin' >
 COPY --from=build /out/haychat-server /usr/local/bin/haychat-server
 COPY --from=build /out/licenses/ /usr/share/licenses/haychat-server/
 COPY server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql deploy/sql/create-invite.sql \
-	deploy/sql/set-registration-mode.sql /usr/share/haychat/sql/
+	deploy/sql/set-registration-mode.sql deploy/sql/attachment-usage.sql \
+	deploy/sql/remove-attachment.sql /usr/share/haychat/sql/
 
 # Fail the build when a linked library is missing from the runtime stage.
 RUN ! /lib64/ld-linux-x86-64.so.2 --list /usr/local/bin/haychat-server | grep -F 'not found'

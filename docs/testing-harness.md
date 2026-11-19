@@ -664,6 +664,11 @@ saved with `attach-download ROOM_ID|@USER_ID MESSAGE_ID INDEX OUT`, which checks
 and hash against the message and decrypts an encrypted file. Whoever may read a message may
 download its files; a blob not bound to a message only by its owner.
 
+Protocol 28 (F3) adds admin moderation: `attach-usage` reports the server's storage use and
+`attach-remove` removes a file. Every account that may read the file's message hears
+`attachment_removed`, its files then list `"removed":true`, and saving one is refused with
+`Attachment removed by an admin`.
+
 ### Commands
 
 | Command | Meaning |
@@ -673,6 +678,8 @@ download its files; a blob not bound to a message only by its owner.
 | `attach-download BLOB OUT...` | Downloads a blob into OUT (written as `OUT.part` and renamed once complete) as stored, unchecked; `attachment_done` carries the SHA-256 of what arrived. A blob this account may not read is refused with `Attachment not found`. |
 | `attach-download ROOM_ID\|@USER_ID MESSAGE_ID INDEX OUT...` | Protocol 27: saves file INDEX (from 0) of a cached, shown message into OUT through `OUT.part`. The worker checks the stored size and the whole blob's SHA-256 against the signed or sealed message, and for an encrypted file opens it chunk by chunk and checks the padding; a failed check deletes the part file and ends in `attachment_error` `This attachment was changed on the server`. Refused at once for an unknown or hidden message (`Unknown message`), a list the server changed, or a removed file. |
 | `attach-cancel BLOB` | Stops this client's upload or download of the blob: `attachment_error` `cancelled`. The server deletes a cancelled upload's file and keeps its row as a tombstone, so it cannot be resumed. |
+| `attach-usage` | Protocol 28, admins: asks for the server's storage use: `{"ok":true,"cmd":"attach-usage","id":0,"serverID":1,…}`, answered by `attachment_usage` (or a `protocol_error` `Admin permission required`). |
+| `attach-remove BLOB [REASON...]` | Protocol 28, admins: removes the file (Ready or bound to a message). The reason (optional, the rest of the line, at most 500 bytes) goes to the server's log only. Answered by `admin_result` with `"action":"attachment-remove"`, the owner in `userID` and the blob in `blobID` (a field only this action has), or a `protocol_error` (`Admin permission required`, `Attachment not found` for an unknown, uploading or already removed file). Every reader of the message hears `attachment_removed`, and a download of the file in progress ends in `attachment_error` `Attachment removed by an admin`. |
 | `chat-latency ROOM_ID COUNT [INTERVAL_MS]` | Sends COUNT signed messages (`latency-probe NONCE N`) to the room, INTERVAL_MS apart (default 50), waits up to 10 s for the last ones, and reports how long each took to come back as this client's own `room_chat`: `{"ok":true,"cmd":"chat-latency","roomID":1,"count":40,"received":40,"p50MS":10.7,"p95MS":10.9,"maxMS":11.0,"meanMS":9.0}`. Events keep printing while it runs, so it can measure a transfer the same process runs. |
 
 ### Events
@@ -681,6 +688,8 @@ download its files; a blob not bound to a message only by its owner.
 | --- | --- |
 | `attachment_progress` | `{"event":"attachment_progress","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","bytes":3670016,"total":26214400}` (once the server answered, then at most every 500 ms; `bytes` is what the server acknowledged (upload) or what was written (download)) |
 | `attachment_done` | `{"event":"attachment_done","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","size":26214400,"sha256":"<hex>","path":"…","elapsedMS":6009,"encrypted":false,"fileSize":26214400}` (an upload's `sha256` is the one the server checked and stored; `size` and `sha256` are the stored bytes', `fileSize` the file's own: the plaintext written by a decrypted download) |
+| `attachment_removed` | `{"event":"attachment_removed","serverID":1,"blobID":"<hex>","roomID":1,"senderID":4,"recipientID":0}` (protocol 28: to every account that may read the message; a direct message names its two sides in `senderID` and `recipientID` with `roomID` 0; printed before the client marks the files removed in its caches and ends its downloads of the blob) |
+| `attachment_usage` | `{"event":"attachment_usage","serverID":1,"usedBytes":26214400,"capacityBytes":0,"freeBytes":53687091200,"freeBytesKnown":true,"accounts":[{"userID":4,"bytes":26214400,"count":1}]}` (protocol 28: stored bytes without removed files, `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` (0 = none), the free space on the server's blob volume, and the top 100 accounts by bytes) |
 | `attachment_error` | `{"event":"attachment_error","serverID":1,"id":1,"direction":"download","blobID":"<hex>","bytes":0,"total":0,"path":"…","error":"Attachment not found"}` (`blobID` is empty for a begin the server refused; `connection lost` when the session ended, `cancelled` after `attach-cancel`) |
 
 Room and direct message events (`room_chat`, `room_history`, `room_opened`, `direct_message`,
@@ -696,7 +705,12 @@ their chat echo latency with no transfer, then during a 25 MiB upload and its do
 check the stored blob, the owner-only download of an unbound blob, a refused upload, a resume
 after `reconnect` and a cancel; then (protocol 27) a file on a `#general` message saved by the
 other client by message and by blob, a sealed file on an encrypted direct message and one in
-an encrypted room, each saved and compared with the original. It prints one `[attachments] latency` line per client and phase and fails when a
+an encrypted room, each saved and compared with the original; then (protocol 28) admin A
+removes B's 25 MiB file while B saves it (B's download ends, both hear `attachment_removed`,
+the file leaves the blob directory, history lists it removed, saving it again is refused and
+`attach-usage` shows the 25 MiB freed), B is refused `attach-remove`, and the
+`deploy/sql/attachment-usage.sql` and `remove-attachment.sql` helpers are checked, the second
+seen by B on its next `history`. It prints one `[attachments] latency` line per client and phase and fails when a
 p95 during a transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 1000).
 
 ## Example: Two Agents Chatting

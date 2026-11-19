@@ -297,13 +297,15 @@ DATABASE_ATTACHMENT_DELETE_NEW_SQL ::
 // - the owner's own Ready blob, before any message binds it.
 //
 // Admins get no bypass, as for history. A Removed blob (state 3) and an Uploading one are never
-// downloadable. One row when allowed: the stored size and the hash as hex.
+// downloadable. One row when allowed: the stored size, the hash as hex, and (protocol 28)
+// whether an admin removed the file, for a reader of a bound tombstone, so its refusal can say
+// so (ATTACHMENT_REMOVED_MESSAGE) instead of "not found".
 DATABASE_ATTACHMENT_DOWNLOAD_CHECK_SQL ::
-	"SELECT a.size::text, encode(a.sha256, 'hex') FROM attachments a " +
+	"SELECT a.size::text, encode(a.sha256, 'hex'), (a.state = 3)::text FROM attachments a " +
 	"LEFT JOIN chat_messages cm ON cm.id = a.chat_message_id " +
 	"LEFT JOIN direct_messages dm ON dm.id = a.direct_message_id " +
 	"WHERE a.blob_id = decode($1::text, 'hex') AND (" +
-	"(a.state = 1 AND a.owner_user_id = $2::bigint) OR (a.state = 2 AND (" +
+	"(a.state = 1 AND a.owner_user_id = $2::bigint) OR (a.state IN (2, 3) AND (" +
 	"(cm.id IS NOT NULL AND EXISTS (SELECT 1 FROM room_members dl_rm " +
 	"WHERE dl_rm.room_id = cm.room_id AND dl_rm.user_id = $2::bigint) " +
 	"AND cm.created_at > COALESCE(" + DATABASE_HISTORY_SINCE_OPEN_SQL + "cm.room_id" +
@@ -340,6 +342,79 @@ DATABASE_ATTACHMENT_KNOWN_SQL ::
 
 // Most rows one sweep pass deletes; the router runs another pass when a pass was full.
 ATTACHMENT_SWEEP_BATCH :: 500
+
+// ── Moderation (protocol 28, attachments plan F3, D22) ────────────────────────────────────
+
+// An admin ($1) removes blob $2 (hex): a Ready or Bound blob becomes a Removed tombstone with
+// removed_by_user_id and removed_at. Nothing else changes: sha256, size, name, media_type,
+// position and the message link stay, because a plaintext message's v2 signature covers them
+// and its history must still list the file (as removed). The admin check
+// (DATABASE_ACTOR_IS_ADMIN_SQL) is in the statement; admins may remove their own files too.
+// The tombstone stops counting toward the quota and the capacity at once (they sum state <> 3).
+//
+// One row: the outcome ('applied', 'not_admin', 'not_found' for an unknown, Uploading or
+// already Removed blob), the owner, the conversation as ServerAttachmentRemoved names it (a room
+// message's room and sender; a direct message's sender and recipient; an unbound blob's owner
+// and the room or recipient it was uploaded to), the message IDs (0 for none), and the accounts
+// that may read the message, comma separated: a room message's members who may read it (the
+// From join cut DATABASE_HISTORY_SINCE_*, shared with history and the download check), both
+// sides of a direct message, or the owner of a blob no message holds.
+DATABASE_ATTACHMENT_REMOVE_SQL ::
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
+	"target AS (SELECT a.id, a.owner_user_id, a.room_id, a.peer_user_id, a.chat_message_id, " +
+	"a.direct_message_id FROM attachments a WHERE a.blob_id = decode($2::text, 'hex') " +
+	"AND a.state IN (1, 2)), " +
+	"decision AS (SELECT CASE WHEN NOT (SELECT ok FROM actor) THEN 'not_admin' " +
+	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'not_found' ELSE 'applied' END AS outcome), " +
+	"removed AS (UPDATE attachments a SET state = 3, removed_by_user_id = $1::bigint, " +
+	"removed_at = now() FROM target t, decision d WHERE a.id = t.id AND d.outcome = 'applied' " +
+	"RETURNING a.id), " +
+	"cm AS (SELECT c.id, c.room_id, c.sender_user_id, c.created_at FROM chat_messages c " +
+	"JOIN target t ON c.id = t.chat_message_id WHERE (SELECT ok FROM actor)), " +
+	"dm AS (SELECT m.id, m.sender_user_id, m.recipient_user_id FROM direct_messages m " +
+	"JOIN target t ON m.id = t.direct_message_id WHERE (SELECT ok FROM actor)), " +
+	"readers AS (SELECT rm.user_id FROM cm JOIN room_members rm ON rm.room_id = cm.room_id " +
+	"WHERE cm.created_at > COALESCE(" + DATABASE_HISTORY_SINCE_OPEN_SQL + "cm.room_id" +
+	DATABASE_HISTORY_SINCE_MIDDLE_SQL + "rm.user_id" + DATABASE_HISTORY_SINCE_CLOSE_SQL +
+	", '-infinity'::timestamptz) " +
+	"UNION SELECT sender_user_id FROM dm UNION SELECT recipient_user_id FROM dm " +
+	"UNION SELECT t.owner_user_id FROM target t WHERE (SELECT ok FROM actor) " +
+	"AND NOT EXISTS (SELECT 1 FROM cm) AND NOT EXISTS (SELECT 1 FROM dm)) " +
+	"SELECT d.outcome, " +
+	"(EXISTS (SELECT 1 FROM removed))::text, COALESCE(t.owner_user_id, 0)::text, " +
+	"COALESCE(cm.room_id, CASE WHEN dm.id IS NULL THEN t.room_id END, 0)::text, " +
+	"COALESCE(cm.sender_user_id, dm.sender_user_id, t.owner_user_id, 0)::text, " +
+	"COALESCE(dm.recipient_user_id, CASE WHEN cm.id IS NULL THEN t.peer_user_id END, 0)::text, " +
+	"COALESCE(cm.id, 0)::text, COALESCE(dm.id, 0)::text, " +
+	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM readers), '') " +
+	"FROM decision d LEFT JOIN target t ON true LEFT JOIN cm ON true LEFT JOIN dm ON true"
+
+// Storage use for an admin ($1; DATABASE_ACTOR_IS_ADMIN_SQL in the statement): whether the
+// requester is an admin, every stored byte that is not a tombstone, and the top $2 accounts by
+// those bytes as "userId:bytes:count", comma separated, largest first. An Uploading blob counts
+// with its declared size, which its begin reserved.
+DATABASE_ATTACHMENT_USAGE_SQL ::
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
+	"live AS (SELECT owner_user_id, size FROM attachments WHERE state <> 3 " +
+	"AND (SELECT ok FROM actor)), " +
+	"accounts AS (SELECT owner_user_id, sum(size) AS bytes, count(*) AS n FROM live " +
+	"GROUP BY owner_user_id ORDER BY bytes DESC, owner_user_id LIMIT $2::integer) " +
+	"SELECT (SELECT ok FROM actor)::text, (SELECT COALESCE(sum(size), 0) FROM live)::text, " +
+	"COALESCE((SELECT string_agg(owner_user_id::text || ':' || bytes::text || ':' || n::text, " +
+	"',' ORDER BY bytes DESC, owner_user_id) FROM accounts), '')"
+
+// The newest $1 bound tombstones (state Removed with a message link). The hourly pass hands
+// their blob IDs to the storage worker, whose delete is idempotent, so a removal made in SQL
+// (deploy/sql/remove-attachment.sql, which cannot reach the storage worker) loses its file
+// within the hour. An unbound tombstone's file goes with its row (the sweeper), and the startup
+// scan deletes every file whose row is Removed.
+DATABASE_ATTACHMENT_TOMBSTONE_FILES_SQL ::
+	"SELECT encode(blob_id, 'hex'), state::text FROM attachments WHERE state = 3 " +
+	"AND (chat_message_id IS NOT NULL OR direct_message_id IS NOT NULL) " +
+	"ORDER BY removed_at DESC NULLS LAST, id DESC LIMIT $1::integer"
+
+// Most tombstones one hourly pass re-deletes files for.
+ATTACHMENT_TOMBSTONE_FILES_BATCH :: 1000
 
 @(private = "file")
 databaseAttachmentHex :: proc(bytes: []u8) -> cstring {
@@ -511,6 +586,10 @@ databaseExecuteAttachmentRequest :: proc(
 			outcome = .NotFound,
 		}
 		if pg.n_tuples(result) == 1 {
+			if databaseGetBool(result, 0, 2) {
+				attachment.outcome = .Removed
+				return databaseSuccess(attachment)
+			}
 			attachment.outcome = .Applied
 			attachment.size = databaseAttachmentGetU64(result, 0, 0)
 			shaText := databaseGetText(result, 0, 1)
@@ -518,19 +597,34 @@ databaseExecuteAttachmentRequest :: proc(
 			_ = common.decodeHexIntoBuffer(shaText, attachment.sha256[:])
 		}
 		return databaseSuccess(attachment)
-	case .Sweep, .Known:
+	case .Remove:
+		return databaseExecuteAttachmentRemove(conn, request)
+	case .Usage:
+		return databaseExecuteAttachmentUsage(conn, request)
+	case .Sweep, .Known, .TombstoneFiles:
 		query: cstring = DATABASE_ATTACHMENT_KNOWN_SQL
 		params := make([dynamic]cstring, 0, 3)
 		defer delete(params)
-		if request.action == .Sweep {
+		#partial switch request.action {
+		case .Sweep:
 			query = DATABASE_ATTACHMENT_SWEEP_SQL
 			append(
 				&params,
 				databaseIntParam(request.pendingHours),
 				databaseIntParam(request.limit > 0 ? request.limit : ATTACHMENT_SWEEP_BATCH),
 			)
+			append(&params, databaseAttachmentHexList(request.blobIds[:]))
+		case .TombstoneFiles:
+			query = DATABASE_ATTACHMENT_TOMBSTONE_FILES_SQL
+			append(
+				&params,
+				databaseIntParam(
+					request.limit > 0 ? request.limit : ATTACHMENT_TOMBSTONE_FILES_BATCH,
+				),
+			)
+		case:
+			append(&params, databaseAttachmentHexList(request.blobIds[:]))
 		}
-		append(&params, databaseAttachmentHexList(request.blobIds[:]))
 		result := databaseAttachmentExec(conn, query, params[:])
 		if result == nil {
 			return databaseConnectionError(conn)
@@ -616,6 +710,120 @@ databaseExecuteAttachmentBegin :: proc(
 	}
 	if pg.get_is_null(result, 0, i32(len(refusals))) {
 		attachment.outcome = .NotFound
+	}
+	return databaseSuccess(attachment)
+}
+
+// Parses a comma-separated list of positive integers (malformed entries skipped).
+@(private = "file")
+databaseAttachmentParseIDs :: proc(text: string) -> [dynamic]int {
+	ids := make([dynamic]int)
+	rest := text
+	for field in strings.split_iterator(&rest, ",") {
+		if value, ok := strconv.parse_int(field); ok && value > 0 {
+			append(&ids, value)
+		}
+	}
+	return ids
+}
+
+@(private = "file")
+databaseExecuteAttachmentRemove :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAttachmentRequest,
+) -> common.DatabaseQueryResponse {
+	blobId := request.blobId
+	result := databaseAttachmentExec(
+		conn,
+		DATABASE_ATTACHMENT_REMOVE_SQL,
+		{databaseIntParam(request.userId), databaseAttachmentHex(blobId[:])},
+	)
+	if result == nil {
+		return databaseConnectionError(conn)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
+		return databaseResultError(&result)
+	}
+	attachment := common.DatabaseAttachmentResult {
+		action  = .Remove,
+		outcome = .NotFound,
+	}
+	outcome := databaseGetText(result, 0, 0)
+	defer delete(outcome)
+	switch outcome {
+	case "not_admin":
+		attachment.outcome = .NotAdmin
+		return databaseSuccess(attachment)
+	case "applied":
+		if !databaseGetBool(result, 0, 1) {
+			return databaseSuccess(attachment)
+		}
+		attachment.outcome = .Applied
+	case:
+		return databaseSuccess(attachment)
+	}
+	readers := databaseGetText(result, 0, 8)
+	defer delete(readers)
+	attachment.removal = common.DatabaseAttachmentRemoval {
+		ownerUserId     = databaseGetIntOrZero(result, 0, 2),
+		roomId          = databaseGetIntOrZero(result, 0, 3),
+		senderId        = databaseGetIntOrZero(result, 0, 4),
+		recipientId     = databaseGetIntOrZero(result, 0, 5),
+		chatMessageId   = databaseGetIntOrZero(result, 0, 6),
+		directMessageId = databaseGetIntOrZero(result, 0, 7),
+		readerUserIds   = databaseAttachmentParseIDs(readers),
+	}
+	return databaseSuccess(attachment)
+}
+
+@(private = "file")
+databaseExecuteAttachmentUsage :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAttachmentRequest,
+) -> common.DatabaseQueryResponse {
+	limit := request.limit > 0 ? request.limit : common.ATTACHMENT_USAGE_ACCOUNTS_MAX
+	result := databaseAttachmentExec(
+		conn,
+		DATABASE_ATTACHMENT_USAGE_SQL,
+		{databaseIntParam(request.userId), databaseIntParam(limit)},
+	)
+	if result == nil {
+		return databaseConnectionError(conn)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
+		return databaseResultError(&result)
+	}
+	attachment := common.DatabaseAttachmentResult {
+		action  = .Usage,
+		outcome = .NotAdmin,
+	}
+	if !databaseGetBool(result, 0, 0) {
+		return databaseSuccess(attachment)
+	}
+	attachment.outcome = .Applied
+	attachment.usedBytes = databaseAttachmentGetU64(result, 0, 1)
+	text := databaseGetText(result, 0, 2)
+	defer delete(text)
+	attachment.accounts = make([dynamic]common.AttachmentAccountUsage, 0, limit)
+	rest := text
+	for entry in strings.split_iterator(&rest, ",") {
+		fields := strings.split(entry, ":")
+		defer delete(fields)
+		if len(fields) != 3 {
+			continue
+		}
+		userId, userOK := strconv.parse_int(fields[0])
+		bytes, bytesOK := strconv.parse_u64(fields[1])
+		count, countOK := strconv.parse_int(fields[2])
+		if !userOK || !bytesOK || !countOK {
+			continue
+		}
+		append(
+			&attachment.accounts,
+			common.AttachmentAccountUsage{userId = userId, bytes = bytes, count = count},
+		)
 	}
 	return databaseSuccess(attachment)
 }

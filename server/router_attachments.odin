@@ -79,6 +79,10 @@ AttachmentPendingStorageKind :: enum u8 {
 	DeleteBlobs,
 	Scan,
 	DeleteOrphans,
+	// Protocol 28: the free space for an admin's ServerAdminAttachmentUsage, and the hourly
+	// pass's deletion of bound tombstones' files (logged when it found any).
+	FreeSpace,
+	DeleteTombstones,
 }
 
 AttachmentPendingStorage :: struct {
@@ -91,6 +95,15 @@ AttachmentPendingStorage :: struct {
 	resume:    bool,
 	size:      u64,
 	sha256:    common.AttachmentSHA256, // Finish: the client's hash, for the finish statement
+	// FreeSpace (protocol 28): what the usage statement found, sent once the free space is
+	// known. accounts is owned (AttachmentPendingStorage_deinit).
+	usedBytes: u64,
+	accounts:  [dynamic]common.AttachmentAccountUsage,
+}
+
+AttachmentPendingStorage_deinit :: proc(pending: ^AttachmentPendingStorage) {
+	delete(pending.accounts)
+	pending.accounts = nil
 }
 
 // A session's byte pace (D8): a token bucket shared by its uploads and downloads.
@@ -135,6 +148,9 @@ RouterAttachmentState :: struct {
 	plaintext:     []u8,
 	nextSweep:     time.Tick,
 	sweepInFlight: bool,
+	// Protocol 28: the hourly pass that deletes bound tombstones' files again (a removal made
+	// in SQL cannot reach the storage worker).
+	nextTombstonePass: time.Tick,
 	scanStarted:   bool,
 	// The startup scan's files while the database says which have rows. Owned.
 	scanFiles:     [dynamic]StorageFile,
@@ -191,6 +207,9 @@ RouterAttachmentState_deinit :: proc(attachments: ^RouterAttachmentState) {
 	}
 	delete(attachments.uploads)
 	delete(attachments.downloads)
+	for _, &pending in attachments.pending {
+		AttachmentPendingStorage_deinit(&pending)
+	}
 	delete(attachments.pending)
 	delete(attachments.pendingUploads)
 	delete(attachments.pendingDownloads)
@@ -204,7 +223,6 @@ RouterAttachmentState_deinit :: proc(attachments: ^RouterAttachmentState) {
 // ── Helpers ───────────────────────────────────────────────────────
 
 // The session of peerID when it is still the authenticated session sessionID.
-@(private = "file")
 attachmentSession :: proc(
 	state: ^MainRouterState,
 	peerID: u32,
@@ -225,7 +243,6 @@ attachmentSession :: proc(
 	return session, true
 }
 
-@(private = "file")
 attachmentRefuse :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -251,7 +268,6 @@ attachmentRefuse :: proc(
 	)
 }
 
-@(private = "file")
 attachmentSend :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -265,7 +281,6 @@ attachmentSend :: proc(
 	}
 }
 
-@(private = "file")
 attachmentStorageSend :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -285,7 +300,6 @@ attachmentStorageSend :: proc(
 	)
 }
 
-@(private = "file")
 attachmentDatabaseSend :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -435,7 +449,6 @@ attachmentRemoveUpload :: proc(
 	AttachmentUploadTransfer_free(upload)
 }
 
-@(private = "file")
 attachmentRemoveDownload :: proc(state: ^MainRouterState, key: AttachmentDownloadKey) {
 	if download, ok := state.attachments.downloads[key]; ok {
 		delete_key(&state.attachments.downloads, key)
@@ -482,7 +495,6 @@ attachmentPersistProgress :: proc(
 	)
 }
 
-@(private = "file")
 attachmentDecode :: proc(payload: []u8, value: ^$T) -> bool {
 	// Fixed-size byte fields decode through the temporary allocator, which the router never
 	// frees, so they decode through the heap instead (server/AGENTS.md).
@@ -1092,15 +1104,12 @@ MainRouterState_handleAttachmentResult :: proc(
 	case .DownloadCheck:
 		attachmentCountDown(&attachments.pendingDownloads, sessionID)
 		if result.outcome != .Applied {
-			attachmentRefuse(
-				pm,
-				state,
-				peerID,
-				sessionID,
-				0,
-				blobId,
-				common.ATTACHMENT_NOT_FOUND_MESSAGE,
-			)
+			// A reader of a file an admin removed hears why (protocol 28).
+			message := common.ATTACHMENT_NOT_FOUND_MESSAGE
+			if result.outcome == .Removed {
+				message = common.ATTACHMENT_REMOVED_MESSAGE
+			}
+			attachmentRefuse(pm, state, peerID, sessionID, 0, blobId, message)
 			return
 		}
 		if request.attachmentOffset > result.size {
@@ -1177,6 +1186,12 @@ MainRouterState_handleAttachmentResult :: proc(
 		}
 	case .Known:
 		attachmentDeleteOrphans(pm, state, result.blobs[:])
+	case .Remove:
+		MainRouterState_attachmentRemoveResult(pm, state, request, result)
+	case .Usage:
+		MainRouterState_attachmentUsageResult(pm, state, request, result)
+	case .TombstoneFiles:
+		MainRouterState_attachmentTombstoneFilesResult(pm, state, result)
 	}
 }
 
@@ -1244,6 +1259,10 @@ attachmentRefusalMessage :: proc(outcome: common.DatabaseAttachmentOutcome) -> s
 		return common.ATTACHMENT_RATE_MESSAGE
 	case .CapacityExceeded:
 		return common.ATTACHMENT_STORAGE_FULL_MESSAGE
+	case .NotAdmin:
+		return "Admin permission required"
+	case .Removed:
+		return common.ATTACHMENT_REMOVED_MESSAGE
 	}
 	return common.ATTACHMENT_INVALID_REQUEST_MESSAGE
 }
@@ -1295,7 +1314,16 @@ MainRouterState_attachmentDatabaseFailed :: proc(
 		attachments.sweepInFlight = false
 	case .Known:
 		clear(&attachments.scanFiles)
-	case .Progress, .Abandon, .DeleteNew:
+	case .Remove, .Usage:
+		if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
+			MainRouterState_sendProtocolError(
+				pm,
+				state,
+				request.peerID,
+				common.ATTACHMENT_UNAVAILABLE_MESSAGE,
+			)
+		}
+	case .Progress, .Abandon, .DeleteNew, .TombstoneFiles:
 	}
 }
 
@@ -1541,6 +1569,9 @@ MainRouterState_handleStorageResponse :: proc(
 		}
 		append(&download.sentOffsets, r.offset)
 	case StorageBlobsDeleted:
+		if pending.kind == .DeleteTombstones && r.deleted > 0 {
+			fmt.printfln("[Attachments] Deleted %d files of removed attachments", r.deleted)
+		}
 	case StorageScanResult:
 		if len(r.files) == 0 {
 			return
@@ -1562,6 +1593,8 @@ MainRouterState_handleStorageResponse :: proc(
 		if r.deleted > 0 {
 			fmt.printfln("[Attachments] Deleted %d orphan attachment files", r.deleted)
 		}
+	case StorageFreeSpaceResult:
+		MainRouterState_attachmentSendUsage(pm, state, &pending, u64(r.freeBytes), r.ok)
 	}
 }
 
@@ -1659,7 +1692,12 @@ MainRouterState_attachmentsStorageStopped :: proc(pm: ^ProcessManager, state: ^M
 		AttachmentDownloadTransfer_free(download)
 	}
 	clear(&attachments.downloads)
-	for _, pending in attachments.pending {
+	for _, &pending in attachments.pending {
+		if pending.kind == .FreeSpace {
+			// The usage still goes out, without the free space.
+			MainRouterState_attachmentSendUsage(pm, state, &pending, 0, false)
+			continue
+		}
 		if pending.kind == .Open {
 			attachmentRefuse(
 				pm,
@@ -1705,6 +1743,10 @@ MainRouterState_attachmentsTick :: proc(
 	if !attachments.sweepInFlight && time.tick_diff(attachments.nextSweep, now) >= 0 {
 		MainRouterState_attachmentsSweep(pm, state)
 		attachments.nextSweep = time.tick_add(now, ATTACHMENT_SWEEP_INTERVAL)
+	}
+	if time.tick_diff(attachments.nextTombstonePass, now) >= 0 {
+		MainRouterState_attachmentsTombstonePass(pm, state)
+		attachments.nextTombstonePass = time.tick_add(now, ATTACHMENT_SWEEP_INTERVAL)
 	}
 }
 

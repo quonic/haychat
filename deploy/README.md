@@ -21,6 +21,8 @@ and the release builds that produce the image and the client downloads. Testers 
 | `deploy/sql/make-admin.sql`      | Gives one existing account the admin role                                                                                              |
 | `deploy/sql/create-invite.sql`   | Prints a new invite code, for a server that is not Open and has no admin yet                                                           |
 | `deploy/sql/set-registration-mode.sql` | Sets the registration mode (`open`, `invite`, `approval`) without a client                                                       |
+| `deploy/sql/attachment-usage.sql` | Shows attachment storage use: totals, the accounts that store the most, and one account's files                                 |
+| `deploy/sql/remove-attachment.sql` | Removes one attachment by its blob ID; the server deletes the file within the hour                                             |
 | `deploy/release-artifacts.sh`    | Builds the server binary and client archives for a release                                                                             |
 | `deploy/client-README-*.txt`     | The `README.txt` shipped in each client archive                                                                                        |
 | `THIRD_PARTY_NOTICES.md`         | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt`                                    |
@@ -58,7 +60,7 @@ the dev image and CI use.
 | Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`), `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) and `/var/lib/haychat/attachments` (`HAYCHAT_ATTACHMENT_DIR`: attachment files, protocol 26)                                                       |
 | Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
-| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the three
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
@@ -328,6 +330,27 @@ the other is incomplete: a row without its file is unavailable to clients, and a
 a row is deleted by the server's startup scan once it is an hour old. Restore both from the same
 backup, the attachments volume before the first start like the storage volume. The server
 refuses an attachment directory that is the storage directory or holds the identity file.
+
+### Attachment Storage and Removing Files
+
+Admins see storage use and remove files from the client (Server settings, Admin, Storage, and
+**Remove attachment** on a file; protocol 28). Without a client, use the SQL helpers:
+
+```sh
+podman exec -i haychat-db psql -U haychat -d haychat <deploy/sql/attachment-usage.sql
+podman exec -i haychat-db psql -U haychat -d haychat -v owner=alice <deploy/sql/attachment-usage.sql
+podman exec -i haychat-db psql -U haychat -d haychat \
+	-v blob=0123456789abcdef0123456789abcdef <deploy/sql/remove-attachment.sql
+```
+
+`attachment-usage.sql` prints the stored bytes (removed files count toward nothing), the top
+accounts (`-v limit=N`, default 100) and, with `-v owner=NAME`, that account's files with their
+blob IDs. `remove-attachment.sql` makes the file a removed tombstone, as an admin's removal
+does: its message stays and lists it as removed, nobody can download it, and it frees its
+owner's quota. SQL cannot reach the running server, so the file itself is deleted by the
+server's hourly pass (and at its next start), and connected clients see the removal on their
+next history fetch, as with other changes made in the database. An admin who removes a file
+from the client deletes it at once and tells everyone who may read its message.
 
 The storage archive holds the server's private key: store it as
 privately as the database dump. To restore into a fresh deployment, import the volume before

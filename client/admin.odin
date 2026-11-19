@@ -38,6 +38,9 @@ AdminRequest :: struct {
 	inviteID:    int,
 	requestID:   int,
 	mode:        common.RegistrationMode,
+	// Protocol 28 (attachment_moderation.odin). RemoveAttachment: blobID and reason (0..500
+	// bytes, no control characters).
+	blobID:      common.AttachmentBlobID,
 }
 
 AdminSendBridge :: #type proc(transport: ^ClientServerTransport, request: AdminRequest) -> bool
@@ -98,6 +101,8 @@ ClientServerTransport_sendAdminRequest :: proc(
 		)
 	case .SetRestricted:
 		return ClientServerTransport_setRestricted(transport, request.userID, request.flag)
+	case .RemoveAttachment:
+		return ClientServerTransport_removeAttachment(transport, request.blobID, request.reason)
 	}
 	return false
 }
@@ -112,6 +117,8 @@ AdminRequestState :: struct {
 	// Protocol 25: the code a RevokeInvite and the request a DecideRegistration names.
 	inviteID:  int,
 	requestID: int,
+	// Protocol 28: the attachment a RemoveAttachment names.
+	blobID:    common.AttachmentBlobID,
 	pending:  bool,
 	// The server's sentence for a success (ServerAdminActionResult.message).
 	result:   string,
@@ -168,6 +175,14 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 			common.REGISTRATION_REASON_MAX_CHARS,
 		) {
 			return "The reason must be at most 500 characters, without control characters."
+		}
+		return ""
+	case .RemoveAttachment:
+		if !common.attachmentBlobIDIsSet(request.blobID) {
+			return "No attachment selected."
+		}
+		if !common.attachmentRemoveReasonIsValid(request.reason) {
+			return "The reason must be at most 500 bytes long, without control characters."
 		}
 		return ""
 	case .SetUserRoles:
@@ -235,6 +250,7 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	tracked.roleID = request.roleID
 	tracked.inviteID = request.inviteID
 	tracked.requestID = request.requestID
+	tracked.blobID = request.blobID
 	tracked.pending = true
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
@@ -350,6 +366,7 @@ State_adminActionResult :: proc(
 	roleID := 0,
 	inviteID := 0,
 	requestID := 0,
+	blobID := common.AttachmentBlobID{},
 ) {
 	tracked := &state.adminRequest
 	if tracked.serverID != serverID {
@@ -361,6 +378,7 @@ State_adminActionResult :: proc(
 	tracked.roleID = roleID
 	tracked.inviteID = inviteID
 	tracked.requestID = requestID
+	tracked.blobID = blobID
 	AdminRequestState_setText(&tracked.result, message)
 	AdminRequestState_setText(&tracked.error, "")
 }

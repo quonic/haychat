@@ -103,6 +103,9 @@ ClientTransferCommandKind :: enum u8 {
 	Resume,
 	Download,
 	Cancel,
+	// Protocol 28: ends this server's downloads of a blob without telling the server, which
+	// already ended them (an admin removed the file).
+	Abandon,
 }
 
 @(private = "file")
@@ -116,6 +119,7 @@ ClientTransferCommand :: struct {
 	blobId:          common.AttachmentBlobID,
 	encrypted:       bool, // Upload: seal the file (protocol 27)
 	expect:          ClientTransferExpect, // Download: what to check (protocol 27)
+	message:         string, // Abandon: why (static, not owned)
 }
 
 ClientTransferInboundKind :: enum u8 {
@@ -404,6 +408,26 @@ ClientTransferWorker_cancel :: proc(
 	return clientTransferQueue(
 		worker,
 		ClientTransferCommand{kind = .Cancel, serverID = serverID, blobId = blobId},
+	)
+}
+
+// Ends every active download of blobId on serverID with an Error event saying message (static),
+// and deletes its part file, without telling the server (protocol 28: the server ended them
+// when an admin removed the file). Returns the command's local ID.
+ClientTransferWorker_abandonDownloads :: proc(
+	worker: ^ClientTransferWorker,
+	serverID: int,
+	blobId: common.AttachmentBlobID,
+	message: string,
+) -> int {
+	return clientTransferQueue(
+		worker,
+		ClientTransferCommand {
+			kind = .Abandon,
+			serverID = serverID,
+			blobId = blobId,
+			message = message,
+		},
 	)
 }
 
@@ -952,6 +976,16 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 				transfer.hasBlobId = direction == .Download
 				clientTransferDropUnacked(transfer)
 				clientTransferWipeCrypto(transfer)
+			}
+		}
+	case .Abandon:
+		for transfer in worker.transfers {
+			if transfer.serverID == command.serverID &&
+			   transfer.direction == .Download &&
+			   transfer.hasBlobId &&
+			   transfer.blobId == command.blobId &&
+			   transfer.state != .Finished {
+				clientTransferFail(worker, transfer, command.message)
 			}
 		}
 	}

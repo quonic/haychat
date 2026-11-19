@@ -10,6 +10,10 @@ package client
 // checks the server's limits and seals the file for an encrypted conversation; send, dm and
 // dm-plain take --attach BLOB for finished uploads; attach-download ROOM_ID|@USER_ID MESSAGE_ID
 // INDEX OUT saves a message's file, checked against the message and decrypted.
+//
+// Protocol 28 (F3): attach-usage and attach-remove BLOB [REASON...] (admins), answered by
+// attachment_usage and admin_result attachment-remove; every reader of a removed file's
+// message hears attachment_removed (after State marked its files removed).
 
 import "../common"
 import "core:fmt"
@@ -515,6 +519,142 @@ headlessAttachDownloadMessage :: proc(harness: ^HeadlessHarness, command: ^Headl
 			path = path,
 			messageID = messageID,
 			index = index,
+		},
+	)
+}
+
+// ── Moderation (protocol 28) ─────────────────────────────────────
+
+// attachment_removed: an admin removed blobID. roomID names a room message's room (or the room
+// an unbound blob was uploaded to); senderID and recipientID a direct message's two sides
+// (senderID is the owner otherwise). Printed before State marks the files.
+HeadlessAttachmentRemovedJSON :: struct {
+	event:       string,
+	serverID:    int,
+	blobID:      string,
+	roomID:      int,
+	senderID:    int,
+	recipientID: int,
+}
+
+HeadlessAttachmentUsageAccountJSON :: struct {
+	userID: int,
+	bytes:  u64,
+	count:  int,
+}
+
+// attachment_usage: the stored bytes (tombstones excluded), the configured capacity (0 = none),
+// the free space on the server's blob volume (freeBytesKnown false when it could not be read)
+// and the top accounts by bytes.
+HeadlessAttachmentUsageJSON :: struct {
+	event:          string,
+	serverID:       int,
+	usedBytes:      u64,
+	capacityBytes:  u64,
+	freeBytes:      u64,
+	freeBytesKnown: bool,
+	accounts:       []HeadlessAttachmentUsageAccountJSON,
+}
+
+headlessAdminResultBlob :: proc(blobID: common.AttachmentBlobID) -> string {
+	if !common.attachmentBlobIDIsSet(blobID) {
+		return ""
+	}
+	id := blobID
+	return headlessHex(id[:], context.temp_allocator)
+}
+
+headlessRenderAttachmentModerationEvent :: proc(
+	event: ^ClientTransportRuntimeEvent,
+	allocator := context.allocator,
+) -> (
+	line: string,
+	kind: HeadlessEventKind,
+	ok: bool,
+) {
+	#partial switch event.kind {
+	case .AttachmentRemoved:
+		kind = .AttachmentRemoved
+		notice := event.attachmentRemoved
+		line = headlessMarshal(
+			HeadlessAttachmentRemovedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				blobID = headlessHex(notice.blobId[:], context.temp_allocator),
+				roomID = notice.roomId,
+				senderID = notice.senderId,
+				recipientID = notice.recipientId,
+			},
+			allocator,
+		)
+		return line, kind, true
+	case .AttachmentUsageReceived:
+		kind = .AttachmentUsage
+		usage := &event.attachmentUsage
+		accounts := make(
+			[]HeadlessAttachmentUsageAccountJSON,
+			len(usage.accounts),
+			context.temp_allocator,
+		)
+		for account, index in usage.accounts {
+			accounts[index] = {
+				userID = account.userId,
+				bytes  = account.bytes,
+				count  = account.count,
+			}
+		}
+		line = headlessMarshal(
+			HeadlessAttachmentUsageJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				usedBytes = usage.usedBytes,
+				capacityBytes = usage.capacityBytes,
+				freeBytes = usage.freeBytes,
+				freeBytesKnown = usage.freeBytesKnown,
+				accounts = accounts,
+			},
+			allocator,
+		)
+		return line, kind, true
+	}
+	return "", {}, false
+}
+
+// attach-usage
+headlessCommandAttachUsage :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	state := &harness.state
+	serverID := state.selected_server_id
+	if errorMessage := State_requestAttachmentUsage(state, serverID); len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessAttachmentRequestJSON{ok = true, cmd = command.name, serverID = serverID},
+	)
+}
+
+// attach-remove BLOB [REASON...]
+headlessCommandAttachRemove :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	blobId, ok := headlessParseBlob(harness, command, command.args[0])
+	if !ok {
+		return
+	}
+	reason := command.argCount > 1 ? command.args[1] : ""
+	state := &harness.state
+	serverID := state.selected_server_id
+	if errorMessage := State_removeAttachment(state, serverID, blobId, reason);
+	   len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessAttachmentRequestJSON {
+			ok = true,
+			cmd = command.name,
+			serverID = serverID,
+			blobID = command.args[0],
 		},
 	)
 }

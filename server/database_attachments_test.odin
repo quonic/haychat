@@ -44,6 +44,10 @@ attachmentSQLTestRun :: proc(
 	copied := result
 	copied.blobs = make([dynamic]common.DatabaseAttachmentBlob, context.temp_allocator)
 	append(&copied.blobs, ..result.blobs[:])
+	copied.removal.readerUserIds = make([dynamic]int, context.temp_allocator)
+	append(&copied.removal.readerUserIds, ..result.removal.readerUserIds[:])
+	copied.accounts = make([dynamic]common.AttachmentAccountUsage, context.temp_allocator)
+	append(&copied.accounts, ..result.accounts[:])
 	IPC__database_query_response_deinit(response)
 	return copied
 }
@@ -1223,4 +1227,442 @@ testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL :: proc(t: ^testing.T)
 	StorageRequest_deinit(deleteRequest)
 	assert(deleted.(StorageBlobsDeleted).deleted == 1, "expected the file deleted")
 	assert(!os.exists(path), "expected the blob gone from the directory")
+}
+
+// ── Moderation (protocol 28, attachments plan F3, D22) ───────────────────────────────────
+
+@(private = "file")
+attachmentSQLTestRemove :: proc(
+	conn: pg.Conn,
+	userID: int,
+	blob: common.AttachmentBlobID,
+) -> common.DatabaseAttachmentResult {
+	return attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest{action = .Remove, userId = userID, blobId = blob},
+	)
+}
+
+@(private = "file")
+attachmentSQLTestReaders :: proc(result: common.DatabaseAttachmentResult) -> string {
+	builder := strings.builder_make(context.temp_allocator)
+	for id, index in result.removal.readerUserIds {
+		if index > 0 {
+			strings.write_byte(&builder, ',')
+		}
+		fmt.sbprintf(&builder, "%d", id)
+	}
+	return strings.to_string(builder)
+}
+
+// D22: only an admin removes (a holder of every assignable permission is refused), only a Ready
+// or Bound blob, and the tombstone keeps every signed field and its message link, frees the
+// quota, and names exactly the accounts that may read the message.
+@(test)
+testAttachmentRemovalAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_remove")
+	alice := databaseAdminTestUser(conn, "rm-alice")
+	bob := databaseAdminTestUser(conn, "rm-bob")
+	carol := databaseAdminTestUser(conn, "rm-carol")
+	dave := databaseAdminTestUser(conn, "rm-dave")
+	admin := databaseAdminTestUser(conn, "rm-admin")
+	helper := databaseAdminTestUser(conn, "rm-helper")
+	databaseAdminTestGrant(conn, admin)
+	databaseDefaultRoomTestExec(
+		conn,
+		"a role with every assignable permission",
+		fmt.tprintf(
+			"INSERT INTO server_roles (name, permissions) VALUES ('rm-helpers', %d); " +
+			"INSERT INTO user_server_roles (user_id, role_id) " +
+			"SELECT %d, id FROM server_roles WHERE name = 'rm-helpers'",
+			transmute(u64)common.SERVER_PERMISSIONS_ASSIGNABLE,
+			helper,
+		),
+	)
+
+	// A From join room: alice and bob before the message, carol after it, dave never.
+	room := attachmentSQLTestRoom(conn, "rm-room")
+	databaseDefaultRoomTestExec(
+		conn,
+		"make the room from join",
+		fmt.tprintf("UPDATE rooms SET history_visibility = 1 WHERE id = %d", room),
+	)
+	attachmentSQLTestJoin(conn, room, alice)
+	attachmentSQLTestJoin(conn, room, bob)
+	databaseDefaultRoomTestExec(
+		conn,
+		"date the early joins",
+		fmt.tprintf(
+			"UPDATE room_members SET joined_at = now() - interval '2 hours' WHERE room_id = %d",
+			room,
+		),
+	)
+	blob, sha := attachmentSQLTestReady(conn, alice, 100, roomID = room)
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, 100, sha, "report.pdf")}
+	_, messageID := attachmentSQLTestPost(conn, room, alice, "the report", refs[:])
+	assert(messageID > 0, "expected the message stored")
+	databaseDefaultRoomTestExec(
+		conn,
+		"date the message before carol",
+		fmt.tprintf(
+			"UPDATE chat_messages SET created_at = now() - interval '1 hour' WHERE id = %d",
+			messageID,
+		),
+	)
+	attachmentSQLTestJoin(conn, room, carol)
+	bound := attachmentSQLTestBinding(conn, blob)
+
+	// The quota sees the blob: alice's 150-byte quota leaves no room for 100 more.
+	quota := AttachmentSQLTestLimits {
+		maxBytes = 1_000_000,
+		quota    = 150,
+	}
+	assert(
+		attachmentSQLTestBegin(conn, alice, 100, roomID = room, limits = quota) == .QuotaExceeded,
+		"expected the quota full before the removal",
+	)
+
+	// Not an admin, even with every assignable permission: nothing changes.
+	for userID in ([]int{alice, bob, helper}) {
+		refused := attachmentSQLTestRemove(conn, userID, blob)
+		assert(
+			refused.outcome == .NotAdmin,
+			fmt.tprintf("expected user %d refused as not an admin, got %v", userID, refused),
+		)
+	}
+	assert(attachmentSQLTestState(conn, blob) == "2", "expected the blob still bound")
+
+	removed := attachmentSQLTestRemove(conn, admin, blob)
+	assert(
+		removed.outcome == .Applied &&
+		removed.removal.ownerUserId == alice &&
+		removed.removal.roomId == room &&
+		removed.removal.senderId == alice &&
+		removed.removal.recipientId == 0 &&
+		removed.removal.chatMessageId == messageID &&
+		removed.removal.directMessageId == 0,
+		fmt.tprintf("expected the room message's blob removed, got %v", removed),
+	)
+	assert(
+		attachmentSQLTestReaders(removed) == fmt.tprintf("%d,%d", alice, bob),
+		fmt.tprintf(
+			"expected only alice and bob as readers (not the From join newcomer, the " +
+			"outsider or the admin), got %s",
+			attachmentSQLTestReaders(removed),
+		),
+	)
+	// Every signed field and the message link stay; only the state and the removal change.
+	after := attachmentSQLTestBinding(conn, blob)
+	assert(
+		after[1:] == bound[1:] && after[0] == '3',
+		fmt.tprintf("expected only the state to change, %s -> %s", bound, after),
+	)
+	shaHex := common.encodeBytesToHex(sha[:])
+	defer delete(shaHex)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT (removed_by_user_id = %d AND removed_at IS NOT NULL AND size = 100 " +
+				"AND sha256 = decode('%s', 'hex'))::text FROM attachments " +
+				"WHERE blob_id = decode('%s', 'hex')",
+				admin,
+				shaHex,
+				attachmentSQLTestHex(blob),
+			),
+		) ==
+		"true",
+		"expected the tombstone to keep its size and hash and name its remover",
+	)
+	// History still lists the file with every signed field, now removed.
+	history := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomHistoryRequest{roomId = room, userId = bob, limit = 10},
+	)
+	defer IPC__database_query_response_deinit(history)
+	page := history.result.(common.DatabaseRoomHistoryResult)
+	assert(len(page.messages) == 1, "expected the message in history")
+	listed := page.messages[0].attachments
+	assert(
+		len(listed) == 1 &&
+		listed[0].blobId == blob &&
+		listed[0].size == 100 &&
+		listed[0].sha256 == sha &&
+		listed[0].name == "report.pdf" &&
+		listed[0].mediaType == "text/plain" &&
+		listed[0].removed,
+		fmt.tprintf("expected the removed file listed with its signed fields, got %v", listed),
+	)
+	// The quota is free again.
+	assert(
+		attachmentSQLTestBegin(conn, alice, 100, roomID = room, limits = quota) == .Applied,
+		"expected the tombstone to free the quota",
+	)
+	// A reader's download is refused as removed; anyone else's as not found.
+	assert(
+		attachmentSQLTestAction(conn, .DownloadCheck, bob, blob).outcome == .Removed,
+		"expected a reader told the file was removed",
+	)
+	assert(
+		attachmentSQLTestAction(conn, .DownloadCheck, dave, blob).outcome == .NotFound,
+		"expected an outsider told nothing",
+	)
+	assert(
+		attachmentSQLTestAction(conn, .DownloadCheck, carol, blob).outcome == .NotFound,
+		"expected a From join newcomer told nothing",
+	)
+
+	// Removed, Uploading and unknown blobs are not found.
+	assert(
+		attachmentSQLTestRemove(conn, admin, blob).outcome == .NotFound,
+		"expected a second removal not found",
+	)
+	uploading: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, bob, 10, roomID = room, blobOut = &uploading) == .Applied,
+		"expected an upload",
+	)
+	assert(
+		attachmentSQLTestRemove(conn, admin, uploading).outcome == .NotFound,
+		"expected an Uploading blob not found",
+	)
+	assert(attachmentSQLTestState(conn, uploading) == "0", "expected the upload untouched")
+	assert(
+		attachmentSQLTestRemove(conn, admin, attachmentSQLTestBlob()).outcome == .NotFound,
+		"expected an unknown blob not found",
+	)
+
+	// A direct message: both sides, and the admin is no reader.
+	dmBlob, dmSHA := attachmentSQLTestReady(conn, alice, 50, recipientID = bob)
+	dmRefs := [1]common.AttachmentRef{attachmentSQLTestRef(dmBlob, 50, dmSHA)}
+	dmRequest := common.DatabasePostDirectMessageRequest {
+		senderId        = alice,
+		recipientId     = bob,
+		content         = strings.clone(""),
+		clientMessageId = databaseTestClientMessageID(),
+		signature       = DATABASE_TEST_SIGNATURE,
+		attachments     = common.AttachmentRefs_clone(dmRefs[:]),
+	}
+	dmResponse := databaseExecuteRequest(conn, dmRequest)
+	IPC__database_query_request_deinit(dmRequest)
+	dmPosted := dmResponse.result.(common.DatabasePostDirectMessageResult)
+	assert(dmPosted.outcome == .Stored, fmt.tprintf("expected the DM stored, got %v", dmPosted))
+	IPC__database_query_response_deinit(dmResponse)
+	dmRemoved := attachmentSQLTestRemove(conn, admin, dmBlob)
+	assert(
+		dmRemoved.outcome == .Applied &&
+		dmRemoved.removal.roomId == 0 &&
+		dmRemoved.removal.senderId == alice &&
+		dmRemoved.removal.recipientId == bob &&
+		dmRemoved.removal.directMessageId > 0 &&
+		attachmentSQLTestReaders(dmRemoved) == fmt.tprintf("%d,%d", alice, bob),
+		fmt.tprintf("expected the direct message's two sides, got %v", dmRemoved),
+	)
+
+	// An unbound Ready blob: only its owner, and an admin's own file is removable too.
+	loose, _ := attachmentSQLTestReady(conn, bob, 30, roomID = room)
+	looseRemoved := attachmentSQLTestRemove(conn, admin, loose)
+	assert(
+		looseRemoved.outcome == .Applied &&
+		looseRemoved.removal.roomId == room &&
+		looseRemoved.removal.senderId == bob &&
+		looseRemoved.removal.chatMessageId == 0 &&
+		attachmentSQLTestReaders(looseRemoved) == fmt.tprintf("%d", bob),
+		fmt.tprintf("expected only the owner of an unbound blob, got %v", looseRemoved),
+	)
+	attachmentSQLTestJoin(conn, room, admin)
+	own, _ := attachmentSQLTestReady(conn, admin, 20, roomID = room)
+	assert(
+		attachmentSQLTestRemove(conn, admin, own).outcome == .Applied,
+		"expected an admin to remove its own file",
+	)
+
+	// The hourly pass lists the bound tombstones (the room's and the DM's), newest first, and
+	// not the unbound ones the sweeper takes with their rows.
+	tombstones := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest{action = .TombstoneFiles, limit = 10},
+	)
+	assert(
+		len(tombstones.blobs) == 2 &&
+		tombstones.blobs[0].blobId == dmBlob &&
+		tombstones.blobs[1].blobId == blob &&
+		tombstones.blobs[0].state == .Removed,
+		fmt.tprintf("expected the two bound tombstones, got %v", tombstones.blobs),
+	)
+}
+
+// Usage (D22): admins only; tombstones do not count, uploads in progress do.
+@(test)
+testAttachmentUsageAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_usage")
+	alice := databaseAdminTestUser(conn, "use-alice")
+	bob := databaseAdminTestUser(conn, "use-bob")
+	admin := databaseAdminTestUser(conn, "use-admin")
+	databaseAdminTestGrant(conn, admin)
+	room := attachmentSQLTestRoom(conn, "use-room")
+	attachmentSQLTestJoin(conn, room, alice)
+	attachmentSQLTestJoin(conn, room, bob)
+	attachmentSQLTestReady(conn, alice, 100, roomID = room)
+	attachmentSQLTestReady(conn, alice, 200, roomID = room)
+	gone, _ := attachmentSQLTestReady(conn, alice, 5000, roomID = room)
+	attachmentSQLTestReady(conn, bob, 250, roomID = room)
+	assert(
+		attachmentSQLTestBegin(conn, bob, 40, roomID = room) == .Applied,
+		"expected an upload in progress",
+	)
+	assert(
+		attachmentSQLTestRemove(conn, admin, gone).outcome == .Applied,
+		"expected the large blob removed",
+	)
+	usage :: proc(conn: pg.Conn, userID: int, limit := 0) -> common.DatabaseAttachmentResult {
+		return attachmentSQLTestRun(
+			conn,
+			common.DatabaseAttachmentRequest{action = .Usage, userId = userID, limit = limit},
+		)
+	}
+	refused := usage(conn, alice)
+	assert(
+		refused.outcome == .NotAdmin && len(refused.accounts) == 0 && refused.usedBytes == 0,
+		fmt.tprintf("expected a non-admin refused with nothing, got %v", refused),
+	)
+	listed := usage(conn, admin)
+	assert(
+		listed.outcome == .Applied &&
+		listed.usedBytes == 590 &&
+		len(listed.accounts) == 2 &&
+		listed.accounts[0].userId == alice &&
+		listed.accounts[0].bytes == 300 &&
+		listed.accounts[0].count == 2 &&
+		listed.accounts[1].userId == bob &&
+		listed.accounts[1].bytes == 290 &&
+		listed.accounts[1].count == 2,
+		fmt.tprintf("expected 590 bytes, alice then bob, got %v", listed),
+	)
+	top := usage(conn, admin, 1)
+	assert(
+		len(top.accounts) == 1 && top.accounts[0].userId == alice && top.usedBytes == 590,
+		fmt.tprintf("expected the limit to cut the list, not the total, got %v", top),
+	)
+}
+
+// A removal made in SQL (deploy/sql/remove-attachment.sql) cannot delete the file: the hourly
+// pass lists the bound tombstone and the storage worker deletes its file.
+@(test)
+testAttachmentSQLRemovalFileIsDeletedByTheHourlyPassAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_sql_remove")
+	alice := databaseAdminTestUser(conn, "sqlrm-alice")
+	room := attachmentSQLTestRoom(conn, "sqlrm-room")
+	attachmentSQLTestJoin(conn, room, alice)
+
+	allocator := context.allocator
+	context.allocator = context.temp_allocator
+	dir := routerTestCreateTempDir("haychat_attachment_sql_remove")
+	context.allocator = allocator
+	defer os.remove_all(dir)
+	for name in ([]string{ATTACHMENT_INCOMING_DIR_NAME, ATTACHMENT_BLOBS_DIR_NAME}) {
+		path := fmt.tprintf("%s/%s", dir, name)
+		assert(os.make_directory(path, os.perm(0o700)) == nil, "expected a blob subdirectory")
+	}
+	worker := StorageWorker_init(dir)
+	defer StorageWorker_deinit(&worker)
+	worker.freeBytes = proc(dir: string) -> (i64, bool) {
+		_ = dir
+		return 1 << 40, true
+	}
+	data := "a file an operator removes in SQL"
+	blob: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, alice, u64(len(data)), roomID = room, blobOut = &blob) ==
+		.Applied,
+		"expected the upload to begin",
+	)
+	opened, _ := StorageWorker_handle(
+		&worker,
+		StorageUploadOpen{blobId = blob, size = u64(len(data))},
+	)
+	assert(opened.(StorageUploadOpened).ok, "expected the part file")
+	chunk := make([]u8, len(data))
+	copy(chunk, data)
+	write := StorageUploadWrite {
+		blobId = blob,
+		data   = chunk,
+	}
+	written, _ := StorageWorker_handle(&worker, write)
+	StorageRequest_deinit(write)
+	assert(written.(StorageUploadWritten).ok, "expected the chunk written")
+	sha := common.AttachmentSHA256(common.hashBytes(transmute([]u8)data))
+	finished, _ := StorageWorker_handle(
+		&worker,
+		StorageUploadFinish{blobId = blob, size = u64(len(data)), sha256 = sha},
+	)
+	assert(finished.(StorageUploadFinished).ok, "expected the blob stored")
+	ready := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest {
+			action = .Finish,
+			userId = alice,
+			blobId = blob,
+			size = u64(len(data)),
+			sha256 = sha,
+		},
+	)
+	assert(ready.outcome == .Applied, "expected the blob Ready")
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, u64(len(data)), sha)}
+	_, messageID := attachmentSQLTestPost(conn, room, alice, "soon gone", refs[:])
+	assert(messageID > 0, "expected the message stored")
+	path := storageBlobPath(&worker, blob)
+	defer delete(path)
+	assert(os.exists(path), "expected the blob's file stored")
+
+	// What deploy/sql/remove-attachment.sql does: the tombstone, with no admin and no file
+	// deletion.
+	databaseDefaultRoomTestExec(
+		conn,
+		"remove the blob as the operator helper does",
+		fmt.tprintf(
+			"UPDATE attachments SET state = 3, removed_at = now() " +
+			"WHERE blob_id = decode('%s', 'hex') AND state IN (1, 2)",
+			attachmentSQLTestHex(blob),
+		),
+	)
+	assert(os.exists(path), "expected the file still there after the SQL removal")
+	sweep := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest{action = .Sweep, pendingHours = 24, limit = 100},
+	)
+	assert(len(sweep.blobs) == 0, "expected the bound tombstone's row kept")
+	tombstones := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest{action = .TombstoneFiles, limit = 10},
+	)
+	assert(
+		len(tombstones.blobs) == 1 && tombstones.blobs[0].blobId == blob,
+		fmt.tprintf("expected the tombstone listed, got %v", tombstones.blobs),
+	)
+	blobs := make([dynamic]common.DatabaseAttachmentBlob)
+	append(&blobs, ..tombstones.blobs[:])
+	deleteRequest := StorageDeleteBlobs {
+		blobs = blobs,
+	}
+	deleted, _ := StorageWorker_handle(&worker, deleteRequest)
+	assert(deleted.(StorageBlobsDeleted).deleted == 1, "expected the file deleted")
+	// The next pass deletes nothing more: the delete is idempotent.
+	again, _ := StorageWorker_handle(&worker, deleteRequest)
+	StorageRequest_deinit(deleteRequest)
+	assert(again.(StorageBlobsDeleted).deleted == 0, "expected a second pass to delete nothing")
+	assert(!os.exists(path), "expected the blob gone from the directory")
+	assert(attachmentSQLTestState(conn, blob) == "3", "expected the tombstone row kept")
 }

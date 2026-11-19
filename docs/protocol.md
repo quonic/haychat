@@ -71,6 +71,7 @@ version below therefore needs clients and servers rebuilt together.
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
 | 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet |
 | 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), with schema migration 15. The message inserts bind the listed blobs, and whoever may read a message may download its files |
+| 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed. No schema migration |
 | 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
@@ -198,6 +199,47 @@ D20). A message lists up to four uploaded blobs; the text may then be empty.
   quotaBytes, usedBytes}`: whether uploads are on, the largest stored blob, the account quota
   (0 = none) and the account's stored bytes. Clients refuse a file early with them; the server
   checks every limit again at begin.
+
+## Attachment moderation (protocol 28)
+
+The third part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F3: D22). Admins
+only, like kick and ban: there is no assignable permission, and the server checks the admin
+role in the statement that reads or changes, so a holder of every other permission is refused
+("Admin permission required").
+
+- **Removal.** `ClientAdminRemoveAttachment{blobId, reason}` makes a Ready or Bound blob a
+  Removed tombstone and deletes its file. The row keeps every field a plaintext message's v2
+  signature covers (size, hash, name, media type, position) and its message link, so the
+  message still verifies and lists the file with `removed` set. An unknown, uploading or already
+  removed blob is "Attachment not found". `reason` is optional: at most 500 bytes of UTF-8
+  without control characters (otherwise "The reason must be at most 500 bytes, without control
+  characters"). The server logs it with the blob, the admin and the owner, and neither stores it
+  nor sends it on. The answer is `ServerAdminActionResult{action = RemoveAttachment (11),
+  userId = the owner, blobId}`.
+- **Who hears.** `ServerAttachmentRemoved{blobId, roomId, senderId, recipientId}` goes to every
+  session of each account that may read the message: a room message's members who may read
+  its history (a From join member who joined after the message hears nothing), both sides of a
+  direct message, and the owner of a blob no message lists. For a room message `roomId` is the
+  room and `senderId` the owner; for a direct message `senderId` and `recipientId` are its two
+  sides; an unbound blob names the conversation it was uploaded to. Clients mark the file
+  removed wherever they show it. The restricted-account rules hide this from nobody who could
+  already read the message.
+- **Downloads.** Every running download of the blob ends with `ServerAttachmentRefused{blobId,
+  "Attachment removed by an admin"}`. A later download by a reader of the message is refused
+  with the same sentence, and by anyone else with "Attachment not found".
+- **Quota.** A tombstone counts toward no quota, capacity or `ServerAuthSuccess.attachments
+  .usedBytes`; it still counts toward the hourly upload limit for the hour after its upload.
+- **Usage.** `ClientAdminAttachmentUsage{}` is answered by `ServerAdminAttachmentUsage{usedBytes,
+  capacityBytes, freeBytes, freeBytesKnown, accounts}`: every stored byte that is not a tombstone
+  (an upload in progress counts with the size it reserved), `HAYCHAT_ATTACHMENT_CAPACITY_BYTES`
+  (0 = no cap), the free space on the blob directory's volume (`freeBytesKnown` false when the
+  server could not read it), and the top 100 accounts by those bytes as
+  `AttachmentAccountUsage{userId, bytes, count}`, largest first.
+- **Removal without a client.** `deploy/sql/remove-attachment.sql` makes the same tombstone
+  (with no `removed_by_user_id`) but cannot reach the server: the server's hourly pass deletes
+  the files of the newest bound tombstones again (and cuts off a download of one), its startup
+  scan deletes every Removed blob's file, and clients see the file as removed on their next
+  history fetch. `deploy/sql/attachment-usage.sql` shows the usage. See `deploy/README.md`.
 
 ## Room permissions and role rooms (protocol 24)
 
