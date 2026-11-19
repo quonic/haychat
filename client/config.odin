@@ -66,6 +66,11 @@ Server :: struct {
 	// Voice volume and local mute per user of this server. Only entries that differ from the
 	// default (volume 1, not muted) are kept; Config_validateServers drops the rest.
 	user_voice:                [dynamic]ServerUserVoice `json:"user_voice,omitempty"`,
+	// Protocol 25 (#43 G2): sign up with an invite code even when the server is Open, by
+	// setting ClientAuthRequestPayload.registering (Server settings → Use an invite code). It
+	// changes nothing for a key that already has an account. Never holds the code itself.
+	// (Odin's JSON writer may still write false despite omitempty.)
+	use_invite_code:           bool `json:"use_invite_code,omitempty"`,
 }
 
 // One user's voice playback on one server, as only this client hears it. user_id is the
@@ -77,8 +82,10 @@ ServerUserVoice :: struct {
 	muted:   bool `json:"muted,omitempty"`,
 }
 
-loadConfig :: proc() -> (config: Config) {
+// Reads where the config lives (APPDATA on Windows, XDG_CONFIG_HOME or ~/.config on Linux).
+initConfigHome :: proc() {
 	when ODIN_OS == .Windows {
+		delete(APP_DATA)
 		APP_DATA = os.get_env("APPDATA", context.allocator)
 		if APP_DATA == "" {
 			fmt.println(
@@ -87,12 +94,17 @@ loadConfig :: proc() -> (config: Config) {
 			APP_DATA = "."
 		}
 	} else when ODIN_OS == .Linux {
+		delete(XDG_CONFIG_HOME)
 		XDG_CONFIG_HOME = os.get_env("XDG_CONFIG_HOME", context.allocator)
 		if XDG_CONFIG_HOME == "" {
 			delete(XDG_CONFIG_HOME)
 			XDG_CONFIG_HOME = getDefaultLinuxConfigHome(os.get_env("HOME", context.temp_allocator))
 		}
 	}
+}
+
+loadConfig :: proc() -> (config: Config) {
+	initConfigHome()
 
 	if !ensureConfigDirExists() {
 		return {}
@@ -448,6 +460,7 @@ Server_clone :: proc(server: Server) -> Server {
 		pinned_server_public_key = strings.clone(server.pinned_server_public_key),
 		pinned_server_fingerprint = strings.clone(server.pinned_server_fingerprint),
 		display_name = strings.clone(server.display_name),
+		use_invite_code = server.use_invite_code,
 	}
 	if len(server.user_voice) > 0 {
 		clone.user_voice = make([dynamic]ServerUserVoice, 0, len(server.user_voice))

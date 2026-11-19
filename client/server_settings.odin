@@ -129,6 +129,8 @@ State_openServerSettings :: proc(state: ^State, serverID: int) -> bool {
 	State_clearAdminRequestStatus(state)
 	// The Admin section lists every room, also those the admin is not in (protocol 15).
 	State_requestAdminRooms(state, serverID)
+	// Protocol 25: the invite codes and sign-up requests this account may see.
+	State_registrationSettingsOpened(state, serverID)
 	return true
 }
 
@@ -142,6 +144,7 @@ State_closeServerSettings :: proc(state: ^State) {
 	State_cancelAdminConfirm(state)
 	State_closeRoleEditor(state)
 	State_closeMemberRoles(state)
+	State_registrationSettingsClosed(state)
 }
 
 // Closes the screen when its server is no longer configured (removed in Settings or here).
@@ -399,6 +402,8 @@ ServerSettingsView :: struct {
 	admin:            AdminSectionView,
 	error:            string,
 	notice:           string,
+	// Protocol 25: Use an invite code (Server.use_invite_code).
+	useInviteCode:    bool,
 }
 
 @(private = "file")
@@ -550,5 +555,6 @@ buildServerSettingsView :: proc(
 	}
 	view.error = form.error
 	view.notice = form.notice
+	view.useInviteCode = server.use_invite_code
 	return
 }

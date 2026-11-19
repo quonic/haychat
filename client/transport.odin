@@ -23,6 +23,10 @@ ClientTransportResult :: struct {
 	hasResponse:         bool,
 	openedPacket:        common.Packet,
 	hasOpenedPacket:     bool,
+	// Protocol 25: the decoded ServerRegistrationRequired (message owned) when the handshake
+	// ended in the registering state.
+	registration:        common.ServerRegistrationRequiredPayload,
+	hasRegistration:     bool,
 }
 
 ClientTransportRuntimeEventKind :: enum {
@@ -106,6 +110,25 @@ ClientTransportRuntimeEventKind :: enum {
 	// Room permissions (protocol 24, room_permissions.odin). RoomPermissionsReceived is
 	// ServerAdminRoomPermissions: roomID and the payload in roomPermissions (arrays owned).
 	RoomPermissionsReceived,
+	// Registration (protocol 25, #43 G2, registration.odin). RegistrationRequired is the
+	// plaintext ServerRegistrationRequired: the transport is active and registering, with
+	// registrationMode, registrationRequestStatus and the server's sentence in message.
+	// RegistrationResult is a ServerRegisterResponse other than Created: registerStatus Pending
+	// or Refused keep the session registering, Declined has already ended it (failureKind
+	// RegistrationDeclined, not retried). Created arrives as Connected with registered set.
+	// RegistrationModeChanged is ServerRegistrationMode (registrationMode).
+	RegistrationRequired,
+	RegistrationResult,
+	RegistrationModeChanged,
+	// Invites and sign-up requests (registration.odin). InviteCreated is ServerInviteCreated:
+	// invite and the code in inviteCode (both owned; the code is wiped when freed). InviteList is
+	// ServerInviteList (invites). RegistrationRequests is ServerRegistrationRequests
+	// (registrationRequests, pendingCount); RegistrationRequestUpdated is
+	// ServerRegistrationRequestUpdated (registrationRequest, pendingCount).
+	InviteCreated,
+	InviteList,
+	RegistrationRequests,
+	RegistrationRequestUpdated,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -192,6 +215,22 @@ ClientTransportRuntimeEvent :: struct {
 	roleID:            int,
 	// Protocol 24.
 	roomPermissions:   common.ServerAdminRoomPermissionsPayload,
+	// Protocol 25 (registration). registrationMode is set on Connected, RegistrationRequired
+	// and RegistrationModeChanged; isRestricted on Connected and AccountUpdated. registered
+	// marks the Connected that a ServerRegisterResponse{Created} produced.
+	registrationMode:          common.RegistrationMode,
+	registrationRequestStatus: common.RegistrationRequestStatus,
+	registerStatus:            common.RegisterStatus,
+	isRestricted:              bool,
+	registered:                bool,
+	invite:                    common.InviteSummary,
+	invites:                   [dynamic]common.InviteSummary,
+	inviteCode:                string,
+	inviteID:                  int,
+	requestID:                 int,
+	registrationRequests:      [dynamic]common.RegistrationRequestSummary,
+	registrationRequest:       common.RegistrationRequestSummary,
+	pendingCount:              int,
 }
 
 ClientServerTransport :: struct {
@@ -221,6 +260,20 @@ ClientServerTransport :: struct {
 	authenticatedNicknameLocked: bool,
 	// The account's effective server permissions from ServerAuthSuccess (protocol 23).
 	authenticatedPermissions:  common.ServerPermissions,
+	// Protocol 25: the server's registration mode and the account's restriction, from
+	// ServerAuthSuccess or ServerRegisterResponse{Created}.
+	authenticatedRegistrationMode: common.RegistrationMode,
+	authenticatedIsRestricted: bool,
+	// Protocol 25 (#43 G2): ClientAuthRequestPayload.registering for every attempt (the
+	// server's "Use an invite code" setting, or an invite link being followed). Set by the UI
+	// thread under the worker lock (ClientServerTransport_setRegistering).
+	registering:               bool,
+	// While connection.status is Registering: a ClientRegister is waiting for its answer, and
+	// whether the last answer was Pending (a lost session then waits for Check again).
+	registerInFlight:          bool,
+	registrationPending:       bool,
+	// The last refusal while registering, the reason a session the server then ends shows.
+	registrationRefusal:       string,
 	lastError:                 string,
 	enetHost:                  ^ENet.Host,
 	enetPeer:                  ^ENet.Peer,
@@ -288,6 +341,12 @@ ClientServerTransport_clearSessionRuntimeState :: proc(transport: ^ClientServerT
 	transport.authenticatedNickname = ""
 	transport.authenticatedNicknameLocked = false
 	transport.authenticatedPermissions = {}
+	transport.authenticatedRegistrationMode = {}
+	transport.authenticatedIsRestricted = false
+	transport.registerInFlight = false
+	transport.registrationPending = false
+	delete(transport.registrationRefusal)
+	transport.registrationRefusal = ""
 }
 
 // Releases the ENet session and every string the transport owns.
@@ -297,6 +356,7 @@ ClientServerTransport_deinit :: proc(transport: ^ClientServerTransport) {
 	delete(transport.serverHost)
 	delete(transport.nickname)
 	delete(transport.authenticatedNickname)
+	delete(transport.registrationRefusal)
 	delete(transport.lastError)
 	delete(transport.pinnedServerPublicKey)
 	delete(transport.pinnedServerFingerprint)
@@ -369,6 +429,17 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.roles)
 	common.RoleSummary_deinit(&event.role)
 	common.ServerAdminRoomPermissionsPayload_deinit(&event.roomPermissions)
+	common.InviteSummary_deinit(&event.invite)
+	for &invite in event.invites {
+		common.InviteSummary_deinit(&invite)
+	}
+	delete(event.invites)
+	common.wipeAndDeleteString(&event.inviteCode)
+	for &request in event.registrationRequests {
+		common.RegistrationRequestSummary_deinit(&request)
+	}
+	delete(event.registrationRequests)
+	common.RegistrationRequestSummary_deinit(&event.registrationRequest)
 	for &participant in event.voiceParticipants {
 		common.VoiceParticipant_deinit(&participant)
 	}
@@ -516,6 +587,7 @@ ClientServerTransport_init :: proc(
 			transport                 = common.TransportState_init(.Client),
 			pinnedServerPublicKey     = strings.clone(server.pinned_server_public_key),
 			pinnedServerFingerprint   = strings.clone(server.pinned_server_fingerprint),
+			registering               = server.use_invite_code,
 		}
 	return transport, "", true
 }
@@ -671,6 +743,8 @@ ClientServerTransport_handleIncomingPacket :: proc(
 			ClientServerTransport_fail(transport, "failed to sign auth request")
 			return result, false
 		}
+		// Protocol 25 (D12): ask to sign up with an invite code even on an Open server.
+		clientAuthRequest.registering = transport.registering
 
 		sharedSecret, sharedSecretOK := common.deriveSharedSecret(
 			&transport.clientEphemeralPrivateKey,
@@ -734,43 +808,33 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		}
 		defer common.ServerAuthSuccessPayload_deinit(&authSuccess)
 
-		common.TransportState_activate(
-			&transport.transport,
-			transport.sessionID,
-			transport.pendingKeys,
-			transport.transport.peerTrustState,
-		)
-		common.DirectionalTransportKeys_wipe(&transport.pendingKeys)
-		transport.pendingKeysReady = false
-		transport.authenticatedUserID = authSuccess.userId
-		transport.authenticatedIsAdmin = authSuccess.isAdmin
-		delete(transport.authenticatedNickname)
-		transport.authenticatedNickname = authSuccess.nickname
-		authSuccess.nickname = ""
-		transport.authenticatedNicknameLocked = authSuccess.nicknameLocked
-		transport.authenticatedPermissions = authSuccess.permissions & common.SERVER_PERMISSIONS_ALL
+		ClientServerTransport_activatePendingKeys(transport)
+		ClientServerTransport_takeAuthSuccess(transport, &authSuccess)
 		return result, true
 
 	case .ServerRegistrationRequired:
-		// Protocol 25 (#43, D12): the key must sign up with an invite code. This client cannot
-		// yet (G2 adds the sign-up), so it stops here as a failure that is not retried.
-		if transport.transport.phase != .AwaitingAuthResult {
+		// Protocol 25 (#43, D12): the key has no account the server will create at sign-in.
+		// The server's transport is already active, so this side activates its own exactly as
+		// on ServerAuthSuccess; the session is then registering, and the only packet it sends
+		// is a sealed ClientRegister (ClientServerTransport_sendRegister).
+		if transport.transport.phase != .AwaitingAuthResult || !transport.pendingKeysReady {
 			ClientServerTransport_fail(transport, "unexpected registration notice")
 			return result, false
 		}
 		required: common.ServerRegistrationRequiredPayload
-		if cbor.unmarshal(outerPacket.payload, &required) != nil {
+		if cbor.unmarshal(outerPacket.payload, &required) != nil ||
+		   !common.registrationModeIsSupported(required.mode) {
 			common.ServerRegistrationRequiredPayload_deinit(&required)
 			ClientServerTransport_fail(transport, "invalid registration notice")
 			return result, false
 		}
-		defer common.ServerRegistrationRequiredPayload_deinit(&required)
-		message := strings.concatenate(
-			{CLIENT_REGISTRATION_REQUIRED_MESSAGE, ": ", required.message},
-		)
-		defer delete(message)
-		ClientServerTransport_fail(transport, message)
-		return result, false
+		ClientServerTransport_activatePendingKeys(transport)
+		transport.authenticatedRegistrationMode = required.mode
+		transport.registerInFlight = false
+		transport.registrationPending = required.status == .Pending
+		result.registration = required
+		result.hasRegistration = true
+		return result, true
 
 	case .ServerAuthFailure:
 		authFailure: common.ServerAuthFailurePayload
@@ -814,6 +878,36 @@ ClientServerTransport_handleIncomingPacket :: proc(
 		)
 		return result, false
 	}
+}
+
+// Activates the transport with the handshake's keys and wipes them (ServerAuthSuccess and
+// ServerRegistrationRequired alike, D12).
+ClientServerTransport_activatePendingKeys :: proc(transport: ^ClientServerTransport) {
+	common.TransportState_activate(
+		&transport.transport,
+		transport.sessionID,
+		transport.pendingKeys,
+		transport.transport.peerTrustState,
+	)
+	common.DirectionalTransportKeys_wipe(&transport.pendingKeys)
+	transport.pendingKeysReady = false
+}
+
+// Keeps what ServerAuthSuccess (or ServerRegisterResponse.auth) says about the account; takes
+// the nickname.
+ClientServerTransport_takeAuthSuccess :: proc(
+	transport: ^ClientServerTransport,
+	authSuccess: ^common.ServerAuthSuccessPayload,
+) {
+	transport.authenticatedUserID = authSuccess.userId
+	transport.authenticatedIsAdmin = authSuccess.isAdmin
+	delete(transport.authenticatedNickname)
+	transport.authenticatedNickname = authSuccess.nickname
+	authSuccess.nickname = ""
+	transport.authenticatedNicknameLocked = authSuccess.nicknameLocked
+	transport.authenticatedPermissions = authSuccess.permissions & common.SERVER_PERMISSIONS_ALL
+	transport.authenticatedRegistrationMode = authSuccess.registrationMode
+	transport.authenticatedIsRestricted = authSuccess.isRestricted
 }
 
 ClientServerTransport_buildEncryptedPacketBytes :: proc(
@@ -1970,6 +2064,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				nickname = payload.nickname,
 				nicknameLocked = payload.nicknameLocked,
 				permissions = payload.permissions & common.SERVER_PERMISSIONS_ALL,
+				isRestricted = payload.isRestricted,
 			},
 			true
 
@@ -1991,6 +2086,8 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				peerUserID = payload.userId,
 				message = payload.message,
 				roleID = payload.roleId,
+				inviteID = payload.inviteId,
+				requestID = payload.requestId,
 			},
 			true
 
@@ -2070,6 +2167,13 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				roleID = payload.roleId,
 			},
 			true
+
+	case .ServerRegistrationMode,
+	     .ServerInviteCreated,
+	     .ServerInviteList,
+	     .ServerRegistrationRequests,
+	     .ServerRegistrationRequestUpdated:
+		return ClientServerTransport_translateRegistrationPacket(transport, innerPacket)
 
 	case .ServerUserKeys:
 		payload: common.ServerUserKeysPayload

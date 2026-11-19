@@ -2,11 +2,7 @@ package client
 
 import "core:fmt"
 import "core:os"
-import filepath "core:path/filepath"
 import "core:strings"
-import "core:sys/linux"
-import "core:sys/windows"
-import "core:text/regex"
 
 
 xScheme :: "x-scheme-handler/haychat"
@@ -117,100 +113,34 @@ registerSchemeHandlerLinux :: proc() {
 	}
 }
 
-// Path to the temporary file
-getJoinFilePath :: proc() -> string {
-	when ODIN_OS == .Windows {
-		tempDir, tempDirErr := os.temp_directory(context.allocator)
-		if tempDirErr != nil {
-			return ""
-		}
-		tempJoinFilePath, joinErr := filepath.join({tempDir, "haychat_url_handler"})
-		if joinErr != nil {
-			return ""
-		}
-		return tempJoinFilePath
-	} else when ODIN_OS == .Linux {
-		return "/tmp/haychat_url_handler"
-	} else {
-		return ""
+// Handles a haychat:// link from the command line before the window opens (main). When a
+// HayChat window already runs, the link goes to it through the per-user hand-off file
+// (invite_link.odin: mode 0600, created new, deleted once read; never /tmp) and this process
+// should exit: handedOff is true. Otherwise this process opens the link itself after startup
+// (init), which shows the confirmation. The link's invite code is never printed.
+schemeHandler :: proc(url: string) -> (handedOff: bool) {
+	if _, err := parseHaychatLink(url, context.temp_allocator); err != .None {
+		fmt.eprintln("[Warning] Ignoring a link HayChat cannot use:", redactHaychatLink(url))
+		return false
 	}
+	if !linkOtherInstanceRunning() {
+		return false
+	}
+	if !writeLinkHandoff(url) {
+		fmt.eprintln("[Warning] Could not pass the link to the running HayChat window")
+		return false
+	}
+	fmt.eprintln("[Info] Passed the link to the running HayChat window:", redactHaychatLink(url))
+	return true
 }
 
-// Function to handle incoming URLs with the "haychat" scheme. This function parses the URL, extracts relevant information, and saves it to a temporary file for the main application to read and act upon.
-schemeHandler :: proc(url: string) -> (host: string, port: string) {
-	// Example URL: haychat://example.com:1234/join
-	if strings.starts_with(url, "haychat://") {
-		// Extract the relevant part of the URL (e.g., the chat ID or action)
-		action := strings.trim_prefix(url, "haychat://")
-		fmt.println("Received haychat URL with action:", action)
-
-		// We are looking for a patter like "example.com:1234/join"
-		regex_create_result, regex_err := regex.create(
-			`^([^:/]+):(\d+)/(join)?$`,
-			{.Case_Insensitive, .Ignore_Whitespace},
-		)
-		if regex_err != nil {
-			fmt.println("Failed to create regex:", regex_err)
-			return
+// The first haychat:// argument, or "". Borrowed from args.
+schemeLinkArgument :: proc(args: []string) -> string {
+	for arg in args {
+		if len(arg) >= len(HAYCHAT_LINK_SCHEME) &&
+		   strings.equal_fold(arg[:len(HAYCHAT_LINK_SCHEME)], HAYCHAT_LINK_SCHEME) {
+			return arg
 		}
-
-		capture, success := regex.match_and_allocate_capture(regex_create_result, action)
-		if !success {
-			fmt.println("Failed to match regex")
-			return
-		}
-		host = capture.groups[1]
-		port = capture.groups[2]
-		join := capture.groups[3] == "join"
-		fmt.println("Parsed URL - Host:", host, "Port:", port, "Join:", join)
-		// Save the host and port to a temporary file
-		when ODIN_OS == .Windows {
-			path := getJoinFilePath()
-			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
-			if writeErr != nil {
-				fmt.println("Failed to write to temporary file:", writeErr)
-				return
-			}
-			fmt.println("Saved URL data to temporary file:", path)
-		} else when ODIN_OS == .Linux {
-			path := getJoinFilePath()
-			writeErr := os.write_entire_file(path, fmt.tprintf("%s:%s\n", host, port))
-			if writeErr != nil {
-				fmt.println("Failed to write to temporary file:", writeErr)
-				return
-			}
-			fmt.println("Saved URL data to temporary file:", path)
-			// Check if we are already running and if so, exit to allow the existing instance to handle the URL
-			pid_list, err := os.process_list(context.allocator)
-			if err != nil {
-				fmt.println("Failed to list processes:", err)
-				return
-			}
-			currentPid := os.get_pid()
-			for pid in pid_list {
-				{
-					process_info, err := os.process_info_by_pid(
-						pid,
-						{.Command_Line},
-						context.allocator,
-					)
-					if err != nil {
-						continue
-					}
-					if pid != currentPid && process_info.command_line == "haychat" {
-						fmt.println(
-							"Another instance of haychat is already running. Exiting to allow it to handle the URL.",
-						)
-						os.exit(0)
-					}
-				}
-			}
-		} else {
-			fmt.println("Unsupported operating system for URL scheme handling.")
-		}
-		return host, port
-	} else {
-		fmt.println("Received URL with unsupported scheme:", url)
-		os.exit(1) // Exit with an error code for unsupported schemes
 	}
+	return ""
 }

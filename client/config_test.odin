@@ -915,3 +915,45 @@ testEncryptionKeyNeedsAnIdentityKeyAndIsCloned :: proc(t: ^testing.T) {
 	_, _, cloneOK := Config_encryptionKey(clone)
 	assert(cloneOK, "expected the cloned key to be valid")
 }
+
+// Protocol 25 (#43 G2): Use an invite code is stored per server as use_invite_code (false or
+// left out while off, as the JSON writer decides) and survives a round trip and a clone. The
+// code itself is never in the config.
+@(test)
+testUseInviteCodeConfigKeyRoundTrips :: proc(t: ^testing.T) {
+	config := Config {
+		display_name = strings.clone("alice"),
+	}
+	defer Config_deinit(&config)
+	append(
+		&config.servers,
+		Server{id = 1, name = strings.clone("Plain"), host = strings.clone("a"), port = 1},
+	)
+	plainJSON, plainErr := json.marshal(config)
+	defer delete(plainJSON)
+	assert(plainErr == nil, "expected the config to marshal")
+	assert(
+		!strings.contains(string(plainJSON), `"use_invite_code":true`),
+		fmt.tprintf("expected use_invite_code off, got %s", plainJSON),
+	)
+
+	config.servers[0].use_invite_code = true
+	data, marshalErr := json.marshal(config)
+	defer delete(data)
+	assert(marshalErr == nil, "expected the config to marshal")
+	assert(
+		strings.contains(string(data), `"use_invite_code":true`),
+		fmt.tprintf("expected use_invite_code in %s", data),
+	)
+	loaded: Config
+	defer Config_deinit(&loaded)
+	assert(json.unmarshal(data, &loaded) == nil, fmt.tprintf("expected %s to load", data))
+	Config_validateServers(&loaded)
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	assert(
+		loaded.servers[0].use_invite_code && clone.servers[0].use_invite_code,
+		"expected use_invite_code back from the file and the clone",
+	)
+	_ = t
+}

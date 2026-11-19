@@ -697,7 +697,8 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 			},
 			`{"event":"user_updated","serverID":955,"user":{"id":9,"nickname":"bob",` +
 			`"isOnline":true,"identityPublicKey":"","hasEncryptionKey":false,` +
-			`"keyState":"unknown","isAdmin":false,"isBanned":true,"roleIds":[]}}`,
+			`"keyState":"unknown","isAdmin":false,"isBanned":true,"roleIds":[],` +
+			`"isRestricted":false}}`,
 			.UserUpdated,
 		},
 		{
@@ -709,7 +710,7 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 				message = strings.clone("Banned bob"),
 			},
 			`{"event":"admin_result","serverID":955,"action":"ban","userID":9,` +
-			`"message":"Banned bob","roleID":0}`,
+			`"message":"Banned bob","roleID":0,"inviteID":0,"requestID":0}`,
 			.AdminResult,
 		},
 		{
@@ -721,7 +722,7 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 				nicknameLocked = true,
 			},
 			`{"event":"account_updated","serverID":955,"isAdmin":true,"nickname":"Tester",` +
-			`"nicknameLocked":true,"permissions":[]}`,
+			`"nicknameLocked":true,"permissions":[],"isRestricted":false}`,
 			.AccountUpdated,
 		},
 		{

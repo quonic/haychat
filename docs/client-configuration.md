@@ -29,6 +29,7 @@ to the right place.
 | `servers[]` | Configured servers: `id`, `name`, `short_name` (rail label), `host`, `port` |
 | `servers[].pinned_server_public_key`, `servers[].pinned_server_fingerprint` | The server identity pinned on first connect. Cleared when the server's address changes or by **Forget key** in Server settings; replaced by **Trust the new key** |
 | `servers[].display_name` | The display name used on this server only, set in Server settings. Default unset: the global `display_name`. Surrounding spaces are dropped when the config is read; a name of the wrong length is refused by the client like a bad global name ("Choose another name") |
+| `servers[].use_invite_code` | Server settings → Signing up → **Use an invite code** (protocol 25): connect with `registering` set, so a server that would let anyone sign up shows the sign-up screen instead, to enter a code that grants roles or a room. Default off (`false` or absent). It changes nothing for an identity key that already has an account there, and an invite link sets it for its own connection without saving it. The code itself is never saved: it lives in memory until the server answers or the sign-up screen goes away |
 | `servers[].user_voice[]` | Voice playback per user of this server, set in Server settings → Voice: `user_id` (the server's account ID), `volume` (linear, 0 to 2, i.e. 0 to 200 %; unset is 1) and `muted` (Mute for me: this client does not play that user). Only entries that differ from the default are written, at most 256 per server. When the config is read, entries without a valid `user_id` or equal to the default are dropped, volumes are clamped, and of repeated users the last entry wins. Local only: the server never learns about them |
 | `encryption_private_key`, `encryption_public_key` | This profile's X25519 encryption key pair in hex (64 characters each), generated on first start. The private half is a secret like `private_key` and is never printed. One key for every server |
 | `encryption_key_signature`, `encryption_key_created_at` | The identity key's Ed25519 signature (hex, 128 characters) over the encryption key bundle, and the bundle's creation time in Unix seconds. The client publishes the bundle to every server it signs in to. At start, a missing key, one that does not parse, a public key that is not the private key's, or a signature that does not verify against `public_key` (for example after the identity key was replaced) is replaced with a new key; other users then see "<name> set up encryption again" |
@@ -47,8 +48,14 @@ Settings → Voice writes the voice keys only when they differ from the default,
 of a default reaches everyone who did not choose otherwise. When the config is read,
 out-of-range numbers are clamped and invalid strings fall back to the default.
 
-Server settings (`servers[].display_name`, labels, `servers[].user_voice[]`) live in this one
-profile and are not synced between devices.
+Server settings (`servers[].display_name`, labels, `servers[].user_voice[]`,
+`servers[].use_invite_code`) live in this one profile and are not synced between devices.
+
+`haychat://` links (protocol 25, plan D19) are handed from the process the link starts to a
+HayChat window that already runs through a file only the user can read: `link-handoff` in
+`$XDG_RUNTIME_DIR/haychat/` (or, without a runtime directory, the config directory; on Windows
+`%APPDATA%\haychat\`), created new with mode 0600 and deleted once read. The window records
+its process ID in `instance` there so the second process knows it runs. Neither is config.
 
 ## Key Store
 

@@ -7,6 +7,7 @@ package client
 import "../common"
 import "core:os"
 import "core:strings"
+import "core:time"
 import "hotkey"
 
 CHAT_RUNTIME_MAX_EVENTS_PER_FRAME :: 32
@@ -48,9 +49,6 @@ ServerRoomCache :: struct {
 State :: struct {
 	config:                         Config,
 	serverTransports:               [dynamic]ClientServerTransport,
-	should_join_server_from_scheme: bool,
-	joinServerFromScheme_host:      string,
-	joinServerFromScheme_port:      string,
 	// The server whose channels, conversations, and members the sidebar shows.
 	selected_server_id:             int,
 	selected_transport_index:       int,
@@ -125,6 +123,18 @@ State :: struct {
 	roomChainNotes:                 [dynamic]RoomChainNote,
 	// Each server's roles (roles.odin, protocol 23).
 	serverRoles:                    [dynamic]ServerRoleCache,
+	// Registration (protocol 25, #43 G2, registration.odin): each server's invites and sign-up
+	// requests, the sign-up screen's fields (the code only in memory), the Admin section's
+	// invite form and decline reason.
+	serverRegistrations:            [dynamic]ServerRegistrationCache,
+	signUpForm:                     SignUpForm,
+	inviteForm:                     InviteForm,
+	decisionForm:                   DecisionForm,
+	// A haychat:// link waiting for the user's answer (invite_link.odin), and whether this
+	// process watches the hand-off file for links other processes pass on (the GUI only).
+	pendingLink:                    PendingLink,
+	linkHandoffWatch:               bool,
+	linkHandoffPolledAt:            time.Tick,
 }
 
 State_selectedTransportIndexForServerID :: proc(state: State, serverID: int) -> int {
@@ -232,8 +242,6 @@ State_deinit :: proc(state: ^State) {
 	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)
-	delete(state.joinServerFromScheme_host)
-	delete(state.joinServerFromScheme_port)
 	delete(state.chat_status_message)
 	for index in 0 ..< len(state.server_room_caches) {
 		ServerRoomCache_deinit(&state.server_room_caches[index])
@@ -251,6 +259,10 @@ State_deinit :: proc(state: ^State) {
 	RoomEditor_deinit(&state.roomEditor)
 	AdminRequestState_deinit(&state.adminRequest)
 	State_deinitRoles(state)
+	if state.linkHandoffWatch {
+		removeLinkInstanceFile()
+	}
+	State_deinitRegistration(state)
 	ServerSettingsForm_deinit(&state.serverSettings)
 	ClientVoiceState_deinit(&state.voice)
 	VoiceSettingsPanel_deinit(&state.voicePanel)
@@ -279,19 +291,14 @@ init :: proc(
 	// connection status while it runs.
 	State_startNetwork(&init_state, onEventQueued, onEventQueuedData)
 
-	if len(os.args) > 1 {
-		for arg in os.args {
-			if strings.starts_with(arg, "haychat://") {
-				// Get the host and port
-				// schemeHandler() already handles checking if their is already an instance running and saving the URL data to a temporary file, so we just need to call it here to ensure that the URL data is processed correctly.
-				// If we are the first process to run, continue with the normal startup process and handle the URL data after the window is initialized. If we are a subsequent process, exit immediately to allow the existing instance to handle the URL data.
-				init_state.joinServerFromScheme_host, init_state.joinServerFromScheme_port =
-					schemeHandler(arg)
-				init_state.should_join_server_from_scheme = true
-				// TODO: Implement logic to add the server to the config and connect to it after the window is initialized. This should include checking if the server is already in the config, and if not, adding it and then connecting to it.
-			}
-		}
+	// A haychat:// link this process was started with (plan D19): shown for confirmation once
+	// the window is up; nothing connects or signs up before the user answers. main already
+	// handed it to a running window when there is one (schemeHandler).
+	if link := schemeLinkArgument(os.args[1:]); len(link) > 0 {
+		State_openLink(&init_state, link)
 	}
+	// Links opened while this window runs arrive through the hand-off file.
+	init_state.linkHandoffWatch = writeLinkInstanceFile()
 
 	return
 }

@@ -130,7 +130,7 @@ expect_ok a admin-rename "$user_b" lock "$renamed_b"
 expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"rename\",\"userID\":$user_b," \
 	"$start_a" "client a got no admin_result for the rename"
 renamed_pattern="^\\{\"event\":\"account_updated\",.*\"nickname\":\"$renamed_b\","
-renamed_pattern+="\"nicknameLocked\":true,\"permissions\":\\[\\]\\}$"
+renamed_pattern+="\"nicknameLocked\":true,\"permissions\":\\[\\],"
 expect_event b "$renamed_pattern" "$start_b" "client b did not see its new locked name"
 expect_event a "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,\"nickname\":\"$renamed_b\"," \
 	"$start_a" "client a did not see user_updated with b's new name"
@@ -141,7 +141,7 @@ connected_b=$(tail -n +"$((start_b + 1))" "$work_dir/b.out" | grep -F '{"event":
 	tail -n 1)
 echo "    b< $connected_b"
 locked_name="\"nickname\":\"$renamed_b\",\"isAdmin\":false,\"nicknameLocked\":true,"
-locked_name+="\"permissions\":[]}"
+locked_name+="\"permissions\":[],"
 [[ "$connected_b" == *"$locked_name"* ]] ||
 	fail "client b's reconnect did not keep the locked name $renamed_b: $connected_b"
 echo "==> [admin] rename passed"
@@ -236,7 +236,7 @@ expect_ok a roles-save 0 manage-rooms "$role_name"
 role_line=$(wait_for_match a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\"," \
 	"$start_a") || fail "client a got no admin_result for the role"
 echo "    a< $role_line"
-[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the role's admin_result has no roleID"
+[[ "$role_line" =~ \"roleID\":([0-9]+)[,}] ]] || fail "the role's admin_result has no roleID"
 role_id=${BASH_REMATCH[1]}
 expect_event b "^\\{\"event\":\"role_updated\",.*\"id\":$role_id,\"name\":\"$role_name\"," \
 	"$start_b" "client b did not see the new role"
@@ -246,7 +246,7 @@ expect_event a "^\\{\"event\":\"admin_result\",.*\"action\":\"role-assign\",\"us
 	"$start_a" "client a got no admin_result for the assignment"
 expect_event b "^\\{\"event\":\"user_updated\",.*\"id\":$user_b,.*\"roleIds\":\\[$role_id\\]" \
 	"$start_b" "client b did not see its new role in user_updated"
-expect_event b '^\{"event":"account_updated",.*"permissions":\["manage-rooms"\]\}$' \
+expect_event b '^\{"event":"account_updated",.*"permissions":\["manage-rooms"\],' \
 	"$start_b" "client b did not see account_updated with manage-rooms"
 expect_ok b status
 [[ "$last_result" == *'"permissions":["manage-rooms"]'* ]] ||
@@ -260,7 +260,7 @@ start_b=$(lines b)
 expect_ok a roles-delete "$role_id"
 expect_event b "^\\{\"event\":\"role_deleted\",\"serverID\":1,\"roleID\":$role_id\\}$" \
 	"$start_b" "client b did not see the role deleted"
-expect_event b '^\{"event":"account_updated",.*"permissions":\[\]\}$' "$start_b" \
+expect_event b '^\{"event":"account_updated",.*"permissions":\[\],' "$start_b" \
 	"client b did not lose manage-rooms with the role"
 start_b=$(lines b)
 expect_ok b room-create text "adm-refused-again-$run_tag"
@@ -299,7 +299,7 @@ expect_ok a roles-save 0 none "$speaker_role"
 save_pattern="^\\{\"event\":\"admin_result\",.*\"action\":\"role-save\","
 role_line=$(wait_for_match a "$save_pattern" "$start_a") ||
 	fail "client a got no admin_result for the speakers role"
-[[ "$role_line" =~ \"roleID\":([0-9]+)\} ]] || fail "the speakers role has no roleID"
+[[ "$role_line" =~ \"roleID\":([0-9]+)[,}] ]] || fail "the speakers role has no roleID"
 speakers=${BASH_REMATCH[1]}
 start_a=$(lines a)
 expect_ok a room-permissions-set "$quiet" speak "$speakers=send"

@@ -231,6 +231,10 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 // Peer user IDs belong to one server, so switching servers closes any open conversation and
 // the room editor.
 State_switchToServer :: proc(state: ^State, serverID: int) {
+	// Leaving a server's sign-up screen forgets its code (registration.odin).
+	if state.signUpForm.serverID != serverID {
+		State_wipeSignUpForm(state)
+	}
 	State_closeRoomEditor(state)
 	State_closeServerSettings(state)
 	State_closeDirectConversation(state)
@@ -579,6 +583,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_roomEditorProtocolError(state, serverID, message)
 	State_roomMembersProtocolError(state, serverID)
 	State_adminProtocolError(state, serverID, message)
+	State_registrationProtocolError(state, serverID, message)
 	State_e2eeProtocolError(state, serverID)
 	State_roomLogsProtocolError(state, serverID)
 	State_setChatStatus(state, message)
@@ -711,6 +716,39 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.peerUserID,
 			event.message,
 			event.roleID,
+			event.inviteID,
+			event.requestID,
+		)
+		State_registrationAdminResult(
+			state,
+			event.serverID,
+			event.adminAction,
+			event.inviteID,
+			event.requestID,
+		)
+	case .RegistrationRequired:
+		State_registrationRequired(state, event)
+	case .RegistrationResult:
+		State_registrationResult(state, event)
+	case .RegistrationModeChanged:
+		State_registrationModeChanged(state, event.serverID, event.registrationMode)
+	case .InviteCreated:
+		State_inviteCreated(state, event)
+	case .InviteList:
+		State_receiveInviteList(state, event.serverID, &event.invites)
+	case .RegistrationRequests:
+		State_receiveRegistrationRequests(
+			state,
+			event.serverID,
+			&event.registrationRequests,
+			event.pendingCount,
+		)
+	case .RegistrationRequestUpdated:
+		State_registrationRequestUpdated(
+			state,
+			event.serverID,
+			&event.registrationRequest,
+			event.pendingCount,
 		)
 	case .RoleListReceived:
 		State_receiveRoleList(state, event.serverID, &event.roles)

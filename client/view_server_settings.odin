@@ -35,20 +35,17 @@ SERVER_SETTINGS_VOLUME_TEXT_WIDTH :: 56
 // Percent steps of the volume sliders.
 SERVER_SETTINGS_VOLUME_STEP :: f32(0.05)
 
-@(private = "file")
 serverSettingsLabel :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string) {
 	ui.label(ctx, ui.cutTop(column, ui.lineHeight(ctx)), text, ctx.theme.fgMuted, .Bold)
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
 }
 
-@(private = "file")
 serverSettingsHeading :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string) {
 	ui.label(ctx, ui.cutTop(column, ui.lineHeight(ctx, .Bold) * 1.4), text, ctx.theme.fg, .Bold)
 	ui.divider(ctx, ui.cutTop(column, max(1, ui.dp(ctx, 1))))
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
 }
 
-@(private = "file")
 serverSettingsWrapped :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string, color: ui.Color) {
 	if len(text) == 0 {
 		return
@@ -58,7 +55,6 @@ serverSettingsWrapped :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string, 
 }
 
 // A single-line field in r. Returns true when Enter was pressed in it.
-@(private = "file")
 serverSettingsField :: proc(
 	ctx: ^ui.Context,
 	r: ui.Rect,
@@ -77,7 +73,6 @@ serverSettingsField :: proc(
 	return result.submitted
 }
 
-@(private = "file")
 ServerSettingsButtonStyle :: enum u8 {
 	Primary,
 	Plain,
@@ -85,7 +80,6 @@ ServerSettingsButtonStyle :: enum u8 {
 	DangerArmed,
 }
 
-@(private = "file")
 serverSettingsButton :: proc(
 	ctx: ^ui.Context,
 	row: ^ui.Rect,
@@ -299,6 +293,7 @@ viewServerSettings :: proc(
 	}
 	_ = ui.cutTop(&column, sectionGap)
 
+
 	// ── Voice ──
 	serverSettingsHeading(ctx, &column, "Voice")
 	serverSettingsWrapped(ctx, &column, view.voiceNote, ctx.theme.fgMuted)
@@ -362,6 +357,30 @@ viewServerSettings :: proc(
 	}
 
 	_ = ui.cutTop(&column, sectionGap)
+
+	// ── Sign-up (protocol 25): acts at once; after Voice, which keeps its place ──
+	inviteCodeClicked := false
+	{
+		serverSettingsLabel(ctx, &column, "Signing up")
+		inviteCodeClicked = adminCheckbox(
+			ctx,
+			&column,
+			ui.idOf("server-settings-invite-code", serverID),
+			"Use an invite code",
+			view.useInviteCode,
+			true,
+		)
+		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		serverSettingsWrapped(
+			ctx,
+			&column,
+			"On a server where anyone may sign up, ask for the sign-up screen instead, to " +
+			"enter a code that gives you roles or a room. It changes nothing once you have an " +
+			"account here.",
+			ctx.theme.fgMuted,
+		)
+		_ = ui.cutTop(&column, sectionGap)
+	}
 
 	// ── Admin (admins only) ──
 	adminAction: AdminSectionAction
@@ -439,8 +458,21 @@ viewServerSettings :: proc(
 	case voiceAction.toggleMute:
 		State_setUserVoiceMuted(state, serverID, voiceAction.userID, voiceAction.muted)
 	}
+	if inviteCodeClicked {
+		State_setUseInviteCode(state, serverID, !view.useInviteCode)
+	}
+	if adminAction.registration.kind != .None {
+		runRegistrationAdminAction(
+			state,
+			serverID,
+			adminAction.registration,
+			view.admin.registration,
+		)
+	}
 	switch adminAction.kind {
 	case .None:
+	case .Unrestrict:
+		State_setRestricted(state, serverID, adminAction.userID, false)
 	case .OpenConfirm:
 		State_openAdminConfirm(state, serverID, adminAction.confirmKind, adminAction.userID)
 	case .CancelConfirm:
@@ -524,10 +556,13 @@ AdminSectionActionKind :: enum u8 {
 	SubmitRoleEditor,
 	DeleteRole,
 	ToggleRolePermission,
+	// Protocol 25 (view_registration.odin).
+	Unrestrict,
 }
 
 @(private = "file")
 AdminSectionAction :: struct {
+	registration: RegistrationAdminAction,
 	kind:        AdminSectionActionKind,
 	confirmKind: AdminConfirmKind,
 	userID:      int,
@@ -539,7 +574,6 @@ AdminSectionAction :: struct {
 
 // A small button laid out from the left of row. A disabled control is drawn muted, never
 // clicks, and says why in its tooltip.
-@(private = "file")
 adminButton :: proc(
 	ctx: ^ui.Context,
 	row: ^ui.Rect,
@@ -568,7 +602,6 @@ adminButton :: proc(
 }
 
 // A small pill after a member's name ("Admin", "Banned"), laid out from the left of row.
-@(private = "file")
 adminBadge :: proc(ctx: ^ui.Context, row: ^ui.Rect, text: string, color: ui.Color) {
 	badgeH := ui.dp(ctx, 18)
 	badgeW := ui.textSize(ui.textGet(ctx, 0, .Bold, text)).x + ui.dp(ctx, 12)
@@ -597,6 +630,12 @@ viewAdminSection :: proc(
 	gap := ui.dp(ctx, PANEL_PADDING)
 	rowH := ui.dp(ctx, ROW_HEIGHT)
 	serverSettingsHeading(ctx, column, "Admin")
+	// The approver badge (D18): a count, no pop-up.
+	if view.pendingCount > 0 {
+		line := ui.cutTop(column, ui.dp(ctx, ROW_HEIGHT))
+		adminBadge(ctx, &line, pendingBadgeText(view.pendingCount), ctx.theme.danger)
+		ui.label(ctx, line, "Sign-up requests are waiting below.", ctx.theme.fgMuted)
+	}
 	serverSettingsWrapped(ctx, column, view.note, ctx.theme.fgMuted)
 	statusOnRow := false
 	for member in view.members {
@@ -627,6 +666,9 @@ viewAdminSection :: proc(
 			if member.isBanned {
 				badgesW += ui.textSize(ui.textGet(ctx, 0, .Bold, "Banned")).x + ui.dp(ctx, 18)
 			}
+			if member.isRestricted {
+				badgesW += ui.textSize(ui.textGet(ctx, 0, .Bold, "Restricted")).x + ui.dp(ctx, 18)
+			}
 			nameW := min(ui.textSize(ui.textGet(ctx, 0, .Bold, member.label)).x, line.w - badgesW)
 			nameRect := ui.cutLeft(&line, max(0, nameW))
 			_ = ui.cutLeft(&line, gap)
@@ -641,6 +683,9 @@ viewAdminSection :: proc(
 			}
 			if member.isBanned {
 				adminBadge(ctx, &line, "Banned", ctx.theme.danger)
+			}
+			if member.isRestricted {
+				adminBadge(ctx, &line, "Restricted", ctx.theme.warning)
 			}
 		}
 		// Protocol 23: its roles other than admin, under the name.
@@ -700,6 +745,16 @@ viewAdminSection :: proc(
 			) {
 				action = {kind = .OpenMemberRoles, userID = userID}
 			}
+			// Protocol 25: lifting a restriction (D11) joins the account to every Public room.
+			if member.isRestricted &&
+			   adminButton(
+				   ctx,
+				   &line,
+				   ui.idOf("admin-member-unrestrict", serverID, userID),
+				   member.restriction,
+			   ) {
+				action = {kind = .Unrestrict, userID = userID}
+			}
 		}
 		if member.rolesOpen {
 			_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
@@ -743,6 +798,19 @@ viewAdminSection :: proc(
 		   rolesAction.kind != .None {
 			action = rolesAction
 		}
+	}
+
+	// Protocol 25: Registration, Invites and Sign-up requests (view_registration.odin), after
+	// Members and Roles and before Rooms, which stays last above the server key.
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
+	if registrationAction := viewRegistrationAdmin(
+		state,
+		ctx,
+		column,
+		view.registration,
+		serverID,
+	); registrationAction.kind != .None {
+		action = {registration = registrationAction}
 	}
 
 	if !view.showRooms {
@@ -828,7 +896,6 @@ ADMIN_ROOMS_MEMBERS_REASON :: "Needs a role that manages room members."
 
 // A checkbox row: a box, ticked when checked, and the label, the whole row one button. A
 // disabled one is drawn muted and never clicks.
-@(private = "file")
 adminCheckbox :: proc(
 	ctx: ^ui.Context,
 	column: ^ui.Rect,
@@ -855,7 +922,6 @@ adminCheckbox :: proc(
 }
 
 // A bordered box of height boxH cut from column, returning its padded inside.
-@(private = "file")
 adminBox :: proc(ctx: ^ui.Context, column: ^ui.Rect, boxH: f32) -> ui.Rect {
 	padding := ui.dp(ctx, PANEL_PADDING * 1.5)
 	box := ui.cutTop(column, boxH)

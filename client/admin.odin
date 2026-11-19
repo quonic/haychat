@@ -32,6 +32,12 @@ AdminRequest :: struct {
 	position:    int,
 	roleIDs:     [common.SERVER_ROLES_MAX]int,
 	roleIDCount: int,
+	// Protocol 25 (registration.odin). RevokeInvite: inviteID. SetRegistrationMode: mode.
+	// DecideRegistration: requestID, flag (approve) and reason (0..500 characters).
+	// SetRestricted: userID and flag (restricted).
+	inviteID:    int,
+	requestID:   int,
+	mode:        common.RegistrationMode,
 }
 
 AdminSendBridge :: #type proc(transport: ^ClientServerTransport, request: AdminRequest) -> bool
@@ -79,8 +85,19 @@ ClientServerTransport_sendAdminRequest :: proc(
 			request.userID,
 			roleIDs[:request.roleIDCount],
 		)
-	case .RevokeInvite, .SetRegistrationMode, .DecideRegistration, .SetRestricted:
-	// Protocol 25 registration actions; the client sends them from G2 on.
+	case .RevokeInvite:
+		return ClientServerTransport_revokeInvite(transport, request.inviteID)
+	case .SetRegistrationMode:
+		return ClientServerTransport_setRegistrationMode(transport, request.mode)
+	case .DecideRegistration:
+		return ClientServerTransport_decideRegistration(
+			transport,
+			request.requestID,
+			request.flag,
+			request.reason,
+		)
+	case .SetRestricted:
+		return ClientServerTransport_setRestricted(transport, request.userID, request.flag)
 	}
 	return false
 }
@@ -92,6 +109,9 @@ AdminRequestState :: struct {
 	userID:   int,
 	// The role a SaveRole or DeleteRole names (protocol 23); a created role's ID once answered.
 	roleID:   int,
+	// Protocol 25: the code a RevokeInvite and the request a DecideRegistration names.
+	inviteID:  int,
+	requestID: int,
 	pending:  bool,
 	// The server's sentence for a success (ServerAdminActionResult.message).
 	result:   string,
@@ -128,6 +148,28 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 			return "No role selected."
 		}
 		return ""
+	case .RevokeInvite:
+		if request.inviteID <= 0 {
+			return "No invite code selected."
+		}
+		return ""
+	case .SetRegistrationMode:
+		if !common.registrationModeIsSupported(request.mode) {
+			return "Choose Open, Invite only or Invite + approval."
+		}
+		return ""
+	case .DecideRegistration:
+		if request.requestID <= 0 {
+			return "No sign-up request selected."
+		}
+		if !common.registrationTextIsValid(
+			request.reason,
+			0,
+			common.REGISTRATION_REASON_MAX_CHARS,
+		) {
+			return "The reason must be at most 500 characters, without control characters."
+		}
+		return ""
 	case .SetUserRoles:
 		if request.userID <= 0 {
 			return "No account selected."
@@ -161,7 +203,6 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 
 // Validates and sends one request. Returns "" when the transport accepted it, otherwise the
 // reason (static or in the temp allocator).
-@(private = "file")
 State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminRequest) -> string {
 	request := request
 	request.nickname = strings.trim_space(request.nickname)
@@ -192,6 +233,8 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	tracked.action = request.action
 	tracked.userID = request.userID
 	tracked.roleID = request.roleID
+	tracked.inviteID = request.inviteID
+	tracked.requestID = request.requestID
 	tracked.pending = true
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
@@ -305,6 +348,8 @@ State_adminActionResult :: proc(
 	userID: int,
 	message: string,
 	roleID := 0,
+	inviteID := 0,
+	requestID := 0,
 ) {
 	tracked := &state.adminRequest
 	if tracked.serverID != serverID {
@@ -314,6 +359,8 @@ State_adminActionResult :: proc(
 	tracked.action = action
 	tracked.userID = userID
 	tracked.roleID = roleID
+	tracked.inviteID = inviteID
+	tracked.requestID = requestID
 	AdminRequestState_setText(&tracked.result, message)
 	AdminRequestState_setText(&tracked.error, "")
 }

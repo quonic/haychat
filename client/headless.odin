@@ -35,11 +35,15 @@ HEADLESS_DISPLAY_NAME_MIN :: 3
 HEADLESS_DISPLAY_NAME_MAX :: 32
 HEADLESS_USAGE ::
 	"usage: client --headless [--name NAME] [--server HOST:PORT] [--config-dir DIR]\n" +
-	"                         [--connect-timeout MS]\n" +
+	"                         [--connect-timeout MS] [--register]\n" +
+	"                         [--invite-code CODE [--reason TEXT]]\n" +
 	"  --name NAME            display name (3-32 bytes); saved to the profile\n" +
 	"  --server HOST:PORT     the profile's only server; saved to the profile\n" +
 	"  --config-dir DIR       config root for this profile (like XDG_CONFIG_HOME)\n" +
 	"  --connect-timeout MS   how long to wait for the first connection (default 15000)\n" +
+	"  --register             sign up with an invite code even on an Open server\n" +
+	"  --invite-code CODE     sends CODE (- for none) when the server asks to sign up;\n" +
+	"                         implies --register; --reason TEXT goes with it\n" +
 	"Commands are read from stdin; type `help` for the list."
 
 // ── Options ───────────────────────────────────────────────────────
@@ -52,6 +56,11 @@ HeadlessOptions :: struct {
 	hasServer:        bool,
 	configDir:        string,
 	connectTimeoutMS: int,
+	// Protocol 25 (headless_registration.odin): connect with registering set, and the code
+	// (and reason) to send when the server asks to sign up.
+	register:         bool,
+	inviteCode:       string,
+	reason:           string,
 }
 
 headlessRequested :: proc(args: []string) -> bool {
@@ -89,6 +98,10 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 		if arg == HEADLESS_FLAG {
 			continue
 		}
+		if arg == "--register" {
+			options.register = true
+			continue
+		}
 		flag := arg
 		value := ""
 		hasValue := false
@@ -98,7 +111,7 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 			hasValue = true
 		}
 		switch flag {
-		case "--name", "--server", "--config-dir", "--connect-timeout":
+		case "--name", "--server", "--config-dir", "--connect-timeout", "--invite-code", "--reason":
 		case:
 			return {}, "unknown argument"
 		}
@@ -134,7 +147,18 @@ headlessParseOptions :: proc(args: []string) -> (options: HeadlessOptions, err: 
 				return {}, "--connect-timeout must be from 1 to 600000 milliseconds"
 			}
 			options.connectTimeoutMS = timeoutMS
+		case "--invite-code":
+			if len(value) == 0 || len(value) > common.INVITE_CODE_TEXT_MAX_BYTES {
+				return {}, "--invite-code must be a code (or - for none) of at most 64 bytes"
+			}
+			options.inviteCode = value
+			options.register = true
+		case "--reason":
+			options.reason = value
 		}
+	}
+	if len(options.reason) > 0 && len(options.inviteCode) == 0 {
+		return {}, "--reason needs --invite-code"
 	}
 	return options, ""
 }
@@ -278,6 +302,15 @@ HeadlessEventKind :: enum {
 	RoleDeleted,
 	// Room permissions (protocol 24, headless_room_permissions.odin).
 	RoomPermissions,
+	// Registration (protocol 25, headless_registration.odin).
+	RegistrationRequired,
+	RegistrationResult,
+	RegistrationMode,
+	InviteCreated,
+	InviteList,
+	RegistrationRequests,
+	RegistrationRequest,
+	LinkPending,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -324,6 +357,14 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RoleUpdated    = "role_updated",
 	.RoleDeleted    = "role_deleted",
 	.RoomPermissions = "room_permissions",
+	.RegistrationRequired = "registration_required",
+	.RegistrationResult = "registration_result",
+	.RegistrationMode = "registration_mode",
+	.InviteCreated  = "invite_created",
+	.InviteList     = "invite_list",
+	.RegistrationRequests = "registration_requests",
+	.RegistrationRequest = "registration_request",
+	.LinkPending    = "link_pending",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -349,6 +390,11 @@ HeadlessConnectedJSON :: struct {
 	isAdmin:        bool,
 	nicknameLocked: bool,
 	permissions:    []string,
+	// Protocol 25: the server's registration mode (open, invite, approval), whether the account
+	// is restricted, and whether this connection is the end of a sign-up (registered).
+	registrationMode: string,
+	isRestricted:   bool,
+	registered:     bool,
 }
 
 // ServerUserUpdated: an admin changed an account's role, ban, or name (protocol 14). user is
@@ -375,6 +421,8 @@ HeadlessDirectoryUserJSON :: struct {
 	isBanned:          bool,
 	// Protocol 23: every role the account holds, the admin role included.
 	roleIds:           []int,
+	// Protocol 25: a restricted account (plan D11).
+	isRestricted:      bool,
 }
 
 // data in lowercase hex, allocated with allocator.
@@ -409,6 +457,7 @@ headlessDirectoryUser :: proc(
 		isAdmin = user.isAdmin,
 		isBanned = user.isBanned,
 		roleIds = user.roleIds[:],
+		isRestricted = user.isRestricted,
 	}
 }
 
@@ -462,18 +511,23 @@ HeadlessAccountUpdatedJSON :: struct {
 	nickname:       string,
 	nicknameLocked: bool,
 	permissions:    []string,
+	isRestricted:   bool,
 }
 
 // ServerAdminActionResult: this session's admin request succeeded. action is "role", "rename",
 // "kick" or "ban" (an unban is a ban), or (protocol 23) "role-save", "role-delete" or
 // "role-assign"; userID is the target and roleID the role a role-save or role-delete named.
+// Protocol 25: "invite-revoke" (inviteID), "registration-mode", "registration-decide"
+// (requestID) and "restricted" (userID).
 HeadlessAdminResultJSON :: struct {
-	event:    string,
-	serverID: int,
-	action:   string,
-	userID:   int,
-	message:  string,
-	roleID:   int,
+	event:     string,
+	serverID:  int,
+	action:    string,
+	userID:    int,
+	message:   string,
+	roleID:    int,
+	inviteID:  int,
+	requestID: int,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -1073,6 +1127,14 @@ headlessRenderRuntimeEvent :: proc(
 		return headlessRenderRoleEvent(event, allocator)
 	case .RoomPermissionsReceived:
 		return headlessRenderRoomPermissionsEvent(event, allocator)
+	case .RegistrationRequired,
+	     .RegistrationResult,
+	     .RegistrationModeChanged,
+	     .InviteCreated,
+	     .InviteList,
+	     .RegistrationRequests,
+	     .RegistrationRequestUpdated:
+		return headlessRenderRegistrationEvent(event, info, allocator)
 	case .VoiceKeyReceived, .VoiceKeyRequested:
 		// Printed as voice_key after State handled them (headlessPollVoice).
 		return "", {}, false
@@ -1253,6 +1315,9 @@ headlessRenderRuntimeEvent :: proc(
 				isAdmin = event.isAdmin,
 				nicknameLocked = event.nicknameLocked,
 				permissions = headlessPermissionNames(event.permissions),
+				registrationMode = headlessRegistrationModeName(event.registrationMode),
+				isRestricted = event.isRestricted,
+				registered = event.registered,
 			},
 			allocator,
 		)
@@ -1388,6 +1453,7 @@ headlessRenderRuntimeEvent :: proc(
 				nickname = event.nickname,
 				nicknameLocked = event.nicknameLocked,
 				permissions = headlessPermissionNames(event.permissions),
+				isRestricted = event.isRestricted,
 			},
 			allocator,
 		)
@@ -1401,6 +1467,8 @@ headlessRenderRuntimeEvent :: proc(
 				userID = event.peerUserID,
 				message = event.message,
 				roleID = event.roleID,
+				inviteID = event.inviteID,
+				requestID = event.requestID,
 			},
 			allocator,
 		)
@@ -1466,6 +1534,14 @@ HeadlessStatusJSON :: struct {
 	permissions:    []string,
 	selectedRoomID: int,
 	lastError:      string,
+	// Protocol 25 (headless_registration.odin): the sign-up screen's phase (none, required,
+	// submitting, pending, refused, declined, ended) and the server's sentence for it, the
+	// registration mode, whether the account is restricted, and the approver badge (D18).
+	signUp:         string,
+	signUpMessage:  string,
+	registrationMode: string,
+	isRestricted:   bool,
+	pendingRegistrations: int,
 }
 
 HeadlessRoomsJSON :: struct {
@@ -1517,6 +1593,7 @@ HeadlessUserJSON :: struct {
 	isAdmin:           bool,
 	isBanned:          bool,
 	roleIds:           []int, // Protocol 23
+	isRestricted:      bool, // Protocol 25
 }
 
 HeadlessUsersJSON :: struct {
@@ -1760,6 +1837,44 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"roles-assign", 2, 0, .None, "roles-assign USER_ID ROLE_ID,ROLE_ID|none",
 		"admins: makes the list every role of the account other than admin",
 		headlessCommandRolesAssign},
+	{"register", 1, 0, .Optional, "register CODE|-|form [REASON...]",
+		"while registering: signs up with an invite code (- for none, Open servers only; " +
+		"form for the one an invite link filled in); " +
+		"answered by registration_result, or connected when the account was made",
+		headlessCommandRegister},
+	{"invite-create", 1, 0, .Optional,
+		"invite-create -|expires=SECONDS,uses=N,roles=ID+ID,room=ID,skip-approval [NOTE...]",
+		"create-invites: makes an invite code (default one day, one use; roles, room and " +
+		"skip-approval are for admins); the code and link arrive once as invite_created",
+		headlessCommandInviteCreate},
+	{"invite-list", 0, 0, .None, "invite-list",
+		"create-invites: the codes from the cache (admins every one); asks for them " +
+		"(invite_list)", headlessCommandInviteList},
+	{"invite-revoke", 1, 0, .None, "invite-revoke INVITE_ID",
+		"revokes a code (admins any, others their own); answered by admin_result",
+		headlessCommandInviteRevoke},
+	{"registration-list", 0, 1, .None, "registration-list [all]",
+		"approvers: sign-up requests from the cache and the pending count; asks for them " +
+		"(registration_requests); all includes decided ones", headlessCommandRegistrationList},
+	{"registration-decide", 2, 0, .Optional,
+		"registration-decide REQUEST_ID approve|decline [REASON...]",
+		"approvers: decides a pending request; answered by admin_result and " +
+		"registration_request", headlessCommandRegistrationDecide},
+	{"registration-mode", 1, 0, .None, "registration-mode open|invite|approval",
+		"admins: sets how people sign up; everyone hears registration_mode",
+		headlessCommandRegistrationMode},
+	{"restrict", 2, 0, .None, "restrict USER_ID on|off",
+		"admins: restricts an account or lifts it (off joins the Public rooms); admin_result",
+		headlessCommandRestrict},
+	{"link-open", 1, 0, .None, "link-open URL",
+		"reads a haychat:// join or invite link as the GUI would (link_pending); nothing " +
+		"connects until link-confirm", headlessCommandLinkOpen},
+	{"link-confirm", 0, 0, .None, "link-confirm",
+		"follows the open link: adds or matches the server, pins its key, connects (an " +
+		"invite with registering set and the code in the sign-up form)",
+		headlessCommandLinkConfirm},
+	{"link-cancel", 0, 0, .None, "link-cancel", "drops the open link and its code",
+		headlessCommandLinkCancel},
 	{"user-keys", 1, 0, .None, "user-keys USER_ID",
 		"fetches an account's encryption key bundle; the answer is a user_keys event",
 		headlessCommandUserKeys},
@@ -1920,6 +2035,13 @@ HeadlessHarness :: struct {
 	// Live room messages (server ID, message ID) still waiting for a key or the log, printed as
 	// room_chat once they open.
 	owedRoomMessages: map[[2]int]bool,
+	// --invite-code and --reason (borrowed from the arguments), sent once on the first
+	// registration_required (headless_registration.odin); answered tells startup to stop
+	// waiting.
+	autoInviteCode:       string,
+	autoReason:           string,
+	autoRegisterSent:     bool,
+	autoRegisterAnswered: bool,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
@@ -1973,6 +2095,15 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 	case .Connected, .Disconnected:
 		delete_key(&harness.connectAttempts, event.serverID)
 	}
+	// A sign-up that made the account (protocol 25): registration_result created, then
+	// connected.
+	if event.kind == .Connected && event.registered {
+		headlessWriteRegistrationCreated(harness, event)
+	}
+	#partial switch event.kind {
+	case .RegistrationResult, .Connected, .ConnectFailed:
+		harness.autoRegisterAnswered = harness.autoRegisterSent
+	}
 	line, kind, ok := headlessRenderRuntimeEvent(event, info)
 	if ok {
 		headlessWriteLine(harness, line)
@@ -2003,6 +2134,9 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		}
 	case .UserKeyChanged:
 		headlessWriteUserKeysEvent(harness, event.serverID, event.userKey.userId)
+	}
+	if event.kind == .RegistrationRequired {
+		headlessAutoRegister(harness, event)
 	}
 	headlessWriteDirectNotes(harness)
 	headlessWriteRoomLogNotes(harness)
@@ -2395,6 +2529,12 @@ headlessConnectAndWait :: proc(
 			#partial switch state.serverConnections[connectionIndex].status {
 			case .Established:
 				return true
+			case .Registering:
+				// Signing up (protocol 25): the script goes on with `register`, or, with
+				// --invite-code, once the server answered the code.
+				if len(harness.autoInviteCode) == 0 || harness.autoRegisterAnswered {
+					return true
+				}
 			case .Failed:
 				// The worker's connect_failed event (retryable false) is already printed.
 				return false
@@ -2472,8 +2612,18 @@ headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParse
 			result.retryInMS = headlessMillisecondsUntil(connection.retryAt, time.tick_now())
 		case .Failed:
 			result.connection = "failed"
+		case .Registering:
+			result.connection = "registering"
 		}
 		result.lastError = connection.detail
+		result.signUp = HEADLESS_SIGN_UP_PHASE_NAMES[connection.signUp]
+		result.signUpMessage = connection.signUpMessage
+		result.registrationMode = headlessRegistrationModeName(connection.registrationMode)
+		result.isRestricted = connection.isRestricted
+		result.pendingRegistrations = State_pendingRegistrationCount(
+			state,
+			state.selected_server_id,
+		)
 	}
 	headlessWriteJSON(harness, result)
 }
@@ -2630,6 +2780,7 @@ headlessCommandUsers :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsed
 			isAdmin  = user.isAdmin,
 			isBanned = user.isBanned,
 			roleIds  = user.roleIds[:],
+			isRestricted = user.isRestricted,
 		}
 		directory := headlessDirectoryUser(user, state, serverID, context.temp_allocator)
 		users[index].identityPublicKey = directory.identityPublicKey
@@ -3535,6 +3686,12 @@ headlessMain :: proc(args: []string) -> int {
 	if headlessApplyOptions(&config, options) {
 		saveConfig(config)
 	}
+	// --register applies to this run only; it is not saved to the profile.
+	if options.register {
+		for &server in config.servers {
+			server.use_invite_code = true
+		}
+	}
 	if len(config.display_name) == 0 {
 		fmt.eprintln("[Error] The profile has no display name; pass --name NAME")
 		return HEADLESS_EXIT_ERROR
@@ -3547,6 +3704,8 @@ headlessMain :: proc(args: []string) -> int {
 		commands    = HEADLESS_COMMANDS[:],
 		running     = true,
 		keyStoreDir = keyStoreDir,
+		autoInviteCode = options.inviteCode,
+		autoReason  = options.reason,
 	}
 	defer HeadlessHarness_deinit(&harness)
 	connectTimeout := time.Duration(options.connectTimeoutMS) * time.Millisecond

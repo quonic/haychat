@@ -24,6 +24,9 @@ odin build client -out:haychat-client
 | `--server HOST:PORT` | The profile's only server. Saved to the profile. Required for a new profile: there is no built-in default server. |
 | `--config-dir DIR` | Config root for this profile, like `XDG_CONFIG_HOME` (`APPDATA` on Windows): the profile is `DIR/haychat/config.json`. Without it the harness uses your real client config. |
 | `--connect-timeout MS` | How long startup waits for the first connection, 1 to 600000 ms (default 15000). |
+| `--register` | Protocol 25: connect with `ClientAuthRequestPayload.registering` set (Server settings → **Use an invite code**), for this run only. A key that already has an account signs in as usual. See [Registration](#registration). |
+| `--invite-code CODE` | Sends `CODE` (`-` for none, which only an Open server accepts) as soon as `registration_required` arrives. Implies `--register`. |
+| `--reason TEXT` | The reason that goes with `--invite-code` (Invite + approval mode). |
 
 Options also accept the `--name=NAME` form.
 
@@ -49,6 +52,10 @@ unreachable) prints `connect_failed` with `"retryable":true` and is retried afte
 seconds, capped at 30 s. Startup ends with:
 
 - `connected`: commands are read from then on.
+- `registration_required` (protocol 25): the key has no account and the server asks it to sign
+  up; commands are read from then on (`register`). With `--invite-code`, startup ends after
+  the server answered the code instead: `registration_result` (`pending`, `refused`), or
+  `registration_result` `created` followed by `connected`.
 - `connect_failed` with `"retryable":false`: a failure retrying cannot fix (the name is taken,
   the server key changed, a protocol version mismatch, an invalid name or identity key).
   `message` explains it in the GUI's words; exit code 2.
@@ -150,7 +157,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | Event | Example |
 | --- | --- |
 | `connecting` | `{"event":"connecting","serverID":1,"attempt":1}` (`attempt` counts from 1 since the last `connected` or `disconnected`) |
-| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false,"permissions":[]}` (`isAdmin`: the account holds the server's `admin` role; `nickname` is the account's name on the server, which an admin may have set and locked, `nicknameLocked`; `permissions` (protocol 23) its effective server permissions, every one for an admin, words as in `roles-list`) |
+| `connected` | `{"event":"connected","serverID":1,"userID":3,"nickname":"alice-1","isAdmin":false,"nicknameLocked":false,"permissions":[],"registrationMode":"open","isRestricted":false,"registered":false}` (`isAdmin`: the account holds the server's `admin` role; `nickname` is the account's name on the server, which an admin may have set and locked, `nicknameLocked`; `permissions` (protocol 23) its effective server permissions, every one for an admin, words as in `roles-list`; protocol 25: the server's `registrationMode`, whether the account `isRestricted`, and `registered` for the connection a sign-up made, see [Registration](#registration)) |
 | `connect_failed` | `{"event":"connect_failed","serverID":1,"message":"timed out connecting to the server","detail":"timed out connecting to the server","failure":"Unreachable","retryable":true,"retryInMS":2000}` |
 | `room_list` | `{"event":"room_list","serverID":1,"rooms":[{"id":1,"name":"general","description":"...","lastReadMessageId":12,"unreadCount":0,"roomType":3,...,"myPermissions":["send","speak"]}]}` (`roomType`: 1 text, 2 voice, 3 both; `myPermissions` (protocol 24) this account's permissions in each room; the server sends a fresh list when they change) |
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}` (printed after the client opened it: `protection` `plain` once the sender's signature verified against its pin (protocol 22); in an encrypted room `encrypted` true, `epoch` the chain's, `protection` `encrypted` with the opened `content`, or `failed` with `decryptError` such as `not_member`, `replayed` when the signature verified; `hidden` with empty `content` for a message the window does not show (no valid signature: `decryptError` `unsigned`, `bad_signature`, `no_sender_key`, `not_sealed`, `BadSignature`, …); a live message that waits for its sender's key, its chain key or the log is printed once it opens) |
@@ -173,11 +180,11 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `direct_history` | `{"event":"direct_history","serverID":1,"peerUserID":4,"hasOlder":false,"messages":[{"id":7,"senderID":3,"senderNickname":"alice","recipientID":4,"recipientNickname":"bob","timestamp":"...","encrypted":true,"signed":true,"decryptError":"","protection":"encrypted","content":"hi"}]}` |
 | `direct_opened` | Same shape as `direct_message`: a message from a history page that waited for its sender's key (`protection` `pending` in `direct_history`) and is now opened or settled |
 | `direct_queue` | `{"event":"direct_queue","serverID":1,"peerUserID":4,"state":"sent","count":1,"reason":""}` (messages `dm` queued for a key went out encrypted; `state` `refused` when they went back into the draft, with the reason) |
-| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"identityPublicKey":"3bac...","hasEncryptionKey":true,"keyState":"unverified","isAdmin":false,"isBanned":false,"roleIds":[4]}]}` (`roleIds`: every role the account holds, `admin` included; `keyState` as before the list was applied; see [Encryption Keys](#encryption-keys)) |
-| `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"identityPublicKey":"d14b...","hasEncryptionKey":true,"keyState":"verified","isAdmin":true,"isBanned":false,"roleIds":[1]}}` (an admin changed an account's role, roles, ban, or name; the full directory entry) |
+| `user_list` | `{"event":"user_list","serverID":1,"users":[{"id":3,"nickname":"alice","isOnline":true,"identityPublicKey":"3bac...","hasEncryptionKey":true,"keyState":"unverified","isAdmin":false,"isBanned":false,"roleIds":[4],"isRestricted":false}]}` (`roleIds`: every role the account holds, `admin` included; `keyState` as before the list was applied; see [Encryption Keys](#encryption-keys)) |
+| `user_updated` | `{"event":"user_updated","serverID":1,"user":{"id":4,"nickname":"bob","isOnline":true,"identityPublicKey":"d14b...","hasEncryptionKey":true,"keyState":"verified","isAdmin":true,"isBanned":false,"roleIds":[1],"isRestricted":false}}` (an admin changed an account's role, roles, ban, or name; the full directory entry) |
 | `user_keys` | `{"event":"user_keys","serverID":1,"userID":4,"nickname":"bob","keyState":"unverified","canEncrypt":true,"verified":false,"hasPin":true,"identityPublicKey":"d14b...","encryptionPublicKey":"8a6d...","createdAt":1731600000,"safetyNumber":"68114 90353 ...","notice":"","message":""}` (what the client concluded about an account's key after a `ServerUserKeys` or `ServerUserKeyChanged`; see [Encryption Keys](#encryption-keys)) |
-| `account_updated` | `{"event":"account_updated","serverID":1,"isAdmin":true,"nickname":"bob","nicknameLocked":false,"permissions":["manage-rooms"]}` (an admin changed this account's role, name or, protocol 23, its permissions through its roles, while it is connected) |
-| `admin_result` | `{"event":"admin_result","serverID":1,"action":"role","userID":4,"message":"bob is an admin","roleID":0}` (your admin request succeeded; `action` is `role`, `rename`, `kick`, or `ban`, an unban included, or `role-save`, `role-delete` or `role-assign`, whose `roleID` names the role) |
+| `account_updated` | `{"event":"account_updated","serverID":1,"isAdmin":true,"nickname":"bob","nicknameLocked":false,"permissions":["manage-rooms"],"isRestricted":false}` (an admin changed this account's role, name or, protocol 23, its permissions through its roles, while it is connected) |
+| `admin_result` | `{"event":"admin_result","serverID":1,"action":"role","userID":4,"message":"bob is an admin","roleID":0,"inviteID":0,"requestID":0}` (your admin request succeeded; `action` is `role`, `rename`, `kick`, or `ban`, an unban included, or `role-save`, `role-delete` or `role-assign`, whose `roleID` names the role, or (protocol 25) `invite-revoke` (`inviteID`), `registration-mode`, `registration-decide` (`requestID`) or `restricted`) |
 | `role_list` | `{"event":"role_list","serverID":1,"roles":[{"id":1,"name":"admin","permissions":["manage-rooms",...],"builtin":true,"position":0}]}` (the answer to the role list request made at connect or by `roles-list`) |
 | `role_updated` | `{"event":"role_updated","serverID":1,"role":{"id":5,"name":"hosts","permissions":["manage-rooms"],"builtin":false,"position":1}}` (an admin created or edited a role; to every session) |
 | `room_permissions` | `{"event":"room_permissions","serverID":1,"roomID":4,"everyone":["speak"],"roles":[{"roleID":5,"permissions":["send"]}],"accessRoleIDs":[],"myPermissions":["send","speak","manage-members","edit-room"]}` (protocol 24: the answer to `room-permissions` and `room-permissions-set`; `accessRoleIDs` are a Roles room's access roles) |
@@ -196,8 +203,11 @@ Every runtime event the client applies is printed first. Keys always come in the
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
 `NameUnavailable`, `ServerKeyChanged`, `ProtocolMismatch`, `InvalidName`, `InvalidIdentity`,
-`Kicked`, `Banned` (protocol 14: a banned account's sign-in), or the harness's own `NoServer`
-and `Timeout`. `retryable` is true when the worker will try again
+`Kicked`, `Banned` (protocol 14: a banned account's sign-in), `RegistrationRequired` (a
+sign-up session the server ended, "Sign-up ended: …"), `RegistrationPending` (a session that
+ended while its request waits; `reconnect` is Check again), `RegistrationDeclined`,
+`RegistrationBusy` ("Too many sign-ups are in progress", retried), or the harness's own
+`NoServer` and `Timeout`. `retryable` is true when the worker will try again
 in `retryInMS`; when it is false nothing retries until `reconnect` (or, at startup, the harness
 exits with code 2).
 
@@ -584,6 +594,61 @@ selected while its window has input focus; the harness has no window, so nothing
 counts deterministic for scripts: `send` selects its room, but nothing clears a badge behind
 the agent's back.
 
+## Registration
+
+Protocol 25 (#43 G2, plan D12-D19). A key without an account on a server that is not Open, or
+any key sent with `registering` (`--register`, **Use an invite code**, or an invite link), gets
+the plaintext `ServerRegistrationRequired`; the transport is then active but registering, and
+the only thing it sends is a sealed `ClientRegister`. `status` reports `"connection":
+"registering"` meanwhile.
+
+Start a client that signs up with a code:
+
+```sh
+./haychat-client --headless --name carol-1 --server 127.0.0.1:12345 \
+	--config-dir "$tmp/carol" --invite-code "$code" [--reason "Bob's sister"]
+```
+
+or start it with `--register` (or on a closed server, with nothing) and send `register CODE
+[REASON...]` after `registration_required`. Existing accounts are never affected.
+
+### Commands
+
+| Command | Meaning |
+| --- | --- |
+| `register CODE\|-\|form [REASON...]` | While registering: one `ClientRegister` with the code (dashes, spaces and case do not matter; `-` for none, Open servers only; `form` for the code an invite link put in the sign-up form after `link-confirm`) and the rest of the line as the reason (sent only in Invite + approval mode). The client checks the code's shape and the reason's length first (`ok:false` without sending). One at a time: a second before the answer is refused. `ok` means it went out; the answer is `registration_result`, or `registration_result` `created` and then `connected`. |
+| `invite-create OPTIONS [NOTE...]` | Create invites: makes a code. `OPTIONS` is `-` (one day, one use) or a comma list of `expires=SECONDS` (0 never, admins only; non-admins at most 604800), `uses=N` (0 no limit, at most 1000), `roles=ID+ID`, `room=ID` (an unencrypted invite room; its accounts are restricted to it) and `skip-approval`; the last three are for admins. The answer is `invite_created`, the only time the code is shown, or a `protocol_error`. |
+| `invite-list` | Create invites: the codes from the cache (`loaded`, `invites`), and asks for them again; the answer is `invite_list` (admins see every code, others their own). |
+| `invite-revoke INVITE_ID` | Revokes a code (admins any, others their own). Answered by `admin_result` `invite-revoke` with `inviteID`. |
+| `registration-list [all]` | Approve registrations: the requests from the cache with `pendingCount` (the badge), and asks again; `all` also lists decided ones. The answer is `registration_requests`. |
+| `registration-decide REQUEST_ID approve\|decline [REASON...]` | Approve registrations: decides a pending request; the reason is shown to a declined applicant. Answered by `admin_result` `registration-decide` (`requestID`) and `registration_request` to every approver; a still-connected applicant gets `registration_result` (`declined`) or `created` and `connected` at once. |
+| `registration-mode open\|invite\|approval` | Admins: sets the server's mode. Answered by `admin_result` `registration-mode`; every session gets `registration_mode`. |
+| `restrict USER_ID on\|off` | Admins: restricts an account or lifts it (lifting joins it to every Public room). Answered by `admin_result` `restricted`; the account gets `account_updated` with `isRestricted`. |
+| `link-open URL` | Reads a `haychat://HOST:PORT/join[?key=HEX]` or `haychat://HOST:PORT/invite/CODE?key=HEX` link as the GUI does: `{"ok":true,"cmd":"link-open","serverID":…}`, then `link_pending` (also for a link the client refuses, with `error`). Nothing connects yet. |
+| `link-confirm` | Follows the open link (the GUI's Join or Continue): adds or matches the server, pins the link's key, selects it and connects; an invite connects with `registering` set and the code in the sign-up form, so `register form` follows (the GUI waits for Sign up). A link whose key differs from the pin is refused. |
+| `link-cancel` | Drops the open link and its code. |
+
+### Events
+
+| Event | Example |
+| --- | --- |
+| `registration_required` | `{"event":"registration_required","serverID":1,"mode":"approval","status":"none","message":"This server needs an invite code and approval to sign up"}` (`mode` `open`, `invite` or `approval`; `status` the key's request: `none`, `pending` (the GUI shows the waiting screen) or `declined` with the reason in `message`) |
+| `registration_result` | `{"event":"registration_result","serverID":1,"status":"pending","message":"Your sign-up request is waiting for approval","userID":0}` (`status` `created` (`userID` the new account, followed by `connected` with `"registered":true`), `pending`, `refused` (`message` such as "This invite code is not valid"; fix the code and `register` again in the same session) or `declined` (the session ends; not retried, like a ban)) |
+| `registration_mode` | `{"event":"registration_mode","serverID":1,"mode":"invite"}` (an admin changed the mode) |
+| `invite_created` | `{"event":"invite_created","serverID":1,"invite":{"id":9,"note":"for carol","createdBy":3,"createdByNickname":"alice","createdAt":"...","expiresAt":"...","maxUses":1,"uses":0,"revoked":false,"roleIds":[],"roomId":0,"restricted":false,"skipApproval":false},"code":"0123-4567-…","link":"haychat://127.0.0.1:12345/invite/0123-4567-…?key=<server key hex>"}` (the answer to `invite-create`; `link` carries the server key this profile pinned) |
+| `invite_list` | `{"event":"invite_list","serverID":1,"invites":[…]}` (as in `invite_created`, without codes) |
+| `registration_requests` | `{"event":"registration_requests","serverID":1,"pendingCount":1,"requests":[{"id":4,"nickname":"dave","reason":"Bob's sister","status":"pending","identityPublicKey":"<hex>","inviteId":9,"inviteNote":"for carol","inviteCreatedBy":3,"createdAt":"...","decidedBy":0,"decidedAt":"","decisionReason":""}]}` (an approver's client asks for it after every `connected`, for the badge) |
+| `registration_request` | `{"event":"registration_request","serverID":1,"pendingCount":0,"request":{…}}` (a request was made, approved or declined; to every approver session; `pendingCount` is the badge) |
+| `link_pending` | `{"event":"link_pending","open":true,"kind":"invite","server":"127.0.0.1:12345","host":"127.0.0.1","port":12345,"hasKey":true,"hasCode":true,"match":"new_server","serverID":0,"error":""}` (`match` `new_server`, `pinned`, `unpinned` (the link's key will be pinned) or `key_differs` (refused, `error` says why); the code is never printed) |
+
+`connected`, `status`, `account_updated`, `user_list`, `user_updated` and `users` carry
+`isRestricted`; `connected` and `status` carry `registrationMode`, and `status` also `signUp`
+(`none`, `required`, `submitting`, `pending`, `refused`, `declined`, `ended`), `signUpMessage`
+and `pendingRegistrations`, the approver badge. A restricted account's `user_list` names only
+the accounts it shares a room with and admins; a `user_updated` for an account the directory
+does not have yet adds it, and a direct message to someone it no longer shares a room with is a
+`protocol_error` "You no longer share a room with this person".
+
 ## Example: Two Agents Chatting
 
 Each agent runs its own client with its own profile. Alice's side (`>` is stdin, `<` stdout):
@@ -892,6 +957,35 @@ click-id admin-confirm 1 7
 wait-text "Banned bob"
 click-id admin-member-ban 1 7
 wait-text "Unbanned bob"
+```
+
+Registration (protocol 25; IDs listed at the top of `client/view_registration.odin`, all with
+the server ID first). In the Admin section: `admin-registration-mode SERVER MODE` (1 Open,
+2 Invite only, 3 Invite + approval); under **Invites**, `admin-invite-new` ("New invite…"), the
+form's `admin-invite-note`, `admin-invite-expiry SERVER INDEX` (0 1 hour … 4 Never),
+`admin-invite-uses SERVER INDEX` (0 one … 4 no limit), `admin-invite-role SERVER ROLE`,
+`admin-invite-room SERVER ROOM`, `admin-invite-skip`, `admin-invite-create` ("Create code") and
+`admin-invite-cancel`, then the code shown once with `admin-invite-copy` ("Copy"),
+`admin-invite-copy-link` ("Copy link") and `admin-invite-done`, and `admin-invite-revoke SERVER
+INVITE` per code; under **Sign-up requests** (badge text "N pending", also on the Admin heading;
+the sidebar gear reads "⚙ N"), `admin-request-approve SERVER REQUEST`, `admin-request-decline
+SERVER REQUEST`, then `admin-request-reason`, `admin-request-decline-confirm` and
+`admin-request-decline-cancel` (server, request); on an account row "Restricted" and
+`admin-member-unrestrict SERVER USER` ("Lift restriction"). Server settings has
+`server-settings-invite-code` (Use an invite code). The sign-up screen replaces the room while
+a server asks to sign up: `signup-code`, `signup-paste`, `signup-reason` (approval mode),
+`signup-submit` ("Sign up"), `signup-check-again` ("Check again") and `signup-start-again`
+("Start again"). An invite link's confirmation has `link-confirm` ("Join" or "Continue") and
+`link-cancel`, with no integers.
+
+```text
+click-id server-settings 1
+click-id admin-invite-new 1
+click-id admin-invite-create 1
+wait-text "Copy link"
+click-id admin-invite-done 1
+wait-text "1 pending"
+click-id admin-request-approve 1 4
 ```
 
 ### Output and Exit Codes
