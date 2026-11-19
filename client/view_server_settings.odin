@@ -386,18 +386,6 @@ viewServerSettings :: proc(
 	adminAction: AdminSectionAction
 	if view.admin.visible {
 		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
-		// Protocol 25: Registration, Invites and Sign-up requests (view_registration.odin),
-		// last in the section so the parts above keep their place.
-		_ = ui.cutTop(&column, sectionGap)
-		if registrationAction := viewRegistrationAdmin(
-			state,
-			ctx,
-			&column,
-			view.admin.registration,
-			serverID,
-		); registrationAction.kind != .None {
-			adminAction = {registration = registrationAction}
-		}
 		_ = ui.cutTop(&column, sectionGap)
 	}
 
@@ -810,6 +798,19 @@ viewAdminSection :: proc(
 		   rolesAction.kind != .None {
 			action = rolesAction
 		}
+	}
+
+	// Protocol 25: Registration, Invites and Sign-up requests (view_registration.odin), after
+	// Members and Roles and before Rooms, which stays last above the server key.
+	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
+	if registrationAction := viewRegistrationAdmin(
+		state,
+		ctx,
+		column,
+		view.registration,
+		serverID,
+	); registrationAction.kind != .None {
+		action = {registration = registrationAction}
 	}
 
 	if !view.showRooms {
