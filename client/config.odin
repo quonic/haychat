@@ -69,6 +69,7 @@ Server :: struct {
 	// Protocol 25 (#43 G2): sign up with an invite code even when the server is Open, by
 	// setting ClientAuthRequestPayload.registering (Server settings → Use an invite code). It
 	// changes nothing for a key that already has an account. Never holds the code itself.
+	// (Odin's JSON writer may still write false despite omitempty.)
 	use_invite_code:           bool `json:"use_invite_code,omitempty"`,
 }
 

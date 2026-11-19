@@ -24,6 +24,9 @@ odin build client -out:haychat-client
 | `--server HOST:PORT` | The profile's only server. Saved to the profile. Required for a new profile: there is no built-in default server. |
 | `--config-dir DIR` | Config root for this profile, like `XDG_CONFIG_HOME` (`APPDATA` on Windows): the profile is `DIR/haychat/config.json`. Without it the harness uses your real client config. |
 | `--connect-timeout MS` | How long startup waits for the first connection, 1 to 600000 ms (default 15000). |
+| `--register` | Protocol 25: connect with `ClientAuthRequestPayload.registering` set (Server settings → **Use an invite code**), for this run only. A key that already has an account signs in as usual. See [Registration](#registration). |
+| `--invite-code CODE` | Sends `CODE` (`-` for none, which only an Open server accepts) as soon as `registration_required` arrives. Implies `--register`. |
+| `--reason TEXT` | The reason that goes with `--invite-code` (Invite + approval mode). |
 
 Options also accept the `--name=NAME` form.
 
@@ -49,6 +52,10 @@ unreachable) prints `connect_failed` with `"retryable":true` and is retried afte
 seconds, capped at 30 s. Startup ends with:
 
 - `connected`: commands are read from then on.
+- `registration_required` (protocol 25): the key has no account and the server asks it to sign
+  up; commands are read from then on (`register`). With `--invite-code`, startup ends after
+  the server answered the code instead: `registration_result` (`pending`, `refused`), or
+  `registration_result` `created` followed by `connected`.
 - `connect_failed` with `"retryable":false`: a failure retrying cannot fix (the name is taken,
   the server key changed, a protocol version mismatch, an invalid name or identity key).
   `message` explains it in the GUI's words; exit code 2.
@@ -196,8 +203,11 @@ Every runtime event the client applies is printed first. Keys always come in the
 In `connect_failed`, `message` is the explanation the GUI shows, `detail` the raw reason from
 the transport or server, and `failure` its kind: `Unreachable` or `Other` (both retried),
 `NameUnavailable`, `ServerKeyChanged`, `ProtocolMismatch`, `InvalidName`, `InvalidIdentity`,
-`Kicked`, `Banned` (protocol 14: a banned account's sign-in), or the harness's own `NoServer`
-and `Timeout`. `retryable` is true when the worker will try again
+`Kicked`, `Banned` (protocol 14: a banned account's sign-in), `RegistrationRequired` (a
+sign-up session the server ended, "Sign-up ended: …"), `RegistrationPending` (a session that
+ended while its request waits; `reconnect` is Check again), `RegistrationDeclined`,
+`RegistrationBusy` ("Too many sign-ups are in progress", retried), or the harness's own
+`NoServer` and `Timeout`. `retryable` is true when the worker will try again
 in `retryInMS`; when it is false nothing retries until `reconnect` (or, at startup, the harness
 exits with code 2).
 
@@ -583,6 +593,61 @@ selected while its window has input focus; the harness has no window, so nothing
 "viewed" and every message from someone else counts until an agent sends `read`. That keeps
 counts deterministic for scripts: `send` selects its room, but nothing clears a badge behind
 the agent's back.
+
+## Registration
+
+Protocol 25 (#43 G2, plan D12-D19). A key without an account on a server that is not Open, or
+any key sent with `registering` (`--register`, **Use an invite code**, or an invite link), gets
+the plaintext `ServerRegistrationRequired`; the transport is then active but registering, and
+the only thing it sends is a sealed `ClientRegister`. `status` reports `"connection":
+"registering"` meanwhile.
+
+Start a client that signs up with a code:
+
+```sh
+./haychat-client --headless --name carol-1 --server 127.0.0.1:12345 \
+	--config-dir "$tmp/carol" --invite-code "$code" [--reason "Bob's sister"]
+```
+
+or start it with `--register` (or on a closed server, with nothing) and send `register CODE
+[REASON...]` after `registration_required`. Existing accounts are never affected.
+
+### Commands
+
+| Command | Meaning |
+| --- | --- |
+| `register CODE\|- [REASON...]` | While registering: one `ClientRegister` with the code (dashes, spaces and case do not matter; `-` for none, Open servers only) and the rest of the line as the reason (sent only in Invite + approval mode). The client checks the code's shape and the reason's length first (`ok:false` without sending). One at a time: a second before the answer is refused. `ok` means it went out; the answer is `registration_result`, or `registration_result` `created` and then `connected`. |
+| `invite-create OPTIONS [NOTE...]` | Create invites: makes a code. `OPTIONS` is `-` (one day, one use) or a comma list of `expires=SECONDS` (0 never, admins only; non-admins at most 604800), `uses=N` (0 no limit, at most 1000), `roles=ID+ID`, `room=ID` (an unencrypted invite room; its accounts are restricted to it) and `skip-approval`; the last three are for admins. The answer is `invite_created`, the only time the code is shown, or a `protocol_error`. |
+| `invite-list` | Create invites: the codes from the cache (`loaded`, `invites`), and asks for them again; the answer is `invite_list` (admins see every code, others their own). |
+| `invite-revoke INVITE_ID` | Revokes a code (admins any, others their own). Answered by `admin_result` `invite-revoke` with `inviteID`. |
+| `registration-list [all]` | Approve registrations: the requests from the cache with `pendingCount` (the badge), and asks again; `all` also lists decided ones. The answer is `registration_requests`. |
+| `registration-decide REQUEST_ID approve\|decline [REASON...]` | Approve registrations: decides a pending request; the reason is shown to a declined applicant. Answered by `admin_result` `registration-decide` (`requestID`) and `registration_request` to every approver; a still-connected applicant gets `registration_result` (`declined`) or `created` and `connected` at once. |
+| `registration-mode open\|invite\|approval` | Admins: sets the server's mode. Answered by `admin_result` `registration-mode`; every session gets `registration_mode`. |
+| `restrict USER_ID on\|off` | Admins: restricts an account or lifts it (lifting joins it to every Public room). Answered by `admin_result` `restricted`; the account gets `account_updated` with `isRestricted`. |
+| `link-open URL` | Reads a `haychat://HOST:PORT/join[?key=HEX]` or `haychat://HOST:PORT/invite/CODE?key=HEX` link as the GUI does and prints `link_pending`. Nothing connects yet. |
+| `link-confirm` | Follows the open link (the GUI's Join or Continue): adds or matches the server, pins the link's key, selects it and connects; an invite connects with `registering` set and the code in the sign-up form, so `register` with the code follows (the GUI waits for Sign up). A link whose key differs from the pin is refused. |
+| `link-cancel` | Drops the open link and its code. |
+
+### Events
+
+| Event | Example |
+| --- | --- |
+| `registration_required` | `{"event":"registration_required","serverID":1,"mode":"approval","status":"none","message":"This server needs an invite code and approval to sign up"}` (`mode` `open`, `invite` or `approval`; `status` the key's request: `none`, `pending` (the GUI shows the waiting screen) or `declined` with the reason in `message`) |
+| `registration_result` | `{"event":"registration_result","serverID":1,"status":"pending","message":"Your sign-up request is waiting for approval","userID":0}` (`status` `created` (`userID` the new account, followed by `connected` with `"registered":true`), `pending`, `refused` (`message` such as "This invite code is not valid"; fix the code and `register` again in the same session) or `declined` (the session ends; not retried, like a ban)) |
+| `registration_mode` | `{"event":"registration_mode","serverID":1,"mode":"invite"}` (an admin changed the mode) |
+| `invite_created` | `{"event":"invite_created","serverID":1,"invite":{"id":9,"note":"for carol","createdBy":3,"createdByNickname":"alice","createdAt":"...","expiresAt":"...","maxUses":1,"uses":0,"revoked":false,"roleIds":[],"roomId":0,"restricted":false,"skipApproval":false},"code":"0123-4567-…","link":"haychat://127.0.0.1:12345/invite/0123-4567-…?key=<server key hex>"}` (the answer to `invite-create`; `link` carries the server key this profile pinned) |
+| `invite_list` | `{"event":"invite_list","serverID":1,"invites":[…]}` (as in `invite_created`, without codes) |
+| `registration_requests` | `{"event":"registration_requests","serverID":1,"pendingCount":1,"requests":[{"id":4,"nickname":"dave","reason":"Bob's sister","status":"pending","identityPublicKey":"<hex>","inviteId":9,"inviteNote":"for carol","inviteCreatedBy":3,"createdAt":"...","decidedBy":0,"decidedAt":"","decisionReason":""}]}` (an approver's client asks for it after every `connected`, for the badge) |
+| `registration_request` | `{"event":"registration_request","serverID":1,"pendingCount":0,"request":{…}}` (a request was made, approved or declined; to every approver session; `pendingCount` is the badge) |
+| `link_pending` | `{"event":"link_pending","open":true,"kind":"invite","server":"127.0.0.1:12345","host":"127.0.0.1","port":12345,"hasKey":true,"hasCode":true,"match":"new_server","serverID":0,"error":""}` (`match` `new_server`, `pinned`, `unpinned` (the link's key will be pinned) or `key_differs` (refused, `error` says why); the code is never printed) |
+
+`connected`, `status`, `account_updated`, `user_list`, `user_updated` and `users` carry
+`isRestricted`; `connected` and `status` carry `registrationMode`, and `status` also `signUp`
+(`none`, `required`, `submitting`, `pending`, `refused`, `declined`, `ended`), `signUpMessage`
+and `pendingRegistrations`, the approver badge. A restricted account's `user_list` names only
+the accounts it shares a room with and admins; a `user_updated` for an account the directory
+does not have yet adds it, and a direct message to someone it no longer shares a room with is a
+`protocol_error` "You no longer share a room with this person".
 
 ## Example: Two Agents Chatting
 

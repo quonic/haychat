@@ -231,6 +231,10 @@ State_selectedRoomDraft :: proc(state: ^State) -> ^[dynamic]u8 {
 // Peer user IDs belong to one server, so switching servers closes any open conversation and
 // the room editor.
 State_switchToServer :: proc(state: ^State, serverID: int) {
+	// Leaving a server's sign-up screen forgets its code (registration.odin).
+	if state.signUpForm.serverID != serverID {
+		State_wipeSignUpForm(state)
+	}
 	State_closeRoomEditor(state)
 	State_closeServerSettings(state)
 	State_closeDirectConversation(state)

@@ -119,9 +119,6 @@ buildSignUpView :: proc(state: ^State, allocator := context.temp_allocator) -> (
 		view.title = strings.clone("Waiting for approval", allocator)
 		view.text = SIGN_UP_PENDING_TEXT
 		view.showCheckAgain = connection.status != .Registering
-		if connection.status == .Failed && connection.failureKind != .RegistrationPending {
-			view.error = connection.detail
-		}
 	case .Declined:
 		view.title = strings.clone("Sign-up declined", allocator)
 		view.text =
@@ -138,6 +135,23 @@ buildSignUpView :: proc(state: ^State, allocator := context.temp_allocator) -> (
 			allocator = allocator,
 		)
 		view.showStartAgain = true
+	}
+	// Check again or Start again could not reach the server: say why under the buttons.
+	#partial switch connection.signUp {
+	case .Pending, .Declined, .Ended:
+		#partial switch connection.failureKind {
+		case .RegistrationPending, .RegistrationDeclined, .RegistrationRequired, .None:
+		case:
+			if connection.lastAttemptFailed && len(connection.detail) > 0 {
+				view.error = describeConnectFailure(
+					connection.failureKind,
+					connection.detail,
+					Server_displayName(server^, state.config),
+					"",
+					allocator,
+				)
+			}
+		}
 	}
 	return
 }

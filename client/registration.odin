@@ -351,9 +351,12 @@ State_registrationResult :: proc(state: ^State, event: ^ClientTransportRuntimeEv
 		connection.signUpRequestStatus = .Pending
 		State_wipeSignUpFormFor(state, event.serverID)
 	case .Refused:
-		// The code stays, so the user can fix it.
+		// The code stays, so the user can fix it. A pending request stays pending: the
+		// refusal is then the server ending the session ("Sign-up took too long").
 		connection := State_serverConnection(state, event.serverID)
-		ServerConnection_setSignUp(connection, .Refused, event.message)
+		if connection.signUp != .Pending {
+			ServerConnection_setSignUp(connection, .Refused, event.message)
+		}
 	case .Declined:
 		message := strings.clone(event.message, context.temp_allocator)
 		State_connectionFailed(state, event)
@@ -391,10 +394,8 @@ State_registrationConnectionChanged :: proc(state: ^State, event: ^ClientTranspo
 			ServerConnection_setSignUp(connection, .Declined, connection.detail)
 			State_wipeSignUpFormFor(state, event.serverID)
 		case:
-			if connection.signUp != .None {
-				ServerConnection_setSignUp(connection, .None, "")
-				State_wipeSignUpFormFor(state, event.serverID)
-			}
+		// Check again or Start again could not reach the server: the screen stays, with
+		// the reason (buildSignUpView), and the banner's retry still runs.
 		}
 	case .Disconnected:
 		if connection.signUp != .None {
@@ -418,10 +419,8 @@ State_signUpVisible :: proc(state: ^State) -> bool {
 		return false
 	}
 	connection := state.serverConnections[index]
-	if connection.signUp == .None {
-		return false
-	}
-	return connection.status == .Registering || connection.status == .Failed
+	// It stays up while Check again or Start again connects, until the server answers.
+	return connection.signUp != .None && connection.status != .Established
 }
 
 // ── Administering ─────────────────────────────────────────────────
