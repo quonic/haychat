@@ -137,3 +137,38 @@ testConfigVoiceKeysDefaultParseAndClamp :: proc(t: ^testing.T) {
 		fmt.tprintf("expected 200/1/64 after clamping, got %v", config),
 	)
 }
+
+@(test)
+testConfigRetiredVariablesAreReportedOnlyWhenSet :: proc(t: ^testing.T) {
+	_ = t
+	// Restore whatever the environment had, so the test leaves no trace.
+	saved: [len(RETIRED_CONFIG_VARIABLES)]string
+	for key, index in RETIRED_CONFIG_VARIABLES {
+		saved[index] = os.get_env(key, context.temp_allocator)
+	}
+	defer for key, index in RETIRED_CONFIG_VARIABLES {
+		if len(saved[index]) > 0 {
+			os.set_env(key, saved[index])
+		} else {
+			os.unset_env(key)
+		}
+	}
+
+	for key in RETIRED_CONFIG_VARIABLES {
+		os.unset_env(key)
+	}
+	unset := retiredConfigVariablesSet()
+	defer delete(unset)
+	assert(
+		len(unset) == 0,
+		fmt.tprintf("expected no retired variables when none are set, got %v", unset[:]),
+	)
+
+	os.set_env("HAYCHAT_MAX_FILE_SIZE", "10485760")
+	set := retiredConfigVariablesSet()
+	defer delete(set)
+	assert(
+		len(set) == 1 && set[0] == "HAYCHAT_MAX_FILE_SIZE",
+		fmt.tprintf("expected only HAYCHAT_MAX_FILE_SIZE to be reported, got %v", set[:]),
+	)
+}

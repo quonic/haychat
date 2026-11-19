@@ -1487,54 +1487,6 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientDecideRegistration(pm, state, peerID, packet.payload)
 	case .ClientAdminSetRestricted:
 		MainRouterState_handleClientAdminSetRestricted(pm, state, peerID, packet.payload)
-	case .ClientStoreFile:
-		req: common.ClientStoreFileRequest
-		err := cbor.unmarshal(packet.payload, &req)
-		defer delete(req.filename)
-		defer delete(req.content)
-		if err != nil || len(req.filename) == 0 || len(req.content) == 0 {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				peerID,
-				common.MessageType.ServerStoreFileResponse,
-				common.ServerStoreFileResult {
-					success = false,
-					message = "invalid payload",
-					hashedFilename = "",
-				},
-			)
-			return
-		}
-
-		hashedName, storeMessage, ok := saveFile(pm.config, req.content, req.filename, int(peerID))
-		if !ok {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				peerID,
-				common.MessageType.ServerStoreFileResponse,
-				common.ServerStoreFileResult {
-					success = false,
-					message = storeMessage,
-					hashedFilename = "",
-				},
-			)
-			return
-		}
-		defer delete(hashedName)
-
-		MainRouterState_sendPeerMessage(
-			pm,
-			state,
-			peerID,
-			common.MessageType.ServerStoreFileResponse,
-			common.ServerStoreFileResult {
-				success = true,
-				message = storeMessage,
-				hashedFilename = strings.clone(hashedName),
-			},
-		)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -2168,6 +2120,11 @@ main :: proc() {
 		config.restartBackoffMin,
 		config.restartBackoffMax,
 	)
+	retiredVariables := retiredConfigVariablesSet()
+	for key in retiredVariables {
+		fmt.eprintfln("[Startup] %s is no longer used and is ignored (#31)", key)
+	}
+	delete(retiredVariables)
 
 	config.networkSocketName = fmt.aprintf("%s_network", SERVER_SOCKET)
 	config.databaseSocketName = fmt.aprintf("%s_database", SERVER_SOCKET)
