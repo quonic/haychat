@@ -104,7 +104,8 @@ formatServerStatus :: proc(
 		&builder,
 		" storage_running=%v storage_restart_pending=%v attachment_uploads=%d " +
 		"attachment_downloads=%d attachment_bytes_in=%d attachment_bytes_out=%d " +
-		"attachment_crypto_ms=%d attachment_blobs_swept=%d attachment_orphans=%d",
+		"attachment_crypto_ms=%d attachment_blobs_swept=%d attachment_orphans=%d " +
+		"attachment_orphans_kept=%d",
 		snapshot.storageRunning,
 		snapshot.storageRestartPending,
 		snapshot.attachmentUploads,
@@ -114,6 +115,7 @@ formatServerStatus :: proc(
 		snapshot.attachments.cryptoNanos / 1_000_000,
 		snapshot.attachments.blobsSwept,
 		snapshot.attachments.orphansFound,
+		snapshot.attachments.orphansKept,
 	)
 	return strings.to_string(builder)
 }

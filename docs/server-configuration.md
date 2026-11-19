@@ -89,6 +89,7 @@ the range; a value that does not parse uses the default. Byte values are plain n
 | `HAYCHAT_ATTACHMENT_MIN_FREE_BYTES` | `1073741824` (1 GiB; 0 to 1 TiB) | Free space the blob directory's volume must keep after an upload; an upload that would go below it is refused with "Server storage is full" |
 | `HAYCHAT_ATTACHMENT_PENDING_HOURS` | `24` (1 to 720) | An upload that was never sent with a message is deleted this many hours after it began |
 | `HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND` | `4194304` (4 MiB/s; 64 KiB/s to 1 GiB/s) | Each connection's transfer pace, uploads and downloads together, so file chunks never crowd out chat |
+| `HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE` | `false` | One start's leave for the startup scan to delete files without a row past its guards (below). It is read only at startup, so set it for the one start that should delete them and remove it again; left set, it disables the guards on every later start |
 
 The sweeper runs at startup and then hourly. It deletes uploads that received no chunk for an
 hour, uploads and unbound files older than `HAYCHAT_ATTACHMENT_PENDING_HOURS`, files whose
@@ -98,11 +99,30 @@ logs `[Attachments] Swept N attachment rows`. At startup the server also deletes
 the blob directory that is older than an hour and has no row (or whose row is a removed file),
 logging each one and `[Attachments] Deleted N orphan attachment files`; this is why a restore
 must load the database before the blob directory ([deploy/README.md
-"Restoring"](../deploy/README.md#restoring)). Hourly and at startup it also deletes the files of
-the newest 1000 removed files that are still on a message again, which is how a removal made
-with `deploy/sql/remove-attachment.sql` leaves the disk. An upload whose client process ended
-is never resumed (the client uploads the file again as a new blob), so its part file goes with
-the stalled uploads.
+"Restoring"](../deploy/README.md#restoring)). Two guards keep a wrong restore order from
+deleting a backup's files (#131); either keeps **every** such file, deletes nothing, and logs a
+`[Attachments] Warning: ...` line with the counts that names `deploy/README.md (Restoring)` and
+the override:
+
+- The `attachments` table has no row at all while the scan found files (in `blobs/`, or
+  `incoming/*.part`): even a single file stays.
+- More than 10% of the files the scan found have no row, and more than 10 of them (the share
+  and the floor are `ATTACHMENT_ORPHAN_PURGE_MAX_SHARE_PERCENT` and
+  `ATTACHMENT_ORPHAN_PURGE_FLOOR` in `server/router_attachments.odin`). Up to 10 orphans are
+  always deleted, so a stray file in a small directory still goes.
+
+The scan counts only files older than an hour, and not the files of rows the startup sweep
+deletes meanwhile (they go with their rows). `HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=1` lifts
+both guards for that start, logging `[Attachments] HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE is
+set: deleting N orphan files of M past the guards` when a guard would have kept them. The
+`[Status]` line counts kept orphans as `attachment_orphans_kept`.
+
+Hourly and at startup the server also deletes the files of the newest 1000 removed files that
+are still on a message again, which is how a removal made with
+`deploy/sql/remove-attachment.sql` leaves the disk. An upload whose client process ended is
+never resumed (the client uploads the file again as a new blob), so its part file goes with the
+stalled uploads. The sweeper and this pass delete only by rows, so the guards do not apply to
+them.
 
 ### Retired Variables
 
@@ -193,7 +213,8 @@ thread logs one line of space-separated `key=value` pairs, for example:
   progress; `attachment_bytes_in` and `attachment_bytes_out` the file bytes received and sent
   since startup; `attachment_crypto_ms` the main thread's time sealing and opening channel 5
   packets; `attachment_blobs_swept` and `attachment_orphans` what the sweeper and the startup
-  scan removed.
+  scan removed, and `attachment_orphans_kept` the files without a row the startup scan's guards
+  kept ([Attachments](#attachments)).
 
 The frame counters start over when the network service restarts. In the dev pod, read the latest
 line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`; in production, see [deploy/README.md

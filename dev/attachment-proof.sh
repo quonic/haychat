@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Live proof of file attachments (protocols 26-28, attachments plan F1-F5) with headless client
 # processes (docs/testing-harness.md "Attachments"). Steps 1-10 run against the server
-# dev/live-proof.sh started; steps 11-15 against a second server this script starts itself, on a
+# dev/live-proof.sh started; steps 11-16 against a second server this script starts itself, on a
 # fresh database it creates and drops, with small limits and its own blob directory, so the
 # CI server's limits stay as they are and the proof may restart it.
 #
@@ -65,6 +65,12 @@ set -euo pipefail
 #                 files, the startup scan the orphan, and the controls (a bound file of a live
 #                 #general message, and an unbound upload within the pending window) stay and
 #                 the first still downloads.
+#  16. guards:    (#131) the startup scan's guards against a wrong restore order. With every
+#                 file made two hours old, 12 planted files without a row (over the floor of
+#                 10 and over 10% of the files) are kept with a warning; after the rows are
+#                 deleted with psql (an empty table) every file is kept with the empty-table
+#                 warning; one start with HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=1 deletes them
+#                 all.
 #
 # The latency lines it prints ("[attachments] latency ...") measure control packets during a
 # transfer: the plan's main risk is file crypto on the router thread and ENet's shared reliable
@@ -536,11 +542,13 @@ wait_limits_ready() {
 	fail "the second server was not ready after ${ready_timeout_secs}s"
 }
 
-# start_limits_server: starts (or starts again) the second server on its own database, port,
-# state and blob directory, with small limits. The log starts empty on every start.
+# start_limits_server [ALLOW_PURGE]: starts (or starts again) the second server on its own
+# database, port, state and blob directory, with small limits. ALLOW_PURGE (default false) is
+# HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE. The log starts empty on every start.
 start_limits_server() {
 	: >"$limits_log"
-	HAYCHAT_DATABASE_NAME=$limits_db HAYCHAT_LISTEN_PORT=$limits_port \
+	HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=${1:-false} \
+		HAYCHAT_DATABASE_NAME=$limits_db HAYCHAT_LISTEN_PORT=$limits_port \
 		HAYCHAT_LOG_DIR="$limits_dir/logs" HAYCHAT_FILE_STORAGE_PATH="$limits_dir/storage" \
 		HAYCHAT_SERVER_IDENTITY_FILE="$limits_dir/storage/server_identity.json" \
 		HAYCHAT_ATTACHMENT_DIR="$limits_dir/attachments" \
@@ -805,5 +813,70 @@ expect_connected d
 download d "$control_blob" "$work_dir/d-control.txt" >/dev/null
 same_bytes "$control_file" "$work_dir/d-control.txt" || fail "the kept file no longer downloads"
 stop_client d
+stop_limits_server
+
+echo "==> [attachments] 16. the startup scan keeps a wrong restore's files (#131)"
+limits_blobs="$limits_dir/attachments/blobs"
+# stored_files: every file the startup scan lists (finished blobs and part files), one per line.
+stored_files() {
+	find "$limits_blobs" "$limits_dir/attachments/incoming" -type f \
+		\( -path "$limits_blobs/*" -o -name '*.part' \)
+}
+# wait_limits_log TEXT: waits until the second server's log has a line containing TEXT.
+wait_limits_log() {
+	local deadline=$((SECONDS + command_timeout_secs))
+	until grep -Fq -- "$1" "$limits_log"; do
+		((SECONDS < deadline)) || fail "the second server never logged: $1"
+		sleep 0.1
+	done
+}
+# The scan lists only files older than an hour; make every stored file old enough.
+stored_files | xargs -r touch -d '2 hours ago'
+known_files=$(stored_files | wc -l)
+((known_files > 0)) || fail "expected stored files before the guard steps"
+planted=()
+for _ in $(seq 1 12); do
+	blob=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	path=$(blob_path "$blob")
+	mkdir -p "$(dirname "$path")"
+	printf 'a restored file %s\n' "$blob" >"$path"
+	touch -d '2 hours ago' "$path"
+	planted+=("$path")
+done
+total_files=$((known_files + 12))
+
+# 12 of the files have no row: more than the floor (10) and more than 10%.
+start_limits_server
+wait_limits_log "[Attachments] Warning: 12 of the $total_files files older than an hour"
+grep -F "[Attachments] Warning: 12 of the" "$limits_log" | grep -Fq \
+	"deploy/README.md (Restoring)" || fail "the warning does not name the restore procedure"
+! grep -Fq "orphan attachment files" "$limits_log" || fail "the scan deleted files past its guard"
+for path in "${planted[@]}"; do
+	[[ -f "$path" ]] || fail "expected $path kept by the over-the-share guard"
+done
+[[ "$(stored_files | wc -l)" == "$total_files" ]] || fail "expected every file kept"
+echo "[attachments] the scan kept 12 orphans of $total_files files and warned"
+stop_limits_server
+
+# An empty table (a fresh database beside a restored volume): every file stays.
+limits_sql "DELETE FROM attachments" >/dev/null
+start_limits_server
+wait_limits_log "[Attachments] Warning: the attachments table is empty but the blob directory \
+holds $total_files files"
+grep -F "attachments table is empty" "$limits_log" | grep -Fq \
+	"HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=1" || fail "the warning does not name the override"
+! grep -Fq "orphan attachment files" "$limits_log" || fail "the scan deleted files of a restore"
+[[ "$(stored_files | wc -l)" == "$total_files" ]] || fail "expected every file kept"
+echo "[attachments] the scan kept all $total_files files beside an empty table and warned"
+stop_limits_server
+
+# One start with the override deletes them all.
+start_limits_server 1
+wait_limits_log "[Attachments] HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE is set: deleting \
+$total_files orphan files of $total_files past the guards"
+wait_limits_log "[Attachments] Deleted $total_files orphan attachment files"
+left=$(stored_files | wc -l)
+[[ "$left" == 0 ]] || fail "expected the override to delete every file, $left left"
+echo "[attachments] the override deleted all $total_files files"
 stop_limits_server
 echo "==> [attachments] PASS"

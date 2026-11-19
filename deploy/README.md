@@ -343,8 +343,26 @@ clear (files of encrypted ones are ciphertext).
 
 The order matters: **the database first, then the blob directory**, and the server must not run
 with the restored files before their rows are back. At every start the server deletes each file
-in the blob directory that is older than an hour and has no row (the startup scan), so a server
-that starts on a fresh database with the restored attachments volume deletes them all.
+in the blob directory that is older than an hour and has no row (the startup scan). Two guards
+stop it from deleting a backup's files when the order went wrong; each keeps every such file,
+deletes nothing and logs a warning with the counts:
+
+- **An empty table:** the `attachments` table has no row at all but the blob directory holds
+  files (a fresh database beside the restored attachments volume). The log says
+  `[Attachments] Warning: the attachments table is empty but the blob directory holds N files
+  older than an hour; kept them all. ...`.
+- **Too many orphans:** more than 10% of the files the scan found have no row, and more than 10
+  of them (an older dump beside a newer volume). The log says `[Attachments] Warning: N of the M
+  files older than an hour in the blob directory have no row (more than 10%); kept them all.
+  ...`. Up to 10 orphans are always deleted, so a stray file in a small directory still goes.
+
+After either warning, stop the server and restore the pair as below. When the files really
+should go (the dump is right and the files are leftovers), start the server **once** with
+`HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=1` (in `/etc/haychat-server/server.env`, or `-e` on `podman
+run`): that start deletes them past both guards and logs `[Attachments]
+HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE is set: deleting N orphan files of M past the guards`.
+Remove the variable right after, because the server reads it at every start and the guards stay
+off while it is set. The hourly sweeper is not guarded: it deletes files only with their rows.
 
 1. Import the storage volume before the first start: `podman volume create haychat-storage &&
    podman volume import haychat-storage FILE.tar`. Leave the attachments volume empty for now.
@@ -375,7 +393,8 @@ What a mismatched pair does:
   `HAYCHAT_ATTACHMENT_PENDING_HOURS`, a file whose message is gone after an hour). An admin can
   remove such a file from its card to show it as removed instead.
 - **A file without a row** (the blob directory is newer than the dump): the startup scan deletes
-  it once the file is an hour old and logs `[Attachments] Deleted N orphan attachment files`.
+  it once the file is an hour old and logs `[Attachments] Deleted N orphan attachment files`,
+  unless a guard above keeps it (an empty table, or more than 10% and more than 10 such files).
 
 The server refuses an attachment directory that is the storage directory or holds the identity
 file, so the two volumes cannot be mixed up.
@@ -395,8 +414,9 @@ The server cleans the volume by itself. Hourly and at every start it deletes the
 the files of uploads that stalled (no data for an hour) or were never sent with a message
 (`HAYCHAT_ATTACHMENT_PENDING_HOURS`, 24), of cancelled uploads, and of files whose message is
 gone (a deleted room's files, for example), each at least an hour after the upload began. At
-every start it also deletes files that have no row. The `[Status]` line counts both
-(`attachment_blobs_swept`, `attachment_orphans`).
+every start it also deletes files that have no row, unless the guards in
+[Restoring](#restoring) keep them. The `[Status]` line counts both (`attachment_blobs_swept`,
+`attachment_orphans`) and the orphans the guards kept (`attachment_orphans_kept`).
 
 Admins see storage use and remove files from the client (Server settings → **Storage**, after
 the Admin section, and **Remove attachment…** in a file card's right-click menu; protocol 28).

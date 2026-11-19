@@ -121,6 +121,8 @@ AttachmentRouterStats :: struct {
 	cryptoNanos:  i64, // time spent in sealFilePacket and openFilePacket
 	blobsSwept:   u64,
 	orphansFound: u64,
+	// Orphans the startup scan's guards kept (#131).
+	orphansKept:  u64,
 }
 
 // A session's file channel halves (protocol 26), taken out of its transport at sign-in
@@ -154,6 +156,11 @@ RouterAttachmentState :: struct {
 	scanStarted:   bool,
 	// The startup scan's files while the database says which have rows. Owned.
 	scanFiles:     [dynamic]StorageFile,
+	// From the scan's start until its Known answer: the blobs the sweeper deleted the rows of
+	// meanwhile. Their files go with StorageDeleteBlobs, so the scan's guards count them
+	// neither as files nor as orphans (a startup sweep would otherwise look like a bad restore).
+	scanPending:   bool,
+	scanSwept:     map[common.AttachmentBlobID]bool,
 	stats:         AttachmentRouterStats,
 }
 
@@ -169,6 +176,7 @@ RouterAttachmentState_init :: proc() -> RouterAttachmentState {
 		pace = make(map[u32]AttachmentPace),
 		plaintext = make([]u8, common.ATTACHMENT_PACKET_MAX_SIZE),
 		scanFiles = make([dynamic]StorageFile),
+		scanSwept = make(map[common.AttachmentBlobID]bool),
 	}
 }
 
@@ -217,6 +225,7 @@ RouterAttachmentState_deinit :: proc(attachments: ^RouterAttachmentState) {
 	delete(attachments.pace)
 	delete(attachments.plaintext)
 	delete(attachments.scanFiles)
+	delete(attachments.scanSwept)
 	attachments^ = {}
 }
 
@@ -1172,6 +1181,11 @@ MainRouterState_handleAttachmentResult :: proc(
 			return
 		}
 		attachments.stats.blobsSwept += u64(len(result.blobs))
+		if attachments.scanPending {
+			for blob in result.blobs {
+				attachments.scanSwept[blob.blobId] = true
+			}
+		}
 		fmt.printfln("[Attachments] Swept %d attachment rows", len(result.blobs))
 		blobs := make([dynamic]common.DatabaseAttachmentBlob, 0, len(result.blobs))
 		append(&blobs, ..result.blobs[:])
@@ -1185,7 +1199,7 @@ MainRouterState_handleAttachmentResult :: proc(
 			attachments.nextSweep = time.tick_add(time.tick_now(), ATTACHMENT_SWEEP_FOLLOW_UP)
 		}
 	case .Known:
-		attachmentDeleteOrphans(pm, state, result.blobs[:])
+		attachmentDeleteOrphans(pm, state, result.blobs[:], result.tableEmpty)
 	case .Remove:
 		MainRouterState_attachmentRemoveResult(pm, state, request, result)
 	case .Usage:
@@ -1195,21 +1209,109 @@ MainRouterState_handleAttachmentResult :: proc(
 	}
 }
 
+// The startup scan's guards (#131) against a wrong restore order (deploy/README.md
+// "Restoring"): with an empty attachments table it deletes nothing, and when more than this
+// share of the files it found are orphans, nothing either, unless there are at most
+// ATTACHMENT_ORPHAN_PURGE_FLOOR of them (one stray file in a small directory still goes).
+// HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE lifts both for one start.
+ATTACHMENT_ORPHAN_PURGE_MAX_SHARE_PERCENT :: 10
+ATTACHMENT_ORPHAN_PURGE_FLOOR :: 10
+
+AttachmentOrphanGuard :: enum u8 {
+	Delete, // delete the orphans
+	KeepEmptyTable, // the table has no row at all: keep every file
+	KeepOverShare, // more than the share and the floor are orphans: keep every file
+}
+
+// What the startup scan does with orphans among scanned files (both counts exclude the files
+// of rows the sweeper deleted meanwhile).
+attachmentOrphanGuard :: proc(
+	scanned: int,
+	orphans: int,
+	tableEmpty: bool,
+	allowPurge: bool,
+) -> AttachmentOrphanGuard {
+	if orphans == 0 || allowPurge {
+		return .Delete
+	}
+	if tableEmpty {
+		return .KeepEmptyTable
+	}
+	if orphans > ATTACHMENT_ORPHAN_PURGE_FLOOR &&
+	   orphans * 100 > scanned * ATTACHMENT_ORPHAN_PURGE_MAX_SHARE_PERCENT {
+		return .KeepOverShare
+	}
+	return .Delete
+}
+
+// The warning the startup scan logs when a guard keeps the orphans. The caller frees it, except
+// the empty string .Delete returns.
+attachmentOrphanGuardWarning :: proc(
+	guard: AttachmentOrphanGuard,
+	scanned: int,
+	orphans: int,
+	allocator := context.allocator,
+) -> string {
+	switch guard {
+	case .Delete:
+		return ""
+	case .KeepEmptyTable:
+		return fmt.aprintf(
+			"[Attachments] Warning: the attachments table is empty but the blob directory " +
+			"holds %d files older than an hour; kept them all. A database restored after its " +
+			"blob directory looks like this: see deploy/README.md (Restoring). To delete them, " +
+			"start once with %s=1 and remove it again",
+			orphans,
+			ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY,
+			allocator = allocator,
+		)
+	case .KeepOverShare:
+		return fmt.aprintf(
+			"[Attachments] Warning: %d of the %d files older than an hour in the blob directory " +
+			"have no row (more than %d%%); kept them all. A database older than its blob " +
+			"directory looks like this: see deploy/README.md (Restoring). To delete them, " +
+			"start once with %s=1 and remove it again",
+			orphans,
+			scanned,
+			ATTACHMENT_ORPHAN_PURGE_MAX_SHARE_PERCENT,
+			ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY,
+			allocator = allocator,
+		)
+	}
+	return ""
+}
+
+// The scan is over (answered, or its lookup failed): forget its files and swept blobs.
+@(private = "file")
+attachmentEndScan :: proc(attachments: ^RouterAttachmentState) {
+	clear(&attachments.scanFiles)
+	clear(&attachments.scanSwept)
+	attachments.scanPending = false
+}
+
 // Every scanned file whose blob has no row, or a row in a state with no such file, is an orphan.
+// The guards (attachmentOrphanGuard) may keep them all.
 @(private = "file")
 attachmentDeleteOrphans :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	known: []common.DatabaseAttachmentBlob,
+	tableEmpty: bool,
 ) {
 	attachments := &state.attachments
+	defer attachmentEndScan(attachments)
 	states := make(map[common.AttachmentBlobID]common.AttachmentState, len(known))
 	defer delete(states)
 	for blob in known {
 		states[blob.blobId] = blob.state
 	}
+	scanned := 0
 	orphans := make([dynamic]StorageFile)
 	for file in attachments.scanFiles {
+		if attachments.scanSwept[file.blobId] {
+			continue
+		}
+		scanned += 1
 		rowState, hasRow := states[file.blobId]
 		keep :=
 			hasRow &&
@@ -1218,10 +1320,28 @@ attachmentDeleteOrphans :: proc(
 			append(&orphans, file)
 		}
 	}
-	clear(&attachments.scanFiles)
+	allowPurge := pm.config.attachmentAllowOrphanPurge
+	guard := attachmentOrphanGuard(scanned, len(orphans), tableEmpty, allowPurge)
+	if guard != .Delete {
+		attachments.stats.orphansKept += u64(len(orphans))
+		warning := attachmentOrphanGuardWarning(guard, scanned, len(orphans))
+		fmt.eprintln(warning)
+		delete(warning)
+		delete(orphans)
+		return
+	}
 	if len(orphans) == 0 {
 		delete(orphans)
 		return
+	}
+	if attachmentOrphanGuard(scanned, len(orphans), tableEmpty, false) != .Delete {
+		fmt.printfln(
+			"[Attachments] %s is set: deleting %d orphan files of %d past the guards; " +
+			"remove it before the next start",
+			ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY,
+			len(orphans),
+			scanned,
+		)
 	}
 	attachments.stats.orphansFound += u64(len(orphans))
 	attachmentStorageSend(
@@ -1313,7 +1433,7 @@ MainRouterState_attachmentDatabaseFailed :: proc(
 	case .Sweep:
 		attachments.sweepInFlight = false
 	case .Known:
-		clear(&attachments.scanFiles)
+		attachmentEndScan(attachments)
 	case .Remove, .Usage:
 		if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
 			MainRouterState_sendProtocolError(
@@ -1574,6 +1694,7 @@ MainRouterState_handleStorageResponse :: proc(
 		}
 	case StorageScanResult:
 		if len(r.files) == 0 {
+			attachmentEndScan(attachments)
 			return
 		}
 		clear(&attachments.scanFiles)
@@ -1693,6 +1814,10 @@ MainRouterState_attachmentsStorageStopped :: proc(pm: ^ProcessManager, state: ^M
 	}
 	clear(&attachments.downloads)
 	for _, &pending in attachments.pending {
+		if pending.kind == .Scan {
+			// The scan is lost with the worker; it runs again at the next start.
+			attachmentEndScan(attachments)
+		}
 		if pending.kind == .FreeSpace {
 			// The usage still goes out, without the free space.
 			MainRouterState_attachmentSendUsage(pm, state, &pending, 0, false)
@@ -1738,6 +1863,7 @@ MainRouterState_attachmentsTick :: proc(
 	// The storage thread registers its IPC endpoint as it starts; the scan waits for it.
 	if !attachments.scanStarted && sync.atomic_load(&pm.config.storageFd) != 0 {
 		attachments.scanStarted = true
+		attachments.scanPending = true
 		attachmentStorageSend(pm, state, StorageScan{}, AttachmentPendingStorage{kind = .Scan})
 	}
 	if !attachments.sweepInFlight && time.tick_diff(attachments.nextSweep, now) >= 0 {

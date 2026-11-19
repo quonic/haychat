@@ -725,7 +725,11 @@ mid-file, and a new process with the same profile cannot resume it but uploads t
 as a new blob; finally the room is deleted, the server stopped, the rows backdated with `psql`
 and a two-hour-old orphan file put in its blob directory, and after the restart the startup sweep
 deletes exactly the deleted room's files, the stalled upload and the room's unsent upload past
-the pending window, the startup scan the orphan, and two controls stay.
+the pending window, the startup scan the orphan, and two controls stay. Last, the startup
+scan's guards against a wrong restore order (#131): with every file made two hours old, 12
+planted files without a row are kept with the over-the-share warning, after `DELETE FROM
+attachments` every file is kept with the empty-table warning, and one start with
+`HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE=1` deletes them all.
 
 It prints one `[attachments] latency` line per client and phase and fails when a p95 during a
 transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 250 ms; the measured p95s have been
