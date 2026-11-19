@@ -270,7 +270,7 @@ testRoomPermissionsPageSendsThroughTheBridge :: proc(t: ^testing.T) {
 		t,
 		saved.set &&
 		saved.roomID == 2 &&
-		saved.everyone == {.SpeakInVoice} &&
+		saved.everyone == {.SpeakInVoice, .AttachFiles} &&
 		saved.roleCount == 1 &&
 		saved.roles[0].roleId == ROOM_PERMISSIONS_TEST_ROLE &&
 		saved.roles[0].permissions == {.SendMessages, .EditRoom},

@@ -44,6 +44,10 @@ ServerConnection :: struct {
 	// restricted (sign-in and ServerAccountUpdated).
 	registrationMode:         common.RegistrationMode,
 	isRestricted:             bool,
+	// Protocol 27 (D18): the server's attachment limits and this account's stored bytes from
+	// sign-in, the stored bytes then counted up by this client's own uploads
+	// (State_attachmentLimits, attachments.odin).
+	attachmentLimits:         common.AttachmentLimits,
 	// The sign-up screen: its phase, the server's sentence for it (owned), and the request's
 	// state from ServerRegistrationRequired.
 	signUp:                   SignUpPhase,

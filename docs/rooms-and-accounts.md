@@ -293,6 +293,7 @@ grant or the grant of any of their roles allows. Membership still decides who se
 | **Speak in voice** | Be heard in the room's voice; without it you join and listen, and the server drops your audio | Yes |
 | **Manage members** | Add and remove members (not in Public or Role rooms) | No |
 | **Edit room** | Change the name, description and type, and the room's permissions | No |
+| **Attach files** | Upload files to the room and send them with messages, together with Send messages (protocol 27) | Yes |
 
 - Server permissions count in every room, member or not: **Manage room members** gives Manage
   members, **Manage rooms** gives Edit room, and admins hold every room permission.
@@ -300,7 +301,7 @@ grant or the grant of any of their roles allows. Membership still decides who se
   the room: those stay with **Manage rooms**.
 - A room's permissions are changed by holders of Manage rooms or the room's Edit room, and no one
   can add or take away a bit they do not hold themselves (Manage rooms counts as holding Send
-  messages, Speak in voice and Edit room). Only roles other than admin get grants.
+  messages, Speak in voice, Edit room and Attach files). Only roles other than admin get grants.
 - A grant counts only while its holder is a member: a member who leaves keeps the role but loses
   what the room granted it.
 - The server checks every permission in the same statement as the change (a post, a voice join,
@@ -310,7 +311,36 @@ grant or the grant of any of their roles allows. Membership still decides who se
 - Every room list carries your own permissions in each room, and a change to a grant, a role or
   the admin role sends a fresh list to everyone it concerns at once, so composers and voice
   follow without a reconnect. A room that existed before the migration grants everyone Send
-  messages and Speak in voice, so nothing changed for it.
+  messages and Speak in voice, so nothing changed for it. Schema migration 15 (protocol 27) gave
+  every existing room's Everyone grant Attach files too, so files work everywhere until a
+  manager takes it away.
+
+## Attachments
+
+Since protocol 27 a message, in a room or a direct conversation, can carry up to four files, with
+or without text (`docs/plan/2026-11-19-file-attachments.md`; the wire format is in
+[protocol.md](protocol.md#attachments-on-messages-protocol-27)). F4 adds the file cards and the
+composer's attach button; until then the window shows a line per file and the harness drives
+them.
+
+- **Sending.** A file is uploaded to the conversation first and then named in the message, and
+  the server binds it to that message in the statement that stores it. In a room this needs
+  Send messages and Attach files; in a direct conversation, the same recipient rules as a
+  message. A file uploaded to one conversation cannot go to another, and a file goes with one
+  message only.
+- **Encryption.** In encrypted rooms and encrypted direct conversations the client encrypts the
+  file before it uploads it, and the file's key, name and type travel inside the encrypted
+  message: the server stores only ciphertext padded to a coarse size. In plaintext conversations
+  the sender signs each file's hash, size, name and type with the message.
+- **Who may download.** Whoever may read the message may download its files: room members (in a
+  From join room, only files of messages sent after they joined) and the two sides of a direct
+  conversation. Admins have no way around that, as for history. A removed member cannot fetch
+  more files. The client checks every file against the message (hash, and for encrypted files
+  every piece and the padding) before it keeps it, and otherwise deletes it: "This attachment
+  was changed on the server".
+- **Limits.** The server announces its per-file limit and the account quota at sign-in, and the
+  client refuses a file that cannot fit before it uploads (see
+  [server-configuration.md](server-configuration.md) for the variables).
 
 ## Direct Messages
 

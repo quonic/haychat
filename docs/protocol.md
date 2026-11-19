@@ -70,6 +70,7 @@ version below therefore needs clients and servers rebuilt together.
 | 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
 | 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet |
+| 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), with schema migration 15. The message inserts bind the listed blobs, and whoever may read a message may download its files |
 | 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
@@ -82,8 +83,8 @@ The behaviour behind these versions is described in [rooms-and-accounts.md](room
 ## Attachment transfers (protocol 26)
 
 The first part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F1): a client uploads
-a file and gets a blob ID, and downloads blobs it owns. Attaching blobs to messages, and letting
-the conversation's readers download them, comes with the next part.
+a file and gets a blob ID. Protocol 27 (below) attaches blobs to messages and lets the
+conversation's readers download them.
 
 - **Control** (CBOR, encrypted, channel 1). `ClientAttachmentUploadBegin{requestId, roomId |
   recipientUserId, size, encrypted}` asks to upload `size` bytes to a room or a direct
@@ -97,8 +98,9 @@ the conversation's readers download them, comes with the next part.
   answers `ServerAttachmentUploadDone{blobId, size, sha256}`), `ClientAttachmentDownload{blobId,
   offset}` is answered by `ServerAttachmentDownloadBegin{blobId, size, offset}`, and
   `ClientAttachmentCancel{blobId}` stops an upload (for good) or a download. Every refusal is
-  `ServerAttachmentRefused{requestId, blobId, message}`. Until attachments are on messages, only
-  a blob's owner may download it.
+  `ServerAttachmentRefused{requestId, blobId, message}`. Since protocol 27 an upload to a room
+  needs AttachFiles too ("You cannot attach files in this room"), and a download is allowed to
+  whoever may read the message the blob is bound to (below), or to its owner before then.
 - **Chunks** (binary, channel 5). `kind u8 ‖ blobId 16 ‖ offset u64 LE ‖ data`, kinds
   UploadChunk 1, UploadAck 2, DownloadChunk 3, DownloadAck 4; a chunk carries 1 to 65536 bytes
   and an ack none. Each is sealed as `kind ‖ sequence u64 LE ‖ ciphertext ‖ tag` with the
@@ -142,6 +144,61 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#roles-and-permiss
   `ServerRoleDeleted` 186. The retired placeholders `ClientGetRoles` … `ServerRemovedRole` keep
   24..31 and are never sent.
 
+## Attachments on messages (protocol 27)
+
+The second part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F2: D10-D16, D18,
+D20). A message lists up to four uploaded blobs; the text may then be empty.
+
+- **References.** `AttachmentRef{blobId, size, sha256, name, mediaType, removed}` in
+  `ClientChatMessage`, `ServerChatMessage`, `StoredChatMessage` (history), `ClientDirectMessage`,
+  `ClientSealedDirectMessage`, `ServerDirectMessage`, `ServerSealedDirectMessage`,
+  `StoredDirectMessage` and `DirectConversationSummary.lastAttachments`, in the message's order.
+  A plaintext message (an unencrypted room, or the direct message fallback) fills every field
+  but `removed`: `size` and `sha256` are the stored file's, `name` is 1..255 bytes of UTF-8 with
+  no control character, `/` or `\` (and not `.` or `..`), `mediaType` 1..100 bytes of ASCII
+  `type/subtype`, a label only. A sealed message (encrypted room or direct message) fills only
+  `blobId` and `size` (the stored ciphertext's); the rest is inside the seal. `removed` is the
+  server's (an admin removed the file, F3) and is never signed. The router refuses a list that
+  does not have this shape ("Invalid message attachments").
+- **Binding.** The statement that stores the message binds the blobs it lists, or stores
+  nothing: each must be the sender's, finished and bound to no message, uploaded to this room
+  (or to a direct conversation with this recipient), encrypted exactly when the message is
+  sealed, and have the size and (plaintext) hash the message names; no blob twice. A refusal is
+  "An attachment cannot be sent with this message"; in a room without AttachFiles it is "You
+  cannot attach files in this room". Echoes and history carry the bound list.
+- **Signatures (D14).** A plaintext message without files keeps the v1 bytes (below, protocol
+  22 and 17), so stored history still verifies. One with files is signed under
+  `"haychat-room-plain-v2"` (or `"haychat-dm-plain-v2"`) over the v1 fields prefix followed by
+  `contentLength u32 LE ‖ content ‖ count u8 ‖` for each file `blobId (16) ‖ sha256 (32) ‖
+  size u64 LE ‖ nameLength u16 LE ‖ name ‖ typeLength u16 LE ‖ type`. The verifier picks the
+  label from the count, so adding, dropping, reordering or changing a file fails the signature
+  either way and the message is not shown.
+- **Sealed messages (D12, D15).** The sealed plaintext map gains an optional `"attachments"`
+  array of 1..4 maps `{"blobId": bytes(16), "key": bytes(32), "sha256": bytes(32), "size": uint,
+  "name": text, "type": text}` (`size` is the file's own size, `sha256` the stored blob's).
+  `content` may be empty only with it. A client compares the outer list with the inner one
+  (same blob IDs in the same order, each outer size the sealed layout of the inner size) and
+  otherwise shows the files as unavailable ("This message's attachments were changed on the
+  server").
+- **Encrypted files** (`common/attachment_e2ee.odin`): the stored blob is `version u8 (1) ‖
+  chunkBytes u32 LE (65536) ‖ chunk_0 ‖ … ‖ chunk_{n-1}`, the file zero-padded to its Padmé
+  length and sealed in 64 KiB chunks with XChaCha20-Poly1305 under a fresh 32-byte file key,
+  nonce `index u64 LE ‖ 16 zero bytes`, AAD `"haychat-attachment-v1" ‖ version ‖ chunkBytes u32
+  LE ‖ index u64 LE ‖ last u8`. Each chunk is sealed exactly once. A downloading client opens
+  chunk by chunk, writes only authenticated bytes, checks that the padding is zero and the
+  whole blob's SHA-256 is the sealed one, and otherwise deletes what it wrote ("This attachment
+  was changed on the server"). The same hash check applies to plaintext files.
+- **Downloads (D10).** `ClientAttachmentDownload` is allowed for a blob bound to a room message
+  when the requester is a member of the room and may read the message (a From join member only
+  messages created after it joined, as for history), for a blob of a direct message when the
+  requester is its sender or recipient (also a restricted account whose shared rooms are gone),
+  and for the owner's own blob before it is bound. Admins get no bypass; a removed blob is never
+  downloadable.
+- **Limits (D18).** `ServerAuthSuccess.attachments` is `AttachmentLimits{enabled, maxBytes,
+  quotaBytes, usedBytes}`: whether uploads are on, the largest stored blob, the account quota
+  (0 = none) and the account's stored bytes. Clients refuse a file early with them; the server
+  checks every limit again at begin.
+
 ## Room permissions and role rooms (protocol 24)
 
 The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions).
@@ -149,7 +206,8 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions)
 - **Room permissions** are `common.RoomPermission` bit numbers carried as one unsigned integer,
   the `RoomPermissions` `bit_set` (u64), and stored as `rooms.everyone_permissions` and
   `room_role_permissions.permissions` (BIGINT). Pinned values: SendMessages 0, SpeakInVoice 1,
-  ManageMembers 2, EditRoom 3. The default everyone grant is SendMessages + SpeakInVoice.
+  ManageMembers 2, EditRoom 3, and (protocol 27) AttachFiles 4. The default everyone grant is
+  SendMessages + SpeakInVoice + AttachFiles (migration 15 added AttachFiles to every room).
   Receivers drop unknown bits.
 - `RoomSummary.myPermissions` is the receiving account's set in the room (server permissions
   included: ManageRoomMembers gives ManageMembers, ManageRooms EditRoom, an admin every bit). It
@@ -162,8 +220,8 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions)
   management permission required"). A set replaces every grant (a role sent without
   permissions loses its grant), refuses a grant to an unknown or the built-in role ("Invalid
   role request") and any bit added or taken away that the requester may not grant ("You cannot
-  grant a room permission you do not hold"; ManageRooms may grant SendMessages, SpeakInVoice and
-  EditRoom). Both are answered by `ServerAdminRoomPermissions{roomId, everyone, roles,
+  grant a room permission you do not hold"; ManageRooms may grant SendMessages, SpeakInVoice,
+  EditRoom and AttachFiles). Both are answered by `ServerAdminRoomPermissions{roomId, everyone, roles,
   accessRoleIds, myPermissions}`.
 - Checks: a message (plaintext or sealed) needs SendMessages ("You cannot send messages in this
   room"). A voice join needs only membership; without SpeakInVoice the relay drops the session's
@@ -357,7 +415,8 @@ write a message in anyone's name.
   server checks it against the session's identity key and refuses a message without a valid
   one ("Invalid room message signature") and a client message ID the sender used before
   ("Duplicate room message"). It stores the signature with the message and sends it with the
-  live message and in history pages.
+  live message and in history pages. A message with files is signed under the v2 label
+  ([protocol 27](#attachments-on-messages-protocol-27)).
 - **What clients show.** A client checks every room message against the sender's pinned
   identity key (its own key for its own messages); a sender it has not pinned yet is fetched
   first, and the message shows "Checking who sent this message…" meanwhile, never its text.

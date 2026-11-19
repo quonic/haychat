@@ -133,6 +133,8 @@ headlessRoomMessageFields :: proc(
 		epoch = fields.epoch,
 		protection = fields.protection,
 		content = headlessRoomContent(entry),
+		attachments = headlessAttachmentsJSON(entry.files[:]),
+		attachmentsChanged = entry.filesChanged,
 	}
 }
 
@@ -158,6 +160,8 @@ headlessWriteRoomChatLine :: proc(
 			epoch = fields.epoch,
 			protection = fields.protection,
 			content = fields.content,
+			attachments = fields.attachments,
+			attachmentsChanged = fields.attachmentsChanged,
 		},
 	)
 	headlessRecordEvent(harness, kind)

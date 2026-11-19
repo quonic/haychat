@@ -618,19 +618,62 @@ HeadlessMessageEventJSON :: struct {
 // or waits ("log", "no_key", "sender_key"), epoch its chain's epoch (0 for plaintext); content
 // the opened or verified text, empty otherwise. Protocol 22 (#90): plain means the sender's
 // signature verified; a hidden message (no valid signature) is one the window does not show.
+//
+// Protocol 27: attachments are the files the client checked (attachments.odin MessageFile; empty
+// until the message opened or verified), attachmentsChanged that a sealed message's outer list
+// is not the one inside the seal (its files are then unavailable).
 HeadlessRoomChatJSON :: struct {
-	event:          string,
-	serverID:       int,
-	roomID:         int,
-	messageID:      int,
-	senderID:       int,
-	senderNickname: string,
-	timestamp:      string,
-	encrypted:      bool,
-	decryptError:   string,
-	epoch:          int,
-	protection:     string,
-	content:        string,
+	event:              string,
+	serverID:           int,
+	roomID:             int,
+	messageID:          int,
+	senderID:           int,
+	senderNickname:     string,
+	timestamp:          string,
+	attachments:        []HeadlessAttachmentJSON,
+	attachmentsChanged: bool,
+	encrypted:          bool,
+	decryptError:       string,
+	epoch:              int,
+	protection:         string,
+	content:            string,
+}
+
+// One checked file of a message (protocol 27): its blob ID, the stored size and the file's own
+// size, the stored blob's hash, name, media type, whether it is encrypted, and whether an admin
+// removed it (F3). attach-download ROOM_ID|@USER_ID MESSAGE_ID INDEX OUT saves it.
+HeadlessAttachmentJSON :: struct {
+	blobID:    string,
+	size:      u64,
+	fileSize:  u64,
+	sha256:    string,
+	name:      string,
+	mediaType: string,
+	encrypted: bool,
+	removed:   bool,
+}
+
+// The JSON of a message's checked files (temp).
+headlessAttachmentsJSON :: proc(files: []MessageFile) -> []HeadlessAttachmentJSON {
+	if len(files) == 0 {
+		return nil
+	}
+	list := make([]HeadlessAttachmentJSON, len(files), context.temp_allocator)
+	for file, index in files {
+		blobId := file.blobId
+		sha := file.sha256
+		list[index] = HeadlessAttachmentJSON {
+			blobID    = headlessHex(blobId[:], context.temp_allocator),
+			size      = file.storedSize,
+			fileSize  = file.fileSize,
+			sha256    = headlessHex(sha[:], context.temp_allocator),
+			name      = file.name,
+			mediaType = file.mediaType,
+			encrypted = file.encrypted,
+			removed   = file.removed,
+		}
+	}
+	return list
 }
 
 HeadlessRoomListJSON :: struct {
@@ -640,15 +683,17 @@ HeadlessRoomListJSON :: struct {
 }
 
 HeadlessHistoryMessageJSON :: struct {
-	id:             int,
-	senderID:       int,
-	senderNickname: string,
-	timestamp:      string,
-	encrypted:      bool,
-	decryptError:   string,
-	epoch:          int,
-	protection:     string,
-	content:        string,
+	id:                 int,
+	senderID:           int,
+	senderNickname:     string,
+	timestamp:          string,
+	attachments:        []HeadlessAttachmentJSON,
+	attachmentsChanged: bool,
+	encrypted:          bool,
+	decryptError:       string,
+	epoch:              int,
+	protection:         string,
+	content:            string,
 }
 
 HeadlessRoomHistoryJSON :: struct {
@@ -783,33 +828,38 @@ HeadlessRoomEventJSON :: struct {
 // window does not show; its content is always empty, as is a pending one's. A live message
 // waiting for its sender's key is printed once it opened.
 HeadlessDirectMessageJSON :: struct {
-	event:             string,
-	serverID:          int,
-	id:                int,
-	senderID:          int,
-	senderNickname:    string,
-	recipientID:       int,
-	recipientNickname: string,
-	timestamp:         string,
-	encrypted:         bool,
-	signed:            bool,
-	decryptError:      string,
-	protection:        string,
-	content:           string,
+	event:              string,
+	serverID:           int,
+	id:                 int,
+	senderID:           int,
+	senderNickname:     string,
+	recipientID:        int,
+	recipientNickname:  string,
+	timestamp:          string,
+	// Protocol 27, as in HeadlessRoomChatJSON.
+	attachments:        []HeadlessAttachmentJSON,
+	attachmentsChanged: bool,
+	encrypted:          bool,
+	signed:             bool,
+	decryptError:       string,
+	protection:         string,
+	content:            string,
 }
 
 HeadlessDirectHistoryMessageJSON :: struct {
-	id:                int,
-	senderID:          int,
-	senderNickname:    string,
-	recipientID:       int,
-	recipientNickname: string,
-	timestamp:         string,
-	encrypted:         bool,
-	signed:            bool,
-	decryptError:      string,
-	protection:        string,
-	content:           string,
+	id:                 int,
+	senderID:           int,
+	senderNickname:     string,
+	recipientID:        int,
+	recipientNickname:  string,
+	timestamp:          string,
+	attachments:        []HeadlessAttachmentJSON,
+	attachmentsChanged: bool,
+	encrypted:          bool,
+	signed:             bool,
+	decryptError:       string,
+	protection:         string,
+	content:            string,
 }
 
 // Queued messages (protocol 17): state "sent" (count of them went out encrypted) or
@@ -1050,6 +1100,8 @@ headlessDirectMessageFields :: proc(
 		decryptError = fields.decryptError,
 		protection = fields.protection,
 		content = headlessDirectContent(entry.security, entry.content),
+		attachments = headlessAttachmentsJSON(entry.files[:]),
+		attachmentsChanged = entry.filesChanged,
 	}
 }
 
@@ -1750,18 +1802,19 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		headlessCommandRooms},
 	{"history", 1, 1, .None, "history ROOM_ID [BEFORE_MESSAGE_ID]",
 		"requests a history page; it arrives as a room_history event", headlessCommandHistory},
-	{"send", 1, 0, .Required, "send ROOM_ID TEXT...", "sends the rest of the line to a room",
-		headlessCommandSend},
+	{"send", 1, 0, .Required, "send ROOM_ID [--attach BLOB]... TEXT...",
+		"sends the rest of the line to a room, with the uploads --attach names (protocol 27; " +
+		"the text may then be empty)", headlessCommandSend},
 	{"users", 0, 0, .None, "users",
 		"every account with its online flag, from the cache; requests it if not loaded",
 		headlessCommandUsers},
 	{"conversations", 0, 0, .None, "conversations",
 		"recent direct conversations, newest first; requests them if not loaded",
 		headlessCommandConversations},
-	{"dm", 1, 0, .Required, "dm USER_ID TEXT...",
+	{"dm", 1, 0, .Required, "dm USER_ID [--attach BLOB]... TEXT...",
 		"sends the rest of the line as an encrypted direct message (queued while the key is " +
 		"fetched, refused when encryption is not possible)", headlessCommandDirectMessage},
-	{"dm-plain", 1, 0, .Required, "dm-plain USER_ID TEXT...",
+	{"dm-plain", 1, 0, .Required, "dm-plain USER_ID [--attach BLOB]... TEXT...",
 		"sends a signed plaintext direct message through the Send without encryption switch, " +
 		"only when encryption is not possible", headlessCommandDirectPlain},
 	{"dm-history", 1, 1, .None, "dm-history USER_ID [BEFORE_MESSAGE_ID]",
@@ -1927,8 +1980,10 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"attach-resume", 1, 0, .None, "attach-resume BLOB",
 		"continues an upload this process started at the offset the server acknowledged",
 		headlessCommandAttachResume},
-	{"attach-download", 1, 0, .Required, "attach-download BLOB OUT...",
-		"downloads a blob to OUT (through OUT.part); attachment_done carries its sha256",
+	{"attach-download", 1, 0, .Required,
+		"attach-download BLOB OUT... | attach-download ROOM_ID|@USER_ID MESSAGE_ID INDEX OUT...",
+		"downloads a blob to OUT (through OUT.part), or file INDEX of a message, checked " +
+		"against the message and decrypted (protocol 27); attachment_done carries its sha256",
 		headlessCommandAttachDownload},
 	{"attach-cancel", 1, 0, .None, "attach-cancel BLOB",
 		"stops an upload (which cannot be resumed after) or a download; attachment_error " +
@@ -2211,6 +2266,8 @@ headlessWriteDirectMessageLine :: proc(
 			decryptError = fields.decryptError,
 			protection = fields.protection,
 			content = fields.content,
+			attachments = fields.attachments,
+			attachmentsChanged = fields.attachmentsChanged,
 		},
 	)
 	headlessRecordEvent(harness, kind)
@@ -2753,17 +2810,22 @@ headlessCommandSend :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 		headlessWriteError(harness, command.name, "usage: send ROOM_ID TEXT...")
 		return
 	}
+	blobIds, text, attachOK := headlessTakeAttachOptions(harness, command, command.args[1])
+	if !attachOK {
+		return
+	}
 	state := &harness.state
 	State_closeDirectConversation(state)
 	state.selected_channel_id = roomID
 	draft := State_selectedRoomDraft(state)
 	clear(draft)
-	append(draft, ..transmute([]u8)command.args[1])
+	append(draft, ..transmute([]u8)text)
+	State_clearChatStatus(state)
 	// Protocol 24: the server, not the harness, refuses a room without SendMessages.
-	State_sendChannelChat(state, checkPermission = false)
+	State_sendChannelChat(state, checkPermission = false, attachments = blobIds)
 
 	draft = State_selectedRoomDraft(state)
-	if len(draft) > 0 {
+	if len(draft) > 0 || headlessAttachmentsOnlyFailed(state, text, blobIds) {
 		// Leave nothing behind for the next send to the same room.
 		clear(draft)
 		message := state.chat_status_message
@@ -2917,16 +2979,25 @@ headlessSendDirect :: proc(
 		State_e2eePeerKeyInfo(state, serverID, peerUserID),
 		conversation.fallbackOn,
 	)
+	blobIds, text, attachOK := headlessTakeAttachOptions(harness, command, command.args[1])
+	if !attachOK {
+		return
+	}
+	if len(blobIds) > 0 && mode == .Queue {
+		// A message with files waits for the key in the composer, not in the queue.
+		headlessWriteError(harness, command.name, "the user's key is still being checked; try again")
+		return
+	}
 	clear(&conversation.draft)
-	append(&conversation.draft, ..transmute([]u8)command.args[1])
+	append(&conversation.draft, ..transmute([]u8)text)
 	State_clearChatStatus(state)
-	State_sendDirectMessageTo(state, serverID, peerUserID)
+	State_sendDirectMessageTo(state, serverID, peerUserID, blobIds)
 
 	draft := &ServerDirectCache_conversationCache(
 		State_serverDirectCache(state, serverID),
 		peerUserID,
 	).draft
-	if len(draft) > 0 {
+	if len(draft) > 0 || headlessAttachmentsOnlyFailed(state, text, blobIds) {
 		// Leave nothing behind for the next message to the same user.
 		clear(draft)
 		message := state.chat_status_message

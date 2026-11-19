@@ -142,6 +142,9 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 			}
 		}
 		text, placeholder, badge := roomMessageDisplay(state, serverID, message, allocator)
+		if !placeholder {
+			text = messageTextWithFiles(text, message.files[:], message.filesChanged, allocator)
+		}
 		append(
 			&lines,
 			TranscriptLine {
@@ -485,6 +488,14 @@ buildDirectConversationView :: proc(
 		}
 		badge, tone := directMessageBadge(message.security, len(message.envelope) > 0)
 		content, placeholder := directMessageText(message)
+		if !placeholder {
+			content = messageTextWithFiles(
+				content,
+				message.files[:],
+				message.filesChanged,
+				allocator,
+			)
+		}
 		append(&lines, TranscriptLine {
 			messageID    = message.id,
 			senderUserID = message.senderId,

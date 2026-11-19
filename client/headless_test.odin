@@ -244,7 +244,8 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		t,
 		line,
 		`{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,` +
-		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z","encrypted":false,` +
+		`"senderNickname":"carol","timestamp":"2026-11-05T10:00:00Z",` +
+		`"attachments":[],"attachmentsChanged":false,"encrypted":false,` +
 		`"decryptError":"","epoch":0,"protection":"pending","content":""}`,
 		"the room_chat JSON",
 	)
@@ -296,6 +297,7 @@ testHeadlessRendersRuntimeEvents :: proc(t: ^testing.T) {
 		line,
 		`{"event":"room_history","serverID":1,"roomID":4,"hasOlder":true,` +
 		`"messages":[{"id":9,"senderID":2,"senderNickname":"","timestamp":"t",` +
+		`"attachments":[],"attachmentsChanged":false,` +
 		`"encrypted":false,"decryptError":"","epoch":0,"protection":"pending","content":""}]}`,
 		"the room_history JSON",
 	)
@@ -522,7 +524,7 @@ testHeadlessCommandResults :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"ok":false,"cmd":"send","error":"usage: send ROOM_ID TEXT..."}` + "\n",
+		`{"ok":false,"cmd":"send","error":"usage: send ROOM_ID [--attach BLOB]... TEXT..."}` + "\n",
 		"the usage error",
 	)
 
@@ -603,7 +605,7 @@ testHeadlessCommandResults :: proc(t: ^testing.T) {
 	output = testHeadlessTakeOutput(&builder)
 	testing.expect(
 		t,
-		strings.contains(output, `{"usage":"send ROOM_ID TEXT...",`) &&
+		strings.contains(output, `{"usage":"send ROOM_ID [--attach BLOB]... TEXT...",`) &&
 		strings.contains(output, `"room_chat"`),
 		fmt.tprintf("expected help to list commands and events, got %s", output),
 	)
@@ -814,7 +816,8 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		t,
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_message","serverID":1,"id":12,"senderID":3,"senderNickname":"alice",` +
-		`"recipientID":4,"recipientNickname":"bob","timestamp":"t","encrypted":false,` +
+		`"recipientID":4,"recipientNickname":"bob","timestamp":"t",` +
+		`"attachments":[],"attachmentsChanged":false,"encrypted":false,` +
 		`"signed":false,"decryptError":"unsigned","protection":"hidden","content":""}` +
 		"\n",
 		"the direct_message JSON",
@@ -846,7 +849,8 @@ testHeadlessRendersDirectMessageEvents :: proc(t: ^testing.T) {
 		testHeadlessTakeOutput(&builder),
 		`{"event":"direct_history","serverID":1,"peerUserID":3,"hasOlder":true,"messages":[` +
 		`{"id":9,"senderID":3,"senderNickname":"alice","recipientID":4,` +
-		`"recipientNickname":"bob","timestamp":"t","encrypted":false,"signed":true,` +
+		`"recipientNickname":"bob","timestamp":"t","attachments":[],` +
+		`"attachmentsChanged":false,"encrypted":false,"signed":true,` +
 		`"decryptError":"","protection":"signed","content":"old"}]}` +
 		"\n",
 		"the direct_history JSON",
@@ -965,7 +969,7 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 	testExpectString(
 		t,
 		testHeadlessTakeOutput(&builder),
-		`{"ok":false,"cmd":"dm","error":"usage: dm USER_ID TEXT..."}` + "\n",
+		`{"ok":false,"cmd":"dm","error":"usage: dm USER_ID [--attach BLOB]... TEXT..."}` + "\n",
 		"the dm usage error",
 	)
 
@@ -1018,7 +1022,7 @@ testHeadlessDirectMessageCommands :: proc(t: ^testing.T) {
 	output = testHeadlessTakeOutput(&builder)
 	testing.expect(
 		t,
-		strings.contains(output, `{"usage":"dm USER_ID TEXT...",`) &&
+		strings.contains(output, `{"usage":"dm USER_ID [--attach BLOB]... TEXT...",`) &&
 		strings.contains(output, `"direct_message"`) &&
 		strings.contains(output, `"presence"`),
 		fmt.tprintf("expected help to list the DM commands and events, got %s", output),

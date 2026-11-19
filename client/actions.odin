@@ -140,6 +140,7 @@ RoomCache_mergeMessage :: proc(cache: ^RoomCache, message: common.StoredChatMess
 			content = strings.clone(message.content),
 			clientMessageId = message.clientMessageId,
 			signature = message.signature,
+			attachments = common.AttachmentRefs_clone(message.attachments[:]),
 		},
 		// Every message is opened or checked by room_chains.odin after the merge: a sealed one
 		// is opened, a plaintext one's signature checked (protocol 22). Until then it is
@@ -269,7 +270,13 @@ State_switchToChannel :: proc(state: ^State, serverID: int, roomID: int) {
 // the message itself appears when the server echoes it back.
 // checkPermission false (the headless harness) leaves the SendMessages check to the server, so
 // an agent sees its refusal.
-State_sendChannelChat :: proc(state: ^State, checkPermission := true) {
+// Protocol 27: attachments names finished uploads to this room (attachments.odin) that the
+// message lists; with them the text may be empty.
+State_sendChannelChat :: proc(
+	state: ^State,
+	checkPermission := true,
+	attachments: []common.AttachmentBlobID = nil,
+) {
 	if state.selected_channel_id == 0 {
 		State_setChatStatus(state, "No channel selected")
 		return
@@ -298,10 +305,26 @@ State_sendChannelChat :: proc(state: ^State, checkPermission := true) {
 		State_setChatStatus(state, ROOM_SEND_NOT_PERMITTED_NOTE)
 		return
 	}
+	if checkPermission &&
+	   len(attachments) > 0 &&
+	   !State_hasRoomPermission(
+		   state,
+		   state.selected_server_id,
+		   state.selected_channel_id,
+		   .AttachFiles,
+	   ) {
+		State_setChatStatus(state, common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE)
+		return
+	}
+	// A message with files may have no text (D15).
+	if len(attachments) > 0 && len(strings.trim_space(newMessage)) == 0 {
+		delete(newMessage)
+		newMessage = strings.clone("")
+	}
 	// Protocol 19: an encrypted room's message is sealed with this session's sender chain, and
 	// waits for it ("Setting up encryption…") when the chain is not set up yet.
 	if State_roomIsEncrypted(state, state.selected_server_id, state.selected_channel_id) {
-		if len(strings.trim_space(newMessage)) == 0 {
+		if len(strings.trim_space(newMessage)) == 0 && len(attachments) == 0 {
 			State_setChatStatus(state, "Cannot send an empty message")
 			return
 		}
@@ -309,11 +332,25 @@ State_sendChannelChat :: proc(state: ^State, checkPermission := true) {
 			State_setChatStatus(state, "Message is too long")
 			return
 		}
+		_, entries, attachError := State_attachmentsForMessage(
+			state,
+			state.selected_server_id,
+			state.selected_channel_id,
+			0,
+			attachments,
+			sealed = true,
+		)
+		defer attachmentEntriesWipe(entries)
+		if len(attachError) > 0 {
+			State_setChatStatus(state, attachError)
+			return
+		}
 		ok, queued, errorMessage := State_roomChainsSend(
 			state,
 			state.selected_server_id,
 			state.selected_channel_id,
 			newMessage,
+			entries,
 		)
 		wipeString(newMessage)
 		if !ok {
@@ -328,12 +365,26 @@ State_sendChannelChat :: proc(state: ^State, checkPermission := true) {
 		}
 		return
 	}
-	// Protocol 22 (#90): every plaintext message is signed by this profile.
+	refs, _, attachError := State_attachmentsForMessage(
+		state,
+		state.selected_server_id,
+		state.selected_channel_id,
+		0,
+		attachments,
+		sealed = false,
+	)
+	if len(attachError) > 0 {
+		State_setChatStatus(state, attachError)
+		return
+	}
+	// Protocol 22 (#90): every plaintext message is signed by this profile (protocol 27: with
+	// its attachments, under the v2 label).
 	send, signError := State_signRoomChat(
 		state,
 		state.selected_server_id,
 		state.selected_channel_id,
 		newMessage,
+		refs,
 	)
 	if len(signError) > 0 {
 		State_setChatStatus(state, signError)
@@ -382,9 +433,14 @@ State_receiveRoomChat :: proc(
 	clientMessageID := common.ClientMessageID{},
 	sealed: []u8 = nil,
 	signature := common.SignatureBytes{},
+	attachments: []common.AttachmentRef = nil,
 ) {
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		return
+	}
+	// Protocol 27: this account's own message bound these uploads.
+	if senderID == State_selfUserID(state, serverID) {
+		State_attachmentsNoteBound(state, serverID, attachments)
 	}
 	cache := State_serverRoomCache(state, serverID)
 	roomCache := ServerRoomCache_roomCache(cache, roomID)
@@ -400,6 +456,7 @@ State_receiveRoomChat :: proc(
 			clientMessageId = clientMessageID,
 			sealed = sealed,
 			signature = signature,
+			attachments = attachmentRefsPayload(attachments),
 		},
 	)
 	State_roomChainsMessageEchoed(state, serverID, roomID, senderID, clientMessageID)
@@ -609,6 +666,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.clientMessageID,
 			event.sealed,
 			event.signature,
+			event.attachments[:],
 		)
 	case .RoomKeyEnvelopeReceived, .RoomKeysReceived:
 		State_receiveRoomKeys(state, event)

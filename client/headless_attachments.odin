@@ -5,6 +5,11 @@ package client
 // transfer worker (attachment_transfer.odin), whose results arrive as attachment_progress,
 // attachment_done and attachment_error events. chat-latency measures how long the server takes
 // to echo this client's own room messages, for the transfer latency proof.
+//
+// Protocol 27 (F2): attach-upload goes through State_uploadAttachment (attachments.odin), which
+// checks the server's limits and seals the file for an encrypted conversation; send, dm and
+// dm-plain take --attach BLOB for finished uploads; attach-download ROOM_ID|@USER_ID MESSAGE_ID
+// INDEX OUT saves a message's file, checked against the message and decrypted.
 
 import "../common"
 import "core:fmt"
@@ -21,6 +26,9 @@ HeadlessAttachmentRequestJSON :: struct {
 	recipientUserID: int,
 	blobID:          string,
 	path:            string,
+	encrypted:       bool, // attach-upload: the file is sealed (protocol 27)
+	messageID:       int, // attach-download by message
+	index:           int,
 }
 
 HeadlessAttachmentProgressJSON :: struct {
@@ -33,6 +41,8 @@ HeadlessAttachmentProgressJSON :: struct {
 	total:     u64,
 }
 
+// size and sha256 are the stored bytes'; protocol 27 adds whether they are the encrypted format
+// and the file's own size (the plaintext written for a decrypted download).
 HeadlessAttachmentDoneJSON :: struct {
 	event:     string,
 	serverID:  int,
@@ -43,6 +53,8 @@ HeadlessAttachmentDoneJSON :: struct {
 	sha256:    string,
 	path:      string,
 	elapsedMS: i64,
+	encrypted: bool,
+	fileSize:  u64,
 }
 
 HeadlessAttachmentErrorJSON :: struct {
@@ -101,9 +113,8 @@ headlessBlobHex :: proc(event: ClientTransferEvent) -> string {
 
 // Prints the transfer worker's queued events and counts them for `wait`.
 headlessDrainTransferEvents :: proc(harness: ^HeadlessHarness) {
-	worker := harness.state.transferWorker
 	for {
-		event, ok := ClientTransferWorker_popEvent(worker)
+		event, ok := State_popTransferEvent(&harness.state)
 		if !ok {
 			return
 		}
@@ -137,6 +148,8 @@ headlessDrainTransferEvents :: proc(harness: ^HeadlessHarness) {
 					sha256 = headlessHex(sha[:], context.temp_allocator),
 					path = event.path,
 					elapsedMS = event.elapsedMS,
+					encrypted = event.encrypted,
+					fileSize = event.fileSize,
 				},
 			)
 			headlessRecordEvent(harness, .AttachmentDone)
@@ -205,12 +218,17 @@ headlessCommandAttachUpload :: proc(harness: ^HeadlessHarness, command: ^Headles
 		headlessWriteError(harness, command.name, "usage: attach-upload ROOM_ID|@USER_ID FILE")
 		return
 	}
-	worker := headlessTransferWorker(harness, command)
-	if worker == nil {
+	if headlessTransferWorker(harness, command) == nil {
 		return
 	}
 	serverID := harness.state.selected_server_id
-	id := ClientTransferWorker_upload(worker, serverID, roomID, recipientID, path)
+	id, uploadError := State_uploadAttachment(&harness.state, serverID, roomID, recipientID, path)
+	if len(uploadError) > 0 {
+		headlessWriteError(harness, command.name, uploadError)
+		return
+	}
+	pending := harness.state.attachmentPendingUploads
+	encrypted := pending[len(pending) - 1].encrypted
 	headlessWriteJSON(
 		harness,
 		HeadlessAttachmentRequestJSON {
@@ -221,6 +239,7 @@ headlessCommandAttachUpload :: proc(harness: ^HeadlessHarness, command: ^Headles
 			roomID = roomID,
 			recipientUserID = recipientID,
 			path = path,
+			encrypted = encrypted,
 		},
 	)
 }
@@ -249,8 +268,14 @@ headlessCommandAttachResume :: proc(harness: ^HeadlessHarness, command: ^Headles
 	)
 }
 
-// attach-download BLOB OUT...
+// attach-download BLOB OUT... (the raw blob, F1: only the owner's unbound one), or
+// attach-download ROOM_ID|@USER_ID MESSAGE_ID INDEX OUT... (protocol 27: file INDEX of a cached
+// message, checked and decrypted).
 headlessCommandAttachDownload :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	if len(command.args[0]) != 2 * common.ATTACHMENT_BLOB_ID_SIZE {
+		headlessAttachDownloadMessage(harness, command)
+		return
+	}
 	blobId, ok := headlessParseBlob(harness, command, command.args[0])
 	if !ok {
 		return
@@ -388,4 +413,108 @@ headlessCommandChatLatency :: proc(harness: ^HeadlessHarness, command: ^Headless
 		},
 	)
 	HeadlessLatencyProbe_deinit(probe)
+}
+
+// Takes the leading "--attach BLOB" options (protocol 27) off text: the blob IDs (temp) and the
+// rest of the line. Writes the error and returns false for a malformed option.
+headlessTakeAttachOptions :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+	text: string,
+) -> (
+	blobIds: []common.AttachmentBlobID,
+	rest: string,
+	ok: bool,
+) {
+	list := make([dynamic]common.AttachmentBlobID, context.temp_allocator)
+	rest = strings.trim_left_space(text)
+	for strings.has_prefix(rest, "--attach") {
+		after := strings.trim_left_space(rest[len("--attach"):])
+		end := strings.index_byte(after, ' ')
+		token := end < 0 ? after : after[:end]
+		blobId, parsed := headlessParseBlob(harness, command, token)
+		if !parsed {
+			return nil, "", false
+		}
+		append(&list, blobId)
+		rest = end < 0 ? "" : strings.trim_left_space(after[end:])
+	}
+	return list[:], rest, true
+}
+
+// Whether a send of attachments without text failed: there is no draft left to tell, so the
+// status line says it (anything but the queued message's "Setting up encryption…").
+headlessAttachmentsOnlyFailed :: proc(
+	state: ^State,
+	text: string,
+	blobIds: []common.AttachmentBlobID,
+) -> bool {
+	return(
+		len(strings.trim_space(text)) == 0 &&
+		len(blobIds) > 0 &&
+		len(state.chat_status_message) > 0 &&
+		state.chat_status_message != DIRECT_SETTING_UP_TEXT \
+	)
+}
+
+@(private = "file")
+headlessAttachDownloadMessage :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	usage := "usage: attach-download ROOM_ID|@USER_ID MESSAGE_ID INDEX OUT"
+	target := command.args[0]
+	roomID, peerUserID := 0, 0
+	ok := false
+	if strings.has_prefix(target, "@") {
+		peerUserID, ok = headlessParseNumber(target[1:])
+	} else {
+		roomID, ok = headlessParseNumber(target)
+	}
+	rest := strings.trim_space(command.args[1])
+	fields: [2]string
+	for index in 0 ..< 2 {
+		end := strings.index_byte(rest, ' ')
+		if end < 0 {
+			ok = false
+			break
+		}
+		fields[index] = rest[:end]
+		rest = strings.trim_left_space(rest[end:])
+	}
+	messageID, messageOK := headlessParseNumber(fields[0])
+	index, indexOK := headlessParseNumber(fields[1], common.ATTACHMENTS_PER_MESSAGE_MAX - 1)
+	path := strings.trim_space(rest)
+	if !ok || !messageOK || messageID == 0 || !indexOK || len(path) == 0 {
+		headlessWriteError(harness, command.name, usage)
+		return
+	}
+	if headlessTransferWorker(harness, command) == nil {
+		return
+	}
+	serverID := harness.state.selected_server_id
+	id, downloadError := State_downloadMessageAttachment(
+		&harness.state,
+		serverID,
+		roomID,
+		peerUserID,
+		messageID,
+		index,
+		path,
+	)
+	if len(downloadError) > 0 {
+		headlessWriteError(harness, command.name, downloadError)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessAttachmentRequestJSON {
+			ok = true,
+			cmd = command.name,
+			id = id,
+			serverID = serverID,
+			roomID = roomID,
+			recipientUserID = peerUserID,
+			path = path,
+			messageID = messageID,
+			index = index,
+		},
+	)
 }

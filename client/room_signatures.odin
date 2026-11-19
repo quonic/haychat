@@ -87,6 +87,7 @@ State_roomCheckPlain :: proc(
 		entry.content,
 		identity,
 		entry.signature,
+		entry.attachments[:],
 	)
 	if !verified {
 		return {protection = .Hidden, failure = .BadSignature}
@@ -116,16 +117,18 @@ State_roomMessagesKeysChanged :: proc(state: ^State, serverID: int) {
 }
 
 // Signs content for roomID as this profile (protocol 22). errorMessage (static) says why it
-// cannot be sent.
+// cannot be sent. attachments (protocol 27, borrowed for the send) are signed with it under
+// the v2 label, and the content may then be empty.
 State_signRoomChat :: proc(
 	state: ^State,
 	serverID, roomID: int,
 	content: string,
+	attachments: []common.AttachmentRef = nil,
 ) -> (
 	send: RoomChatSend,
 	errorMessage: string,
 ) {
-	if len(content) == 0 {
+	if len(content) == 0 && len(attachments) == 0 {
 		return {}, "Cannot send an empty message"
 	}
 	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
@@ -142,8 +145,9 @@ State_signRoomChat :: proc(
 		return {}, "This profile has no valid identity key"
 	}
 	send = RoomChatSend {
-		roomID  = ClientServerTransport_runtimeRoomID(roomID),
-		content = content,
+		roomID      = ClientServerTransport_runtimeRoomID(roomID),
+		content     = content,
+		attachments = attachments,
 	}
 	if !common.generateRandomBytes(send.clientMessageID[:]) {
 		return {}, "Could not prepare the message"
@@ -159,6 +163,7 @@ State_signRoomChat :: proc(
 		},
 		content,
 		identityPrivateKey,
+		attachments,
 	)
 	if !signOK {
 		return {}, "Could not sign the message"

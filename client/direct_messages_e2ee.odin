@@ -101,11 +101,16 @@ State_directIdentityFor :: proc(
 // empty for Failed and Hidden messages and waiting envelopes. Every message must be signed by
 // its sender (#82): an unsigned one, one whose signature does not verify against the pin, and
 // an envelope that fails at or before its signature check are Hidden.
+//
+// Protocol 27: when files is set it receives the message's checked files (owned) once it is
+// Signed or Encrypted (attachments.odin): a plaintext message's references verified by its v2
+// signature, or the list inside the seal compared with the outer one (changed when they differ).
 openDirectMessageContent :: proc(
 	keys: DirectOpenKeys,
 	senderIdentity, recipientIdentity: Maybe(common.IdentityPublicKeyBytes),
 	message: common.StoredDirectMessage,
 	allocator := context.allocator,
+	files: ^MessageFilesResult = nil,
 ) -> (
 	content: string,
 	security: DirectMessageSecurity,
@@ -143,7 +148,16 @@ openDirectMessageContent :: proc(
 		if err != .None {
 			return "", directEnvelopeSecurity(err)
 		}
-		return plaintext.content, {protection = .Encrypted}
+		content = plaintext.content
+		plaintext.content = ""
+		if files != nil {
+			files.files, files.changed = messageFilesFromSealed(
+				message.attachments[:],
+				plaintext.attachments[:],
+			)
+		}
+		common.SealedDirectMessagePlaintext_deinit(&plaintext, allocator)
+		return content, {protection = .Encrypted}
 	}
 	if message.signature == {} {
 		return "", {protection = .Hidden, failure = .Unsigned}
@@ -161,9 +175,13 @@ openDirectMessageContent :: proc(
 		message.content,
 		sender,
 		message.signature,
+		message.attachments[:],
 	)
 	if !verified {
 		return "", {protection = .Hidden, failure = .BadSignature}
+	}
+	if files != nil {
+		files.files = messageFilesFromPlain(message.attachments[:])
 	}
 	return strings.clone(message.content, allocator), {protection = .Signed}
 }
@@ -193,12 +211,16 @@ State_openDirectEntry :: proc(
 		message = StoredDirectMessage_clone(withoutContent),
 	}
 	delete(entry.content)
+	opened: MessageFilesResult
 	entry.content, entry.security = openDirectMessageContent(
 		keys,
 		State_directIdentityFor(state, serverID, keys, message.senderId),
 		State_directIdentityFor(state, serverID, keys, message.recipientId),
 		message,
+		files = &opened,
 	)
+	entry.files = opened.files
+	entry.filesChanged = opened.changed
 	return entry
 }
 
@@ -222,6 +244,7 @@ State_openDirectPreview :: proc(
 		clientMessageId = entry.lastClientMessageId,
 		envelope        = entry.lastEnvelope,
 		signature       = entry.lastSignature,
+		attachments     = entry.lastAttachments,
 	}
 	content, security := openDirectMessageContent(
 		keys,
@@ -290,12 +313,17 @@ State_directReopenPending :: proc(state: ^State, serverID: int) {
 			if entry.security.protection != .Pending {
 				continue
 			}
+			opened: MessageFilesResult
 			content, security := openDirectMessageContent(
 				keys,
 				State_directIdentityFor(state, serverID, keys, entry.senderId),
 				State_directIdentityFor(state, serverID, keys, entry.recipientId),
 				entry.message,
+				files = &opened,
 			)
+			MessageFiles_deinit(&entry.files)
+			entry.files = opened.files
+			entry.filesChanged = opened.changed
 			if security.protection == .Pending &&
 			   !State_directKeyMayArrive(state, serverID, peerUserID) {
 				security = DIRECT_SETTLED_WITHOUT_KEY
@@ -405,7 +433,16 @@ directSendMode :: proc(info: E2EEPeerKeyInfo, fallbackOn: bool) -> DirectSendMod
 // queued while the peer's key is fetched, as a signed plaintext message only through the
 // switch. The draft is cleared (and wiped) once the message went out or was queued; nothing
 // is added to the transcript, which shows the message when the server echoes it.
-State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
+//
+// Protocol 27: attachments names finished uploads to this conversation (attachments.odin),
+// sealed when the message is and signed when it is the plaintext fallback; with them the text
+// may be empty. A message with files is not queued while the peer's key is fetched: it waits in
+// the draft ("Setting up encryption…") and is sent again by the user.
+State_sendDirectMessageTo :: proc(
+	state: ^State,
+	serverID, peerUserID: int,
+	attachments: []common.AttachmentBlobID = nil,
+) {
 	if peerUserID <= 0 {
 		State_setChatStatus(state, "No conversation selected")
 		return
@@ -426,8 +463,13 @@ State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
 		delete(content)
 	}
 	if len(strings.trim_space(content)) == 0 {
-		State_setChatStatus(state, "Cannot send an empty message")
-		return
+		if len(attachments) == 0 {
+			State_setChatStatus(state, "Cannot send an empty message")
+			return
+		}
+		wipeString(content)
+		delete(content)
+		content = strings.clone("")
 	}
 	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
 		State_setChatStatus(state, "Message is too long")
@@ -437,6 +479,12 @@ State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
 	info := State_e2eePeerKeyInfo(state, serverID, peerUserID)
 	switch directSendMode(info, conversation.fallbackOn) {
 	case .Queue:
+		if len(attachments) > 0 {
+			State_setChatStatus(state, DIRECT_SETTING_UP_TEXT)
+			ids := [1]int{peerUserID}
+			State_e2eeRequestUserKeys(state, serverID, ids[:])
+			return
+		}
 		append(&conversation.queued, strings.clone(content))
 		wipeBytes(conversation.draft[:])
 		clear(&conversation.draft)
@@ -448,7 +496,14 @@ State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
 		name := State_e2eeUserName(state, serverID, peerUserID)
 		State_setChatStatus(state, e2eeKeyStateText(info, name))
 	case .Encrypt, .Plaintext:
-		sent, sendError := State_directSend(state, serverID, peerUserID, content, info)
+		sent, sendError := State_directSend(
+			state,
+			serverID,
+			peerUserID,
+			content,
+			info,
+			attachments,
+		)
 		if !sent {
 			State_setChatStatus(state, sendError)
 			return
@@ -462,11 +517,13 @@ State_sendDirectMessageTo :: proc(state: ^State, serverID, peerUserID: int) {
 }
 
 // Seals (canEncrypt) or signs content and sends it. sendError (temp) says why it failed.
+// attachments (protocol 27) go inside the seal, or are signed with the fallback.
 State_directSend :: proc(
 	state: ^State,
 	serverID, peerUserID: int,
 	content: string,
 	info: E2EEPeerKeyInfo,
+	attachments: []common.AttachmentBlobID = nil,
 ) -> (
 	sent: bool,
 	sendError: string,
@@ -491,6 +548,19 @@ State_directSend :: proc(
 	}
 	envelope: [common.SEALED_ENVELOPE_MAX_BYTES]u8
 	defer crypto.zero_explicit(&envelope, size_of(envelope))
+	refs, entries, attachError := State_attachmentsForMessage(
+		state,
+		serverID,
+		0,
+		peerUserID,
+		attachments,
+		sealed = info.canEncrypt,
+	)
+	defer attachmentEntriesWipe(entries)
+	if len(attachError) > 0 {
+		return false, attachError
+	}
+	send.attachments = refs
 	if info.canEncrypt {
 		keyPair, _, keyOK := Config_encryptionKey(state.config)
 		defer common.EncryptionKeyPair_wipe(&keyPair)
@@ -511,6 +581,7 @@ State_directSend :: proc(
 			info.encryptionPublicKey,
 			identityPrivateKey,
 			envelope[:],
+			entries,
 		)
 		if err != .None {
 			return false, "Could not encrypt the message"
@@ -526,6 +597,7 @@ State_directSend :: proc(
 			},
 			content,
 			identityPrivateKey,
+			refs,
 		)
 		if !signOK {
 			return false, "Could not sign the message"
