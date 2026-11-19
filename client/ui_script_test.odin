@@ -267,3 +267,39 @@ testUIScriptParsesScroll :: proc(t: ^testing.T) {
 		testing.expectf(t, lineErr == UI_SCRIPT_SCROLL_USAGE, "%q: got %q", line, lineErr)
 	}
 }
+
+@(test)
+testUIScriptParsesScrollUntil :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	commands, errLine, err := uiScriptParse(
+		"scroll-until \"New role…\" 640 400 3\nscroll-until Roles 10 20 -2 9000\n",
+	)
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0 && len(commands) == 2, "expected two scroll-until commands")
+	assert(commands[0].kind == .ScrollUntil, "expected scroll-until")
+	assert(commands[0].text == "New role…", "expected the text to look for")
+	assert(commands[0].x == 640 && commands[0].y == 400, "expected the coordinates")
+	assert(
+		commands[0].count == 3 && commands[0].timeoutMS == UI_SCRIPT_DEFAULT_TIMEOUT_MS,
+		"expected three notches a turn and the default timeout",
+	)
+	assert(
+		commands[1].count == -2 && commands[1].timeoutMS == 9000,
+		"expected two notches up and a 9000 ms timeout",
+	)
+	assert(UI_SCRIPT_COMMAND_NAMES[.ScrollUntil] == "scroll-until", "expected the JSON name")
+	bad := []string {
+		"scroll-until",
+		"scroll-until Roles 1 2",
+		"scroll-until Roles 1 2 0",
+		"scroll-until Roles 1 2 101",
+		`scroll-until Roles 1 2 "3"`,
+		`scroll-until "" 1 2 3`,
+		"scroll-until Roles 1 2 3 4 5",
+	}
+	for line in bad {
+		lines, _, lineErr := uiScriptParse(line)
+		assert(lines == nil, "expected nothing parsed from a bad line")
+		testing.expectf(t, lineErr == UI_SCRIPT_SCROLL_UNTIL_USAGE, "%q: got %q", line, lineErr)
+	}
+}

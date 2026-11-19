@@ -524,8 +524,8 @@ testInviteCodeFieldIsTrimmedAndCheckedBeforeSending :: proc(t: ^testing.T) {
 	normalized := normalizeInviteCodeInput(REGISTRATION_TEST_CODE)
 	testing.expect(
 		t,
-		validateSignUp(.InviteApproval, normalized, "") == SIGN_UP_REASON_REQUIRED_LOCAL,
-		"expected approval mode to need a reason",
+		validateSignUp(.InviteApproval, normalized, "") == "",
+		"expected approval mode to leave the reason to the server (a code may skip approval)",
 	)
 	testing.expect(
 		t,
@@ -1033,6 +1033,47 @@ testUseInviteCodeSettingSetsRegistering :: proc(t: ^testing.T) {
 		!server.use_invite_code && !state.serverTransports[index].registering,
 		"expected the setting off",
 	)
+}
+
+// I have an invite code (#43 G3): the first-run and add-server form sets use_invite_code with
+// the new server, so its first connection already asks to register.
+@(test)
+testSettingsFormInviteCodeChoice :: proc(t: ^testing.T) {
+	config := testConfigWithServers({})
+	defer Config_deinit(&config)
+	delete(config.display_name)
+	config.display_name = ""
+	state := State_initFromConfig(config)
+	defer State_deinit(&state)
+
+	State_openSettings(&state)
+	assert(!state.settings.useInviteCode, "expected the choice off on a new form")
+	testSetDraft(&state.settings.displayName, "carol")
+	testSetDraft(&state.settings.serverHost, "chat.example:4000")
+	State_toggleSettingsInviteCode(&state)
+	assert(State_applySettings(&state), "expected the first run to apply")
+	assert(len(state.config.servers) == 1, "expected the server added")
+	first := state.config.servers[0]
+	firstIndex := State_selectedTransportIndexForServerID(state, first.id)
+	assert(
+		first.use_invite_code && firstIndex >= 0 && state.serverTransports[firstIndex].registering,
+		"expected the first connection to ask to register",
+	)
+
+	// Adding a second server starts with the choice off again.
+	State_openSettings(&state)
+	assert(!state.settings.useInviteCode, "expected the add-server form to start off")
+	testSetDraft(&state.settings.serverHost, "other.example:4000")
+	assert(State_applySettings(&state), "expected the second server to apply")
+	second := state.config.servers[1]
+	secondIndex := State_selectedTransportIndexForServerID(state, second.id)
+	assert(
+		!second.use_invite_code && secondIndex >= 0 &&
+		!state.serverTransports[secondIndex].registering,
+		"expected the second server to sign in as usual",
+	)
+	first = state.config.servers[0]
+	assert(first.use_invite_code, "expected the first server to keep its choice")
 }
 
 @(test)

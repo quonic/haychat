@@ -12,6 +12,10 @@ SETTINGS_COLUMN_WIDTH :: 480
 SETTINGS_PORT_WIDTH :: 104
 SETTINGS_SECTION_GAP :: 20
 SETTINGS_LABEL_GAP :: 6
+SETTINGS_INVITE_CODE_LABEL :: "I have an invite code"
+SETTINGS_INVITE_CODE_NOTE ::
+	"The server then shows its sign-up screen, where you enter the code, even if anyone may " +
+	"sign up there."
 
 @(private = "file")
 settingsLabel :: proc(ctx: ^ui.Context, column: ^ui.Rect, text: string) {
@@ -157,6 +161,18 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 		hint := "Leave the host empty to only save your name."
 		settingsWrapped(ctx, &column, hint, ctx.theme.fgMuted)
 	}
+	// Protocol 25: on a server where anyone may sign up, the first connection would make a
+	// plain account before Server settings' Use an invite code could be turned on.
+	_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	inviteCodeClicked := adminCheckbox(
+		ctx,
+		&column,
+		ui.idOf("settings-invite-code", form.editingServerID),
+		SETTINGS_INVITE_CODE_LABEL,
+		form.useInviteCode,
+		true,
+	)
+	settingsWrapped(ctx, &column, SETTINGS_INVITE_CODE_NOTE, ctx.theme.fgMuted)
 
 	if len(form.error) > 0 {
 		_ = ui.cutTop(&column, ui.dp(ctx, PANEL_PADDING))
@@ -195,6 +211,8 @@ viewSettings :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 
 	// Actions run last: they can reallocate the server list drawn above.
 	switch {
+	case inviteCodeClicked:
+		State_toggleSettingsInviteCode(state)
 	case submitted:
 		State_applySettings(state)
 	case closeClicked:

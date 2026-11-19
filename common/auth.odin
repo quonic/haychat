@@ -1123,17 +1123,25 @@ sealPacketForSession :: proc(
 		return {}, false
 	}
 
+	// Both CBOR buffers hold the plaintext (an invite code in ClientRegister, a message's text),
+	// so they are wiped before they are freed.
 	innerPacket, buildOK := buildPacket(messageType, payload)
 	if !buildOK {
 		return {}, false
 	}
-	defer delete(innerPacket.payload)
+	defer {
+		crypto.zero_explicit(raw_data(innerPacket.payload), len(innerPacket.payload))
+		delete(innerPacket.payload)
+	}
 
 	innerPacketBytes, marshalOK := marshalPacket(innerPacket)
 	if !marshalOK {
 		return {}, false
 	}
-	defer delete(innerPacketBytes)
+	defer {
+		crypto.zero_explicit(raw_data(innerPacketBytes), len(innerPacketBytes))
+		delete(innerPacketBytes)
+	}
 
 	sequence, sequenceOK := TransportState_nextSendSequence(state)
 	if !sequenceOK {

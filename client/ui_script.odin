@@ -27,6 +27,8 @@ UI_SCRIPT_MAX_COUNT :: 1000
 UI_SCRIPT_MAX_SCROLL_NOTCHES :: 100
 UI_SCRIPT_SCROLL_USAGE ::
 	"usage: scroll X Y N (N wheel notches, -100 to 100, positive scrolls down)"
+UI_SCRIPT_SCROLL_UNTIL_USAGE ::
+	"usage: scroll-until \"TEXT\" X Y N [TIMEOUT_MS] (N notches per turn, -100 to 100)"
 UI_SCRIPT_MAX_IDS :: 4
 UI_SCRIPT_MAX_WINDOW_SIZE :: 16384
 // Longest the loop sleeps while a script runs, so waits and timeouts are checked promptly.
@@ -153,6 +155,7 @@ UIScriptCommandKind :: enum u8 {
 	RightClickID,
 	WaitGone,
 	Scroll,
+	ScrollUntil,
 }
 
 UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
@@ -172,6 +175,7 @@ UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
 	.RightClickID = "right-click-id",
 	.WaitGone     = "wait-gone",
 	.Scroll       = "scroll",
+	.ScrollUntil  = "scroll-until",
 }
 
 UIScriptKey :: struct {
@@ -185,8 +189,8 @@ UIScriptCommand :: struct {
 	line:      int, // 1-based line in the script file
 	text:      string, // Owned: the TEXT, NAME, or FILE argument, or the key's name
 	count:     int, // wait-count: how many times the text must be drawn; scroll: the notches
-	timeoutMS: int, // wait: the duration; wait-text, wait-count: the timeout
-	x, y:      f32, // click X Y, right-click X Y and scroll X Y N, in window coordinates
+	timeoutMS: int, // wait: the duration; wait-text, wait-count, scroll-until: the timeout
+	x, y:      f32, // click X Y, right-click X Y and scroll(-until) X Y N, in window coordinates
 	ids:       [UI_SCRIPT_MAX_IDS]int, // click-id, right-click-id: the integers after the name
 	idCount:   int,
 	key:       UIScriptKey,
@@ -406,6 +410,30 @@ uiScriptParseLine :: proc(
 		if !ok {
 			return {}, false, UI_SCRIPT_SCROLL_USAGE
 		}
+	case "scroll-until":
+		// Turns the wheel N notches at a time until TEXT is drawn (in view), for widgets
+		// whose place on a long screen depends on how much the server lists above them.
+		command.kind = .ScrollUntil
+		ok = len(args) >= 4 && len(args) <= 5 && len(args[0].text) > 0 && !args[3].quoted
+		if ok {
+			xOK, yOK, nOK: bool
+			command.x, xOK = uiScriptParseCoordinate(args[1])
+			command.y, yOK = uiScriptParseCoordinate(args[2])
+			command.count, nOK = strconv.parse_int(args[3].text, 10)
+			ok =
+				xOK &&
+				yOK &&
+				nOK &&
+				command.count != 0 &&
+				abs(command.count) <= UI_SCRIPT_MAX_SCROLL_NOTCHES
+		}
+		if ok {
+			command.timeoutMS, ok = uiScriptParseTimeout(args, 4)
+		}
+		if !ok {
+			return {}, false, UI_SCRIPT_SCROLL_UNTIL_USAGE
+		}
+		text = args[0].text
 	case "click-id", "right-click-id":
 		right := tokens[0].text == "right-click-id"
 		command.kind = right ? .RightClickID : .ClickID
@@ -636,7 +664,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		line = command.line,
 	}
 	switch command.kind {
-	case .WaitText, .WaitCount, .WaitGone, .AssertText, .Click, .RightClick, .Type:
+	case .WaitText, .WaitCount, .WaitGone, .AssertText, .Click, .RightClick, .Type, .ScrollUntil:
 		result.text = command.text
 	case .ClickID, .RightClickID:
 		result.name = command.text
@@ -914,6 +942,26 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		result.x, result.y = command.x, command.y
 		pushOK = uiScriptPushWheel(window, ui.Vec2{command.x, command.y}, command.count)
 		pushed = true
+	case .ScrollUntil:
+		if ui.Automation_countText(automation, command.text) > 0 {
+			result.waitedMS = elapsed
+			uiScriptAdvance(runner, result)
+		} else if elapsed >= command.timeoutMS {
+			uiScriptFail(
+				runner,
+				result,
+				fmt.tprintf(
+					"timed out after %d ms: the text never came into view",
+					command.timeoutMS,
+				),
+			)
+		} else if !uiScriptPushWheel(window, ui.Vec2{command.x, command.y}, command.count) {
+			uiScriptFail(runner, result, "SDL could not queue the input event")
+		} else {
+			// The same command runs again once the turn is drawn and settled.
+			runner.settleUntilFrame = ctx.frame + UI_SCRIPT_SETTLE_FRAMES
+			ui.requestFrame(ctx)
+		}
 	case .Type:
 		pushOK = uiScriptPushText(runner, window, command.text)
 		pushed = true

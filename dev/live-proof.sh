@@ -10,12 +10,12 @@ set -euo pipefail
 # container, both of which provide odin on PATH and a reachable database. The server's logs,
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
-# Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --e2ee | --voice | --ui |
-#                          --sql | test_name...]
+# Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --e2ee | --registration |
+#                          --voice | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
 #                   harness smoke test, the admin proof, the room access proof, the encryption
-#                   key proof, the two-process
+#                   key proof, the registration proof, the two-process
 #                   voice proof, the GUI automation smoke test, the server SQL proofs, and the
 #                   startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
@@ -31,6 +31,10 @@ set -euo pipefail
 #                   (dev/e2ee-proof.sh): bundles published and pinned on first use, matching
 #                   safety numbers, a verified pin that survives a restart, and a key swapped
 #                   in the database that shows as a key change until it is trusted
+#   --registration  only the registration proof (dev/registration-proof.sh): Invite only,
+#                   invite codes (an inviter's, expired, revoked and used up), an invite link,
+#                   Invite + approval (approved live and declined), a room code that makes a
+#                   restricted account, and the admin key on a fresh database
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -50,9 +54,9 @@ set -euo pipefail
 #
 # Every step runs under `timeout` (run_step below), so a hung client, proof or test binary fails
 # the run within minutes instead of using up CI's job limit. The limits are generous (several
-# times a normal run, compile included): client tests 20 minutes, the harness, admin and access
-# proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof 20, its failing
-# run 2, and the failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit
+# times a normal run, compile included): client tests 20 minutes, the harness, admin, access and
+# registration proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof
+# 20, its failing run 2, and the failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit
 # (for a slow machine, or a short one while debugging). A step that times out prints "[live]
 # STEP timed out after N s" and the run fails; timeout signals the step's whole process group,
 # then kills it 30 seconds later if it is still there.
@@ -122,6 +126,7 @@ run_harness=false
 run_admin=false
 run_access=false
 run_e2ee=false
+run_registration=false
 run_voice=false
 run_ui=false
 run_sql=false
@@ -134,6 +139,7 @@ if [[ $# -gt 0 ]]; then
 			run_admin=true
 			run_access=true
 			run_e2ee=true
+			run_registration=true
 			run_voice=true
 			run_ui=true
 			run_sql=true
@@ -154,6 +160,10 @@ if [[ $# -gt 0 ]]; then
 		--e2ee)
 			tests=()
 			run_e2ee=true
+			;;
+		--registration)
+			tests=()
+			run_registration=true
 			;;
 		--voice)
 			tests=()
@@ -322,6 +332,15 @@ fi
 if [[ "$run_e2ee" == true ]]; then
 	echo "==> [live] running dev/e2ee-proof.sh"
 	run_step 1200 "dev/e2ee-proof.sh" dev/e2ee-proof.sh 127.0.0.1:12345
+fi
+
+# After the GUI and encryption proofs: it switches the server's registration mode (and back, also
+# when it fails), and its restricted account and requests would change what they list. It runs
+# a second server, on a fresh database it creates and drops, from the same binary.
+if [[ "$run_registration" == true ]]; then
+	echo "==> [live] running dev/registration-proof.sh"
+	run_step 600 "dev/registration-proof.sh" env HAYCHAT_SERVER_BIN="$server_bin" \
+		dev/registration-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

@@ -3,7 +3,7 @@
 # arrays declared there, which shellcheck cannot see from this file; last_result is read there.
 # shellcheck disable=SC2154,SC2004,SC2034
 
-# Helpers shared by dev/harness-smoke.sh and dev/ui-smoke.sh for driving headless clients
+# Helpers shared by the dev/*-proof.sh and *-smoke.sh scripts for driving headless clients
 # (docs/testing-harness.md) from bash. Source it after setting:
 #   repo_dir              the repository root (make_admin reads deploy/sql/make-admin.sql)
 #   work_dir              scratch directory; client NAME writes NAME.out and NAME.err there
@@ -49,6 +49,22 @@ start_client() {
 	"$client_bin" --headless --name "$nickname" --server "$server_address" \
 		--config-dir "$work_dir/profile-$profile" \
 		--connect-timeout "$((command_timeout_secs * 1000))" \
+		<"$work_dir/$client.in" >"$work_dir/$client.out" 2>"$work_dir/$client.err" &
+	client_pid[$client]=$!
+	exec {fd}>"$work_dir/$client.in"
+	client_fd[$client]=$fd
+}
+
+# start_client_at NAME NICKNAME ADDRESS [OPTION...]: start_client for another server address,
+# with extra harness options (for example --invite-code CODE --reason TEXT, or --register),
+# always with its own profile directory profile-NAME.
+start_client_at() {
+	local client=$1 nickname=$2 address=$3 fd
+	shift 3
+	mkfifo "$work_dir/$client.in"
+	"$client_bin" --headless --name "$nickname" --server "$address" \
+		--config-dir "$work_dir/profile-$client" \
+		--connect-timeout "$((command_timeout_secs * 1000))" "$@" \
 		<"$work_dir/$client.in" >"$work_dir/$client.out" 2>"$work_dir/$client.err" &
 	client_pid[$client]=$!
 	exec {fd}>"$work_dir/$client.in"
