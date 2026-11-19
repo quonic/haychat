@@ -340,6 +340,10 @@ DATABASE_ATTACHMENT_KNOWN_SQL ::
 	"SELECT encode(blob_id, 'hex'), state::text FROM attachments WHERE blob_id IN " +
 	"(SELECT decode(x, 'hex') FROM unnest(string_to_array($1::text, ',')) x)"
 
+// Whether the attachments table has any row at all (#131): asked only when Known found none of
+// the scanned files, since a found row already answers it.
+DATABASE_ATTACHMENT_ANY_ROW_SQL :: "SELECT EXISTS (SELECT 1 FROM attachments)"
+
 // Most rows one sweep pass deletes; the router runs another pass when a pass was full.
 ATTACHMENT_SWEEP_BATCH :: 500
 
@@ -651,6 +655,19 @@ databaseExecuteAttachmentRequest :: proc(
 					state = common.AttachmentState(stateValue),
 				},
 			)
+		}
+		if request.action == .Known && len(attachment.blobs) == 0 {
+			anyRow := databaseAttachmentExec(conn, DATABASE_ATTACHMENT_ANY_ROW_SQL, nil)
+			if anyRow == nil {
+				delete(attachment.blobs)
+				return databaseConnectionError(conn)
+			}
+			defer pg.clear(anyRow)
+			if pg.result_status(anyRow) != .Tuples_OK || pg.n_tuples(anyRow) != 1 {
+				delete(attachment.blobs)
+				return databaseResultError(&anyRow)
+			}
+			attachment.tableEmpty = !databaseGetBool(anyRow, 0, 0)
 		}
 		return databaseSuccess(attachment)
 	}

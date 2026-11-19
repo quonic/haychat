@@ -256,7 +256,13 @@ role in the statement that reads or changes, so a holder of every other permissi
   gone can no longer be bound, resumed or downloaded; a blob with a transfer in progress is
   never swept. At startup the storage worker also lists every file older than an hour, and the
   server deletes those without a row, or whose row is in a state that has no such file (a part
-  file of a finished blob, any file of a tombstone).
+  file of a finished blob, any file of a tombstone). Two guards against a wrong restore order
+  (#131) keep every such file instead, with a warning: the `attachments` table has no row at
+  all, or more than 10% of the listed files and more than 10 of them are orphans (the files of
+  rows the startup sweep deletes meanwhile count as neither).
+  `HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE` lifts both for one start
+  (`docs/server-configuration.md`, Attachments). The sweeper is not guarded: it deletes files
+  only with their rows.
 - **Room deletion.** Deleting a room deletes its messages, which unlinks their files (and the
   room's unsent uploads). The first sweep pass after the deletion deletes them, so they leave
   the blob directory within an hour of it (or at the server's next start); a file uploaded less

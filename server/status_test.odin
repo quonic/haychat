@@ -54,6 +54,7 @@ testServerStatusLineListsVoiceCounters :: proc(t: ^testing.T) {
 			"storage_running=false",
 			"attachment_uploads=0",
 			"attachment_crypto_ms=0",
+			"attachment_orphans_kept=0",
 		}) {
 		found := false
 		for candidate in pairs {
@@ -69,9 +70,9 @@ testServerStatusLineListsVoiceCounters :: proc(t: ^testing.T) {
 		fmt.tprintf("expected no web admin keys in the status, got %q", text),
 	)
 	assert(
-		len(pairs) == 13 + len(VoiceRelayDropReason) + 9,
+		len(pairs) == 13 + len(VoiceRelayDropReason) + 10,
 		fmt.tprintf(
-			"expected 13 process and voice pairs, one per drop reason and 9 attachment pairs, " +
+			"expected 13 process and voice pairs, one per drop reason and 10 attachment pairs, " +
 			"got %d in %q",
 			len(pairs),
 			text,

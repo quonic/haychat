@@ -78,6 +78,8 @@ ServerConfig :: struct {
 	attachmentMinFreeBytes:          i64, // free-disk reserve on the blob directory's volume
 	attachmentPendingHours:          int, // unbound uploads are swept after this
 	attachmentSessionBytesPerSecond: i64, // per-session pace, both directions together
+	// One start's leave to delete orphans past the startup scan's guards (#131).
+	attachmentAllowOrphanPurge:      bool,
 }
 
 ServerIdentityFile :: struct {
@@ -129,6 +131,11 @@ DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND :: 4 * ATTACHMENT_MIB
 ATTACHMENT_SESSION_BYTES_PER_SECOND_MIN :: 64 * ATTACHMENT_KIB
 ATTACHMENT_SESSION_BYTES_PER_SECOND_MAX :: ATTACHMENT_GIB
 // The blob directory's subdirectories (storage.odin), created at startup with mode 0700.
+// The startup scan's override (#131): set for one start, it lets the scan delete orphans past
+// its guards (an empty attachments table, more than ATTACHMENT_ORPHAN_PURGE_MAX_SHARE_PERCENT).
+ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY :: "HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE"
+DEFAULT_ATTACHMENT_ALLOW_ORPHAN_PURGE :: false
+
 ATTACHMENT_INCOMING_DIR_NAME :: "incoming"
 ATTACHMENT_BLOBS_DIR_NAME :: "blobs"
 
@@ -273,6 +280,10 @@ loadAttachmentConfig :: proc(config: ^ServerConfig) {
 	config.attachmentSessionBytesPerSecond = parseOr(
 		"HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND",
 		DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND,
+	)
+	config.attachmentAllowOrphanPurge = parseBoolOr(
+		ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY,
+		DEFAULT_ATTACHMENT_ALLOW_ORPHAN_PURGE,
 	)
 	validateAttachmentConfig(config)
 }

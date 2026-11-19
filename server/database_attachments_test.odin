@@ -609,7 +609,29 @@ testAttachmentSweeperAgainstPostgreSQL :: proc(t: ^testing.T) {
 			fmt.tprintf("expected the young upload and the bound blob, got %v", blob),
 		)
 	}
+	assert(!known.tableEmpty, "expected a table with rows not reported empty")
 	IPC__database_query_response_deinit(knownResponse)
+
+	// #131: whether the table has any row decides the empty-table guard, even when none of the
+	// scanned files has one.
+	for empty in ([]bool{false, true}) {
+		if empty {
+			databaseDefaultRoomTestExec(conn, "empty the table", "DELETE FROM attachments")
+		}
+		unknown := make([dynamic]common.AttachmentBlobID)
+		append(&unknown, attachmentSQLTestBlob(), attachmentSQLTestBlob())
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabaseAttachmentRequest{action = .Known, blobIds = unknown},
+		)
+		delete(unknown)
+		result := response.result.(common.DatabaseAttachmentResult)
+		assert(
+			response.success && len(result.blobs) == 0 && result.tableEmpty == empty,
+			fmt.tprintf("expected no rows and tableEmpty %v, got %v", empty, result),
+		)
+		IPC__database_query_response_deinit(response)
+	}
 }
 
 // ── Protocol 27: binding, the D10 download check, room deletion ────────────────

@@ -226,6 +226,59 @@ testConfigAttachmentKeysClamp :: proc(t: ^testing.T) {
 	)
 }
 
+// The startup scan's override (#131): off by default, parsed like the other booleans, and
+// documented under the name the server reads.
+@(test)
+testConfigAttachmentAllowOrphanPurgeDefaultParseAndDocs :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
+	_ = t
+	assert(
+		ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY == "HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE",
+		"expected the documented variable name",
+	)
+	assert(!DEFAULT_ATTACHMENT_ALLOW_ORPHAN_PURGE, "expected the override off by default")
+	saved := os.get_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY, context.temp_allocator)
+	defer if len(saved) > 0 {
+		os.set_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY, saved)
+	} else {
+		os.unset_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY)
+	}
+
+	config: ServerConfig
+	os.unset_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY)
+	loadAttachmentConfig(&config)
+	assert(!config.attachmentAllowOrphanPurge, "expected no override without the variable")
+	for value in ([]string{"1", " true ", "YES", "on"}) {
+		os.set_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY, value)
+		loadAttachmentConfig(&config)
+		assert(
+			config.attachmentAllowOrphanPurge,
+			fmt.tprintf("expected %q to allow the purge", value),
+		)
+	}
+	for value in ([]string{"0", "false", "off", "maybe", ""}) {
+		os.set_env(ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY, value)
+		loadAttachmentConfig(&config)
+		assert(
+			!config.attachmentAllowOrphanPurge,
+			fmt.tprintf("expected %q to leave the purge off", value),
+		)
+	}
+
+	documented := [?]string {
+		#load("../docs/server-configuration.md", string),
+		#load("../.env.example", string),
+		#load("../deploy/README.md", string),
+	}
+	for text, index in documented {
+		assert(
+			strings.contains(text, ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY),
+			fmt.tprintf("expected document %d to name %s", index, ATTACHMENT_ALLOW_ORPHAN_PURGE_KEY),
+		)
+	}
+}
+
 @(test)
 testConfigStartupRefusesAnAttachmentDirectoryHoldingTheServerState :: proc(t: ^testing.T) {
 	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.

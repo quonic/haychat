@@ -126,7 +126,8 @@ DatabaseAttachmentAction :: enum u8 {
 	// window, unbound tombstones, bound blobs whose message is gone; never a row younger than an
 	// hour) and returns their blob IDs and states, so the storage worker deletes their files.
 	Sweep,
-	// The state of each blob ID in blobIds that has a row (the startup orphan scan).
+	// The state of each blob ID in blobIds that has a row (the startup orphan scan), and
+	// whether the table has no row at all (tableEmpty, #131).
 	Known,
 	// Protocol 28 (F3, D22): an admin (userId, checked in the statement) makes a Ready or Bound
 	// blob a Removed tombstone, keeping every signed field and the message link; the result
@@ -205,6 +206,9 @@ DatabaseAttachmentResult :: struct {
 	// Usage (protocol 28): every stored byte (tombstones excluded) and the top accounts (owned).
 	usedBytes: u64,
 	accounts: [dynamic]AttachmentAccountUsage,
+	// Known (#131): the attachments table has no row at all, so the startup scan keeps every
+	// file (a database restored after its blob directory, or a fresh one beside an old volume).
+	tableEmpty: bool,
 }
 
 DatabaseAttachmentRemoval :: struct {
