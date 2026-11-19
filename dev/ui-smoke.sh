@@ -75,6 +75,15 @@ set -euo pipefail
 #      reason: her card shows "Attachment removed by an admin", bob hears attachment_removed
 #      and his history lists it removed. Last she opens Admin → Storage and
 #      (protocol 29) Removed files, which lists her removal with its reason.
+#  15. editing and deleting messages (#76 M3): in #general alice sends a message, edits it from
+#      its menu ("Editing message" bar, Ctrl+A, new text, Return) and again with Up in the empty
+#      composer; bob must print both edits verified. She rests the pointer on "(edited)"
+#      (`hover`) and the history shows the original and both edits. She deletes the message
+#      from its menu (the confirmation names its files and edit history) and it reads "Message
+#      deleted"; as an admin she deletes bob's #general message, which reads "Removed by the
+#      server", and bob prints both tombstones (removedByServer false, then true). Last she
+#      edits and deletes a message in her encrypted conversation with bob, who prints the
+#      verified edit and the signed tombstone.
 #
 # Under --all the server holds every earlier proof's accounts, so the Admin section is several
 # screens long: the script reaches each control with `scroll-until`, never by a fixed scroll.
@@ -177,6 +186,13 @@ alice_saved="$work_dir/alice-saved-$run_tag.bin"
 file_message="ui smoke file from alice $run_tag"
 bob_file_message="ui smoke file from bob $run_tag"
 remove_reason="ui smoke removal $run_tag"
+# Step 15's messages (#76 M3).
+edit_target="ui smoke edit me $run_tag"
+edit_first="ui smoke edited once $run_tag"
+edit_second="ui smoke edited twice $run_tag"
+bob_doomed="ui smoke bob says $run_tag"
+dm_edit_target="ui smoke dm edit me $run_tag"
+dm_edited="ui smoke dm edited $run_tag"
 # The registration mode the server had, restored on exit whatever happens (step 13 changes it).
 original_mode=""
 
@@ -611,6 +627,93 @@ assert-text "Removed files"
 assert-text "$alice_file_name"
 screenshot $screenshot_dir/54-removed-files.bmp
 click-id server-settings-close 1
+# Editing and deleting messages (#76 M3). Edit message from the menu opens the "Editing
+# message" bar with the text in its own field; Ctrl+A and typing replace it.
+click "# general"
+click "Message #general (Enter to send, Shift+Enter for newline)"
+type "$edit_target"
+key Return
+wait-text "$edit_target" 10000
+right-click "$edit_target"
+wait-text "Edit message" 5000
+screenshot $screenshot_dir/55-message-menu.bmp
+click "Edit message"
+wait-text "Editing message" 5000
+screenshot $screenshot_dir/56-editing.bmp
+key Ctrl+A
+type "$edit_first"
+key Return
+wait-gone "Editing message" 5000
+wait-text "$edit_first" 10000
+wait-text "(edited)" 5000
+screenshot $screenshot_dir/57-edited.bmp
+# Up in the empty composer edits her newest message again.
+click "Message #general (Enter to send, Shift+Enter for newline)"
+key Up
+wait-text "Editing message" 5000
+key Ctrl+A
+type "$edit_second"
+key Return
+wait-text "$edit_second" 10000
+wait-gone "$edit_first" 10000
+# Resting on "(edited)" opens the history: the original and both edits, oldest first (the
+# newest is drawn twice, in the transcript and in the history).
+hover "(edited)"
+wait-text "Edit history" 5000
+wait-text "Original" 5000
+wait-text "$edit_target" 5000
+wait-text "$edit_first" 5000
+wait-count 2 "$edit_second" 5000
+screenshot $screenshot_dir/58-edit-history.bmp
+hover 640 80
+wait-gone "Edit history" 5000
+# Delete her message from its menu: a confirmation, then the tombstone.
+right-click "$edit_second"
+click "Delete message…"
+wait-text "Delete message" 5000
+screenshot $screenshot_dir/59-delete-confirm.bmp
+click-id message-delete-confirm 1
+wait-text "Message deleted" 10000
+wait-gone "$edit_second" 5000
+screenshot $screenshot_dir/60-deleted.bmp
+# As an admin, delete bob's message: members see "Removed by the server".
+wait-text "$bob_doomed" 120000
+right-click "$bob_doomed"
+click "Delete message…"
+wait-text "Delete message" 5000
+screenshot $screenshot_dir/61-admin-delete-confirm.bmp
+click-id message-delete-confirm 1
+wait-text "Removed by the server" 10000
+wait-gone "$bob_doomed" 5000
+screenshot $screenshot_dir/62-admin-deleted.bmp
+# A direct message: the conversation with bob is end-to-end encrypted, so the edit is sealed.
+click-id dm-conversation 1 $user_bob
+click-id dm-input 1 $user_bob
+# Up opens her newest message here for editing; Esc leaves it unchanged.
+key Up
+wait-text "Editing message" 5000
+key Escape
+wait-gone "Editing message" 5000
+click-id dm-input 1 $user_bob
+type "$dm_edit_target"
+key Return
+wait-text "$dm_edit_target" 10000
+right-click "$dm_edit_target"
+click "Edit message"
+wait-text "Editing message" 5000
+key Ctrl+A
+type "$dm_edited"
+key Return
+wait-text "$dm_edited" 10000
+wait-text "(edited)" 10000
+screenshot $screenshot_dir/63-dm-edited.bmp
+right-click "$dm_edited"
+click "Delete message…"
+wait-text "Delete message" 5000
+click-id message-delete-confirm 1
+wait-text "Message deleted" 10000
+wait-gone "$dm_edited" 5000
+screenshot $screenshot_dir/64-dm-deleted.bmp
 quit
 EOF
 
@@ -785,6 +888,10 @@ upload_line=$(wait_for_match bob '^\{"event":"attachment_done",.*"direction":"up
 [[ "$upload_line" =~ \"blobID\":\"([0-9a-f]{32})\" ]] || fail "[files] no blob in $upload_line"
 expect_ok bob dm "$user_alice" --attach "${BASH_REMATCH[1]}" "$bob_file_message"
 
+echo "==> [ui] bob posts in #general for alice to delete as an admin (#76 M3)"
+edits_start=$(wc -l <"$work_dir/bob.out")
+expect_ok bob send 1 "$bob_doomed"
+
 gui_status=0
 wait "$gui_pid" || gui_status=$?
 gui_pid=""
@@ -885,6 +992,33 @@ history_line=$(wait_for_match bob "^\\{\"event\":\"room_history\"," "$history_st
 	fail "[files] bob got no history"
 [[ "$history_line" == *"\"blobID\":\"$alice_blob\""*'"removed":true'* ]] ||
 	fail "[files] bob's history does not list alice's file removed"
+
+echo "==> [ui] alice edited and deleted messages from the window; bob saw each (#76 M3)"
+# expect_bob_event PATTERN WHAT: a line of bob's matching PATTERN since step 15 began.
+expect_bob_event() {
+	local line
+	line=$(wait_for_match bob "$1" "$edits_start") || fail "[edits] $2"
+	echo "    bob< $line"
+}
+edited_pattern="^\\{\"event\":\"message_edited\",\"serverID\":1,\"kind\":\"room\",.*"
+edited_pattern+="\"editStatus\":\"verified\",\"editFailure\":\"none\",\"content\":"
+expect_bob_event "$edited_pattern\"$edit_first\"\\}$" "bob never saw alice's first edit verified"
+expect_bob_event "$edited_pattern\"$edit_second\"\\}$" "bob never saw alice's second edit verified"
+deleted_pattern="^\\{\"event\":\"message_deleted\",\"serverID\":1,\"kind\":\"room\","
+deleted_pattern+="\"conversationID\":1,.*\"senderID\":"
+tombstone_tail=",\"found\":true,\"deleted\":true,\"removedByServer\":"
+expect_bob_event "$deleted_pattern$user_alice${tombstone_tail}false\\}$" \
+	"bob never saw alice's signed delete"
+expect_bob_event "$deleted_pattern$user_bob${tombstone_tail}true\\}$" \
+	"bob never saw alice's admin delete of his message as removed by the server"
+dm_edited_pattern="^\\{\"event\":\"message_edited\",\"serverID\":1,\"kind\":\"dm\",.*"
+dm_edited_pattern+="\"editStatus\":\"verified\",\"editFailure\":\"none\","
+dm_edited_pattern+="\"content\":\"$dm_edited\"\\}$"
+expect_bob_event "$dm_edited_pattern" "bob never saw alice's sealed DM edit verified"
+dm_deleted_pattern="^\\{\"event\":\"message_deleted\",\"serverID\":1,\"kind\":\"dm\",.*"
+dm_deleted_pattern+="\"senderID\":$user_alice,\"found\":true,\"deleted\":true,"
+dm_deleted_pattern+="\"removedByServer\":false\\}$"
+expect_bob_event "$dm_deleted_pattern" "bob never saw alice's signed DM delete"
 
 stop_client erin
 stop_client alice-watch

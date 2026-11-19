@@ -28,10 +28,18 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	chips := ComposerChipsAction {
 		removeIndex = -1,
 	}
-	if draft := State_selectedDirectDraft(state); draft != nil {
+	if viewMessageEditComposer(state, ctx, &area, serverID, .Direct, peerUserID) {
+		// #76 M3: an inline edit takes the composer's place in every mode (a plaintext
+		// message's edit is signed plaintext, a sealed one's needs the peer's key, D11); files
+		// stay out of it (D9) and the draft waits, untouched.
+		if len(view.status) > 0 {
+			viewComposerStatusOnly(ctx, &area, view.status)
+		}
+	} else if draft := State_selectedDirectDraft(state); draft != nil {
 		switch composer.mode {
 		case .Encrypted, .SettingUp, .Fallback:
 			inputID := ui.idOf("dm-input", serverID, peerUserID)
+			viewComposerRefocus(state, ctx, inputID)
 			// Files follow the conversation's encryption, the Send without encryption switch
 			// included (F4).
 			attach := buildComposerAttachmentsView(state, serverID, 0, peerUserID)
@@ -49,6 +57,7 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 			if result.submitted || (result.entered && len(attach.chips) > 0) {
 				action = .Send
 			}
+			viewComposerEditKeys(state, ctx, result, serverID, .Direct, peerUserID)
 			chips = viewComposerChips(ctx, &area, attach, serverID, .Direct, peerUserID)
 			if chips.send {
 				action = .Send
@@ -125,6 +134,7 @@ viewDirectChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Con
 	)
 	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Direct, peerUserID)
 	viewTranscriptCardAction(state, ctx, transcript, view.lines, serverID, .Direct, peerUserID)
+	viewTranscriptEditMarker(state, ctx, transcript, serverID, .Direct, peerUserID)
 }
 
 DirectComposerAction :: enum u8 {

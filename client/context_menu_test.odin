@@ -409,12 +409,13 @@ testMessageMenuEntriesAndActions :: proc(t: ^testing.T) {
 	_ = State_runContextMenuAction(&state, .SendMessage, now)
 	assert(state.selected_dm_peer_id == CONTEXT_MENU_TEST_PEER, "expected the sender's DM open")
 
-	// Your own message: no Send message to sender.
+	// Your own message: no Send message to sender, but Edit message and Delete message… (#76
+	// M3). This room list grants nothing, so Edit (which needs SendMessages, D10) is off.
 	State_openContextMenu(&state, MessageMenuTarget{934, .Room, 1, 61}, {10, 10})
 	contextMenuTestExpect(
 		t,
 		contextMenuTestEntries(&state),
-		"Copy message,Copy name,Quote",
+		"Copy message,Copy name,Quote,|Edit message (off),Delete message…!",
 		"your own message",
 	)
 

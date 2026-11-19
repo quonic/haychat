@@ -47,9 +47,6 @@ import "core:strings"
 
 MESSAGE_DELETED_TEXT :: "Message deleted"
 MESSAGE_REMOVED_BY_SERVER_TEXT :: "Removed by the server"
-MESSAGE_EDITED_SUFFIX :: " (edited)"
-MESSAGE_EDIT_PENDING_SUFFIX :: " (edited, not verified yet)"
-MESSAGE_EDIT_FAILED_SUFFIX :: " (An edit could not be verified)"
 MESSAGE_EDIT_NOT_OPENED_MESSAGE :: "That message could not be opened, so it cannot be edited"
 MESSAGE_EDIT_NOT_OWN_MESSAGE :: "You can only edit your own messages"
 MESSAGE_DELETE_NOT_OWN_MESSAGE :: "You can only delete your own messages"
@@ -135,33 +132,6 @@ MessageEditView_deinit :: proc(view: ^MessageEditView) {
 	delete(view.shownAt)
 	MessageEditView_clearEdits(view)
 	view^ = {}
-}
-
-// The text a transcript shows for a message's content, with its edit marker (allocator for the
-// marked text; the original is borrowed when there is no edit).
-messageEditShownText :: proc(
-	content: string,
-	view: MessageEditView,
-	editCount: int,
-	allocator := context.temp_allocator,
-) -> string {
-	shown := content
-	if len(view.shownContent) > 0 || view.shownEditID > 0 {
-		shown = view.shownContent
-	}
-	switch view.status {
-	case .Verified:
-		return fmt.aprintf("%s%s", shown, MESSAGE_EDITED_SUFFIX, allocator = allocator)
-	case .Pending:
-		return fmt.aprintf("%s%s", shown, MESSAGE_EDIT_PENDING_SUFFIX, allocator = allocator)
-	case .Failed:
-		return fmt.aprintf("%s%s", shown, MESSAGE_EDIT_FAILED_SUFFIX, allocator = allocator)
-	case .None:
-	}
-	if editCount > 0 && view.shownEditID > 0 {
-		return fmt.aprintf("%s%s", shown, MESSAGE_EDITED_SUFFIX, allocator = allocator)
-	}
-	return shown
 }
 
 // The tombstone's text (D6).

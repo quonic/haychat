@@ -103,21 +103,30 @@ button :: proc(
 	return it.clicked
 }
 
-// Shows text next to anchor after the pointer has rested on it for a moment.
-tooltip :: proc(ctx: ^Context, id: ID, anchor: Rect, text: string) {
+// Whether the pointer has rested on anchor for delayMS, with no button held. Until then it
+// asks for a frame at the moment the delay ends, so the caller sees it without new input. One
+// widget owns the hover at a time (the one under the pointer), shared with tooltips.
+hoverHeld :: proc(ctx: ^Context, id: ID, anchor: Rect, delayMS: u64) -> bool {
 	if !mouseOver(ctx, anchor) || ctx.active != 0 {
-		return
+		return false
 	}
 	ctx.hoverSeen = true
 	if ctx.hoverOwner != id {
 		ctx.hoverOwner = id
 		ctx.hoverStartMS = ctx.nowMS
 	}
-	showAt := ctx.hoverStartMS + TOOLTIP_DELAY_MS
+	showAt := ctx.hoverStartMS + delayMS
 	if ctx.nowMS >= showAt {
+		return true
+	}
+	requestFrameAt(ctx, showAt)
+	return false
+}
+
+// Shows text next to anchor after the pointer has rested on it for a moment.
+tooltip :: proc(ctx: ^Context, id: ID, anchor: Rect, text: string) {
+	if hoverHeld(ctx, id, anchor, TOOLTIP_DELAY_MS) {
 		ctx.tooltip = TooltipRequest{text, anchor}
-	} else {
-		requestFrameAt(ctx, showAt)
 	}
 }
 

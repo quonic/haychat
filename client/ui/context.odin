@@ -159,6 +159,9 @@ openFonts :: proc(ctx: ^Context) -> bool {
 			fmt.eprintln("[Error] Failed to open the UI font:", SDL.GetError())
 			return false
 		}
+		if fontID == .Italic {
+			ttf.SetFontStyle(ctx.fonts[fontID], {.ITALIC})
+		}
 		if len(ctx.fontData.emoji) > 0 {
 			ctx.emojiFonts[fontID] = openFontBytes(ctx.fontData.emoji, size)
 			if ctx.emojiFonts[fontID] != nil {

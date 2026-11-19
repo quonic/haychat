@@ -16,6 +16,11 @@ TextInputResult :: struct {
 	submitted: bool, // Enter was pressed with non-blank content
 	// Enter was pressed, blank content or not (a message with only files may be sent).
 	entered:   bool,
+	// Escape was pressed (an inline edit cancels on it).
+	escaped:   bool,
+	// Up was pressed without modifiers while the buffer was empty (the composer edits the
+	// newest own message on it).
+	upInEmpty: bool,
 }
 
 // Context menus on text inputs. A right press on an input focuses it (keeping its selection)
@@ -240,6 +245,8 @@ textInput :: proc(
 		result.changed ||= keys.changed
 		result.submitted = keys.submitted
 		result.entered = keys.entered
+		result.escaped = keys.escaped
+		result.upInEmpty = keys.upInEmpty
 	}
 	if ctx.textMenu.watched == id {
 		ctx.textMenu.facts = TextFieldFacts {
@@ -380,6 +387,9 @@ textInputHandleKeys :: proc(
 				}
 			case SDL.K_UP, SDL.K_DOWN:
 				up := e.key == SDL.K_UP
+				if up && len(buf) == 0 && !shift && !ctrl {
+					result.upInEmpty = true
+				}
 				target := textInputVerticalTarget(ctx, id, buf[:], wrapW, st.caret, up)
 				TextEdit_setCaret(st, target, shift)
 			case SDL.K_BACKSPACE:
@@ -411,6 +421,7 @@ textInputHandleKeys :: proc(
 				}
 			case SDL.K_ESCAPE:
 				TextEdit_setCaret(st, st.caret, false)
+				result.escaped = true
 			}
 		}
 		if edited {

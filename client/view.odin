@@ -23,6 +23,11 @@ viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	defer viewContextMenu(state, ctx)
 	// Under the context menu: the Remove attachment confirmation (F4).
 	defer viewAttachmentRemoveDialog(state, ctx)
+	// #76 M3: the Delete message… confirmation, and under it a message's edit history, which
+	// takes a press inside it before the widgets under it see one.
+	defer viewMessageDeleteDialog(state, ctx)
+	defer viewEditHistoryPopover(state, ctx)
+	viewEditHistoryBeginFrame(state, ctx)
 	// Under the context menu, above everything else.
 	defer viewVerifyDialog(state, ctx)
 	// A haychat:// link waiting for the user's answer (plan D19).
@@ -554,6 +559,9 @@ viewSidebarRow :: proc(ctx: ^ui.Context, serverID: int, row: SidebarRow, rect: u
 		if row.previewUnencrypted {
 			status = fmt.tprintf("%s. %s", status, DIRECT_ROW_UNENCRYPTED_TOOLTIP)
 		}
+		if len(row.preview) > 0 {
+			status = fmt.tprintf("%s\nLast message: %s", status, row.preview)
+		}
 		ui.tooltip(ctx, id, rect, status)
 		return clicked
 	}
@@ -676,8 +684,18 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	serverID := state.selected_server_id
 	roomID := state.selected_channel_id
 	if !view.allowsChat {
-		// A voice-only room takes no messages: a note sits where the composer would.
+		// A voice-only room takes no messages: a note sits where the composer would. An edit
+		// needs what a new message needs (D10), so one open here ends.
+		if State_messageEditIn(state, serverID, .Room, roomID) != nil {
+			State_cancelMessageEdit(state)
+		}
 		viewComposerNote(ctx, &area, view.voiceOnlyNote, view.status)
+	} else if viewMessageEditComposer(state, ctx, &area, serverID, .Room, roomID) {
+		// #76 M3: an inline edit takes the composer's place; files stay out of it (D9) and
+		// the draft waits, untouched, until the edit is saved or cancelled.
+		if len(view.status) > 0 {
+			viewComposerStatusOnly(ctx, &area, view.status)
+		}
 	} else if draft := State_selectedRoomDraft(state); draft != nil {
 		placeholder := "Message… (Enter to send, Shift+Enter for newline)"
 		if hasRoom {
@@ -687,6 +705,7 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 			)
 		}
 		inputID := ui.idOf("room-input", serverID, roomID)
+		viewComposerRefocus(state, ctx, inputID)
 		attach := buildComposerAttachmentsView(state, serverID, roomID, 0)
 		result, attachClicked := viewComposer(
 			ctx,
@@ -702,6 +721,7 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 		// Enter sends a message with only files too (D15).
 		chips.send ||= result.submitted || (result.entered && len(attach.chips) > 0)
 		viewRunComposerAttachments(state, ctx, serverID, roomID, 0, attachClicked, chips)
+		viewComposerEditKeys(state, ctx, result, serverID, .Room, roomID)
 	} else if len(view.status) > 0 {
 		viewComposerStatusOnly(ctx, &area, view.status)
 	}
@@ -740,6 +760,7 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 	)
 	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Room, roomID)
 	viewTranscriptCardAction(state, ctx, transcript, view.lines, serverID, .Room, roomID)
+	viewTranscriptEditMarker(state, ctx, transcript, serverID, .Room, roomID)
 
 	// Last, so the form replaces the room only from the next frame on.
 	switch {

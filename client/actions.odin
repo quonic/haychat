@@ -667,6 +667,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	// After the status: a refused sealed message puts its own reason there.
 	State_roomChainsProtocolError(state, serverID, message)
 	State_voiceE2EEProtocolError(state, serverID, message)
+	State_messageChangeProtocolError(state, serverID, message)
 }
 
 // Applies one decoded runtime event. Fields whose ownership moves into State are cleared on

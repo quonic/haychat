@@ -13,6 +13,9 @@ rgba :: proc(hex: u32) -> Color {
 FontID :: enum u8 {
 	Regular,
 	Bold,
+	// The regular face slanted by SDL_ttf (TTF_STYLE_ITALIC): muted notes such as a deleted
+	// message's tombstone.
+	Italic,
 }
 
 // Sizes are in logical points; the context scales them by the window's display scale.

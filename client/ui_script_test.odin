@@ -224,6 +224,35 @@ testUIScriptParsesRightClicks :: proc(t: ^testing.T) {
 	}
 }
 
+// #76 M3: hover moves the pointer without pressing, by drawn text, widget ID or point.
+@(test)
+testUIScriptParsesHovers :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := `hover "(edited)"` + "\nhover 120 48.5\nhover-id room-edited 1 1 42\n"
+	commands, errLine, err := uiScriptParse(source)
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0 && len(commands) == 3, "expected three hovers")
+	assert(commands[0].kind == .Hover && commands[0].text == "(edited)", "expected text")
+	assert(commands[1].kind == .HoverAt && commands[1].x == 120, "expected coordinates")
+	assert(commands[1].y == 48.5, "expected the y coordinate")
+	assert(commands[2].kind == .HoverID && commands[2].text == "room-edited", "expected an ID")
+	assert(commands[2].idCount == 3 && commands[2].ids[2] == 42, "expected the ID's integers")
+	assert(UI_SCRIPT_COMMAND_NAMES[.Hover] == "hover", "expected the JSON name")
+	assert(UI_SCRIPT_COMMAND_NAMES[.HoverID] == "hover-id", "expected the JSON name")
+
+	bad := [?][2]string {
+		{"hover", `usage: hover "TEXT" or hover X Y`},
+		{"hover 1 2 3", `usage: hover "TEXT" or hover X Y`},
+		{"hover-id", "usage: hover-id NAME [INTEGER...] (at most 4 integers)"},
+		{"hover-id a b", "usage: hover-id NAME [INTEGER...] (at most 4 integers)"},
+	}
+	for entry in bad {
+		lines, _, lineErr := uiScriptParse(entry[0])
+		assert(lines == nil, "expected nothing parsed from a bad line")
+		testing.expectf(t, lineErr == entry[1], "%q: got %q", entry[0], lineErr)
+	}
+}
+
 @(test)
 testUIScriptParsesWaitGone :: proc(t: ^testing.T) {
 	defer free_all(context.temp_allocator)

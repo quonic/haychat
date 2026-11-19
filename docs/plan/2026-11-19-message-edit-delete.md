@@ -282,6 +282,37 @@ Where the design above leaves something open, M2 chose:
   with the server's notice, as for plaintext. Its refusals arrive as protocol errors naming the
   message.
 
+### Notes from M3 (2026-11-19)
+
+M3 needed no protocol change. Where the design above leaves something open, M3 chose:
+
+- **The edit has its own field.** "Editing loads the text into the composer" is an edit field
+  in the composer's place (`MessageEditComposer`), not the draft: the draft is never touched,
+  so it is there again after a save or a cancel without being moved anywhere. Enter with the
+  text unchanged closes the bar without sending; blank text is refused for a message without
+  files (D9). The file chips and the paperclip are not drawn while editing (D9).
+- **Menu entries.** Your own message that cannot be edited now (a room you may not send in, a
+  sealed message that did not open, not connected) shows **Edit message** greyed out rather
+  than hidden. A tombstone's menu has no Copy message, Quote, Edit or Delete. Copy message and
+  Quote use the latest verified version.
+- **The marker.** "(edited)" is a separate label after the text (never selected or copied);
+  while an edit waits it reads "(edited, not verified yet)", and when the latest edit failed
+  "(edited) · An edit could not be verified" in the warning colour. A click pins the history
+  open (a press outside or Esc closes it); the popover is not modal, so typing goes on while
+  the pointer rests on a marker. It shows at most 70 % of the window's height: the original
+  and the newest edits, with "… N earlier edits not shown". Only the latest edit's failure
+  reason is known (the cached list keeps a status per edit), so only it gets the small text.
+- **Times** in the history are UTC ("YYYY-MM-DD HH:MM UTC"), like Removed files.
+- **Tombstones** are drawn in a slanted regular face (`ui.FontID.Italic`, SDL_ttf's
+  `TTF_STYLE_ITALIC`; the client ships no italic font), muted, without the encryption badge.
+- **The DM preview.** The GUI's conversation list has no preview line, so the newest message's
+  latest version or tombstone sentence goes into the row's tooltip ("Last message: …",
+  `State_directPreviewText`). A tombstone no longer marks the row "Unencrypted" (the preview's
+  tombstone was read as signed plaintext).
+- **A pending DM edit.** "Setting up encryption…" keeps the bar open with that status, and the
+  edit goes out by itself once the peer's key can be encrypted to (`State_messageEditPoll`), or
+  when the user presses Enter again; a key that will not come says why.
+
 ## Packages
 
 Strictly sequential, one PR each against `main`, each from fresh `main` after the previous merge.
@@ -342,3 +373,30 @@ Strictly sequential, one PR each against `main`, each from fresh `main` after th
 - 2026-11-19: M1 merged (PR #150). M2 implemented with no protocol change: sealed edits in
   encrypted rooms and DMs, sent and opened; departures are under "Notes from M2" and the GUI's
   hooks under "M3 hooks (from M2)". M3 to follow.
+- 2026-11-19: M2 merged (PR #151). M3 implemented with no protocol change: the message menu's
+  Edit message and Delete message… (and an admin's Delete message… on room messages), the
+  inline edit bar with Up and Esc, "(edited)" with its hover history, tombstones, the DM
+  preview in the conversation row's tooltip, `hover` in GUI automation, `dev/ui-smoke.sh` step
+  15 and the user and tester guides; departures are under "Notes from M3". Every package is
+  done; the follow-ups below are left.
+
+### Follow-ups
+
+- (M1) A deleted message's files are refused with "Attachment removed by an admin", also after
+  an author's delete: give that case its own sentence.
+- (M1) An assignable "manage messages" permission for moderation deletes (D5 keeps them to
+  admins).
+- (M1) A delete removes the message's edit rows, so their client message IDs and chain indexes
+  are no longer reserved on the server (harmless today: clients never reuse them and edit
+  signatures have their own label).
+- (M2) No event (in the harness or the client) when a sealed edit printed pending opens later;
+  history, `room_opened` and `msg-edits` show it. The GUI redraws from State, so it shows there.
+- (M2) No unit test for a Full history newcomer reading an edit through a forwarded chain (the
+  live proof covers it).
+- (M3) A visible preview line in the conversation list (today only the row's tooltip).
+- (M3) The history popover does not scroll: past 70 % of the window older edits are left out
+  with a count. Its times are UTC, not the local time zone.
+- (M3) Keep each listed edit's failure reason, so the history can say why for every failed
+  edit, not only the latest.
+- (M3) A real italic face for tombstones (SDL_ttf's slanted regular is rough at small sizes).
+- (M3) No keyboard way to open the edit history, and Up edits only from an empty composer.

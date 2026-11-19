@@ -250,9 +250,10 @@ testRoomMessageEditsAreShownOnlyWhenTheirAuthorSigned :: proc(t: ^testing.T) {
 		fmt.tprintf("expected the verified edit shown and the original kept, got %v", entry.edit),
 	)
 	text, placeholder, _ := roomMessageDisplay(&state, MESSAGE_EDIT_TEST_SERVER, entry^)
+	marker, _ := messageEditMarker(entry.edit, entry.editCount, entry.deleted)
 	assert(
-		!placeholder && text == "hello, edited" + MESSAGE_EDITED_SUFFIX,
-		fmt.tprintf("expected the edit with its marker, got %q", text),
+		!placeholder && text == "hello, edited" && marker == MESSAGE_EDIT_MARKER,
+		fmt.tprintf("expected the edit with its marker, got %q %q", text, marker),
 	)
 
 	// Signed by someone else, moved from another message, or sealed: not shown.
@@ -290,9 +291,10 @@ testRoomMessageEditsAreShownOnlyWhenTheirAuthorSigned :: proc(t: ^testing.T) {
 		)
 	}
 	text, _, _ = roomMessageDisplay(&state, MESSAGE_EDIT_TEST_SERVER, entry^)
+	failedMarker, failed := messageEditMarker(entry.edit, entry.editCount, entry.deleted)
 	assert(
-		text == "hello, edited" + MESSAGE_EDIT_FAILED_SUFFIX,
-		fmt.tprintf("expected the last good version marked, got %q", text),
+		text == "hello, edited" && failedMarker == MESSAGE_EDIT_FAILED_MARKER && failed,
+		fmt.tprintf("expected the last good version marked, got %q %q", text, failedMarker),
 	)
 	sealedEdit := common.MessageEdit {
 		id        = 9,
@@ -709,7 +711,7 @@ testDirectMessageEditsAndTombstones :: proc(t: ^testing.T) {
 	entry = State_directMessageEntry(&state, MESSAGE_EDIT_TEST_SERVER, MESSAGE_EDIT_TEST_PEER, 70)
 	text, _ := directMessageText(entry^)
 	assert(
-		entry.edit.status == .Verified && text == "dm hello, edited" + MESSAGE_EDITED_SUFFIX,
+		entry.edit.status == .Verified && text == "dm hello, edited",
 		fmt.tprintf("expected the DM edit shown, got %q", text),
 	)
 	cache := State_serverDirectCache(&state, MESSAGE_EDIT_TEST_SERVER)
