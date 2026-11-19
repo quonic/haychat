@@ -511,12 +511,13 @@ testRemovedAttachmentsStaySignedAndAreMarked :: proc(t: ^testing.T) {
 		fmt.tprintf("expected the quota to get 1000 bytes back, got %d", limits.usedBytes),
 	)
 	// Another account's file gives this account's quota nothing.
-	marked := State_attachmentRemoved(
+	marked, lookup := State_attachmentRemoved(
 		&state,
 		ATTACHMENT_TEST_SERVER,
 		{blobId = refs[1].blobId, roomId = common.GENERAL_ROOM_ID, senderId = ATTACHMENT_TEST_PEER},
 	)
 	assert(marked == 1, fmt.tprintf("expected one shown file marked, got %d", marked))
+	assert(lookup == .Scan, "expected a notice without a message ID to scan")
 	limits = State_attachmentLimits(&state, ATTACHMENT_TEST_SERVER)
 	assert(limits.usedBytes == 4000, "expected another account's file not to count")
 
@@ -544,6 +545,288 @@ testRemovedAttachmentsStaySignedAndAreMarked :: proc(t: ^testing.T) {
 	assert(
 		again.files[0].removed && again.files[1].removed && again.attachments[0].removed,
 		"expected a history page to mark a cached message's files removed",
+	)
+}
+
+// Protocol 29 (#138): a notice that names its message marks only that entry, in the room or
+// the direct conversation it names; one naming none (an unbound blob) scans every cache.
+@(test)
+testAttachmentRemovedFindsTheMessageByID :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&e2eeSendBridgeTestMutex)
+	defer sync.mutex_unlock(&e2eeSendBridgeTestMutex)
+	e2eeFetchBridge = attachmentTestFetchBridge
+	defer e2eeFetchBridge = ClientServerTransport_fetchUserKeys
+	defer free_all(context.temp_allocator)
+
+	server := testDirectServer(ATTACHMENT_TEST_SERVER)
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	testPrepareRoomSend(&state, ATTACHMENT_TEST_SERVER, ATTACHMENT_TEST_SELF)
+	serverKey, peerKey := testMessageSigner(&state, ATTACHMENT_TEST_SERVER, ATTACHMENT_TEST_PEER)
+	refs := attachmentTestRefs()
+	// Two room messages and two direct messages list the same blob, so a lookup that scanned
+	// would mark them all.
+	for messageID in ([]int{40, 41, 42}) {
+		attachmentTestDeliver(&state, messageID, "file", peerKey, serverKey, refs[:], refs[:])
+	}
+	blob := refs[0].blobId
+	directCache := State_serverDirectCache(&state, ATTACHMENT_TEST_SERVER)
+	conversation := DirectConversationCache {
+		peerUserID = ATTACHMENT_TEST_PEER,
+	}
+	for messageID in ([]int{5, 6}) {
+		entry: DirectMessageEntry
+		entry.id = messageID
+		entry.senderId = ATTACHMENT_TEST_PEER
+		entry.recipientId = ATTACHMENT_TEST_SELF
+		append(&entry.attachments, common.AttachmentRef{blobId = blob, size = 10})
+		append(&entry.files, MessageFile{blobId = blob, storedSize = 10})
+		append(&conversation.messages, entry)
+	}
+	append(&directCache.caches, conversation)
+	roomRemoved :: proc(state: ^State, messageID: int) -> bool {
+		entry := attachmentTestEntry(state, messageID)
+		return entry.files[0].removed && entry.attachments[0].removed
+	}
+	directRemoved :: proc(state: ^State, index: int) -> bool {
+		cache := State_serverDirectCache(state, ATTACHMENT_TEST_SERVER)
+		entry := &cache.caches[0].messages[index]
+		return entry.files[0].removed && entry.attachments[0].removed
+	}
+
+	// The room message the notice names, and nothing else.
+	marked, lookup := State_attachmentRemoved(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		{
+			blobId = blob,
+			roomId = common.GENERAL_ROOM_ID,
+			senderId = ATTACHMENT_TEST_PEER,
+			chatMessageId = 41,
+		},
+	)
+	assert(
+		marked == 1 &&
+		lookup == .Direct &&
+		roomRemoved(&state, 41) &&
+		!roomRemoved(&state, 40) &&
+		!roomRemoved(&state, 42) &&
+		!directRemoved(&state, 0) &&
+		!directRemoved(&state, 1),
+		fmt.tprintf("expected only message 41 marked, got %d %v", marked, lookup),
+	)
+	// A message not in the cache: nothing to mark, and no scan.
+	marked, lookup = State_attachmentRemoved(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		{
+			blobId = blob,
+			roomId = common.GENERAL_ROOM_ID,
+			senderId = ATTACHMENT_TEST_PEER,
+			chatMessageId = 999,
+		},
+	)
+	assert(
+		marked == 0 && lookup == .Direct && !roomRemoved(&state, 40),
+		"expected an uncached message to mark nothing",
+	)
+	// A direct message: the conversation with the other side (the peer sent it to this
+	// account), and only that message.
+	marked, lookup = State_attachmentRemoved(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		{
+			blobId = blob,
+			senderId = ATTACHMENT_TEST_PEER,
+			recipientId = ATTACHMENT_TEST_SELF,
+			directMessageId = 6,
+		},
+	)
+	assert(
+		marked == 1 &&
+		lookup == .Direct &&
+		directRemoved(&state, 1) &&
+		!directRemoved(&state, 0) &&
+		!roomRemoved(&state, 40),
+		fmt.tprintf("expected only direct message 6 marked, got %d %v", marked, lookup),
+	)
+	// No message named (an unbound blob): every cache is scanned.
+	marked, lookup = State_attachmentRemoved(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		{blobId = blob, roomId = common.GENERAL_ROOM_ID, senderId = ATTACHMENT_TEST_PEER},
+	)
+	assert(
+		lookup == .Scan &&
+		marked == 5 &&
+		roomRemoved(&state, 40) &&
+		roomRemoved(&state, 42) &&
+		directRemoved(&state, 0),
+		fmt.tprintf("expected the scan to mark every listing, got %d %v", marked, lookup),
+	)
+}
+
+// Protocol 29 (#138): removal log pages decode only when well formed and ordered; a first page
+// replaces the list, Load more's page adds older entries without repeats; the view says who
+// removed each file (an operator for SQL), names encrypted and unsent files, and offers Load
+// more while the server has older entries.
+@(test)
+testAttachmentRemovalsListAndView :: proc(t: ^testing.T) {
+	_ = t
+	defer free_all(context.temp_allocator)
+	transport: ClientServerTransport
+	transport.serverID = ATTACHMENT_TEST_SERVER
+	defer delete(transport.lastError)
+	blob: common.AttachmentBlobID
+	blob[0] = 0x77
+	entry :: proc(
+		id: int,
+		blob: common.AttachmentBlobID,
+		removedBy: int,
+		name := "",
+		reason := "",
+		roomID := 0,
+		direct := false,
+		encrypted := false,
+	) -> common.AttachmentRemovalEntry {
+		return common.AttachmentRemovalEntry {
+			id = id,
+			blobId = blob,
+			ownerUserId = ATTACHMENT_TEST_PEER,
+			removedByUserId = removedBy,
+			removedAt = strings.clone("2026-11-19 12:34:56.789+00"),
+			reason = strings.clone(reason),
+			roomId = roomID,
+			direct = direct,
+			encrypted = encrypted,
+			name = strings.clone(name),
+		}
+	}
+	translate :: proc(
+		transport: ^ClientServerTransport,
+		page: ^common.ServerAdminAttachmentRemovalsPayload,
+	) -> ClientTransportRuntimeEvent {
+		payload, err := cbor.marshal(page^)
+		common.ServerAdminAttachmentRemovalsPayload_deinit(page)
+		assert(err == nil, "expected the page to encode")
+		defer delete(payload)
+		event, handled := ClientServerTransport_translateAttachmentModerationPacket(
+			transport,
+			common.Packet{messageType = .ServerAdminAttachmentRemovals, payload = payload},
+		)
+		assert(handled, "expected the page handled")
+		return event
+	}
+
+	// Out of order, or not older than the cursor: refused.
+	disordered := common.ServerAdminAttachmentRemovalsPayload{}
+	append(&disordered.entries, entry(3, blob, 1), entry(4, blob, 1))
+	bad := translate(&transport, &disordered)
+	assert(bad.kind == .ProtocolError, "expected entries out of order refused")
+	ClientTransportRuntimeEvent_deinit(&bad)
+	stale := common.ServerAdminAttachmentRemovalsPayload {
+		beforeId = 3,
+	}
+	append(&stale.entries, entry(3, blob, 1))
+	bad = translate(&transport, &stale)
+	assert(bad.kind == .ProtocolError, "expected an entry at the cursor refused")
+	ClientTransportRuntimeEvent_deinit(&bad)
+
+	server := testDirectServer(ATTACHMENT_TEST_SERVER)
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	testPrepareRoomSend(&state, ATTACHMENT_TEST_SERVER, ATTACHMENT_TEST_SELF)
+	roomCache := State_serverRoomCache(&state, ATTACHMENT_TEST_SERVER)
+	append(
+		&roomCache.rooms,
+		common.RoomSummary{id = 7, name = strings.clone("lobby")},
+	)
+
+	// The first page: three entries, older ones on the server.
+	first := common.ServerAdminAttachmentRemovalsPayload {
+		hasMore = true,
+	}
+	append(
+		&first.entries,
+		entry(9, blob, ATTACHMENT_TEST_SELF, name = "report.pdf", reason = "spam", roomID = 7),
+		entry(8, blob, 0, encrypted = true, direct = true),
+		entry(6, blob, ATTACHMENT_TEST_SELF, roomID = 12),
+	)
+	event := translate(&transport, &first)
+	assert(
+		event.kind == .AttachmentRemovalsReceived,
+		fmt.tprintf("expected the page, got %v", event.kind),
+	)
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+
+	view := buildAttachmentRemovalsView(&state, ATTACHMENT_TEST_SERVER)
+	assert(
+		view.loaded && view.hasMore && !view.pending && len(view.rows) == 3,
+		fmt.tprintf("expected three rows and Load more, got %v", view),
+	)
+	assert(
+		view.rows[0].name == "report.pdf" &&
+		view.rows[0].reason == "spam" &&
+		view.rows[0].place == "#lobby" &&
+		strings.has_suffix(view.rows[0].removedBy, "(you)"),
+		fmt.tprintf("expected the plaintext file removed by this admin, got %v", view.rows[0]),
+	)
+	assert(
+		view.rows[0].time == "2026-11-19 12:34 UTC",
+		fmt.tprintf("expected the time in UTC minutes, got %q", view.rows[0].time),
+	)
+	assert(
+		view.rows[1].name == ATTACHMENT_REMOVAL_ENCRYPTED_NAME &&
+		view.rows[1].removedBy == ATTACHMENT_REMOVAL_OPERATOR &&
+		view.rows[1].place == ATTACHMENT_REMOVAL_DIRECT &&
+		view.rows[1].reason == "",
+		fmt.tprintf("expected an encrypted direct file removed in SQL, got %v", view.rows[1]),
+	)
+	assert(
+		view.rows[2].name == ATTACHMENT_REMOVAL_UNSENT_NAME &&
+		view.rows[2].place == "Room 12",
+		fmt.tprintf("expected an unsent file in an unknown room, got %v", view.rows[2]),
+	)
+
+	// Load more: the page before the oldest held, with an entry the list already has; the
+	// last page ends Load more.
+	more := common.ServerAdminAttachmentRemovalsPayload {
+		beforeId = 6,
+	}
+	append(&more.entries, entry(5, blob, 0), entry(2, blob, 0))
+	event = translate(&transport, &more)
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+	connection := State_serverConnection(&state, ATTACHMENT_TEST_SERVER)
+	repeated := common.ServerAdminAttachmentRemovalsPayload {
+		beforeId = 3,
+	}
+	append(&repeated.entries, entry(2, blob, 0), entry(1, blob, 0, roomID = 0))
+	State_attachmentRemovalsReceived(&state, ATTACHMENT_TEST_SERVER, &repeated)
+	ids := make([dynamic]int, context.temp_allocator)
+	for held in connection.attachmentRemovals {
+		append(&ids, held.id)
+	}
+	assert(
+		fmt.tprintf("%v", ids[:]) == "[9, 8, 6, 5, 2, 1]",
+		fmt.tprintf("expected the pages joined newest first without repeats, got %v", ids),
+	)
+	view = buildAttachmentRemovalsView(&state, ATTACHMENT_TEST_SERVER)
+	assert(!view.hasMore, "expected no Load more after the last page")
+	assert(
+		view.rows[5].place == ATTACHMENT_REMOVAL_DELETED_ROOM,
+		fmt.tprintf("expected a room since deleted, got %v", view.rows[5]),
+	)
+
+	// Refresh: a first page replaces the list.
+	fresh := common.ServerAdminAttachmentRemovalsPayload{}
+	append(&fresh.entries, entry(10, blob, 0))
+	State_attachmentRemovalsReceived(&state, ATTACHMENT_TEST_SERVER, &fresh)
+	assert(
+		len(connection.attachmentRemovals) == 1 && connection.attachmentRemovals[0].id == 10,
+		"expected a first page to replace the list",
 	)
 }
 

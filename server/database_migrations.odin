@@ -992,6 +992,75 @@ DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS ::
 	"WHERE table_schema = current_schema() AND table_name = 'rooms' " +
 	"AND column_name = 'everyone_permissions' AND column_default = '19'))"
 
+// Migration 16 (the attachment removal log, protocol 29, #138). attachment_removals keeps one
+// row per removal: the blob, its owner, the removing admin (NULL for deploy/sql/
+// remove-attachment.sql, or an admin account since deleted), the time and the reason, kept
+// indefinitely (the volume is tiny). It is a log, so it has no foreign key to attachments: a
+// row outlives the sweeper deleting a tombstone's row. room_id and the message links turn NULL
+// when their row goes; direct (the file was for a direct conversation) and encrypted stay, so
+// the client can still say where it was. name is a plaintext file's name; an encrypted file's
+// name is inside its message's seal and never reaches the server.
+//
+// Backfill: one row per existing admin or SQL removal, with no reason (it was only logged).
+// F1 also made tombstones of cancelled and mismatched uploads (DATABASE_ATTACHMENT_ABANDON_SQL,
+// owner as removed_by_user_id); those were Uploading, which never sets completed_at, while a
+// removal applies only to a Ready or Bound blob, which DATABASE_ATTACHMENT_FINISH_SQL gave
+// completed_at. So completed_at IS NOT NULL tells them apart, also for an admin removing its own
+// file. Never edit it; append a migration instead.
+DATABASE_MIGRATION_16_ATTACHMENT_REMOVALS_SQL ::
+	"CREATE TABLE attachment_removals (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"blob_id BYTEA NOT NULL, " +
+	"owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"removed_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"removed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"reason TEXT NULL, " +
+	"room_id BIGINT NULL REFERENCES rooms(id) ON DELETE SET NULL, " +
+	"direct BOOLEAN NOT NULL DEFAULT false, " +
+	"encrypted BOOLEAN NOT NULL DEFAULT false, " +
+	"chat_message_id BIGINT NULL REFERENCES chat_messages(id) ON DELETE SET NULL, " +
+	"direct_message_id BIGINT NULL REFERENCES direct_messages(id) ON DELETE SET NULL, " +
+	"name TEXT NULL, " +
+	"CONSTRAINT attachment_removals_blob_id_size CHECK (octet_length(blob_id) = 16), " +
+	"CONSTRAINT attachment_removals_reason_size " +
+	"CHECK (octet_length(reason) BETWEEN 1 AND 500), " +
+	"CONSTRAINT attachment_removals_name_size CHECK (octet_length(name) BETWEEN 1 AND 255), " +
+	"CONSTRAINT attachment_removals_one_message " +
+	"CHECK (chat_message_id IS NULL OR direct_message_id IS NULL)); " +
+	"CREATE INDEX attachment_removals_by_blob_id ON attachment_removals (blob_id); " +
+	"INSERT INTO attachment_removals (blob_id, owner_user_id, removed_by_user_id, removed_at, " +
+	"room_id, direct, encrypted, chat_message_id, direct_message_id, name) " +
+	"SELECT a.blob_id, a.owner_user_id, a.removed_by_user_id, a.removed_at, a.room_id, " +
+	"(a.room_id IS NULL AND (a.peer_user_id IS NOT NULL OR a.direct_message_id IS NOT NULL)), " +
+	"a.encrypted, a.chat_message_id, a.direct_message_id, " +
+	"CASE WHEN a.encrypted THEN NULL ELSE a.name END FROM attachments a " +
+	"WHERE a.state = 3 AND a.removed_at IS NOT NULL AND a.completed_at IS NOT NULL " +
+	"ORDER BY a.removed_at, a.id;"
+
+// What migration 16 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ATTACHMENT_REMOVALS_CHECKS ::
+	"('attachment_removals table', to_regclass('attachment_removals') IS NOT NULL), " +
+	"('attachment_removals columns', (SELECT count(*) = 12 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'attachment_removals' " +
+	"AND column_name IN ('id', 'blob_id', 'owner_user_id', 'removed_by_user_id', " +
+	"'removed_at', 'reason', 'room_id', 'direct', 'encrypted', 'chat_message_id', " +
+	"'direct_message_id', 'name'))), " +
+	"('attachment_removals checks', (SELECT count(*) = 4 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachment_removals') AND contype = 'c' AND conname IN " +
+	"('attachment_removals_blob_id_size', 'attachment_removals_reason_size', " +
+	"'attachment_removals_name_size', 'attachment_removals_one_message'))), " +
+	"('attachment_removals links set null', (SELECT count(*) = 4 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachment_removals') AND contype = 'f' " +
+	"AND confdeltype = 'n')), " +
+	"('attachment_removals owner cascades', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachment_removals') AND contype = 'f' " +
+	"AND confdeltype = 'c' AND confrelid = to_regclass('users'))), " +
+	"('attachment_removals no attachments key', NOT EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachment_removals') AND contype = 'f' " +
+	"AND confrelid = to_regclass('attachments'))), " +
+	"('attachment_removals blob index', " +
+	"to_regclass('attachment_removals_by_blob_id') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -1078,6 +1147,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "attachments on messages",
 		sql = DATABASE_MIGRATION_15_ATTACHMENTS_ON_MESSAGES_SQL,
 		checks = DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS,
+	},
+	{
+		version = 16,
+		name = "attachment removals",
+		sql = DATABASE_MIGRATION_16_ATTACHMENT_REMOVALS_SQL,
+		checks = DATABASE_ATTACHMENT_REMOVALS_CHECKS,
 	},
 }
 
@@ -1207,6 +1282,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ATTACHMENTS_CHECKS +
 	", " +
 	DATABASE_ATTACHMENTS_ON_MESSAGES_CHECKS +
+	", " +
+	DATABASE_ATTACHMENT_REMOVALS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

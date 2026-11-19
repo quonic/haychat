@@ -319,6 +319,8 @@ HeadlessEventKind :: enum {
 	// and ServerAdminAttachmentUsage.
 	AttachmentRemoved,
 	AttachmentUsage,
+	// Protocol 29 (#138): ServerAdminAttachmentRemovals, a page of the removal log.
+	AttachmentRemovals,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -378,6 +380,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.AttachmentError = "attachment_error",
 	.AttachmentRemoved = "attachment_removed",
 	.AttachmentUsage = "attachment_usage",
+	.AttachmentRemovals = "attachment_removals",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -1196,7 +1199,7 @@ headlessRenderRuntimeEvent :: proc(
 		return headlessRenderRoleEvent(event, allocator)
 	case .RoomPermissionsReceived:
 		return headlessRenderRoomPermissionsEvent(event, allocator)
-	case .AttachmentRemoved, .AttachmentUsageReceived:
+	case .AttachmentRemoved, .AttachmentUsageReceived, .AttachmentRemovalsReceived:
 		return headlessRenderAttachmentModerationEvent(event, allocator)
 	case .RegistrationRequired,
 	     .RegistrationResult,
@@ -2010,6 +2013,10 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: removes an attachment (its message stays and lists it as removed); answered " +
 		"by admin_result attachment-remove, and readers hear attachment_removed",
 		headlessCommandAttachRemove},
+	{"attach-removals", 0, 1, .None, "attach-removals [BEFORE_ID]",
+		"admins: a page of the attachment removal log, newest first (BEFORE_ID: the oldest " +
+		"id held, for the next page); answered by attachment_removals (entries, hasMore)",
+		headlessCommandAttachRemovals},
 	{"chat-latency", 2, 1, .None, "chat-latency ROOM_ID COUNT [INTERVAL_MS]",
 		"sends COUNT room messages INTERVAL_MS apart (default 50) and reports their echo " +
 		"times (p50MS, p95MS, maxMS, meanMS)", headlessCommandChatLatency},

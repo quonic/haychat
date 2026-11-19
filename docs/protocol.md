@@ -73,6 +73,7 @@ version below therefore needs clients and servers rebuilt together.
 | 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet: only a blob's owner may download it |
 | 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), the refusals "Invalid message attachments", "An attachment cannot be sent with this message" and "You cannot attach files in this room", with schema migration 15 (`attachment_count` on both message tables, the `attachments.position`/`name`/`media_type` columns, and Attach files added to every room's Everyone grant). The message inserts bind the listed blobs, and whoever may read a message may download its files |
 | 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed, and a reader's download of it is refused with "Attachment removed by an admin". No schema migration |
+| 29 | Attachment removal log (#138, [below](#attachment-removal-log-protocol-29)): `ClientAdminListAttachmentRemovals{beforeId}` and `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}` (wire values 216 and 217, `AttachmentRemovalEntry`), and `chatMessageId`/`directMessageId` in `ServerAttachmentRemoved`, with schema migration 16 (`attachment_removals`). Every removal, by an admin or `deploy/sql/remove-attachment.sql`, keeps a row with its reason that admins list in the client |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -196,17 +197,21 @@ role in the statement that reads or changes, so a holder of every other permissi
   message still verifies and lists the file with `removed` set. An unknown, uploading or already
   removed blob is "Attachment not found". `reason` is optional: at most 500 bytes of UTF-8
   without control characters (otherwise "The reason must be at most 500 bytes, without control
-  characters"). The server logs it with the blob, the admin and the owner, and neither stores it
-  nor sends it on. The answer is `ServerAdminActionResult{action = RemoveAttachment (11),
-  userId = the owner, blobId}`.
-- **Who hears.** `ServerAttachmentRemoved{blobId, roomId, senderId, recipientId}` goes to every
+  characters"). The server logs it with the blob, the admin and the owner and (protocol 29)
+  keeps it in the removal log, which only admins list; it is never sent to anyone else. The
+  answer is `ServerAdminActionResult{action = RemoveAttachment (11), userId = the owner,
+  blobId}`.
+- **Who hears.** `ServerAttachmentRemoved{blobId, roomId, senderId, recipientId,
+  chatMessageId, directMessageId}` goes to every
   session of each account that may read the message: a room message's members who may read
   its history (a From join member who joined after the message hears nothing), both sides of a
   direct message, and the owner of a blob no message lists. For a room message `roomId` is the
   room and `senderId` the owner; for a direct message `senderId` and `recipientId` are its two
-  sides; an unbound blob names the conversation it was uploaded to. Clients mark the file
-  removed wherever they show it. The restricted-account rules hide this from nobody who could
-  already read the message.
+  sides; an unbound blob names the conversation it was uploaded to. Since protocol 29
+  `chatMessageId` or `directMessageId` is the message the file was on (both 0 for an unbound
+  blob), so a client marks that entry without scanning its caches; it scans only when both are
+  0. Clients mark the file removed wherever they show it. The restricted-account rules hide this
+  from nobody who could already read the message.
 - **Downloads.** Every running download of the blob ends with `ServerAttachmentRefused{blobId,
   "Attachment removed by an admin"}`. A later download by a reader of the message is refused
   with the same sentence, and by anyone else with "Attachment not found".
@@ -219,10 +224,36 @@ role in the statement that reads or changes, so a holder of every other permissi
   server could not read it), and the top 100 accounts by those bytes as
   `AttachmentAccountUsage{userId, bytes, count}`, largest first.
 - **Removal without a client.** `deploy/sql/remove-attachment.sql` makes the same tombstone
-  (with no `removed_by_user_id`) but cannot reach the server: the server's hourly pass deletes
+  (with no `removed_by_user_id`, and since protocol 29 a removal log row with no admin and an
+  optional `-v reason=...`) but cannot reach the server: the server's hourly pass deletes
   the files of the newest bound tombstones again (and cuts off a download of one), its startup
   scan deletes every Removed blob's file, and clients see the file as removed on their next
   history fetch. `deploy/sql/attachment-usage.sql` shows the usage. See `deploy/README.md`.
+
+### Attachment removal log (protocol 29)
+
+Issue #138. Admins see past removals and their reasons in the client.
+
+- **The log.** `attachment_removals` (migration 16) keeps one row per removal: the blob, its
+  owner, the removing admin (none for `deploy/sql/remove-attachment.sql`, or for an admin
+  account deleted since), the time, the reason, the room or whether it was for a direct
+  conversation, the message the file was on, and a plaintext file's name. An encrypted file's
+  name is inside its message's seal, which the server cannot open, so it has none. The admin
+  removal statement writes its row in the same statement as the tombstone, so a removal never
+  happens without its row; a refused removal writes none. Rows are kept indefinitely (removals
+  are rare and a row is small) and are not tied to `attachments`, so a row outlives the sweeper
+  deleting a tombstone's row; its room and message links turn empty when those go. Migration 16
+  backfilled a row, without a reason, for every earlier removal (a tombstone that had been Ready
+  or Bound), and none for cancelled or mismatched uploads.
+- **Listing.** `ClientAdminListAttachmentRemovals{beforeId}` (admins only, checked in the
+  statement; anyone else gets "Admin permission required", a negative cursor "Invalid admin
+  request") is answered by `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}`: at most
+  50 entries, newest first, with IDs below `beforeId` (0 for the newest page), the cursor history
+  uses; `hasMore` says older entries follow. Each `AttachmentRemovalEntry{id, blobId,
+  ownerUserId, removedByUserId, removedAt, reason, roomId, direct, encrypted, chatMessageId,
+  directMessageId, name}` has `removedByUserId` 0 for a removal made in SQL, `removedAt` as
+  PostgreSQL `timestamptz` text, `roomId` 0 for a direct message or a deleted room, and `name`
+  empty for an encrypted file or one never sent.
 
 ### Attachment lifecycle
 

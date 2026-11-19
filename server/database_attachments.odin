@@ -355,6 +355,9 @@ ATTACHMENT_SWEEP_BATCH :: 500
 // and its history must still list the file (as removed). The admin check
 // (DATABASE_ACTOR_IS_ADMIN_SQL) is in the statement; admins may remove their own files too.
 // The tombstone stops counting toward the quota and the capacity at once (they sum state <> 3).
+// Protocol 29 (#138): the same statement adds the removal log row (attachment_removals) with
+// the reason $3 ('' for none), so a removal is never applied without its row or logged without
+// being applied.
 //
 // One row: the outcome ('applied', 'not_admin', 'not_found' for an unknown, Uploading or
 // already Removed blob), the owner, the conversation as ServerAttachmentRemoved names it (a room
@@ -365,14 +368,21 @@ ATTACHMENT_SWEEP_BATCH :: 500
 // sides of a direct message, or the owner of a blob no message holds.
 DATABASE_ATTACHMENT_REMOVE_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
-	"target AS (SELECT a.id, a.owner_user_id, a.room_id, a.peer_user_id, a.chat_message_id, " +
-	"a.direct_message_id FROM attachments a WHERE a.blob_id = decode($2::text, 'hex') " +
-	"AND a.state IN (1, 2)), " +
+	"target AS (SELECT a.id, a.blob_id, a.owner_user_id, a.room_id, a.peer_user_id, " +
+	"a.chat_message_id, a.direct_message_id, a.encrypted, a.name FROM attachments a " +
+	"WHERE a.blob_id = decode($2::text, 'hex') AND a.state IN (1, 2)), " +
 	"decision AS (SELECT CASE WHEN NOT (SELECT ok FROM actor) THEN 'not_admin' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'not_found' ELSE 'applied' END AS outcome), " +
 	"removed AS (UPDATE attachments a SET state = 3, removed_by_user_id = $1::bigint, " +
 	"removed_at = now() FROM target t, decision d WHERE a.id = t.id AND d.outcome = 'applied' " +
 	"RETURNING a.id), " +
+	"logged AS (INSERT INTO attachment_removals (blob_id, owner_user_id, removed_by_user_id, " +
+	"removed_at, reason, room_id, direct, encrypted, chat_message_id, direct_message_id, " +
+	"name) SELECT t.blob_id, t.owner_user_id, $1::bigint, now(), NULLIF($3::text, ''), " +
+	"t.room_id, (t.room_id IS NULL AND (t.peer_user_id IS NOT NULL " +
+	"OR t.direct_message_id IS NOT NULL)), t.encrypted, t.chat_message_id, " +
+	"t.direct_message_id, CASE WHEN t.encrypted THEN NULL ELSE t.name END " +
+	"FROM target t JOIN removed r ON r.id = t.id RETURNING id), " +
 	"cm AS (SELECT c.id, c.room_id, c.sender_user_id, c.created_at FROM chat_messages c " +
 	"JOIN target t ON c.id = t.chat_message_id WHERE (SELECT ok FROM actor)), " +
 	"dm AS (SELECT m.id, m.sender_user_id, m.recipient_user_id FROM direct_messages m " +
@@ -385,7 +395,8 @@ DATABASE_ATTACHMENT_REMOVE_SQL ::
 	"UNION SELECT t.owner_user_id FROM target t WHERE (SELECT ok FROM actor) " +
 	"AND NOT EXISTS (SELECT 1 FROM cm) AND NOT EXISTS (SELECT 1 FROM dm)) " +
 	"SELECT d.outcome, " +
-	"(EXISTS (SELECT 1 FROM removed))::text, COALESCE(t.owner_user_id, 0)::text, " +
+	"(EXISTS (SELECT 1 FROM removed) AND EXISTS (SELECT 1 FROM logged))::text, " +
+	"COALESCE(t.owner_user_id, 0)::text, " +
 	"COALESCE(cm.room_id, CASE WHEN dm.id IS NULL THEN t.room_id END, 0)::text, " +
 	"COALESCE(cm.sender_user_id, dm.sender_user_id, t.owner_user_id, 0)::text, " +
 	"COALESCE(dm.recipient_user_id, CASE WHEN cm.id IS NULL THEN t.peer_user_id END, 0)::text, " +
@@ -407,6 +418,22 @@ DATABASE_ATTACHMENT_USAGE_SQL ::
 	"COALESCE((SELECT string_agg(owner_user_id::text || ':' || bytes::text || ':' || n::text, " +
 	"',' ORDER BY bytes DESC, owner_user_id) FROM accounts), '')"
 
+// A page of the removal log (protocol 29, #138) for an admin ($1; DATABASE_ACTOR_IS_ADMIN_SQL
+// in the statement): at most $3 rows with an ID below $2 (0 for the newest), newest first, the
+// cursor history uses. Always one row at least: the first column says whether the requester is
+// an admin, and the rest are NULL when there is no entry (or no admin). Columns: is admin, id,
+// blob (hex), owner, remover (0 for SQL), removed_at, reason, room, direct, encrypted, the chat
+// and direct message IDs (0 for none) and the name.
+DATABASE_ATTACHMENT_REMOVALS_SQL ::
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok) " +
+	"SELECT a.ok::text, r.id::text, encode(r.blob_id, 'hex'), r.owner_user_id::text, " +
+	"COALESCE(r.removed_by_user_id, 0)::text, r.removed_at::text, COALESCE(r.reason, ''), " +
+	"COALESCE(r.room_id, 0)::text, r.direct::text, r.encrypted::text, " +
+	"COALESCE(r.chat_message_id, 0)::text, COALESCE(r.direct_message_id, 0)::text, " +
+	"COALESCE(r.name, '') FROM actor a LEFT JOIN LATERAL (SELECT * FROM attachment_removals x " +
+	"WHERE a.ok AND ($2::bigint = 0 OR x.id < $2::bigint) ORDER BY x.id DESC " +
+	"LIMIT $3::integer) r ON true ORDER BY r.id DESC NULLS LAST"
+
 // The newest $1 bound tombstones (state Removed with a message link). The hourly pass hands
 // their blob IDs to the storage worker, whose delete is idempotent, so a removal made in SQL
 // (deploy/sql/remove-attachment.sql, which cannot reach the storage worker) loses its file
@@ -419,6 +446,13 @@ DATABASE_ATTACHMENT_TOMBSTONE_FILES_SQL ::
 
 // Most tombstones one hourly pass re-deletes files for.
 ATTACHMENT_TOMBSTONE_FILES_BATCH :: 1000
+
+// A text parameter (the reason validation refuses NUL, so nothing is cut short).
+@(private = "file")
+databaseAttachmentText :: proc(text: string) -> cstring {
+	value, _ := strings.clone_to_cstring(text)
+	return value
+}
 
 @(private = "file")
 databaseAttachmentHex :: proc(bytes: []u8) -> cstring {
@@ -605,6 +639,8 @@ databaseExecuteAttachmentRequest :: proc(
 		return databaseExecuteAttachmentRemove(conn, request)
 	case .Usage:
 		return databaseExecuteAttachmentUsage(conn, request)
+	case .Removals:
+		return databaseExecuteAttachmentRemovals(conn, request)
 	case .Sweep, .Known, .TombstoneFiles:
 		query: cstring = DATABASE_ATTACHMENT_KNOWN_SQL
 		params := make([dynamic]cstring, 0, 3)
@@ -753,7 +789,11 @@ databaseExecuteAttachmentRemove :: proc(
 	result := databaseAttachmentExec(
 		conn,
 		DATABASE_ATTACHMENT_REMOVE_SQL,
-		{databaseIntParam(request.userId), databaseAttachmentHex(blobId[:])},
+		{
+			databaseIntParam(request.userId),
+			databaseAttachmentHex(blobId[:]),
+			databaseAttachmentText(request.reason),
+		},
 	)
 	if result == nil {
 		return databaseConnectionError(conn)
@@ -840,6 +880,76 @@ databaseExecuteAttachmentUsage :: proc(
 		append(
 			&attachment.accounts,
 			common.AttachmentAccountUsage{userId = userId, bytes = bytes, count = count},
+		)
+	}
+	return databaseSuccess(attachment)
+}
+
+// A page of the removal log (protocol 29): limit rows (at most ATTACHMENT_REMOVALS_PAGE_MAX)
+// before beforeId, and whether older ones follow (one row more is asked for to know).
+@(private = "file")
+databaseExecuteAttachmentRemovals :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAttachmentRequest,
+) -> common.DatabaseQueryResponse {
+	limit := request.limit
+	if limit <= 0 || limit > common.ATTACHMENT_REMOVALS_PAGE_MAX {
+		limit = common.ATTACHMENT_REMOVALS_PAGE_MAX
+	}
+	result := databaseAttachmentExec(
+		conn,
+		DATABASE_ATTACHMENT_REMOVALS_SQL,
+		{
+			databaseIntParam(request.userId),
+			databaseIntParam(max(request.beforeId, 0)),
+			databaseIntParam(limit + 1),
+		},
+	)
+	if result == nil {
+		return databaseConnectionError(conn)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) < 1 {
+		return databaseResultError(&result)
+	}
+	attachment := common.DatabaseAttachmentResult {
+		action  = .Removals,
+		outcome = .NotAdmin,
+	}
+	if !databaseGetBool(result, 0, 0) {
+		return databaseSuccess(attachment)
+	}
+	attachment.outcome = .Applied
+	rows := int(pg.n_tuples(result))
+	attachment.removals = make([dynamic]common.AttachmentRemovalEntry, 0, min(rows, limit))
+	for row in 0 ..< i32(rows) {
+		if pg.get_is_null(result, row, 1) {
+			continue
+		}
+		if len(attachment.removals) == limit {
+			attachment.hasMore = true
+			break
+		}
+		blobId, blobOK := databaseAttachmentGetBlobID(result, row, 2)
+		if !blobOK {
+			continue
+		}
+		append(
+			&attachment.removals,
+			common.AttachmentRemovalEntry {
+				id = databaseGetIntOrZero(result, row, 1),
+				blobId = blobId,
+				ownerUserId = databaseGetIntOrZero(result, row, 3),
+				removedByUserId = databaseGetIntOrZero(result, row, 4),
+				removedAt = databaseGetText(result, row, 5),
+				reason = databaseGetText(result, row, 6),
+				roomId = databaseGetIntOrZero(result, row, 7),
+				direct = databaseGetBool(result, row, 8),
+				encrypted = databaseGetBool(result, row, 9),
+				chatMessageId = databaseGetIntOrZero(result, row, 10),
+				directMessageId = databaseGetIntOrZero(result, row, 11),
+				name = databaseGetText(result, row, 12),
+			},
 		)
 	}
 	return databaseSuccess(attachment)

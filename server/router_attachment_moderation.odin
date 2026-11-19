@@ -2,6 +2,7 @@ package server
 
 import "../common"
 import "core:fmt"
+import "core:strings"
 
 // Attachment moderation (protocol 28, attachments plan F3, D22). Admins only, with no
 // assignable permission; the database statement checks the admin role (DATABASE_ACTOR_IS_ADMIN_SQL)
@@ -11,8 +12,12 @@ import "core:fmt"
 //   a Removed tombstone with every signed field and its message link kept) -> every active
 //   download of the blob ends with ServerAttachmentRefused{ATTACHMENT_REMOVED_MESSAGE}, the
 //   storage worker deletes the file (StorageDeleteBlobs), every session of each account that may
-//   read the message gets ServerAttachmentRemoved, and the admin ServerAdminActionResult. The
-//   reason is logged with the blob, the admin and the owner, and never stored or sent on.
+//   read the message gets ServerAttachmentRemoved (protocol 29: with the message's ID), and the
+//   admin ServerAdminActionResult. The reason is logged with the blob, the admin and the owner,
+//   and (protocol 29) kept in the removal log the same statement writes; only admins list it.
+// - ClientAdminListAttachmentRemovals{beforeId} (protocol 29, #138) ->
+//   DATABASE_ATTACHMENT_REMOVALS_SQL -> ServerAdminAttachmentRemovals{beforeId, entries,
+//   hasMore}, newest first and paged by row ID like history.
 // - ClientAdminAttachmentUsage -> DATABASE_ATTACHMENT_USAGE_SQL -> StorageFreeSpace (statfs on
 //   the blob directory) -> ServerAdminAttachmentUsage.
 // - Hourly (and at startup), DATABASE_ATTACHMENT_TOMBSTONE_FILES_SQL lists the newest bound
@@ -56,15 +61,54 @@ MainRouterState_handleClientAdminRemoveAttachment :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseAttachmentRequest{action = .Remove, userId = userID, blobId = req.blobId},
+		common.DatabaseAttachmentRequest {
+			action = .Remove,
+			userId = userID,
+			blobId = req.blobId,
+			reason = strings.clone(req.reason),
+		},
 		PendingDBRequest {
 			sessionID = session.transport.sessionID,
 			targetUserID = userID,
 			description = req.reason,
 		},
 	)
-	// The pending request owns the reason now.
+	// The pending request owns the reason now (the database request has its own copy).
 	req.reason = ""
+}
+
+MainRouterState_handleClientAdminListAttachmentRemovals :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	userID, ok := MainRouterState_authenticatedUserForAdminRequest(pm, state, peerID)
+	if !ok {
+		return
+	}
+	session, _ := MainRouterState_getPeerSession(state, peerID)
+	req: common.ClientAdminListAttachmentRemovalsPayload
+	if !attachmentDecode(payload, &req) || req.beforeId < 0 {
+		MainRouterState_sendProtocolError(pm, state, peerID, ADMIN_INVALID_REQUEST_MESSAGE)
+		return
+	}
+	attachmentDatabaseSend(
+		pm,
+		state,
+		peerID,
+		common.DatabaseAttachmentRequest {
+			action = .Removals,
+			userId = userID,
+			beforeId = req.beforeId,
+			limit = common.ATTACHMENT_REMOVALS_PAGE_MAX,
+		},
+		PendingDBRequest {
+			sessionID = session.transport.sessionID,
+			targetUserID = userID,
+			attachmentBeforeID = req.beforeId,
+		},
+	)
 }
 
 MainRouterState_handleClientAdminAttachmentUsage :: proc(
@@ -185,10 +229,12 @@ MainRouterState_attachmentRemoveResult :: proc(
 	)
 
 	notice := common.ServerAttachmentRemovedPayload {
-		blobId      = blobId,
-		roomId      = removal.roomId,
-		senderId    = removal.senderId,
-		recipientId = removal.recipientId,
+		blobId          = blobId,
+		roomId          = removal.roomId,
+		senderId        = removal.senderId,
+		recipientId     = removal.recipientId,
+		chatMessageId   = removal.chatMessageId,
+		directMessageId = removal.directMessageId,
 	}
 	for userID in removal.readerUserIds {
 		MainRouterState_sendMessageToUserID(pm, state, userID, .ServerAttachmentRemoved, notice)
@@ -235,6 +281,35 @@ MainRouterState_attachmentUsageResult :: proc(
 			sessionID = request.sessionID,
 			usedBytes = result.usedBytes,
 			accounts = accounts,
+		},
+	)
+}
+
+// Answers a removal log page (protocol 29): the entries, newest first, with the cursor the
+// request carried. The database response frees the entries after the send.
+MainRouterState_attachmentRemovalsResult :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	request: PendingDBRequest,
+	result: common.DatabaseAttachmentResult,
+) {
+	if _, live := attachmentSession(state, request.peerID, request.sessionID); !live {
+		return
+	}
+	if result.outcome != .Applied {
+		MainRouterState_sendAdminRequired(pm, state, request.peerID)
+		return
+	}
+	attachmentSend(
+		pm,
+		state,
+		request.peerID,
+		request.sessionID,
+		.ServerAdminAttachmentRemovals,
+		common.ServerAdminAttachmentRemovalsPayload {
+			beforeId = request.attachmentBeforeID,
+			entries = result.removals,
+			hasMore = result.hasMore,
 		},
 	)
 }

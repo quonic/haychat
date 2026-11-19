@@ -135,9 +135,12 @@ ClientTransportRuntimeEventKind :: enum {
 	// Attachment moderation (protocol 28, attachment_moderation.odin). AttachmentRemoved is
 	// ServerAttachmentRemoved (attachmentRemoved: blobId, roomId, senderId, recipientId; nothing
 	// owned). AttachmentUsageReceived is ServerAdminAttachmentUsage (attachmentUsage, accounts
-	// owned). AdminActionResult carries blobID for a RemoveAttachment.
+	// owned). AdminActionResult carries blobID for a RemoveAttachment. Protocol 29:
+	// AttachmentRemovalsReceived is ServerAdminAttachmentRemovals (attachmentRemovals, entries
+	// owned), and AttachmentRemoved also names the message (chatMessageId, directMessageId).
 	AttachmentRemoved,
 	AttachmentUsageReceived,
+	AttachmentRemovalsReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -247,6 +250,7 @@ ClientTransportRuntimeEvent :: struct {
 	// Protocol 28.
 	attachmentRemoved:         common.ServerAttachmentRemovedPayload,
 	attachmentUsage:           common.ServerAdminAttachmentUsagePayload,
+	attachmentRemovals:        common.ServerAdminAttachmentRemovalsPayload,
 	blobID:                    common.AttachmentBlobID,
 }
 
@@ -479,6 +483,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.logEntries)
 	common.AttachmentRefs_deinit(&event.attachments)
 	common.ServerAdminAttachmentUsagePayload_deinit(&event.attachmentUsage)
+	common.ServerAdminAttachmentRemovalsPayload_deinit(&event.attachmentRemovals)
 	event^ = {}
 }
 
@@ -2151,7 +2156,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 			},
 			true
 
-	case .ServerAttachmentRemoved, .ServerAdminAttachmentUsage:
+	case .ServerAttachmentRemoved, .ServerAdminAttachmentUsage, .ServerAdminAttachmentRemovals:
 		return ClientServerTransport_translateAttachmentModerationPacket(transport, innerPacket)
 
 	case .ServerRoleList:

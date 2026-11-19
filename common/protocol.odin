@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 28
+protocolVersion: ProtocolVersion = 29
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -464,6 +464,10 @@ MessageType :: enum {
 	ServerAdminAttachmentUsage, // ServerAdminAttachmentUsagePayload: answer to the usage request
 	ClientAdminRemoveAttachment, // ClientAdminRemoveAttachmentPayload: make a blob a tombstone
 	ServerAttachmentRemoved, // ServerAttachmentRemovedPayload: to whoever may read its message
+	// The attachment removal log (protocol 29, #138), appended so no existing wire value moves.
+	// Admins only, checked in the database statement.
+	ClientAdminListAttachmentRemovals, // ClientAdminListAttachmentRemovalsPayload: a page
+	ServerAdminAttachmentRemovals, // ServerAdminAttachmentRemovalsPayload: the page, newest first
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,

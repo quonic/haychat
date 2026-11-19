@@ -532,14 +532,22 @@ stores.
 
 - **Remove attachment…** on a file card's right-click menu asks for confirmation ("Remove NAME
   from the server? The message stays, and everyone who can read it sees "Attachment removed by
-  an admin" instead of the file.") with an optional **Reason**. The reason goes only to the
-  server's log; nobody else sees it. The file is deleted from the server at once, a download in
+  an admin" instead of the file.") with an optional **Reason**. The server keeps the reason in
+  its removal log, which admins can see under **Removed files**; nobody else sees it. The file
+  is deleted from the server at once, a download in
   progress stops, and the file no longer counts toward its owner's quota. The message stays,
   and its card says "Attachment removed by an admin" for everyone who can read it.
 - **Server settings → Storage**, after the Admin section, shows **Used**, **Capacity** ("No
   limit" when the server has none), **Free space** on the server's disk ("unknown" when the
   server cannot read it) and the accounts by the bytes they store, with **Refresh**. It is asked
   for again each time Server settings opens. Removed files count toward nothing.
+- **Server settings → Removed files**, after Storage, lists the files removed from the server,
+  newest first: when, the file's name ("Encrypted file" for an encrypted one, whose name the
+  server never sees, and "File never sent" for one that was not on a message yet), whose it
+  was, who removed it ("an operator" when it was removed with SQL on the server), the room or
+  "Direct message", and the reason when one was given. **Load more** shows older removals and
+  **Refresh** asks again; the list is asked for each time Server settings opens and after you
+  remove a file. The server keeps these entries indefinitely.
 - Operators without a client can do the same with SQL; see
   [deploy/README.md](../deploy/README.md#attachment-storage-and-removing-files).
 

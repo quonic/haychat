@@ -140,6 +140,10 @@ DatabaseAttachmentAction :: enum u8 {
 	// again. A removal made in SQL (deploy/sql/remove-attachment.sql) cannot delete the file
 	// itself; the storage worker's delete is idempotent.
 	TombstoneFiles,
+	// Protocol 29 (#138): a page of the removal log (attachment_removals; admins only, checked
+	// in the statement), newest first, before the row ID beforeId (0 for the newest), at most
+	// limit rows.
+	Removals,
 }
 
 DatabaseAttachmentRequest :: struct {
@@ -163,6 +167,10 @@ DatabaseAttachmentRequest :: struct {
 	limit:           int,
 	// Sweep: blobs never to sweep (live transfers). Known: the blobs to look up. Owned.
 	blobIds:         [dynamic]AttachmentBlobID,
+	// Remove (protocol 29): the admin's reason, stored in the removal log ("" for none). Owned.
+	reason:          string,
+	// Removals (protocol 29): the page's cursor, a removal log row ID (0 for the newest).
+	beforeId:        int,
 }
 
 DatabaseAttachmentOutcome :: enum u8 {
@@ -209,6 +217,9 @@ DatabaseAttachmentResult :: struct {
 	// Known (#131): the attachments table has no row at all, so the startup scan keeps every
 	// file (a database restored after its blob directory, or a fresh one beside an old volume).
 	tableEmpty: bool,
+	// Removals (protocol 29): the page, newest first, and whether older rows follow (owned).
+	removals: [dynamic]AttachmentRemovalEntry,
+	hasMore:  bool,
 }
 
 DatabaseAttachmentRemoval :: struct {
@@ -397,8 +408,11 @@ messageContentLengthIsValid :: proc(contentLength: int, attachmentCount: int) ->
 // Most accounts ServerAdminAttachmentUsage lists, by stored bytes.
 ATTACHMENT_USAGE_ACCOUNTS_MAX :: 100
 // A removal's optional reason: at most this many bytes of UTF-8 with no control characters.
-// The server logs it with the blob, the admin and the owner; it is never stored or sent on.
+// The server logs it with the blob, the admin and the owner, and (protocol 29) keeps it in the
+// removal log, which admins list (ServerAdminAttachmentRemovals); no one else ever sees it.
 ATTACHMENT_REMOVE_REASON_MAX_BYTES :: 500
+// Most removal log entries one ServerAdminAttachmentRemovals page carries (protocol 29).
+ATTACHMENT_REMOVALS_PAGE_MAX :: 50
 
 // What a removed file's card says, and the refusal of a download cut short by a removal
 // (ServerAttachmentRefused). Clients may match it; never reword it.
@@ -455,12 +469,100 @@ ClientAdminRemoveAttachmentPayload_deinit :: proc(payload: ^ClientAdminRemoveAtt
 // members who joined after it get nothing), both sides of a direct message, and the owner of an
 // unbound Ready blob. roomId names a room message's room; senderId and recipientId a direct
 // message's two sides (senderId is the owner for a room message, and recipientId 0). An unbound
-// blob names the conversation it was uploaded to.
+// blob names the conversation it was uploaded to. Protocol 29 (#138): chatMessageId or
+// directMessageId is the message the file was on, so a client finds it without scanning its
+// caches; both are 0 for a blob no message holds.
 ServerAttachmentRemovedPayload :: struct {
-	blobId:      AttachmentBlobID,
-	roomId:      int,
-	senderId:    int,
-	recipientId: int,
+	blobId:          AttachmentBlobID,
+	roomId:          int,
+	senderId:        int,
+	recipientId:     int,
+	chatMessageId:   int,
+	directMessageId: int,
+}
+
+// ── Removal log (protocol 29, #138) ───────────────────────────────────────────────────────
+
+// ClientAdminListAttachmentRemovals: a page of the removal log (admins only), newest first.
+// beforeId is the cursor, as for history: 0 for the newest page, otherwise the oldest entry ID
+// the client holds. Answered by ServerAdminAttachmentRemovals, or a ServerProtocolError
+// ("Admin permission required", "Invalid admin request" for a negative cursor).
+ClientAdminListAttachmentRemovalsPayload :: struct {
+	beforeId: int,
+}
+
+// One removal: id the log row (the page cursor), the blob and its owner, removedByUserId the
+// admin (0 for a removal made in SQL with deploy/sql/remove-attachment.sql, or an admin account
+// since deleted), removedAt the time as PostgreSQL timestamptz text, reason the admin's ("" for
+// none). roomId is the room the file was for (0 for a direct message or a room since deleted),
+// direct whether it was for a direct conversation, chatMessageId or directMessageId the message
+// it was on (0 for none: never sent, or the message is gone). name is a plaintext file's name;
+// an encrypted file's name is inside its message's seal, which the server cannot open, so it is
+// "" with encrypted set. A plaintext file never sent has no name either. Strings are owned once
+// decoded (AttachmentRemovalEntry_deinit).
+AttachmentRemovalEntry :: struct {
+	id:              int,
+	blobId:          AttachmentBlobID,
+	ownerUserId:     int,
+	removedByUserId: int,
+	removedAt:       string,
+	reason:          string,
+	roomId:          int,
+	direct:          bool,
+	encrypted:       bool,
+	chatMessageId:   int,
+	directMessageId: int,
+	name:            string,
+}
+
+AttachmentRemovalEntry_deinit :: proc(entry: ^AttachmentRemovalEntry) {
+	delete(entry.removedAt)
+	delete(entry.reason)
+	delete(entry.name)
+	entry.removedAt = ""
+	entry.reason = ""
+	entry.name = ""
+}
+
+AttachmentRemovalEntries_deinit :: proc(entries: ^[dynamic]AttachmentRemovalEntry) {
+	for &entry in entries {
+		AttachmentRemovalEntry_deinit(&entry)
+	}
+	delete(entries^)
+	entries^ = nil
+}
+
+// ServerAdminAttachmentRemovals: the page asked for (beforeId echoed, so a client tells a first
+// page from a continuation), at most ATTACHMENT_REMOVALS_PAGE_MAX entries newest first, and
+// whether older entries follow. Owned once decoded.
+ServerAdminAttachmentRemovalsPayload :: struct {
+	beforeId: int,
+	entries:  [dynamic]AttachmentRemovalEntry,
+	hasMore:  bool,
+}
+
+ServerAdminAttachmentRemovalsPayload_deinit :: proc(
+	payload: ^ServerAdminAttachmentRemovalsPayload,
+) {
+	AttachmentRemovalEntries_deinit(&payload.entries)
+}
+
+// Whether a decoded removal log entry is well formed: positive IDs, a set blob, a valid reason
+// and, when present, a valid file name.
+attachmentRemovalEntryIsValid :: proc(entry: AttachmentRemovalEntry) -> bool {
+	return(
+		entry.id > 0 &&
+		attachmentBlobIDIsSet(entry.blobId) &&
+		entry.ownerUserId > 0 &&
+		entry.removedByUserId >= 0 &&
+		entry.roomId >= 0 &&
+		entry.chatMessageId >= 0 &&
+		entry.directMessageId >= 0 &&
+		(entry.chatMessageId == 0 || entry.directMessageId == 0) &&
+		len(entry.removedAt) <= 64 &&
+		attachmentRemoveReasonIsValid(entry.reason) &&
+		(len(entry.name) == 0 || attachmentNameIsValid(entry.name))
+	)
 }
 
 // A removal reason: 0..ATTACHMENT_REMOVE_REASON_MAX_BYTES bytes of valid UTF-8 with no control

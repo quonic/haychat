@@ -73,7 +73,8 @@ set -euo pipefail
 #      conversation; she saves it through its card (`save-path` answers the save dialog) and
 #      its hash must match. Admin alice removes her own file from its card's menu with a
 #      reason: her card shows "Attachment removed by an admin", bob hears attachment_removed
-#      and his history lists it removed. Last she opens Admin → Storage.
+#      and his history lists it removed. Last she opens Admin → Storage and
+#      (protocol 29) Removed files, which lists her removal with its reason.
 #
 # Under --all the server holds every earlier proof's accounts, so the Admin section is several
 # screens long: the script reaches each control with `scroll-until`, never by a fixed scroll.
@@ -604,6 +605,11 @@ click-id server-settings 1
 wait-text "Display name on this server" 5000
 scroll-until "Free space" 760 400 3 60000
 screenshot $screenshot_dir/53-admin-storage.bmp
+# Removed files (protocol 29, #138), after Storage: her removal, newest first, with its reason.
+scroll-until "Reason: $remove_reason" 760 400 3 60000
+assert-text "Removed files"
+assert-text "$alice_file_name"
+screenshot $screenshot_dir/54-removed-files.bmp
 click-id server-settings-close 1
 quit
 EOF

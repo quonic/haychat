@@ -669,6 +669,10 @@ Protocol 28 (F3) adds admin moderation: `attach-usage` reports the server's stor
 `attachment_removed`, its files then list `"removed":true`, and saving one is refused with
 `Attachment removed by an admin`.
 
+Protocol 29 (#138) names the message in `attachment_removed` (`chatMessageID` or
+`directMessageID`) and adds `attach-removals [BEFORE_ID]`, a page of the server's removal log
+(admins only), answered by `attachment_removals`.
+
 ### Commands
 
 | Command | Meaning |
@@ -679,7 +683,8 @@ Protocol 28 (F3) adds admin moderation: `attach-usage` reports the server's stor
 | `attach-download ROOM_ID\|@USER_ID MESSAGE_ID INDEX OUT...` | Protocol 27: saves file INDEX (from 0) of a cached, shown message into OUT through `OUT.part`. The worker checks the stored size and the whole blob's SHA-256 against the signed or sealed message, and for an encrypted file opens it chunk by chunk and checks the padding; a failed check deletes the part file and ends in `attachment_error` `This attachment was changed on the server`. Refused at once for an unknown or hidden message (`Unknown message`), a list the server changed, or a removed file. |
 | `attach-cancel BLOB` | Stops this client's upload or download of the blob: `attachment_error` `cancelled`. The server deletes a cancelled upload's file and keeps its row as a tombstone, so it cannot be resumed. |
 | `attach-usage` | Protocol 28, admins: asks for the server's storage use: `{"ok":true,"cmd":"attach-usage","id":0,"serverID":1,…}`, answered by `attachment_usage` (or a `protocol_error` `Admin permission required`). |
-| `attach-remove BLOB [REASON...]` | Protocol 28, admins: removes the file (Ready or bound to a message). The reason (optional, the rest of the line, at most 500 bytes) goes to the server's log only. Answered by `admin_result` with `"action":"attachment-remove"`, the owner in `userID` and the blob in `blobID` (a field only this action has), or a `protocol_error` (`Admin permission required`, `Attachment not found` for an unknown, uploading or already removed file). Every reader of the message hears `attachment_removed`, and a download of the file in progress ends in `attachment_error` `Attachment removed by an admin`. |
+| `attach-remove BLOB [REASON...]` | Protocol 28, admins: removes the file (Ready or bound to a message). The reason (optional, the rest of the line, at most 500 bytes) goes to the server's log and (protocol 29) its removal log, which `attach-removals` lists. Answered by `admin_result` with `"action":"attachment-remove"`, the owner in `userID` and the blob in `blobID` (a field only this action has), or a `protocol_error` (`Admin permission required`, `Attachment not found` for an unknown, uploading or already removed file). Every reader of the message hears `attachment_removed`, and a download of the file in progress ends in `attachment_error` `Attachment removed by an admin`. |
+| `attach-removals [BEFORE_ID]` | Protocol 29, admins: asks for a page of the removal log, newest first: `{"ok":true,"cmd":"attach-removals","id":0,"serverID":1,…}`, answered by `attachment_removals` (or a `protocol_error` `Admin permission required`; `Invalid admin request` for a negative cursor). Without BEFORE_ID it asks for the newest page; with the `id` of the oldest entry held, the page before it (BEFORE_ID must be 0 or more). |
 | `chat-latency ROOM_ID COUNT [INTERVAL_MS]` | Sends COUNT signed messages (`latency-probe NONCE N`) to the room, INTERVAL_MS apart (default 50), waits up to 10 s for the last ones, and reports how long each took to come back as this client's own `room_chat`: `{"ok":true,"cmd":"chat-latency","roomID":1,"count":40,"received":40,"p50MS":10.7,"p95MS":10.9,"maxMS":11.0,"meanMS":9.0}`. Events keep printing while it runs, so it can measure a transfer the same process runs. |
 
 ### Events
@@ -688,7 +693,8 @@ Protocol 28 (F3) adds admin moderation: `attach-usage` reports the server's stor
 | --- | --- |
 | `attachment_progress` | `{"event":"attachment_progress","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","bytes":3670016,"total":26214400}` (once the server answered, then at most every 500 ms; `bytes` is what the server acknowledged (upload) or what was written (download)) |
 | `attachment_done` | `{"event":"attachment_done","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","size":26214400,"sha256":"<hex>","path":"…","elapsedMS":6009,"encrypted":false,"fileSize":26214400}` (an upload's `sha256` is the one the server checked and stored; `size` and `sha256` are the stored bytes', `fileSize` the file's own: the plaintext written by a decrypted download) |
-| `attachment_removed` | `{"event":"attachment_removed","serverID":1,"blobID":"<hex>","roomID":1,"senderID":4,"recipientID":0}` (protocol 28: to every account that may read the message; a direct message names its two sides in `senderID` and `recipientID` with `roomID` 0; printed before the client marks the files removed in its caches and ends its downloads of the blob) |
+| `attachment_removed` | `{"event":"attachment_removed","serverID":1,"blobID":"<hex>","roomID":1,"senderID":4,"recipientID":0,"chatMessageID":31,"directMessageID":0}` (protocol 28: to every account that may read the message; a direct message names its two sides in `senderID` and `recipientID` with `roomID` 0; protocol 29: `chatMessageID` or `directMessageID` is the message the file was on, both 0 for a file never sent; printed before the client marks the files removed in its caches and ends its downloads of the blob) |
+| `attachment_removals` | `{"event":"attachment_removals","serverID":1,"beforeID":0,"hasMore":false,"entries":[{"id":2,"blobID":"<hex>","ownerID":4,"removedByID":1,"removedAt":"2026-11-19 12:00:00.123456+00","reason":"spam","roomID":1,"direct":false,"encrypted":false,"chatMessageID":31,"directMessageID":0,"name":"notes.txt"}]}` (protocol 29: at most 50 entries, newest first; `beforeID` the cursor it answers, `hasMore` whether older entries follow; `removedByID` 0 for a removal made with `deploy/sql/remove-attachment.sql`; `roomID` 0 for a direct message or a deleted room; `name` empty for an encrypted file, whose name the server never has, or one never sent) |
 | `attachment_usage` | `{"event":"attachment_usage","serverID":1,"usedBytes":26214400,"capacityBytes":0,"freeBytes":53687091200,"freeBytesKnown":true,"accounts":[{"userID":4,"bytes":26214400,"count":1}]}` (protocol 28: stored bytes without removed files, `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` (0 = none), the free space on the server's blob volume, and the top 100 accounts by bytes) |
 | `attachment_error` | `{"event":"attachment_error","serverID":1,"id":1,"direction":"download","blobID":"<hex>","bytes":0,"total":0,"path":"…","error":"Attachment not found"}` (`blobID` is empty for a begin the server refused; `connection lost` when the session ended, `cancelled` after `attach-cancel`) |
 
@@ -710,7 +716,10 @@ saved and compared with the original; then (protocol 28) admin A removes B's 25 
 saves it (B's download ends, both hear `attachment_removed`, the file leaves the blob directory,
 history lists it removed, saving it again is refused and `attach-usage` shows the 25 MiB freed),
 B is refused `attach-remove`, and the `deploy/sql/attachment-usage.sql` and
-`remove-attachment.sql` helpers are checked, the second seen by B on its next `history`.
+`remove-attachment.sql` helpers are checked, the second seen by B on its next `history`; then
+(protocol 29) `attachment_removed` names the message, and A's `attach-removals` lists the
+helper's removal (no admin, its `-v reason`) and then A's with A's reason, a page before the
+first starts at A's, and B is refused the list.
 
 Then it starts a second server from the same binary, on a fresh database it creates and drops,
 with its own blob directory, 2 MiB per file, a 3 MiB quota and a 512 KiB/s pace
@@ -1146,7 +1155,11 @@ optional reason: `attachment-remove-reason SERVER` (the field), `attachment-remo
 SERVER` and `attachment-remove-cancel SERVER`; it closes once the server confirmed. Admins find
 **Storage** in Server settings right after the Admin section: Used, Capacity, Free space
 ("unknown" when the server cannot tell) and the accounts by usage, with
-`admin-storage-refresh SERVER`.
+`admin-storage-refresh SERVER`. Since protocol 29 **Removed files** follows it: one entry per
+removal, newest first (the file's name in bold with the time on its right, then "PLACE · owner
+NAME · removed by NAME", then "Reason: …" when there is one), with `admin-removals-refresh
+SERVER` and, while older entries exist, **Load more** (`admin-removals-more SERVER`). Reach it
+with `scroll-until "Reason: …"` or `scroll-until "Removed files"`.
 
 ```text
 click "# general"
@@ -1270,9 +1283,10 @@ progress and **Cancel**) and waits for "Saved as …"; the saved file must match
 she right-clicks her own file's card, clicks **Remove attachment…**, types a reason and
 confirms: her card shows "Attachment removed by an admin", bob must print
 `attachment_removed` for the blob, and his next `history` lists it removed. Last she opens
-Server settings and scrolls to **Storage**. Under `--all` the Admin section is several screens
+Server settings and scrolls to **Storage** and then (protocol 29) to **Removed files**, which
+must list her removal with its reason. Under `--all` the Admin section is several screens
 long, so these steps reach every control with `scroll-until` rather than a fixed scroll.
-alice takes 54 screenshots on the way (`01-…` to `53-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
+alice takes 55 screenshots on the way (`01-…` to `54-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
 lines of the GUI script it generates, deletes any files with those names before the window
 opens, and at the end prints every path and fails naming each one that was not written, so a
 new shot needs no count to update and leftovers from an earlier run never count. They stay in

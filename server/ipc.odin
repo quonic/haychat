@@ -345,6 +345,7 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.candidateUserIds)
 	case common.DatabaseAttachmentRequest:
 		delete(r.blobIds)
+		delete(r.reason)
 	case common.DatabaseRegistrationModeRequest, common.DatabaseRestrictedUsersRequest:
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
@@ -477,6 +478,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.blobs)
 		delete(r.removal.readerUserIds)
 		delete(r.accounts)
+		removals := r.removals
+		common.AttachmentRemovalEntries_deinit(&removals)
 	case common.DatabaseRegistrationModeResult:
 	case common.DatabaseRoleResult:
 		for &role in r.roles {

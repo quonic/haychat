@@ -419,7 +419,8 @@ every start it also deletes files that have no row, unless the guards in
 `attachment_orphans`) and the orphans the guards kept (`attachment_orphans_kept`).
 
 Admins see storage use and remove files from the client (Server settings → **Storage**, after
-the Admin section, and **Remove attachment…** in a file card's right-click menu; protocol 28).
+the Admin section, and **Remove attachment…** in a file card's right-click menu; protocol 28),
+and since protocol 29 every past removal with its reason (Server settings → **Removed files**).
 Without a client, use the SQL helpers:
 
 ```sh
@@ -427,6 +428,9 @@ podman exec -i haychat-db psql -U haychat -d haychat <deploy/sql/attachment-usag
 podman exec -i haychat-db psql -U haychat -d haychat -v owner=alice <deploy/sql/attachment-usage.sql
 podman exec -i haychat-db psql -U haychat -d haychat \
 	-v blob=0123456789abcdef0123456789abcdef <deploy/sql/remove-attachment.sql
+podman exec -i haychat-db psql -U haychat -d haychat \
+	-v blob=0123456789abcdef0123456789abcdef -v reason='Reported as spam' \
+	<deploy/sql/remove-attachment.sql
 ```
 
 The image carries them in `/usr/share/haychat/sql/` too. `attachment-usage.sql` prints the
@@ -438,7 +442,16 @@ uploading or already removed blob. SQL cannot reach the running server, so the f
 deleted by the server's hourly pass (and at its next start), and connected clients see the
 removal on their next history fetch, as with other changes made in the database. An admin who
 removes a file from the client deletes it at once and tells everyone who may read its message.
-Neither way records the reason anywhere but the server's log.
+
+Both ways add a row to the removal log, the `attachment_removals` table (migration 16): the
+blob, its owner, the admin (empty for `remove-attachment.sql`), the time, the reason, the room
+or direct conversation, the message and a plaintext file's name (an encrypted file's name never
+reaches the server). `remove-attachment.sql` takes the reason as `-v reason=...`: optional, at
+most 500 bytes with no control characters. Admins list the log in the client, where a removal
+made in SQL reads "removed by an operator". Rows are kept indefinitely, since removals are rare,
+and are not tied to the `attachments` row, so a row stays after the server deletes a removed
+file's row. An admin's reason also still goes to the server's log
+(`[Admin] Attachment ... removed by user ...: REASON`).
 
 ## Upgrades
 

@@ -20,15 +20,19 @@ package client
 // - Remove attachment (admins): State_openAttachmentRemoveDialog opens a confirmation with an
 //   optional reason; its answer is State.adminRequest (action RemoveAttachment, blobID).
 // - Admin → Storage: buildAdminStorageView from State_attachmentUsage, names from the user list.
+// - Removed files (protocol 29, #138; admins): buildAttachmentRemovalsView from
+//   State_attachmentRemovals, newest first, with Load more while the server has older entries.
 //
 // The client never opens, runs or previews a file (D19): there is no Open button and no image
 // decoding.
 
 import "../common"
+import "base:runtime"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:time"
 import "core:unicode/utf8"
 
 ATTACHMENT_UNAVAILABLE_TEXT :: "Attachment unavailable"
@@ -963,7 +967,8 @@ buildAttachmentRemoveDialogView :: proc(
 	view.title = ATTACHMENT_REMOVE_TITLE
 	view.text = fmt.aprintf(
 		"Remove %s from the server? The message stays, and everyone who can read it sees " +
-		"\"%s\" instead of the file. A reason is optional and goes only to the server's log.",
+		"\"%s\" instead of the file. A reason is optional; the server keeps it in its " +
+		"removal log, which only admins can see.",
 		dialog.name,
 		common.ATTACHMENT_REMOVED_MESSAGE,
 		allocator = allocator,
@@ -1067,6 +1072,146 @@ buildAdminStorageView :: proc(
 		}
 	}
 	view.accounts = rows
+	return
+}
+
+// ── Removed files (protocol 29, #138) ────────────────────────────
+
+// What a removal log row says for an encrypted file (its name is inside the seal, which the
+// server never opens), a plaintext file never sent (named only once a message lists it), a
+// removal made in SQL, a direct message, and a room since deleted.
+ATTACHMENT_REMOVAL_ENCRYPTED_NAME :: "Encrypted file"
+ATTACHMENT_REMOVAL_UNSENT_NAME :: "File never sent"
+ATTACHMENT_REMOVAL_OPERATOR :: "an operator"
+ATTACHMENT_REMOVAL_DIRECT :: "Direct message"
+ATTACHMENT_REMOVAL_DELETED_ROOM :: "A deleted room"
+
+AttachmentRemovalRow :: struct {
+	id:        int,
+	time:      string,
+	name:      string,
+	owner:     string,
+	removedBy: string,
+	place:     string,
+	reason:    string, // "" for none
+}
+
+AttachmentRemovalsView :: struct {
+	loaded:  bool,
+	pending: bool,
+	hasMore: bool,
+	rows:    []AttachmentRemovalRow,
+}
+
+// A removal time as "YYYY-MM-DD HH:MM UTC" (the server's timestamptz text as it came when it
+// cannot be read).
+attachmentRemovalTimeText :: proc(text: string, allocator := context.temp_allocator) -> string {
+	seconds, ok := parseServerTimestampUnix(text)
+	if !ok {
+		return strings.clone(text, allocator)
+	}
+	moment := time.unix(seconds, 0)
+	year, month, day := time.date(moment)
+	hour, minute, _ := time.clock(moment)
+	return fmt.aprintf(
+		"%04d-%02d-%02d %02d:%02d UTC",
+		year,
+		int(month),
+		day,
+		hour,
+		minute,
+		allocator = allocator,
+	)
+}
+
+// A room's name from the room list or, for an admin, every room (ServerAdminRooms).
+@(private = "file")
+attachmentRemovalRoomName :: proc(state: ^State, serverID, roomID: int) -> string {
+	index := State_serverRoomCacheIndex(state^, serverID)
+	if index < 0 {
+		return ""
+	}
+	cache := &state.server_room_caches[index]
+	for room in cache.rooms {
+		if room.id == roomID {
+			return room.name
+		}
+	}
+	for summary in cache.adminRooms {
+		if summary.room.id == roomID {
+			return summary.room.name
+		}
+	}
+	return ""
+}
+
+// Removed files from the removal log pages held. The strings are in allocator.
+buildAttachmentRemovalsView :: proc(
+	state: ^State,
+	serverID: int,
+	allocator := context.temp_allocator,
+) -> (
+	view: AttachmentRemovalsView,
+) {
+	entries, loaded, hasMore, pending := State_attachmentRemovals(state, serverID)
+	view.loaded = loaded
+	view.pending = pending
+	view.hasMore = hasMore
+	cache: ^ServerDirectCache
+	if cacheIndex := State_serverDirectCacheIndex(state^, serverID); cacheIndex >= 0 {
+		cache = &state.serverDirectCaches[cacheIndex]
+	}
+	selfID := State_selfUserID(state, serverID)
+	account := proc(
+		cache: ^ServerDirectCache,
+		userID, selfID: int,
+		allocator: runtime.Allocator,
+	) -> string {
+		nickname := ""
+		if cache != nil {
+			nickname = ServerDirectCache_peerNickname(cache, userID)
+		}
+		label := userLabel(nickname, userID, allocator)
+		if userID == selfID {
+			label = fmt.aprintf("%s (you)", label, allocator = allocator)
+		}
+		return label
+	}
+	rows := make([]AttachmentRemovalRow, len(entries), allocator)
+	for entry, index in entries {
+		row := AttachmentRemovalRow {
+			id     = entry.id,
+			time   = attachmentRemovalTimeText(entry.removedAt, allocator),
+			owner  = account(cache, entry.ownerUserId, selfID, allocator),
+			reason = strings.clone(entry.reason, allocator),
+		}
+		switch {
+		case entry.encrypted:
+			row.name = ATTACHMENT_REMOVAL_ENCRYPTED_NAME
+		case len(entry.name) > 0:
+			row.name = strings.clone(entry.name, allocator)
+		case:
+			row.name = ATTACHMENT_REMOVAL_UNSENT_NAME
+		}
+		row.removedBy = ATTACHMENT_REMOVAL_OPERATOR
+		if entry.removedByUserId > 0 {
+			row.removedBy = account(cache, entry.removedByUserId, selfID, allocator)
+		}
+		switch {
+		case entry.direct:
+			row.place = ATTACHMENT_REMOVAL_DIRECT
+		case entry.roomId > 0:
+			name := attachmentRemovalRoomName(state, serverID, entry.roomId)
+			row.place = fmt.aprintf("Room %d", entry.roomId, allocator = allocator)
+			if len(name) > 0 {
+				row.place = fmt.aprintf("#%s", name, allocator = allocator)
+			}
+		case:
+			row.place = ATTACHMENT_REMOVAL_DELETED_ROOM
+		}
+		rows[index] = row
+	}
+	view.rows = rows
 	return
 }
 

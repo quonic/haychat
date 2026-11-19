@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 import "core:testing"
 
@@ -245,7 +246,11 @@ testRouterAttachmentRemovalFansOutToReadersAndEndsDownloads :: proc(t: ^testing.
 	query := routerPollDatabaseQuery(&h)
 	request, ok := query.request.(common.DatabaseAttachmentRequest)
 	assert(
-		ok && request.action == .Remove && request.userId == 42 && request.blobId == blobId,
+		ok &&
+		request.action == .Remove &&
+		request.userId == 42 &&
+		request.blobId == blobId &&
+		request.reason == "spam",
 		fmt.tprintf("expected the removal statement for admin 42, got %v", query.request),
 	)
 	IPC__database_query_request_deinit(query.request)
@@ -253,7 +258,12 @@ testRouterAttachmentRemovalFansOutToReadersAndEndsDownloads :: proc(t: ^testing.
 		&h,
 		query.request_id,
 		.Applied,
-		common.DatabaseAttachmentRemoval{ownerUserId = 43, roomId = 1, senderId = 43},
+		common.DatabaseAttachmentRemoval {
+			ownerUserId = 43,
+			roomId = 1,
+			senderId = 43,
+			chatMessageId = 900,
+		},
 		{43, 77},
 	)
 
@@ -298,7 +308,9 @@ testRouterAttachmentRemovalFansOutToReadersAndEndsDownloads :: proc(t: ^testing.
 			notice.blobId == blobId &&
 			notice.roomId == 1 &&
 			notice.senderId == 43 &&
-			notice.recipientId == 0,
+			notice.recipientId == 0 &&
+			notice.chatMessageId == 900 &&
+			notice.directMessageId == 0,
 			fmt.tprintf("expected the room notice for peer %d, got %v", peerID, notice),
 		)
 	}
@@ -415,6 +427,203 @@ testRouterAttachmentRemovalRefusals :: proc(t: ^testing.T) {
 	)
 	routerTestExpectProtocolError(&h, peers[:], ADMIN_INVALID_REQUEST_MESSAGE)
 	routerTestExpectNoDatabaseQuery(&h, "expected bad requests refused before the database")
+}
+
+// Protocol 29 (#138): a direct message's removal names its message, so readers find it without
+// scanning their caches.
+@(test)
+testRouterAttachmentRemovalNamesTheDirectMessage :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := modTestHarness()
+	defer routerTestHarness_deinit(&h)
+	adminPeer, bobPeer := u32(1), u32(2)
+	h.state.connectedPeers[bobPeer] = true
+	adminTransport := routerCompleteHandshake(&h, adminPeer, 42, isAdmin = true)
+	peers := [?]RouterTestPeer{{adminPeer, &adminTransport}, {bobPeer, nil}}
+	bobTransport := routerCompleteHandshake(&h, bobPeer, 43)
+	peers[1].transport = &bobTransport
+	skipped := modTestDrain(&h, peers[:])
+	modTestFree(&skipped)
+
+	blobId := modTestBlob(0x50)
+	routerTestSendSealed(
+		&h,
+		&adminTransport,
+		adminPeer,
+		.ClientAdminRemoveAttachment,
+		common.ClientAdminRemoveAttachmentPayload{blobId = blobId},
+	)
+	query := routerPollDatabaseQuery(&h)
+	request := query.request.(common.DatabaseAttachmentRequest)
+	assert(request.reason == "", fmt.tprintf("expected no reason, got %q", request.reason))
+	IPC__database_query_request_deinit(query.request)
+	modTestAnswerRemove(
+		&h,
+		query.request_id,
+		.Applied,
+		common.DatabaseAttachmentRemoval {
+			ownerUserId = 43,
+			senderId = 43,
+			recipientId = 42,
+			directMessageId = 31,
+		},
+		{43},
+	)
+	deleteCommand := modTestPollStorage(&h)
+	StorageRequest_deinit(deleteCommand.request)
+	messages := modTestDrain(&h, peers[:])
+	defer modTestFree(&messages)
+	notice: common.ServerAttachmentRemovedPayload
+	assert(
+		cbor.unmarshal(
+			modTestFind(messages[:], bobPeer, .ServerAttachmentRemoved),
+			&notice,
+			temp_allocator = context.allocator,
+		) ==
+		nil,
+		"expected the notice to decode",
+	)
+	assert(
+		notice.blobId == blobId &&
+		notice.roomId == 0 &&
+		notice.senderId == 43 &&
+		notice.recipientId == 42 &&
+		notice.chatMessageId == 0 &&
+		notice.directMessageId == 31,
+		fmt.tprintf("expected the direct message's notice with its ID, got %v", notice),
+	)
+}
+
+// Protocol 29 (#138): the removal log list. The statement decides who is an admin; the router
+// refuses a negative cursor before it, passes the page size, and echoes the cursor.
+@(test)
+testRouterAttachmentRemovalsList :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := modTestHarness()
+	defer routerTestHarness_deinit(&h)
+	peerID := u32(1)
+	transport := routerCompleteHandshake(&h, peerID, 42, isAdmin = true)
+	peers := [?]RouterTestPeer{{peerID, &transport}}
+
+	routerTestSendSealed(
+		&h,
+		&transport,
+		peerID,
+		.ClientAdminListAttachmentRemovals,
+		common.ClientAdminListAttachmentRemovalsPayload{beforeId = -1},
+	)
+	routerTestExpectProtocolError(&h, peers[:], ADMIN_INVALID_REQUEST_MESSAGE)
+	routerTestExpectNoDatabaseQuery(&h, "expected a negative cursor refused before the database")
+
+	// Not an admin, as the statement says: refused.
+	routerTestSendSealed(
+		&h,
+		&transport,
+		peerID,
+		.ClientAdminListAttachmentRemovals,
+		common.ClientAdminListAttachmentRemovalsPayload{},
+	)
+	query := routerPollDatabaseQuery(&h)
+	request := query.request.(common.DatabaseAttachmentRequest)
+	assert(
+		request.action == .Removals &&
+		request.userId == 42 &&
+		request.beforeId == 0 &&
+		request.limit == common.ATTACHMENT_REMOVALS_PAGE_MAX,
+		fmt.tprintf("expected the removals statement, got %v", request),
+	)
+	IPC__database_query_request_deinit(query.request)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseAttachmentResult{action = .Removals, outcome = .NotAdmin},
+		},
+	)
+	routerTestExpectProtocolError(&h, peers[:], "Admin permission required")
+
+	// An admin's second page: the entries as the statement listed them, and the cursor.
+	routerTestSendSealed(
+		&h,
+		&transport,
+		peerID,
+		.ClientAdminListAttachmentRemovals,
+		common.ClientAdminListAttachmentRemovalsPayload{beforeId = 30},
+	)
+	query = routerPollDatabaseQuery(&h)
+	request = query.request.(common.DatabaseAttachmentRequest)
+	assert(request.beforeId == 30, fmt.tprintf("expected the cursor passed, got %v", request))
+	IPC__database_query_request_deinit(query.request)
+	blobId := modTestBlob(0x60)
+	removals := make([dynamic]common.AttachmentRemovalEntry, 0, 2)
+	append(
+		&removals,
+		common.AttachmentRemovalEntry {
+			id = 29,
+			blobId = blobId,
+			ownerUserId = 43,
+			removedByUserId = 42,
+			removedAt = strings.clone("2026-11-19 12:00:00+00"),
+			reason = strings.clone("spam"),
+			roomId = 1,
+			chatMessageId = 5,
+			name = strings.clone("a.txt"),
+		},
+		common.AttachmentRemovalEntry {
+			id = 27,
+			blobId = blobId,
+			ownerUserId = 44,
+			removedAt = strings.clone("2026-11-18 12:00:00+00"),
+			direct = true,
+			encrypted = true,
+		},
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseAttachmentResult {
+				action = .Removals,
+				outcome = .Applied,
+				removals = removals,
+				hasMore = true,
+			},
+		},
+	)
+	_, packet := routerTestReceive(&h, peers[:])
+	defer delete(packet.payload)
+	assert(packet.messageType == .ServerAdminAttachmentRemovals, "expected the removals page")
+	page: common.ServerAdminAttachmentRemovalsPayload
+	assert(
+		cbor.unmarshal(packet.payload, &page, temp_allocator = context.allocator) == nil,
+		"expected the page to decode",
+	)
+	defer common.ServerAdminAttachmentRemovalsPayload_deinit(&page)
+	assert(
+		page.beforeId == 30 &&
+		page.hasMore &&
+		len(page.entries) == 2 &&
+		page.entries[0].id == 29 &&
+		page.entries[0].blobId == blobId &&
+		page.entries[0].removedByUserId == 42 &&
+		page.entries[0].reason == "spam" &&
+		page.entries[0].name == "a.txt" &&
+		page.entries[0].chatMessageId == 5 &&
+		page.entries[1].id == 27 &&
+		page.entries[1].removedByUserId == 0 &&
+		page.entries[1].direct &&
+		page.entries[1].encrypted,
+		fmt.tprintf("expected the page with its cursor, got %v", page),
+	)
+	routerTestExpectNoNetworkMessage(&h, "expected only the page")
 }
 
 // The usage statement decides who may see it; the storage worker adds the free space.

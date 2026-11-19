@@ -131,9 +131,11 @@ State_openServerSettings :: proc(state: ^State, serverID: int) -> bool {
 	State_requestAdminRooms(state, serverID)
 	// Protocol 25: the invite codes and sign-up requests this account may see.
 	State_registrationSettingsOpened(state, serverID)
-	// Admin → Storage (attachments plan F4): fresh numbers every time the screen opens.
+	// Admin → Storage (attachments plan F4) and Removed files (protocol 29): fresh every time
+	// the screen opens.
 	if State_isServerAdmin(state, serverID) && State_isServerConnected(state, serverID) {
 		_ = State_requestAttachmentUsage(state, serverID)
+		_ = State_requestAttachmentRemovals(state, serverID)
 	}
 	return true
 }
