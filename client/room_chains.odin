@@ -1873,7 +1873,12 @@ State_roomChainsProtocolError :: proc(state: ^State, serverID: int, message: str
 		message == common.SEALED_ROOM_MESSAGE_INVALID_MESSAGE ||
 		message == common.ROOM_MESSAGE_DUPLICATE_MESSAGE ||
 		message == common.ROOM_KEY_ENVELOPE_INVALID_MESSAGE ||
-		message == common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE
+		message == common.SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE ||
+		// Protocol 27: the files a message listed were refused; its text goes back to the
+		// draft and the uploads can be attached again.
+		message == common.ATTACHMENT_BIND_REFUSED_MESSAGE ||
+		message == common.ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE ||
+		message == common.ATTACHMENT_REFS_INVALID_MESSAGE
 	affected := make([dynamic]int, 0, 4, context.temp_allocator)
 	for &chains in state.roomChains {
 		if chains.serverID != serverID {

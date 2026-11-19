@@ -228,7 +228,7 @@ user_id() {
 upload() {
 	local client=$1 target=$2 file=$3 start id
 	start=$(lines "$client")
-	expect_ok "$client" "attach-upload $target $file"
+	expect_ok "$client" "attach-upload $target $file" >&2
 	id=$(json_field "$last_result" id)
 	expect_event "$client" "\"event\":\"attachment_done\",\"serverID\":[0-9]+,\"id\":$id," "$start"
 }
@@ -238,7 +238,7 @@ download() {
 	local client=$1 start id
 	shift
 	start=$(lines "$client")
-	expect_ok "$client" "attach-download $*"
+	expect_ok "$client" "attach-download $*" >&2
 	id=$(json_field "$last_result" id)
 	expect_event "$client" "\"event\":\"attachment_done\",\"serverID\":[0-9]+,\"id\":$id," "$start"
 }
