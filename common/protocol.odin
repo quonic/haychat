@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 26
+protocolVersion: ProtocolVersion = 27
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -151,6 +151,10 @@ ClientAuthRequestPayload :: struct {
 //
 // registrationMode and isRestricted (protocol 25, #43): the server's registration mode, which
 // ServerRegistrationMode keeps current, and whether the account is restricted (plan D11, D17).
+//
+// attachments (protocol 27, attachments plan D18): the server's attachment limits and this
+// account's stored bytes, so a client refuses a file early and hides the attach control when
+// uploads are off. The server checks every limit again at upload.
 ServerAuthSuccessPayload :: struct {
 	userId:           int,
 	message:          string,
@@ -160,6 +164,7 @@ ServerAuthSuccessPayload :: struct {
 	permissions:      ServerPermissions,
 	registrationMode: RegistrationMode,
 	isRestricted:     bool,
+	attachments:      AttachmentLimits,
 }
 
 ServerAuthFailurePayload :: struct {
@@ -526,13 +531,22 @@ RoomPermission :: enum u8 {
 	SpeakInVoice  = 1, // Be heard in voice: without it the relay drops the session's frames
 	ManageMembers = 2, // Add and remove members of this room (not Public or Role rooms)
 	EditRoom      = 3, // Change the name, description and type, and the room's grants
+	// Protocol 27 (attachments plan D20): attach files to messages, together with SendMessages.
+	// In the default everyone grant; migration 15 added it to every existing room.
+	AttachFiles   = 4,
 }
 
 RoomPermissions :: bit_set[RoomPermission;u64]
 
-ROOM_PERMISSIONS_ALL :: RoomPermissions{.SendMessages, .SpeakInVoice, .ManageMembers, .EditRoom}
-// What rooms.everyone_permissions starts at: every member may send and speak.
-ROOM_PERMISSIONS_DEFAULT :: RoomPermissions{.SendMessages, .SpeakInVoice}
+ROOM_PERMISSIONS_ALL :: RoomPermissions {
+	.SendMessages,
+	.SpeakInVoice,
+	.ManageMembers,
+	.EditRoom,
+	.AttachFiles,
+}
+// What rooms.everyone_permissions starts at: every member may send, speak and attach files.
+ROOM_PERMISSIONS_DEFAULT :: RoomPermissions{.SendMessages, .SpeakInVoice, .AttachFiles}
 
 // The set a database mask stands for: bits outside ROOM_PERMISSIONS_ALL are dropped, so -1 (an
 // admin) is every permission.
@@ -634,17 +648,28 @@ Message :: struct {
 // signature does not verify against the sender's identity key, or whose clientMessageId or
 // chain index the sender used before (ROOM_MESSAGE_DUPLICATE_MESSAGE); plaintext in an
 // encrypted room and sealed bytes in an unencrypted one are refused too.
+//
+// attachments (protocol 27, attachments plan D14-D16): 0..ATTACHMENTS_PER_MESSAGE_MAX files the
+// sender uploaded to this room, which the server binds to the message in the statement that
+// stores it (each the sender's, Ready, unbound, uploaded to this room, encrypted exactly when
+// the room is; else ATTACHMENT_BIND_REFUSED_MESSAGE, and without AttachFiles
+// ATTACHMENT_SEND_NOT_PERMITTED_MESSAGE). With attachments the content may be empty. A
+// plaintext message's references are complete and signed with the v2 label; a sealed
+// message's carry only blobId and size, and the client compares them with the list inside the
+// seal ("This message's attachments were changed on the server").
 ClientChatMessagePayload :: struct {
 	roomId:          int,
 	content:         string,
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
 	signature:       SignatureBytes, // Protocol 22: a plaintext message's; zero when sealed
+	attachments:     [dynamic]AttachmentRef,
 }
 
 ClientChatMessagePayload_deinit :: proc(payload: ^ClientChatMessagePayload) {
 	delete(payload.content)
 	delete(payload.sealed)
+	AttachmentRefs_deinit(&payload.attachments)
 	payload.content = ""
 	payload.sealed = nil
 }
@@ -661,6 +686,8 @@ ServerChatMessagePayload :: struct {
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
 	signature:       SignatureBytes,
+	// Protocol 27: as in ClientChatMessagePayload, with removed set by the server.
+	attachments:     [dynamic]AttachmentRef,
 }
 
 ServerChatMessagePayload_deinit :: proc(payload: ^ServerChatMessagePayload) {
@@ -668,6 +695,7 @@ ServerChatMessagePayload_deinit :: proc(payload: ^ServerChatMessagePayload) {
 	delete(payload.timestamp)
 	delete(payload.content)
 	delete(payload.sealed)
+	AttachmentRefs_deinit(&payload.attachments)
 	payload^ = {}
 }
 
@@ -729,6 +757,9 @@ StoredChatMessage :: struct {
 	clientMessageId: ClientMessageID,
 	sealed:          []u8,
 	signature:       SignatureBytes,
+	// Protocol 27: the message's attachments in the order it listed them, with removed set by
+	// the server (attachments.state Removed).
+	attachments:     [dynamic]AttachmentRef,
 }
 
 StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
@@ -736,6 +767,7 @@ StoredChatMessage_deinit :: proc(message: ^StoredChatMessage) {
 	delete(message.timestamp)
 	delete(message.content)
 	delete(message.sealed)
+	AttachmentRefs_deinit(&message.attachments)
 	message^ = {}
 }
 
@@ -1289,11 +1321,22 @@ VOICE_KEY_INVALID_MESSAGE :: "Invalid voice key"
 // or wrong signature (DIRECT_MESSAGE_SIGNATURE_INVALID_MESSAGE), a clientMessageId the sender
 // used before (DIRECT_MESSAGE_DUPLICATE_MESSAGE), a message to the sender's own account, and a
 // recipient that does not exist, with ServerProtocolError.
+//
+// attachments (protocol 27): as in ClientChatMessagePayload, uploaded to this conversation
+// (recipientUserId) and not encrypted; with them content may be empty and the signature uses
+// the v2 label.
 ClientDirectMessagePayload :: struct {
 	recipientUserId: int,
-	content:         string, // 1..CHAT_MESSAGE_MAX_BYTES bytes of UTF-8
+	content:         string, // 1..CHAT_MESSAGE_MAX_BYTES bytes of UTF-8 (0 with attachments)
 	clientMessageId: ClientMessageID, // 16 random bytes, never all zero
 	signature:       SignatureBytes,
+	attachments:     [dynamic]AttachmentRef,
+}
+
+ClientDirectMessagePayload_deinit :: proc(payload: ^ClientDirectMessagePayload) {
+	delete(payload.content)
+	payload.content = ""
+	AttachmentRefs_deinit(&payload.attachments)
 }
 
 // ClientSealedDirectMessage (protocol 17): an encrypted direct message. envelope is a
@@ -1302,10 +1345,15 @@ ClientDirectMessagePayload :: struct {
 // verifyDirectMessageEnvelope against the identity keys it knows and refuses anything else with
 // SEALED_DIRECT_MESSAGE_INVALID_MESSAGE; duplicates, self-addressed messages and unknown
 // recipients are refused as for ClientDirectMessage.
+//
+// attachments (protocol 27): the encrypted files the seal lists, with only blobId and size
+// (the stored ciphertext's), for the server's binding; each was uploaded encrypted to this
+// conversation.
 ClientSealedDirectMessagePayload :: struct {
 	recipientUserId: int,
 	clientMessageId: ClientMessageID,
 	envelope:        []u8,
+	attachments:     [dynamic]AttachmentRef,
 }
 
 // One persisted direct message. Nicknames are the accounts' current nicknames, joined from
@@ -1325,6 +1373,8 @@ StoredDirectMessage :: struct {
 	clientMessageId:   ClientMessageID,
 	envelope:          []u8,
 	signature:         SignatureBytes,
+	// Protocol 27: as in StoredChatMessage (plaintext complete, sealed blobId and size only).
+	attachments:       [dynamic]AttachmentRef,
 }
 
 // ServerDirectMessage: a stored plaintext message, sent to every authenticated session of
@@ -1342,6 +1392,7 @@ ServerDirectMessagePayload :: struct {
 	content:           string,
 	clientMessageId:   ClientMessageID,
 	signature:         SignatureBytes,
+	attachments:       [dynamic]AttachmentRef, // Protocol 27
 }
 
 // ServerSealedDirectMessage (protocol 17): a stored encrypted message, fanned out like
@@ -1355,6 +1406,7 @@ ServerSealedDirectMessagePayload :: struct {
 	timestamp:         string,
 	clientMessageId:   ClientMessageID,
 	envelope:          []u8,
+	attachments:       [dynamic]AttachmentRef, // Protocol 27: blobId, size and removed only
 }
 
 // Refusals of a direct message (protocol 17), as ServerProtocolError messages.
@@ -1367,6 +1419,7 @@ ServerDirectMessagePayload_deinit :: proc(payload: ^ServerDirectMessagePayload) 
 	delete(payload.recipientNickname)
 	delete(payload.timestamp)
 	delete(payload.content)
+	AttachmentRefs_deinit(&payload.attachments)
 	payload^ = {}
 }
 
@@ -1375,12 +1428,14 @@ ServerSealedDirectMessagePayload_deinit :: proc(payload: ^ServerSealedDirectMess
 	delete(payload.recipientNickname)
 	delete(payload.timestamp)
 	delete(payload.envelope)
+	AttachmentRefs_deinit(&payload.attachments)
 	payload^ = {}
 }
 
 ClientSealedDirectMessagePayload_deinit :: proc(payload: ^ClientSealedDirectMessagePayload) {
 	delete(payload.envelope)
 	payload.envelope = nil
+	AttachmentRefs_deinit(&payload.attachments)
 }
 
 // Whether a client message ID is set. The all-zero ID means "none" (messages from before
@@ -1475,6 +1530,9 @@ DirectConversationSummary :: struct {
 	lastClientMessageId: ClientMessageID,
 	lastEnvelope:        []u8,
 	lastSignature:       SignatureBytes,
+	// Protocol 27: the latest message's attachments, as in StoredDirectMessage, so a plaintext
+	// preview's v2 signature can be checked. Owned.
+	lastAttachments:     [dynamic]AttachmentRef,
 	// Read state (protocol 11): the newest message ID the requester marked read in this
 	// conversation (0 when never), and the peer's messages after it, capped at
 	// UNREAD_COUNT_CAP. Without a marker every message from the peer is unread.
@@ -2143,6 +2201,8 @@ DatabasePostRoomChatMessageRequest :: struct {
 	chainId:         ChainID,
 	chainIndex:      int,
 	signature:       SignatureBytes, // Protocol 22: a plaintext message's, checked by the router
+	// Protocol 27: the attachments to bind (owned), checked for shape by the router.
+	attachments:     [dynamic]AttachmentRef,
 }
 
 // Protocol 19: one SenderKey envelope (owned) the router checked, with the user IDs its wraps
@@ -2291,6 +2351,8 @@ DatabasePostDirectMessageRequest :: struct {
 	envelope:                []u8,
 	serverIdentityPublicKey: IdentityPublicKeyBytes,
 	senderIdentityPublicKey: IdentityPublicKeyBytes,
+	// Protocol 27: the attachments to bind (owned), checked for shape by the router.
+	attachments:             [dynamic]AttachmentRef,
 }
 
 // Returns a page of the conversation between userId and peerUserId, in both directions.
@@ -2440,6 +2502,9 @@ DatabaseUserIdentityResult :: struct {
 	requestStatus:     RegistrationRequestStatus,
 	decisionReason:    string,
 	isRestricted:      bool,
+	// Protocol 27 (D18): the account's stored attachment bytes (rows not Removed), for
+	// ServerAuthSuccess.attachments.usedBytes.
+	attachmentUsedBytes: u64,
 }
 
 DatabaseRoomListResult :: struct {
@@ -2477,6 +2542,10 @@ DatabasePostRoomChatMessageResult :: struct {
 	notEncrypted:     bool,
 	staleEpoch:       bool,
 	duplicate:        bool,
+	// Protocol 27: the message lists attachments but the sender lacks AttachFiles in the room
+	// (attachDenied), or a listed blob cannot be bound (attachmentsRefused); nothing was stored.
+	attachDenied:     bool,
+	attachmentsRefused: bool,
 	storedMessage:    StoredChatMessage,
 	recipientUserIDs: [dynamic]int,
 }
@@ -2563,6 +2632,9 @@ DirectMessagePostOutcome :: enum u8 {
 	InvalidEnvelope, // The envelope does not verify against the accounts' identity keys
 	Duplicate, // The sender already stored a message with this clientMessageId
 	Restricted, // Protocol 25 (D17): a restricted account on a side and no shared room
+	// Protocol 27: a listed blob cannot be bound (not the sender's, not Ready and unbound, not
+	// uploaded to this conversation, another encryption, size or hash).
+	AttachmentsRefused,
 }
 
 // storedMessage (owned) is set only when outcome is Stored.

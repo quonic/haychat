@@ -884,11 +884,15 @@ testDirectMessagePlaintextCBOR :: proc(t: ^testing.T) {
 		value = 'x'
 	}
 	buffer: [DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE + 1]u8
+	// The plaintext without attachments (protocol 27 added the optional key).
+	ContentOnly :: struct {
+		content: string,
+	}
 	for length in ([?]int{1, 23, 24, 255, 256, CHAT_MESSAGE_MAX_BYTES}) {
 		text := string(content[:length])
 		n, ok := encodeSealedDirectMessagePlaintext(text, buffer[:])
 		assert(ok, fmt.tprintf("expected %d bytes to encode", length))
-		marshalled, marshalErr := cbor.marshal(SealedDirectMessagePlaintext{content = text})
+		marshalled, marshalErr := cbor.marshal(ContentOnly{content = text})
 		defer delete(marshalled)
 		assert(marshalErr == nil, "expected core:encoding/cbor to encode")
 		assert(
@@ -920,7 +924,7 @@ testDirectMessagePlaintextCBOR :: proc(t: ^testing.T) {
 	defer SealedDirectMessagePlaintext_deinit(&decoded)
 	assert(err == .None && decoded.content == "with a reply", "expected unknown keys ignored")
 
-	empty, emptyErr := cbor.marshal(SealedDirectMessagePlaintext{})
+	empty, emptyErr := cbor.marshal(ContentOnly{})
 	defer delete(empty)
 	assert(emptyErr == nil, "expected the empty plaintext to encode")
 	_, err = decodeSealedDirectMessagePlaintext(empty)
@@ -2817,4 +2821,493 @@ testVoiceKeyRefusesWhatItMustNot :: proc(t: ^testing.T) {
 	assert(err == .BadSenderUserID, fmt.tprintf("sender 0: %v", err))
 	_, err = sealVoiceKey(fields, testVoiceKey(), nil, alice.privateKey, buffer[:])
 	assert(err == .NoRecipients, fmt.tprintf("no recipients: %v", err))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attachments on messages (protocol 27, attachments plan D14-D16). Vectors from
+// dev/tools/e2ee-vectors.py (plain_v2_vectors, sealed_attachments_vector).
+
+@(private = "file")
+KAT_ROOM_PLAIN_V2_SIGNATURE ::
+	"ed41ac41143caf1bdf346ed590d4f090b91125ce53ba19a8e38fc6f6cb21ce0a816133c318358f22" +
+	"5c7fdbdb3e5dded5d6f87c7d8196af10718e9a1a0874ae0f"
+@(private = "file")
+KAT_PLAIN_V2_SIGNATURE ::
+	"55d1b3198ab5d8544244f62b6e6ab22d50fe5c8d1144e0a2f7865c68f8e2841750d4a006a72f99cb" +
+	"8265b7bb47a0c5e44601e5dd1cfc6230ac7d3fcf7a6f9d04"
+@(private = "file")
+KAT_SEALED_ATTACHMENTS_PLAINTEXT ::
+	"a267636f6e74656e746974776f2066696c65736b6174746163686d656e747382a666626c6f624964" +
+	"50bbd408fc31182bb6c38be926949aa33c636b657958200ef59d4a659c8ae94a250062d5b0d0700a" +
+	"2b3aa0ae9abf3db5681317e4431e13667368613235365820268443f520c8b79a78386bca6f58ec85" +
+	"d5b0b4763636b05d7bd610ca65ba272a6473697a651904d2646e616d656a7265706f72742e706466" +
+	"64747970656f6170706c69636174696f6e2f706466a666626c6f624964504238afb03c65a40ba9c9" +
+	"f799ee58a25e636b657958201be8b04307ab53e01cec615d3839883ec3fde3fcca22c17b93aa8d36" +
+	"479d4a5766736861323536582071b7f675c390c458ae8650e2e2c8ab41c0496e014a3e1db9b6e063" +
+	"1425afca3b6473697a651a00011170646e616d657670686f746f206f662074686520636166c3a92e" +
+	"6a706764747970656a696d6167652f6a706567"
+
+// The two attachments the vectors use, as plaintext references (the stored blob's hash) and as
+// sealed entries (with their file keys).
+@(private = "file")
+testAttachmentRefs :: proc() -> [2]AttachmentRef {
+	refs: [2]AttachmentRef
+	for index in 0 ..< 2 {
+		blob := testLabel(fmt.tprintf("haychat-e2ee-test-attachment-blob-%d", index + 1))
+		copy(refs[index].blobId[:], blob[:ATTACHMENT_BLOB_ID_SIZE])
+		refs[index].sha256 = AttachmentSHA256(
+			testLabel(fmt.tprintf("haychat-e2ee-test-attachment-sha-%d", index + 1)),
+		)
+	}
+	refs[0].size = 1234
+	refs[0].name = "report.pdf"
+	refs[0].mediaType = "application/pdf"
+	refs[1].size = 70000
+	refs[1].name = "photo of the café.jpg"
+	refs[1].mediaType = "image/jpeg"
+	return refs
+}
+
+@(private = "file")
+testSealedAttachments :: proc() -> [2]SealedAttachment {
+	refs := testAttachmentRefs()
+	sealed: [2]SealedAttachment
+	for index in 0 ..< 2 {
+		sealed[index] = SealedAttachment {
+			blobId    = refs[index].blobId,
+			key       = AttachmentFileKey(
+				testLabel(fmt.tprintf("haychat-e2ee-test-attachment-key-%d", index + 1)),
+			),
+			sha256    = refs[index].sha256,
+			size      = refs[index].size,
+			name      = refs[index].name,
+			mediaType = refs[index].mediaType,
+		}
+	}
+	return sealed
+}
+
+@(test)
+testPlaintextRoomMessageV2Signature :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	label := testLabel("haychat-e2ee-test-room-plain-client-message-id")
+	fields := PlaintextRoomMessageFields {
+		serverIdentityPublicKey = testServerPublicKey(),
+		roomID                  = TEST_ROOM_ID,
+		senderUserID            = TEST_ALICE_ID,
+	}
+	copy(fields.clientMessageID[:], label[:CLIENT_MESSAGE_ID_SIZE])
+	refs := testAttachmentRefs()
+	signature, ok := signPlaintextRoomMessage(fields, "two files", alice.privateKey, refs[:])
+	assert(ok, "expected the room message with attachments to sign")
+	assert(
+		testHexEqual(signature[:], KAT_ROOM_PLAIN_V2_SIGNATURE),
+		"expected the v2 vector signature",
+	)
+	assert(
+		verifyPlaintextRoomMessage(fields, "two files", alice.publicKey, signature, refs[:]),
+		"expected the v2 signature to verify",
+	)
+	// The label follows the count: without attachments the same bytes do not verify, and a v1
+	// signature does not verify with attachments added.
+	assert(
+		!verifyPlaintextRoomMessage(fields, "two files", alice.publicKey, signature),
+		"expected stripped attachments to fail",
+	)
+	v1, v1OK := signPlaintextRoomMessage(fields, "two files", alice.privateKey)
+	assert(v1OK, "expected the v1 message to sign")
+	assert(
+		!verifyPlaintextRoomMessage(fields, "two files", alice.publicKey, v1, refs[:]),
+		"expected added attachments to fail a v1 signature",
+	)
+	testAttachmentRefTampering(
+		t,
+		proc(refs: []AttachmentRef, content: string, signature: SignatureBytes) -> bool {
+			alice := testUser("alice", TEST_ALICE_ID)
+			label := testLabel("haychat-e2ee-test-room-plain-client-message-id")
+			fields := PlaintextRoomMessageFields {
+				serverIdentityPublicKey = testServerPublicKey(),
+				roomID                  = TEST_ROOM_ID,
+				senderUserID            = TEST_ALICE_ID,
+			}
+			copy(fields.clientMessageID[:], label[:CLIENT_MESSAGE_ID_SIZE])
+			return verifyPlaintextRoomMessage(fields, content, alice.publicKey, signature, refs)
+		},
+		"two files",
+		signature,
+	)
+	// The fields prefix is still covered.
+	changed := fields
+	changed.roomID += 1
+	assert(
+		!verifyPlaintextRoomMessage(changed, "two files", alice.publicKey, signature, refs[:]),
+		"expected another room to fail",
+	)
+	changed = fields
+	changed.clientMessageID[0] ~= 1
+	assert(
+		!verifyPlaintextRoomMessage(changed, "two files", alice.publicKey, signature, refs[:]),
+		"expected another client message ID to fail",
+	)
+	// Empty content is allowed with attachments only; bad references never sign.
+	_, ok = signPlaintextRoomMessage(fields, "", alice.privateKey, refs[:1])
+	assert(ok, "expected empty content with an attachment to sign")
+	_, ok = signPlaintextRoomMessage(fields, "", alice.privateKey)
+	assert(!ok, "expected empty content without attachments to be refused")
+	bad := refs
+	bad[1].blobId = bad[0].blobId
+	_, ok = signPlaintextRoomMessage(fields, "x", alice.privateKey, bad[:])
+	assert(!ok, "expected duplicate blob IDs to be refused")
+	bad = refs
+	bad[0].name = "a/b"
+	_, ok = signPlaintextRoomMessage(fields, "x", alice.privateKey, bad[:])
+	assert(!ok, "expected a name with a separator to be refused")
+}
+
+// Every signed attachment field: changing any one fails verify, and so do a dropped, an added
+// or a reordered attachment, and other content. removed is not signed.
+@(private = "file")
+testAttachmentRefTampering :: proc(
+	t: ^testing.T,
+	verify: proc(refs: []AttachmentRef, content: string, signature: SignatureBytes) -> bool,
+	content: string,
+	signature: SignatureBytes,
+) {
+	_ = t
+	refs := testAttachmentRefs()
+	assert(verify(refs[:], content, signature), "expected the untouched references to verify")
+	for field in 0 ..< 5 {
+		for index in 0 ..< 2 {
+			changed := refs
+			switch field {
+			case 0:
+				changed[index].blobId[3] ~= 0x40
+			case 1:
+				changed[index].sha256[31] ~= 0x01
+			case 2:
+				changed[index].size += 1
+			case 3:
+				changed[index].name = "report.pdF"
+			case 4:
+				changed[index].mediaType = "application/octet-stream"
+			}
+			assert(
+				!verify(changed[:], content, signature),
+				fmt.tprintf("expected field %d of attachment %d to be signed", field, index),
+			)
+		}
+	}
+	assert(!verify(refs[:1], content, signature), "expected a dropped attachment to fail")
+	swapped := [2]AttachmentRef{refs[1], refs[0]}
+	assert(!verify(swapped[:], content, signature), "expected reordered attachments to fail")
+	extra := [3]AttachmentRef{refs[0], refs[1], refs[1]}
+	extra[2].blobId[0] ~= 0xFF
+	assert(!verify(extra[:], content, signature), "expected an added attachment to fail")
+	assert(!verify(refs[:], "other", signature), "expected other content to fail")
+	removed := refs
+	removed[0].removed = true
+	assert(verify(removed[:], content, signature), "expected removed not to be signed")
+}
+
+@(test)
+testPlaintextDirectMessageV2Signature :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	fields := testPlaintextFields()
+	refs := testAttachmentRefs()
+	signature, ok := signPlaintextDirectMessage(fields, "", alice.privateKey, refs[:1])
+	assert(ok, "expected the fallback with an attachment and no text to sign")
+	assert(testHexEqual(signature[:], KAT_PLAIN_V2_SIGNATURE), "expected the v2 vector")
+	assert(
+		verifyPlaintextDirectMessage(fields, "", alice.publicKey, signature, refs[:1]),
+		"expected the v2 fallback to verify",
+	)
+	assert(
+		!verifyPlaintextDirectMessage(fields, "", bob.publicKey, signature, refs[:1]),
+		"expected another signer to fail",
+	)
+	changed := fields
+	changed.recipientUserID = TEST_ALICE_ID + 100
+	assert(
+		!verifyPlaintextDirectMessage(changed, "", alice.publicKey, signature, refs[:1]),
+		"expected another recipient to fail",
+	)
+	// Every field of a two-attachment direct message is signed too.
+	two, twoOK := signPlaintextDirectMessage(fields, "two files", alice.privateKey, refs[:])
+	assert(twoOK, "expected two attachments to sign")
+	testAttachmentRefTampering(
+		t,
+		proc(refs: []AttachmentRef, content: string, signature: SignatureBytes) -> bool {
+			alice := testUser("alice", TEST_ALICE_ID)
+			return verifyPlaintextDirectMessage(
+				testPlaintextFields(),
+				content,
+				alice.publicKey,
+				signature,
+				refs,
+			)
+		},
+		"two files",
+		two,
+	)
+	// A room message's v2 signature over the same body is not a direct message's.
+	roomFields := PlaintextRoomMessageFields {
+		serverIdentityPublicKey = fields.serverIdentityPublicKey,
+		roomID                  = TEST_BOB_ID,
+		senderUserID            = TEST_ALICE_ID,
+		clientMessageID         = fields.clientMessageID,
+	}
+	roomSignature, roomOK := signPlaintextRoomMessage(roomFields, "two files", alice.privateKey, refs[:])
+	assert(roomOK, "expected the room message to sign")
+	assert(
+		!verifyPlaintextDirectMessage(fields, "two files", alice.publicKey, roomSignature, refs[:]),
+		"expected the room label to fail as a direct message",
+	)
+}
+
+@(test)
+testSealedPlaintextWithAttachments :: proc(t: ^testing.T) {
+	_ = t
+	sealed := testSealedAttachments()
+	buffer: [DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE]u8
+	n, ok := encodeSealedMessagePlaintext("two files", sealed[:], buffer[:])
+	assert(ok, "expected the plaintext with attachments to encode")
+	assert(
+		testHexEqual(buffer[:n], KAT_SEALED_ATTACHMENTS_PLAINTEXT),
+		"expected the canonical vector",
+	)
+	decoded, err := decodeSealedDirectMessagePlaintext(buffer[:n])
+	defer SealedDirectMessagePlaintext_deinit(&decoded)
+	assert(err == .None, fmt.tprintf("expected the vector to decode, got %v", err))
+	assert(decoded.content == "two files" && len(decoded.attachments) == 2, "expected both back")
+	for attachment, index in decoded.attachments {
+		want := sealed[index]
+		assert(
+			attachment.blobId == want.blobId &&
+			attachment.key == want.key &&
+			attachment.sha256 == want.sha256 &&
+			attachment.size == want.size &&
+			attachment.name == want.name &&
+			attachment.mediaType == want.mediaType,
+			fmt.tprintf("expected attachment %d back unchanged", index),
+		)
+	}
+
+	// Empty content only with attachments (D15).
+	n, ok = encodeSealedMessagePlaintext("", sealed[:1], buffer[:])
+	assert(ok, "expected empty content with an attachment to encode")
+	emptyDecoded, emptyErr := decodeSealedDirectMessagePlaintext(buffer[:n])
+	defer SealedDirectMessagePlaintext_deinit(&emptyDecoded)
+	assert(
+		emptyErr == .None && emptyDecoded.content == "" && len(emptyDecoded.attachments) == 1,
+		"expected empty content with one attachment to decode",
+	)
+	_, ok = encodeSealedMessagePlaintext("", nil, buffer[:])
+	assert(!ok, "expected empty content without attachments to be refused")
+
+	// The encoder refuses what a message may not carry.
+	five: [5]SealedAttachment
+	for &entry, index in five {
+		entry = sealed[0]
+		entry.blobId[0] = u8(index + 1)
+	}
+	_, ok = encodeSealedMessagePlaintext("x", five[:], buffer[:])
+	assert(!ok, "expected five attachments to be refused")
+	duplicate := [2]SealedAttachment{sealed[0], sealed[0]}
+	_, ok = encodeSealedMessagePlaintext("x", duplicate[:], buffer[:])
+	assert(!ok, "expected a repeated blob ID to be refused")
+	badType := sealed
+	badType[0].mediaType = "pdf"
+	_, ok = encodeSealedMessagePlaintext("x", badType[:], buffer[:])
+	assert(!ok, "expected a media type without a subtype to be refused")
+	badName := sealed
+	badName[1].name = "\x07bell"
+	_, ok = encodeSealedMessagePlaintext("x", badName[:], buffer[:])
+	assert(!ok, "expected a control character in a name to be refused")
+
+	// The largest plaintext still fits the envelope and a sealed room message.
+	text: [CHAT_MESSAGE_MAX_BYTES]u8
+	for &value in text {
+		value = 'y'
+	}
+	longName: [ATTACHMENT_NAME_MAX_BYTES]u8
+	for &value in longName {
+		value = 'n'
+	}
+	longType: [ATTACHMENT_MEDIA_TYPE_MAX_BYTES]u8
+	for &value in longType {
+		value = 't'
+	}
+	longType[50] = '/'
+	largest: [ATTACHMENTS_PER_MESSAGE_MAX]SealedAttachment
+	for &entry, index in largest {
+		entry = sealed[0]
+		entry.blobId[0] = u8(index + 1)
+		entry.size = max(u64)
+		entry.name = string(longName[:])
+		entry.mediaType = string(longType[:])
+	}
+	n, ok = encodeSealedMessagePlaintext(string(text[:]), largest[:], buffer[:])
+	assert(ok, "expected the largest plaintext to encode")
+	assert(n == DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE, fmt.tprintf("expected the maximum, got %d", n))
+	assert(
+		sealedEnvelopeSize(2, n) <= SEALED_ENVELOPE_MAX_BYTES &&
+		sealedRoomMessageSize(n) <= SEALED_ROOM_MESSAGE_MAX_BYTES,
+		"expected the largest plaintext to fit an envelope and a sealed room message",
+	)
+	fields := testDirectMessageFields()
+	alice := testUser("alice", TEST_ALICE_ID)
+	aliceKeys := testEncryptionKeyPair("alice")
+	bobKeys := testEncryptionKeyPair("bob")
+	envelope: [SEALED_ENVELOPE_MAX_BYTES]u8
+	sealedLength, sealErr := sealDirectMessage(
+		fields,
+		string(text[:]),
+		aliceKeys.publicKey,
+		bobKeys.publicKey,
+		alice.privateKey,
+		envelope[:],
+		largest[:],
+	)
+	assert(sealErr == .None, fmt.tprintf("expected the largest message to seal, got %v", sealErr))
+	opened, openErr := openDirectMessage(
+		envelope[:sealedLength],
+		fields,
+		TEST_BOB_ID,
+		bobKeys,
+	)
+	defer SealedDirectMessagePlaintext_deinit(&opened)
+	assert(
+		openErr == .None && len(opened.attachments) == ATTACHMENTS_PER_MESSAGE_MAX,
+		fmt.tprintf("expected the attachments to open, got %v", openErr),
+	)
+	assert(opened.attachments[3].size == max(u64), "expected the largest size back")
+}
+
+@(test)
+testSealedAttachmentsStrictReader :: proc(t: ^testing.T) {
+	_ = t
+	sealed := testSealedAttachments()
+	buffer: [DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE]u8
+	n, ok := encodeSealedMessagePlaintext("a", sealed[:1], buffer[:])
+	assert(ok, "expected one attachment to encode")
+	canonical := buffer[:n]
+	// The entry starts after A2 "content" "a" "attachments" 81: 1 + 8 + 2 + 12 + 1.
+	entry := 24
+	assert(canonical[entry] == 0xA6, "expected the entry map at its offset")
+
+	refusals := make([dynamic][]u8, context.temp_allocator)
+	mutate :: proc(source: []u8, offset: int, value: u8) -> []u8 {
+		copied := make([]u8, len(source), context.temp_allocator)
+		copy(copied, source)
+		copied[offset] = value
+		return copied
+	}
+	// Not an array; an empty array; an array of five.
+	attachmentsValue := entry - 1
+	append(&refusals, mutate(canonical, attachmentsValue, 0xA1))
+	append(&refusals, mutate(canonical, attachmentsValue, 0x80))
+	append(&refusals, mutate(canonical, attachmentsValue, 0x85))
+	// An entry with five keys (one missing) and with seven (a repeated one runs off the end).
+	append(&refusals, mutate(canonical, entry, 0xA5))
+	append(&refusals, mutate(canonical, entry, 0xA7))
+	// blobId as 15 bytes and as text; key as text.
+	append(&refusals, mutate(canonical, entry + 7, 0x4F))
+	append(&refusals, mutate(canonical, entry + 7, 0x70))
+	keyValue := entry + 1 + 7 + 17 + 4
+	append(&refusals, mutate(canonical, keyValue, 0x78))
+	// size as a negative integer.
+	sizeValue := entry + 1 + 7 + 17 + 4 + 34 + 7 + 34 + 5
+	append(&refusals, mutate(canonical, sizeValue, 0x39))
+	// A control character in the name.
+	nameValue := sizeValue + 3 + 5
+	append(&refusals, mutate(canonical, nameValue + 1, 0x01))
+	// Trailing bytes.
+	trailing := make([]u8, len(canonical) + 1, context.temp_allocator)
+	copy(trailing, canonical)
+	append(&refusals, trailing)
+	for data, index in refusals {
+		_, err := decodeSealedDirectMessagePlaintext(data)
+		assert(err == .BadPlaintext, fmt.tprintf("expected refusal %d, got %v", index, err))
+	}
+
+	// Unknown keys inside an entry are skipped.
+	Later :: struct {
+		blobId:  [16]u8,
+		key:     [32]u8,
+		sha256:  [32]u8,
+		size:    u64,
+		name:    string,
+		type:    string,
+		preview: [3]int,
+	}
+	Message :: struct {
+		content:     string,
+		attachments: [1]Later,
+	}
+	later := Message {
+		content = "later",
+		attachments = {
+			{
+				blobId = sealed[0].blobId,
+				key = transmute([32]u8)sealed[0].key,
+				sha256 = sealed[0].sha256,
+				size = 9,
+				name = "a.txt",
+				type = "text/plain",
+				preview = {1, 2, 3},
+			},
+		},
+	}
+	encoded, marshalErr := cbor.marshal(later)
+	defer delete(encoded)
+	assert(marshalErr == nil, "expected the later plaintext to encode")
+	decoded, err := decodeSealedDirectMessagePlaintext(encoded)
+	defer SealedDirectMessagePlaintext_deinit(&decoded)
+	assert(
+		err == .None && len(decoded.attachments) == 1 && decoded.attachments[0].name == "a.txt",
+		fmt.tprintf("expected an unknown entry key to be skipped, got %v", err),
+	)
+}
+
+@(test)
+testAttachmentRefValidation :: proc(t: ^testing.T) {
+	_ = t
+	refs := testAttachmentRefs()
+	assert(attachmentRefsAreValid(refs[:], sealed = false), "expected plaintext refs to pass")
+	assert(!attachmentRefsAreValid(refs[:], sealed = true), "expected full refs to fail sealed")
+	outer := [1]AttachmentRef{{blobId = refs[0].blobId, size = 77}}
+	assert(attachmentRefsAreValid(outer[:], sealed = true), "expected an outer ref to pass")
+	assert(!attachmentRefsAreValid(outer[:], sealed = false), "expected it to fail plaintext")
+	outer[0].removed = true
+	assert(!attachmentRefsAreValid(outer[:], sealed = true), "expected removed from a client")
+	assert(
+		attachmentRefsAreValid(outer[:], sealed = true, fromServer = true),
+		"expected removed from the server",
+	)
+	outer[0].removed = false
+	outer[0].size = 0
+	assert(!attachmentRefsAreValid(outer[:], sealed = true), "expected size 0 to fail")
+	for name in ([?]string{"", ".", "..", "a/b", "a\\b", "tab\there", "del\x7f", "c1\u0085"}) {
+		assert(!attachmentNameIsValid(name), fmt.tprintf("expected %q to be refused", name))
+	}
+	long: [ATTACHMENT_NAME_MAX_BYTES + 1]u8
+	for &value in long {
+		value = 'a'
+	}
+	assert(attachmentNameIsValid(string(long[:ATTACHMENT_NAME_MAX_BYTES])), "expected 255 bytes")
+	assert(!attachmentNameIsValid(string(long[:])), "expected 256 bytes to be refused")
+	assert(attachmentNameIsValid(".hidden file (1).tar.gz"), "expected an ordinary name")
+	for mediaType in ([?]string{"image/png", "application/vnd.ms-excel", "text/x-c++src"}) {
+		assert(attachmentMediaTypeIsValid(mediaType), fmt.tprintf("expected %s", mediaType))
+	}
+	for mediaType in ([?]string{"", "png", "/png", "image/", "image/png; q=1", "a/b/c", "é/x"}) {
+		assert(!attachmentMediaTypeIsValid(mediaType), fmt.tprintf("expected %q refused", mediaType))
+	}
+	assert(messageContentLengthIsValid(0, 1), "expected empty content with one attachment")
+	assert(!messageContentLengthIsValid(0, 0), "expected empty content alone to be refused")
+	assert(!messageContentLengthIsValid(1, 5), "expected five attachments to be refused")
+	assert(!messageContentLengthIsValid(CHAT_MESSAGE_MAX_BYTES + 1, 1), "expected too long")
 }

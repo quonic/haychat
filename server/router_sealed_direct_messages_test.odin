@@ -204,13 +204,13 @@ testMainRouterRefusesInvalidSealedDirectMessages :: proc(t: ^testing.T) {
 		payload:  common.ClientSealedDirectMessagePayload,
 		expected: string,
 	} {
-		{{43, clientMessageID, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{43, {}, envelope}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{0, clientMessageID, envelope}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{43, clientMessageID, oversized}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{43, clientMessageID, garbage}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{43, clientMessageID, truncated}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
-		{{42, clientMessageID, envelope}, "Cannot send a direct message to yourself"},
+		{{43, clientMessageID, nil, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{43, {}, envelope, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{0, clientMessageID, envelope, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{43, clientMessageID, oversized, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{43, clientMessageID, garbage, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{43, clientMessageID, truncated, nil}, common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE},
+		{{42, clientMessageID, envelope, nil}, "Cannot send a direct message to yourself"},
 	}
 	for refused in cases {
 		routerTestSendSealed(&h, &transport, peerID, .ClientSealedDirectMessage, refused.payload)
@@ -233,7 +233,7 @@ testMainRouterRefusesInvalidSealedDirectMessages :: proc(t: ^testing.T) {
 			&transport,
 			peerID,
 			.ClientSealedDirectMessage,
-			common.ClientSealedDirectMessagePayload{43, clientMessageID, envelope},
+			common.ClientSealedDirectMessagePayload{43, clientMessageID, envelope, nil},
 		)
 		query := routerPollDatabaseQuery(&h)
 		MainRouterState_handleDatabaseResult(
@@ -257,7 +257,7 @@ testMainRouterRefusesInvalidSealedDirectMessages :: proc(t: ^testing.T) {
 	h.state.connectedPeers[unauthenticated] = true
 	MainRouterState_setPeerSession(&h.state, unauthenticated, RouterPeerSession_init())
 	bytes, err := cbor.marshal(
-		common.ClientSealedDirectMessagePayload{43, clientMessageID, envelope},
+		common.ClientSealedDirectMessagePayload{43, clientMessageID, envelope, nil},
 	)
 	assert(err == nil, "expected the payload to encode")
 	defer delete(bytes)
@@ -316,7 +316,7 @@ testMainRouterRefusesUnsignedAndForgedFallbackDirectMessages :: proc(t: ^testing
 			&transport,
 			peerID,
 			.ClientDirectMessage,
-			common.ClientDirectMessagePayload{43, "other server", clientMessageID, signature},
+			common.ClientDirectMessagePayload{43, "other server", clientMessageID, signature, nil},
 		)
 		routerTestExpectProtocolError(&h, peers[:], common.DIRECT_MESSAGE_SIGNATURE_INVALID_MESSAGE)
 		routerTestExpectNoDatabaseQuery(&h, "expected another server's signature to be refused")

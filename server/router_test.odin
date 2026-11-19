@@ -262,6 +262,10 @@ routerCompleteHandshake :: proc(
 	identityPrivateKeyOut: ^common.IdentityPrivateKeyBytes = nil,
 	// Protocol 25: the identity statement reports a restricted account.
 	isRestricted := false,
+	// Protocol 27: the account's stored attachment bytes the identity statement reports, and
+	// where to put the limits ServerAuthSuccess announced.
+	attachmentUsedBytes := u64(0),
+	attachmentLimitsOut: ^common.AttachmentLimits = nil,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -373,6 +377,7 @@ routerCompleteHandshake :: proc(
 				nickname = strings.clone(len(accountNickname) > 0 ? accountNickname : nickname),
 				nicknameLocked = nicknameLocked,
 				isRestricted = isRestricted,
+				attachmentUsedBytes = attachmentUsedBytes,
 			},
 		},
 	)
@@ -413,6 +418,9 @@ routerCompleteHandshake :: proc(
 	authSuccessErr := cbor.unmarshal(authSuccessPacket.payload, &authSuccess)
 	assert(authSuccessErr == nil, "expected auth success payload decode to succeed")
 	defer common.ServerAuthSuccessPayload_deinit(&authSuccess)
+	if attachmentLimitsOut != nil {
+		attachmentLimitsOut^ = authSuccess.attachments
+	}
 	assert(
 		authSuccess.userId == userID,
 		"expected authenticated user ID from database resolution",

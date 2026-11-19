@@ -500,10 +500,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// ClientAdminSetRegistrationMode ... ClientAdminSetRestricted); 26 added attachment
 	// transfers (F1: transport v3 with the file channel's keys, ENet channel 5,
 	// ClientAttachmentUploadBegin ... ServerAttachmentRefused, the binary chunks of
-	// attachment_wire.odin) and retired ClientUploadFile ... ServerDeleteFileResponse.
+	// attachment_wire.odin) and retired ClientUploadFile ... ServerDeleteFileResponse; 27 put
+	// attachments on messages (F2: AttachmentRef on every room and direct message payload and
+	// DirectConversationSummary.lastAttachments, the v2 plaintext signatures, the sealed
+	// "attachments" key, RoomPermission.AttachFiles and ServerAuthSuccess.attachments).
 	assert(
-		protocolVersion == 26,
-		fmt.tprintf("expected protocol version 26 for attachments, got %d", protocolVersion),
+		protocolVersion == 27,
+		fmt.tprintf("expected protocol version 27 for attachments, got %d", protocolVersion),
 	)
 }
 
@@ -1656,14 +1659,16 @@ testRoomPermissionWireValuesArePinned :: proc(t: ^testing.T) {
 		int(RoomPermission.SendMessages) == 0 &&
 		int(RoomPermission.SpeakInVoice) == 1 &&
 		int(RoomPermission.ManageMembers) == 2 &&
-		int(RoomPermission.EditRoom) == 3,
+		int(RoomPermission.EditRoom) == 3 &&
+		int(RoomPermission.AttachFiles) == 4,
 		"expected RoomPermission to stay SendMessages 0, SpeakInVoice 1, ManageMembers 2, " +
-		"EditRoom 3",
+		"EditRoom 3, AttachFiles 4",
 	)
 	assert(
-		roomPermissionsMask(ROOM_PERMISSIONS_ALL) == 15 &&
-		roomPermissionsMask(ROOM_PERMISSIONS_DEFAULT) == 3,
-		"expected every room permission to be mask 15 and the default (send, speak) mask 3",
+		roomPermissionsMask(ROOM_PERMISSIONS_ALL) == 31 &&
+		roomPermissionsMask(ROOM_PERMISSIONS_DEFAULT) == 19,
+		"expected every room permission to be mask 31 and the default (send, speak, attach) " +
+		"mask 19",
 	)
 	assert(
 		roomPermissionsFromMask(-1) == ROOM_PERMISSIONS_ALL &&
@@ -1763,4 +1768,81 @@ testRoomPermissionPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		roomAccessRolesAreValid(.Public, nil),
 		"expected a Role room to need access roles and other rooms to have none",
 	)
+}
+
+// Protocol 27: attachments ride on every message payload and the auth success limits, and a
+// decoded payload owns their strings (freed by the *_deinit helpers).
+@(test)
+testAttachmentRefsRoundTripOverCBOR :: proc(t: ^testing.T) {
+	_ = t
+	refs := make([dynamic]AttachmentRef, context.temp_allocator)
+	append(
+		&refs,
+		AttachmentRef {
+			blobId = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+			size = 1234,
+			sha256 = {0 = 0xAA, 31 = 0xBB},
+			name = "report.pdf",
+			mediaType = "application/pdf",
+		},
+		AttachmentRef{blobId = {0 = 9, 15 = 9}, size = 77, removed = true},
+	)
+	message := ServerChatMessagePayload {
+		id          = 5,
+		senderId    = 2,
+		roomId      = 1,
+		timestamp   = "now",
+		attachments = refs,
+	}
+	encoded, err := cbor.marshal(message)
+	defer delete(encoded)
+	assert(err == nil, "expected the chat message with attachments to encode")
+	decoded: ServerChatMessagePayload
+	decodeErr := cbor.unmarshal(encoded, &decoded, temp_allocator = context.allocator)
+	defer ServerChatMessagePayload_deinit(&decoded)
+	assert(decodeErr == nil, fmt.tprintf("expected it to decode, got %v", decodeErr))
+	assert(len(decoded.attachments) == 2, "expected both attachments back")
+	assert(
+		decoded.attachments[0].blobId == refs[0].blobId &&
+		decoded.attachments[0].sha256 == refs[0].sha256 &&
+		decoded.attachments[0].size == 1234 &&
+		decoded.attachments[0].name == "report.pdf" &&
+		decoded.attachments[0].mediaType == "application/pdf" &&
+		!decoded.attachments[0].removed,
+		"expected the plaintext reference unchanged",
+	)
+	assert(
+		decoded.attachments[1].removed && decoded.attachments[1].size == 77,
+		"expected the removed flag and the size of the sealed reference",
+	)
+
+	auth := ServerAuthSuccessPayload {
+		userId      = 3,
+		message     = "ok",
+		nickname    = "alice",
+		attachments = {enabled = true, maxBytes = 25 << 20, quotaBytes = 1 << 30, usedBytes = 99},
+	}
+	authBytes, authErr := cbor.marshal(auth)
+	defer delete(authBytes)
+	assert(authErr == nil, "expected the auth success to encode")
+	authDecoded: ServerAuthSuccessPayload
+	assert(cbor.unmarshal(authBytes, &authDecoded) == nil, "expected the auth success to decode")
+	defer ServerAuthSuccessPayload_deinit(&authDecoded)
+	assert(authDecoded.attachments == auth.attachments, "expected the limits unchanged")
+
+	// A message from a protocol 26 peer (no attachments key) decodes with none.
+	Old :: struct {
+		recipientUserId: int,
+		content:         string,
+	}
+	old, oldErr := cbor.marshal(Old{recipientUserId = 4, content = "hi"})
+	defer delete(old)
+	assert(oldErr == nil, "expected the old payload to encode")
+	direct: ClientDirectMessagePayload
+	assert(
+		cbor.unmarshal(old, &direct, temp_allocator = context.allocator) == nil,
+		"expected the old direct message to decode",
+	)
+	defer ClientDirectMessagePayload_deinit(&direct)
+	assert(direct.content == "hi" && len(direct.attachments) == 0, "expected no attachments")
 }

@@ -17,22 +17,40 @@ import "shared:pg"
 // and time (NULL when nothing was stored), both nicknames, and (protocol 25, D17) whether the
 // two accounts may exchange messages: neither is restricted, they share a room, or one is an
 // admin (database_registration.odin). Nothing is stored when they may not.
+//
+// Protocol 27 (attachments plan D1, D11): $8..$12 list the message's attachments
+// (databaseAttachmentBindParams; all '' for none). Every listed blob must be the sender's, Ready
+// and unbound, uploaded to this conversation (peer_user_id the recipient), encrypted exactly
+// when the message is sealed, with the size and (plaintext) hash the message names: the
+// seventh column (bind_ok). The insert stores the count and the bound CTE binds the blobs, in
+// this statement.
 DATABASE_POST_DIRECT_MESSAGE_SQL ::
 	"WITH recipient AS (SELECT id, nickname FROM users " +
 	"WHERE id = $2::bigint AND id <> $1::bigint " +
 	"AND ($7::text = '' OR public_key = decode($7::text, 'hex'))), " +
 	"allowed AS (SELECT " + DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" +
 	DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$2" + DATABASE_USERS_MAY_MEET_CLOSE_SQL + " AS ok), " +
+	DATABASE_ATTACHMENT_BIND_INPUT_OPEN_SQL + "$8" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL +
+	"$9" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL + "$10" +
+	DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL + "$11" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL +
+	"$12" + DATABASE_ATTACHMENT_BIND_INPUT_CLOSE_SQL +
+	DATABASE_ATTACHMENT_BIND_CHECK_OPEN_SQL + "$1" + DATABASE_ATTACHMENT_BIND_CHECK_SEALED_SQL +
+	"$6::text <> ''" + DATABASE_ATTACHMENT_BIND_CHECK_CONVERSATION_SQL +
+	"a.peer_user_id IS DISTINCT FROM $2::bigint" + DATABASE_ATTACHMENT_BIND_CHECK_CLOSE_SQL +
 	"stored AS (INSERT INTO direct_messages (sender_user_id, recipient_user_id, content, " +
-	"client_message_id, signature, envelope) " +
+	"client_message_id, signature, envelope, attachment_count) " +
 	"SELECT $1::bigint, recipient.id, $3::text, decode(NULLIF($4::text, ''), 'hex'), " +
-	"decode(NULLIF($5::text, ''), 'hex'), decode(NULLIF($6::text, ''), 'hex') FROM recipient " +
-	"WHERE (SELECT ok FROM allowed) " +
+	"decode(NULLIF($5::text, ''), 'hex'), decode(NULLIF($6::text, ''), 'hex'), " +
+	"(SELECT count(*) FROM bind_in)::smallint FROM recipient " +
+	"WHERE (SELECT ok FROM allowed) AND (SELECT ok FROM bind_ok) " +
 	"ON CONFLICT (sender_user_id, client_message_id) WHERE client_message_id IS NOT NULL " +
-	"DO NOTHING RETURNING id, created_at) " +
+	"DO NOTHING RETURNING id, created_at), " +
+	DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL + "direct_message_id" +
+	DATABASE_ATTACHMENT_BIND_UPDATE_CLOSE_SQL +
 	"SELECT EXISTS (SELECT 1 FROM recipient), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $1::bigint), ''), " +
-	"COALESCE((SELECT nickname FROM recipient), ''), (SELECT ok FROM allowed)::text " +
+	"COALESCE((SELECT nickname FROM recipient), ''), (SELECT ok FROM allowed)::text, " +
+	"(SELECT ok FROM bind_ok)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // The identity key of the recipient $2 of a message from $1, as hex ('' for an account without
@@ -50,6 +68,8 @@ DATABASE_DIRECT_MESSAGE_RECIPIENT_KEY_SQL ::
 // Protocol 25 (D17): a peer the requester may not meet (a restricted account on either side,
 // no shared room, no admin) counts as missing unless the two already have a conversation, whose
 // history stays readable after the last shared room is gone.
+//
+// Protocol 27: the last column is the message's attachments (DATABASE_MESSAGE_ATTACHMENTS_*).
 DATABASE_GET_DIRECT_HISTORY_SQL ::
 	"WITH peer AS (SELECT (EXISTS (SELECT 1 FROM users WHERE id = $2::bigint) AND (" +
 	DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" + DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$2" +
@@ -59,7 +79,9 @@ DATABASE_GET_DIRECT_HISTORY_SQL ::
 	"SELECT p.ok, d.id::text, d.sender_user_id::text, d.recipient_user_id::text, " +
 	"d.created_at::text, d.content, d.sender_nickname, d.recipient_nickname, " +
 	"COALESCE(encode(d.client_message_id, 'hex'), ''), COALESCE(encode(d.envelope, 'hex'), ''), " +
-	"COALESCE(encode(d.signature, 'hex'), '') " +
+	"COALESCE(encode(d.signature, 'hex'), ''), " +
+	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "direct_message_id = d.id" +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " " +
 	"FROM peer p LEFT JOIN LATERAL (" +
 	"SELECT dm.id, dm.sender_user_id, dm.recipient_user_id, dm.created_at, dm.content, " +
 	"dm.client_message_id, dm.envelope, dm.signature, " +
@@ -77,12 +99,15 @@ DATABASE_GET_DIRECT_HISTORY_SQL ::
 // message ID of each peer, the inner query keeps the $2 newest conversations, and only those
 // are counted. Unread is every message from the peer above the marker, or every message from
 // the peer without one (migration 2), counted on direct_messages_by_sender_and_recipient and
-// capped at common.UNREAD_COUNT_CAP ($3).
+// capped at common.UNREAD_COUNT_CAP ($3). Protocol 27: the last column is the latest
+// message's attachments.
 DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"SELECT c.peer_id::text, u.nickname, c.id::text, c.sender_user_id::text, " +
 	"c.created_at::text, c.content, COALESCE(m.last_read_message_id, 0)::text, " +
 	"unread.n::text, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
-	"COALESCE(encode(c.envelope, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), '') FROM (" +
+	"COALESCE(encode(c.envelope, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), ''), " +
+	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "direct_message_id = c.id" +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " FROM (" +
 	"SELECT * FROM (" +
 	"SELECT DISTINCT ON (peer_id) peer_id, id, sender_user_id, created_at, content, " +
 	"client_message_id, envelope, signature FROM (" +
@@ -182,6 +207,13 @@ databaseExecutePostDirectMessage :: proc(
 	defer delete(envelopeParam)
 	recipientKeyParam, _ := strings.clone_to_cstring(recipientKeyHex)
 	defer delete(recipientKeyParam)
+	bindParams := databaseAttachmentBindParams(
+		request.attachments[:],
+		sealed = len(request.envelope) > 0,
+	)
+	defer for param in bindParams {
+		delete(param)
+	}
 	params := [?][^]byte {
 		transmute([^]byte)senderIDParam,
 		transmute([^]byte)recipientIDParam,
@@ -190,6 +222,11 @@ databaseExecutePostDirectMessage :: proc(
 		transmute([^]byte)signatureParam,
 		transmute([^]byte)envelopeParam,
 		transmute([^]byte)recipientKeyParam,
+		transmute([^]byte)bindParams[0],
+		transmute([^]byte)bindParams[1],
+		transmute([^]byte)bindParams[2],
+		transmute([^]byte)bindParams[3],
+		transmute([^]byte)bindParams[4],
 	}
 	result := databaseExecParams(conn, DATABASE_POST_DIRECT_MESSAGE_SQL, params[:])
 	if result == nil {
@@ -210,6 +247,11 @@ databaseExecutePostDirectMessage :: proc(
 			outcome = .InvalidEnvelope
 		}
 		return databaseSuccess(common.DatabasePostDirectMessageResult{outcome = outcome})
+	}
+	if !databaseGetBool(result, 0, 6) {
+		return databaseSuccess(
+			common.DatabasePostDirectMessageResult{outcome = .AttachmentsRefused},
+		)
 	}
 	if pg.get_is_null(result, 0, 1) {
 		return databaseSuccess(common.DatabasePostDirectMessageResult{outcome = .Duplicate})
@@ -237,6 +279,8 @@ databaseExecutePostDirectMessage :: proc(
 				clientMessageId = request.clientMessageId,
 				envelope = envelope,
 				signature = len(request.envelope) == 0 ? request.signature : {},
+				// Bound as listed: the statement checked each size (and plaintext hash).
+				attachments = common.AttachmentRefs_clone(request.attachments[:]),
 			},
 		},
 	)
@@ -382,6 +426,9 @@ databaseExecuteGetDirectHistory :: proc(
 			continue
 		}
 		clientMessageID, envelope, signature := databaseGetDirectMessageSecurity(result, row, 8)
+		attachmentsText := databaseGetText(result, row, 11)
+		attachments := databaseParseAttachmentRefs(attachmentsText)
+		delete(attachmentsText)
 		append(
 			&messages,
 			common.StoredDirectMessage {
@@ -395,6 +442,7 @@ databaseExecuteGetDirectHistory :: proc(
 				clientMessageId = clientMessageID,
 				envelope = envelope,
 				signature = signature,
+				attachments = attachments,
 			},
 		)
 	}
@@ -442,6 +490,9 @@ databaseExecuteListDirectConversations :: proc(
 		lastRead, _ := databaseGetInt(result, row, 6)
 		unread, _ := databaseGetInt(result, row, 7)
 		clientMessageID, envelope, signature := databaseGetDirectMessageSecurity(result, row, 8)
+		attachmentsText := databaseGetText(result, row, 11)
+		lastAttachments := databaseParseAttachmentRefs(attachmentsText)
+		delete(attachmentsText)
 		append(
 			&conversations,
 			common.DirectConversationSummary {
@@ -456,6 +507,7 @@ databaseExecuteListDirectConversations :: proc(
 				lastClientMessageId = clientMessageID,
 				lastEnvelope = envelope,
 				lastSignature = signature,
+				lastAttachments = lastAttachments,
 			},
 		)
 	}

@@ -27,6 +27,7 @@ testRoomPermissionBitsMatchTheEnum :: proc(t: ^testing.T) {
 			{DATABASE_ROOM_PERMISSION_SPEAK_IN_VOICE_SQL, .SpeakInVoice},
 			{DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL, .ManageMembers},
 			{DATABASE_ROOM_PERMISSION_EDIT_ROOM_SQL, .EditRoom},
+			{DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL, .AttachFiles},
 		}) {
 		expected := fmt.tprintf("%d", common.roomPermissionsMask({bit.permission}))
 		assert(
@@ -44,10 +45,13 @@ testRoomPermissionBitsMatchTheEnum :: proc(t: ^testing.T) {
 		fmt.tprintf("%d", common.roomPermissionsMask(common.ROOM_PERMISSIONS_ALL)),
 		"expected the every-permission literal to be ROOM_PERMISSIONS_ALL",
 	)
-	// What migration 12 gives every room: the default grant.
+	// What migration 12 gave every room (send and speak), and what migration 15 makes the
+	// default grant (protocol 27: attach files too).
 	assert(
 		strings.contains(DATABASE_MIGRATION_12_ROOM_PERMISSIONS_SQL, "DEFAULT 3;") &&
-		common.roomPermissionsMask(common.ROOM_PERMISSIONS_DEFAULT) == 3,
+		strings.contains(DATABASE_MIGRATION_15_ATTACHMENTS_ON_MESSAGES_SQL, "SET DEFAULT 19;") &&
+		DATABASE_ROOM_PERMISSIONS_DEFAULT_SQL ==
+			fmt.tprintf("%d", common.roomPermissionsMask(common.ROOM_PERMISSIONS_DEFAULT)),
 		"expected rooms.everyone_permissions to default to ROOM_PERMISSIONS_DEFAULT",
 	)
 }

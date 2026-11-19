@@ -3,12 +3,14 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:testing"
 import "shared:pg"
 
 // The attachment statements against a migrated schema of their own (HAYCHAT_DATABASE_SQL_TEST=1,
-// database_attachments.odin): every refusal of the begin statement, the upload steps, the F1
-// download check, the sweeper's rules and the startup scan's lookup.
+// database_attachments.odin): every refusal of the begin statement, the upload steps, the
+// download check (D10, protocol 27), the sweeper's rules and the startup scan's lookup, and
+// (protocol 27) binding blobs in the room message insert.
 
 @(private = "file")
 AttachmentSQLTestLimits :: struct {
@@ -225,10 +227,20 @@ testAttachmentBeginStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		attachmentSQLTestBegin(conn, dave, 10, roomID = files) == .Applied,
 		"expected an admin member allowed without the everyone grant",
 	)
+	// Protocol 27 (D20): AttachFiles is required too, reported apart from Send.
 	databaseDefaultRoomTestExec(
 		conn,
-		"restore send",
+		"revoke attach files",
 		fmt.tprintf("UPDATE rooms SET everyone_permissions = 3 WHERE id = %d", files),
+	)
+	assert(
+		attachmentSQLTestBegin(conn, alice, 10, roomID = files) == .AttachDenied,
+		"expected a member without AttachFiles refused",
+	)
+	databaseDefaultRoomTestExec(
+		conn,
+		"restore send and attach files",
+		fmt.tprintf("UPDATE rooms SET everyone_permissions = 19 WHERE id = %d", files),
 	)
 	assert(
 		attachmentSQLTestBegin(conn, alice, 10, roomID = voiceOnly) == .ChatDisabled,
@@ -344,7 +356,7 @@ testAttachmentBeginStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 }
 
-// Resume, progress, finish, the F1 download check, delete-new and abandon.
+// Resume, progress, finish, the owner's download of its unbound blob, delete-new and abandon.
 @(test)
 testAttachmentUploadStepsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	_ = t
@@ -415,7 +427,7 @@ testAttachmentUploadStepsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 	assert(
 		attachmentSQLTestAction(conn, .DownloadCheck, bob, blob).outcome == .NotFound,
-		"expected F1 to refuse every account but the owner",
+		"expected an unbound blob refused to every account but the owner",
 	)
 	assert(
 		attachmentSQLTestAction(conn, .Resume, alice, blob).outcome == .NotFound,
@@ -594,4 +606,600 @@ testAttachmentSweeperAgainstPostgreSQL :: proc(t: ^testing.T) {
 		)
 	}
 	IPC__database_query_response_deinit(knownResponse)
+}
+
+// ── Protocol 27: binding, the D10 download check, room deletion ────────────────
+
+// A Ready blob of owner's in a room or a direct conversation, with its hash.
+@(private = "file")
+attachmentSQLTestReady :: proc(
+	conn: pg.Conn,
+	owner: int,
+	size: u64,
+	roomID := 0,
+	recipientID := 0,
+	encrypted := false,
+) -> (
+	blob: common.AttachmentBlobID,
+	sha: common.AttachmentSHA256,
+) {
+	outcome := attachmentSQLTestBegin(
+		conn,
+		owner,
+		size,
+		roomID = roomID,
+		recipientID = recipientID,
+		encrypted = encrypted,
+		blobOut = &blob,
+	)
+	assert(outcome == .Applied, fmt.tprintf("expected the upload to begin, got %v", outcome))
+	assert(common.generateRandomBytes(sha[:]), "expected a random hash")
+	finished := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest {
+			action = .Finish,
+			userId = owner,
+			blobId = blob,
+			size = size,
+			sha256 = sha,
+		},
+	)
+	assert(finished.outcome == .Applied, "expected the blob Ready")
+	return
+}
+
+// A plaintext reference to a blob, as a message lists it.
+@(private = "file")
+attachmentSQLTestRef :: proc(
+	blob: common.AttachmentBlobID,
+	size: u64,
+	sha: common.AttachmentSHA256,
+	name := "notes.txt",
+	sealed := false,
+) -> common.AttachmentRef {
+	if sealed {
+		return common.AttachmentRef{blobId = blob, size = size}
+	}
+	return common.AttachmentRef {
+		blobId = blob,
+		size = size,
+		sha256 = sha,
+		name = name,
+		mediaType = "text/plain",
+	}
+}
+
+// Posts a room message with refs (plaintext, or sealed at the room's epoch 1) and returns the
+// outcome flags and the stored ID.
+@(private = "file")
+attachmentSQLTestPost :: proc(
+	conn: pg.Conn,
+	roomID, senderID: int,
+	content: string,
+	refs: []common.AttachmentRef,
+	sealed := false,
+) -> (
+	posted: common.DatabasePostRoomChatMessageResult,
+	messageID: int,
+) {
+	request := common.DatabasePostRoomChatMessageRequest {
+		roomId          = roomID,
+		senderId        = senderID,
+		content         = strings.clone(content),
+		clientMessageId = databaseTestClientMessageID(),
+		attachments     = common.AttachmentRefs_clone(refs),
+	}
+	if sealed {
+		request.sealed = make([]u8, 96)
+		for index in 0 ..< len(request.sealed) {
+			request.sealed[index] = u8(index)
+		}
+		request.epoch = 1
+		assert(common.generateRandomBytes(request.chainId[:]), "expected a chain ID")
+	} else {
+		request.signature = DATABASE_TEST_SIGNATURE
+	}
+	defer IPC__database_query_request_deinit(request)
+	response := databaseExecuteRequest(conn, request)
+	defer IPC__database_query_response_deinit(response)
+	result, ok := response.result.(common.DatabasePostRoomChatMessageResult)
+	assert(response.success && ok, fmt.tprintf("expected the post to run: %s", response.message))
+	assert(
+		!result.isMember || result.storedMessage.id == 0 ||
+		len(result.storedMessage.attachments) == len(refs),
+		"expected the echo to list the bound attachments",
+	)
+	posted = result
+	messageID = result.storedMessage.id
+	posted.storedMessage = {}
+	posted.recipientUserIDs = nil
+	return
+}
+
+@(private = "file")
+attachmentSQLTestBinding :: proc(conn: pg.Conn, blob: common.AttachmentBlobID) -> string {
+	return databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT state::text || '/' || COALESCE(chat_message_id::text, '-') || '/' || " +
+			"COALESCE(direct_message_id::text, '-') || '/' || COALESCE(position::text, '-') || " +
+			"'/' || COALESCE(name, '-') || '/' || COALESCE(media_type, '-') || '/' || " +
+			"(bound_at IS NOT NULL)::text FROM attachments WHERE blob_id = decode('%s', 'hex')",
+			attachmentSQLTestHex(blob),
+		),
+	)
+}
+
+// D1, D11, D15, D20: the room message insert binds the blobs it lists, in the same statement,
+// and refuses the whole message when one does not qualify.
+@(test)
+testAttachmentBindingInRoomMessagesAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_bind")
+	alice := databaseAdminTestUser(conn, "bind-alice")
+	bob := databaseAdminTestUser(conn, "bind-bob")
+	files := attachmentSQLTestRoom(conn, "bind-files")
+	other := attachmentSQLTestRoom(conn, "bind-other")
+	secret := attachmentSQLTestRoom(conn, "bind-secret", encrypted = true)
+	databaseDefaultRoomTestExec(
+		conn,
+		"start the encrypted room's log",
+		fmt.tprintf("UPDATE rooms SET log_version = 1 WHERE id = %d", secret),
+	)
+	for room in ([]int{files, other, secret}) {
+		attachmentSQLTestJoin(conn, room, alice)
+		attachmentSQLTestJoin(conn, room, bob)
+	}
+
+	// A plaintext message binds its blob: Bound, linked, positioned, named.
+	first, firstSHA := attachmentSQLTestReady(conn, alice, 1000, roomID = files)
+	second, secondSHA := attachmentSQLTestReady(conn, alice, 2000, roomID = files)
+	refs := [2]common.AttachmentRef {
+		attachmentSQLTestRef(first, 1000, firstSHA, "a.txt"),
+		attachmentSQLTestRef(second, 2000, secondSHA, "b.txt"),
+	}
+	posted, messageID := attachmentSQLTestPost(conn, files, alice, "", refs[:])
+	assert(
+		posted.isMember && messageID > 0,
+		fmt.tprintf("expected an attachments-only message stored, got %v", posted),
+	)
+	assert(
+		attachmentSQLTestBinding(conn, first) ==
+		fmt.tprintf("2/%d/-/0/a.txt/text/plain/true", messageID),
+		fmt.tprintf("expected the first blob bound, got %s", attachmentSQLTestBinding(conn, first)),
+	)
+	assert(
+		attachmentSQLTestBinding(conn, second) ==
+		fmt.tprintf("2/%d/-/1/b.txt/text/plain/true", messageID),
+		"expected the second blob bound at position 1",
+	)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT attachment_count::text || '/' || content FROM chat_messages WHERE id = %d",
+				messageID,
+			),
+		) ==
+		"2/",
+		"expected the count stored with an empty content",
+	)
+	// History lists them in order with every field, and the removed flag of a tombstone.
+	databaseDefaultRoomTestExec(
+		conn,
+		"remove the second blob",
+		fmt.tprintf(
+			"UPDATE attachments SET state = 3 WHERE blob_id = decode('%s', 'hex')",
+			attachmentSQLTestHex(second),
+		),
+	)
+	history := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomHistoryRequest{roomId = files, userId = bob, limit = 10},
+	)
+	defer IPC__database_query_response_deinit(history)
+	page := history.result.(common.DatabaseRoomHistoryResult)
+	assert(len(page.messages) == 1, "expected the message in history")
+	listed := page.messages[0].attachments
+	assert(
+		len(listed) == 2 &&
+		listed[0].blobId == first &&
+		listed[0].size == 1000 &&
+		listed[0].sha256 == firstSHA &&
+		listed[0].name == "a.txt" &&
+		listed[0].mediaType == "text/plain" &&
+		!listed[0].removed &&
+		listed[1].blobId == second &&
+		listed[1].removed,
+		fmt.tprintf("expected both attachments in history, got %v", listed),
+	)
+
+	// Refusals: bound twice, someone else's blob, another room, a direct message's blob, an
+	// unfinished upload, another size or hash, and a blob listed twice.
+	refuse :: proc(conn: pg.Conn, room, sender: int, refs: []common.AttachmentRef, why: string) {
+		result, id := attachmentSQLTestPost(conn, room, sender, "x", refs)
+		assert(
+			result.attachmentsRefused && id == 0,
+			fmt.tprintf("expected %s refused, got %v", why, result),
+		)
+	}
+	refuse(conn, files, alice, refs[:1], "a blob bound twice")
+	bobs, bobSHA := attachmentSQLTestReady(conn, bob, 10, roomID = files)
+	bobRef := [1]common.AttachmentRef{attachmentSQLTestRef(bobs, 10, bobSHA)}
+	refuse(conn, files, alice, bobRef[:], "someone else's blob")
+	elsewhere, elsewhereSHA := attachmentSQLTestReady(conn, alice, 10, roomID = other)
+	elsewhereRef := [1]common.AttachmentRef{attachmentSQLTestRef(elsewhere, 10, elsewhereSHA)}
+	refuse(conn, files, alice, elsewhereRef[:], "a blob of another room")
+	direct, directSHA := attachmentSQLTestReady(conn, alice, 10, recipientID = bob)
+	directRef := [1]common.AttachmentRef{attachmentSQLTestRef(direct, 10, directSHA)}
+	refuse(conn, files, alice, directRef[:], "a direct message's blob")
+	uploading: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, alice, 10, roomID = files, blobOut = &uploading) == .Applied,
+		"expected an upload",
+	)
+	uploadingRef := [1]common.AttachmentRef{attachmentSQLTestRef(uploading, 10, firstSHA)}
+	refuse(conn, files, alice, uploadingRef[:], "an unfinished upload")
+	fresh, freshSHA := attachmentSQLTestReady(conn, alice, 10, roomID = files)
+	wrongSize := [1]common.AttachmentRef{attachmentSQLTestRef(fresh, 11, freshSHA)}
+	refuse(conn, files, alice, wrongSize[:], "another size")
+	wrongSHA := [1]common.AttachmentRef{attachmentSQLTestRef(fresh, 10, firstSHA)}
+	refuse(conn, files, alice, wrongSHA[:], "another hash")
+	twice := [2]common.AttachmentRef {
+		attachmentSQLTestRef(fresh, 10, freshSHA),
+		attachmentSQLTestRef(fresh, 10, freshSHA),
+	}
+	refuse(conn, files, alice, twice[:], "a blob listed twice")
+	assert(attachmentSQLTestState(conn, fresh) == "1", "expected a refused blob still Ready")
+
+	// Encryption must match: a plaintext blob in an encrypted room, an encrypted one in a
+	// plaintext room (forced in SQL, since begin refuses both), and a sealed message listing a
+	// plaintext blob of its own room.
+	encryptedBlob, _ := attachmentSQLTestReady(conn, alice, 500, roomID = secret, encrypted = true)
+	plainInSecret, plainSHA := attachmentSQLTestReady(conn, alice, 10, roomID = files)
+	databaseDefaultRoomTestExec(
+		conn,
+		"move a plaintext blob into the encrypted room",
+		fmt.tprintf(
+			"UPDATE attachments SET room_id = %d WHERE blob_id = decode('%s', 'hex')",
+			secret,
+			attachmentSQLTestHex(plainInSecret),
+		),
+	)
+	plainOuter := [1]common.AttachmentRef{attachmentSQLTestRef(plainInSecret, 10, plainSHA, sealed = true)}
+	sealedResult, sealedID := attachmentSQLTestPost(conn, secret, alice, "", plainOuter[:], sealed = true)
+	assert(
+		sealedResult.attachmentsRefused && sealedID == 0,
+		fmt.tprintf("expected a sealed message with a plaintext blob refused, got %v", sealedResult),
+	)
+	encryptedInFiles, encryptedSHA := attachmentSQLTestReady(conn, alice, 10, roomID = files)
+	databaseDefaultRoomTestExec(
+		conn,
+		"mark a plaintext room's blob encrypted",
+		fmt.tprintf(
+			"UPDATE attachments SET encrypted = true WHERE blob_id = decode('%s', 'hex')",
+			attachmentSQLTestHex(encryptedInFiles),
+		),
+	)
+	encryptedRef := [1]common.AttachmentRef{attachmentSQLTestRef(encryptedInFiles, 10, encryptedSHA)}
+	refuse(conn, files, alice, encryptedRef[:], "an encrypted blob in a plaintext message")
+
+	// A sealed message binds its encrypted blob; history carries only the ID, size and flag.
+	outer := [1]common.AttachmentRef{{blobId = encryptedBlob, size = 500}}
+	sealedPosted, sealedMessageID := attachmentSQLTestPost(conn, secret, alice, "", outer[:], sealed = true)
+	assert(
+		sealedMessageID > 0,
+		fmt.tprintf("expected the sealed message stored, got %v", sealedPosted),
+	)
+	assert(
+		attachmentSQLTestBinding(conn, encryptedBlob) ==
+		fmt.tprintf("2/%d/-/0/-/-/true", sealedMessageID),
+		"expected the encrypted blob bound with no name",
+	)
+	sealedHistory := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomHistoryRequest{roomId = secret, userId = bob, limit = 10},
+	)
+	defer IPC__database_query_response_deinit(sealedHistory)
+	sealedPage := sealedHistory.result.(common.DatabaseRoomHistoryResult)
+	sealedListed := sealedPage.messages[len(sealedPage.messages) - 1].attachments
+	assert(
+		len(sealedListed) == 1 &&
+		sealedListed[0].blobId == encryptedBlob &&
+		sealedListed[0].size == 500 &&
+		sealedListed[0].sha256 == {} &&
+		sealedListed[0].name == "" &&
+		sealedListed[0].mediaType == "",
+		fmt.tprintf("expected only the ID and size of a sealed blob, got %v", sealedListed),
+	)
+
+	// Without AttachFiles a message with attachments is refused before binding; one without
+	// still posts.
+	databaseDefaultRoomTestExec(
+		conn,
+		"revoke attach files",
+		fmt.tprintf("UPDATE rooms SET everyone_permissions = 3 WHERE id = %d", files),
+	)
+	freshRef := [1]common.AttachmentRef{attachmentSQLTestRef(fresh, 10, freshSHA)}
+	denied, deniedID := attachmentSQLTestPost(conn, files, alice, "x", freshRef[:])
+	assert(
+		denied.attachDenied && deniedID == 0,
+		fmt.tprintf("expected attachments refused without AttachFiles, got %v", denied),
+	)
+	_, textID := attachmentSQLTestPost(conn, files, alice, "just text", nil)
+	assert(textID > 0, "expected a text message without AttachFiles")
+	assert(attachmentSQLTestState(conn, fresh) == "1", "expected the blob still unbound")
+}
+
+// D10: whoever may read a message's history may download its files, and nobody else; the owner
+// may download its own unbound blob; a Removed blob is never downloadable.
+@(test)
+testAttachmentDownloadCheckAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_download")
+	alice := databaseAdminTestUser(conn, "dl-alice")
+	bob := databaseAdminTestUser(conn, "dl-bob")
+	carol := databaseAdminTestUser(conn, "dl-carol")
+	admin := databaseAdminTestUser(conn, "dl-admin")
+	databaseAdminTestGrant(conn, admin)
+	allowed :: proc(conn: pg.Conn, userID: int, blob: common.AttachmentBlobID) -> bool {
+		return attachmentSQLTestAction(conn, .DownloadCheck, userID, blob).outcome == .Applied
+	}
+
+	// A Full history room: every member, no outsider, no admin bypass.
+	full := attachmentSQLTestRoom(conn, "dl-full")
+	databaseDefaultRoomTestExec(
+		conn,
+		"make the room full history",
+		fmt.tprintf("UPDATE rooms SET history_visibility = 2 WHERE id = %d", full),
+	)
+	attachmentSQLTestJoin(conn, full, alice)
+	attachmentSQLTestJoin(conn, full, bob)
+	blob, sha := attachmentSQLTestReady(conn, alice, 100, roomID = full)
+	assert(allowed(conn, alice, blob), "expected the owner to download its unbound blob")
+	assert(!allowed(conn, bob, blob), "expected an unbound blob refused to a member")
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, 100, sha)}
+	_, messageID := attachmentSQLTestPost(conn, full, alice, "file", refs[:])
+	assert(messageID > 0, "expected the message stored")
+	assert(allowed(conn, bob, blob), "expected a member to download a bound blob")
+	assert(!allowed(conn, carol, blob), "expected a non-member refused")
+	assert(!allowed(conn, admin, blob), "expected an admin outside the room refused (no bypass)")
+	download := attachmentSQLTestAction(conn, .DownloadCheck, bob, blob)
+	assert(download.size == 100 && download.sha256 == sha, "expected the stored size and hash")
+	// A new member of a Full history room reads the old file.
+	attachmentSQLTestJoin(conn, full, carol)
+	assert(allowed(conn, carol, blob), "expected a Full history newcomer allowed")
+	// A removed member loses it.
+	databaseDefaultRoomTestExec(
+		conn,
+		"remove bob",
+		fmt.tprintf("DELETE FROM room_members WHERE room_id = %d AND user_id = %d", full, bob),
+	)
+	assert(!allowed(conn, bob, blob), "expected a removed member refused")
+
+	// A From join room: a newcomer reads only files of messages after it joined.
+	fromJoin := attachmentSQLTestRoom(conn, "dl-from-join")
+	databaseDefaultRoomTestExec(
+		conn,
+		"make the room from join",
+		fmt.tprintf("UPDATE rooms SET history_visibility = 1 WHERE id = %d", fromJoin),
+	)
+	attachmentSQLTestJoin(conn, fromJoin, alice)
+	databaseDefaultRoomTestExec(
+		conn,
+		"date alice's join before the old message",
+		fmt.tprintf(
+			"UPDATE room_members SET joined_at = now() - interval '2 hours' " +
+			"WHERE room_id = %d AND user_id = %d",
+			fromJoin,
+			alice,
+		),
+	)
+	old, oldSHA := attachmentSQLTestReady(conn, alice, 100, roomID = fromJoin)
+	oldRefs := [1]common.AttachmentRef{attachmentSQLTestRef(old, 100, oldSHA)}
+	_, oldID := attachmentSQLTestPost(conn, fromJoin, alice, "before", oldRefs[:])
+	databaseDefaultRoomTestExec(
+		conn,
+		"date the old message before the newcomer",
+		fmt.tprintf(
+			"UPDATE chat_messages SET created_at = now() - interval '1 hour' WHERE id = %d",
+			oldID,
+		),
+	)
+	attachmentSQLTestJoin(conn, fromJoin, bob)
+	assert(!allowed(conn, bob, old), "expected a From join newcomer refused an older file")
+	assert(allowed(conn, alice, old), "expected the earlier member allowed")
+	recent, recentSHA := attachmentSQLTestReady(conn, alice, 100, roomID = fromJoin)
+	recentRefs := [1]common.AttachmentRef{attachmentSQLTestRef(recent, 100, recentSHA)}
+	_, recentID := attachmentSQLTestPost(conn, fromJoin, alice, "after", recentRefs[:])
+	databaseDefaultRoomTestExec(
+		conn,
+		"date the newcomer's join before the new message",
+		fmt.tprintf(
+			"UPDATE room_members SET joined_at = now() - interval '1 minute' " +
+			"WHERE room_id = %d AND user_id = %d; UPDATE chat_messages SET created_at = now() " +
+			"WHERE id = %d",
+			fromJoin,
+			bob,
+			recentID,
+		),
+	)
+	assert(allowed(conn, bob, recent), "expected a newcomer allowed a newer file")
+	// A Public room always reads Full, whatever history_visibility says.
+	databaseDefaultRoomTestExec(
+		conn,
+		"make the from join room public",
+		fmt.tprintf("UPDATE rooms SET access = 1 WHERE id = %d", fromJoin),
+	)
+	assert(allowed(conn, bob, old), "expected a Public room's member allowed every file")
+
+	// A direct message: its sender and recipient only, and still for a restricted recipient
+	// whose shared room is gone (D17: direct message history stays readable).
+	dmBlob, dmSHA := attachmentSQLTestReady(conn, alice, 100, recipientID = carol)
+	dmRefs := [1]common.AttachmentRef{attachmentSQLTestRef(dmBlob, 100, dmSHA)}
+	dmRequest := common.DatabasePostDirectMessageRequest {
+		senderId        = alice,
+		recipientId     = carol,
+		content         = strings.clone(""),
+		clientMessageId = databaseTestClientMessageID(),
+		signature       = DATABASE_TEST_SIGNATURE,
+		attachments     = common.AttachmentRefs_clone(dmRefs[:]),
+	}
+	dmResponse := databaseExecuteRequest(conn, dmRequest)
+	IPC__database_query_request_deinit(dmRequest)
+	dmPosted := dmResponse.result.(common.DatabasePostDirectMessageResult)
+	assert(dmPosted.outcome == .Stored, fmt.tprintf("expected the DM stored, got %v", dmPosted))
+	IPC__database_query_response_deinit(dmResponse)
+	assert(allowed(conn, alice, dmBlob), "expected the sender allowed")
+	assert(allowed(conn, carol, dmBlob), "expected the recipient allowed")
+	assert(!allowed(conn, bob, dmBlob), "expected a third account refused")
+	assert(!allowed(conn, admin, dmBlob), "expected an admin refused a direct message's file")
+	databaseDefaultRoomTestExec(
+		conn,
+		"restrict carol and drop her rooms",
+		fmt.tprintf(
+			"UPDATE users SET restricted = true WHERE id = %d; " +
+			"DELETE FROM room_members WHERE user_id = %d",
+			carol,
+			carol,
+		),
+	)
+	assert(allowed(conn, carol, dmBlob), "expected a restricted recipient still allowed")
+
+	// A Removed blob is never downloadable, and neither is an Uploading one.
+	databaseDefaultRoomTestExec(
+		conn,
+		"remove the direct message's blob",
+		fmt.tprintf(
+			"UPDATE attachments SET state = 3 WHERE blob_id = decode('%s', 'hex')",
+			attachmentSQLTestHex(dmBlob),
+		),
+	)
+	assert(!allowed(conn, alice, dmBlob), "expected a removed blob refused to its sender")
+	uploading: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, alice, 10, roomID = full, blobOut = &uploading) == .Applied,
+		"expected an upload",
+	)
+	assert(!allowed(conn, alice, uploading), "expected an unfinished upload refused")
+}
+
+// D17: deleting a room turns its messages' blob links NULL, the sweeper deletes those rows once
+// they are an hour old, and the storage worker then deletes their files.
+@(test)
+testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_room_delete")
+	alice := databaseAdminTestUser(conn, "del-alice")
+	room := attachmentSQLTestRoom(conn, "del-room")
+	attachmentSQLTestJoin(conn, room, alice)
+
+	// The blob's file, through the storage worker on a directory of its own.
+	allocator := context.allocator
+	context.allocator = context.temp_allocator
+	dir := routerTestCreateTempDir("haychat_attachment_room_delete")
+	context.allocator = allocator
+	defer os.remove_all(dir)
+	for name in ([]string{ATTACHMENT_INCOMING_DIR_NAME, ATTACHMENT_BLOBS_DIR_NAME}) {
+		path := fmt.tprintf("%s/%s", dir, name)
+		assert(os.make_directory(path, os.perm(0o700)) == nil, "expected a blob subdirectory")
+	}
+	worker := StorageWorker_init(dir)
+	defer StorageWorker_deinit(&worker)
+	worker.freeBytes = proc(dir: string) -> (i64, bool) {
+		_ = dir
+		return 1 << 40, true
+	}
+	data := "the file of a room that will be deleted"
+	blob: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, alice, u64(len(data)), roomID = room, blobOut = &blob) ==
+		.Applied,
+		"expected the upload to begin",
+	)
+	opened, _ := StorageWorker_handle(&worker, StorageUploadOpen{blobId = blob, size = u64(len(data))})
+	assert(opened.(StorageUploadOpened).ok, "expected the part file")
+	chunk := make([]u8, len(data))
+	copy(chunk, data)
+	write := StorageUploadWrite {
+		blobId = blob,
+		data   = chunk,
+	}
+	written, _ := StorageWorker_handle(&worker, write)
+	StorageRequest_deinit(write)
+	assert(written.(StorageUploadWritten).ok, "expected the chunk written")
+	sha := common.AttachmentSHA256(common.hashBytes(transmute([]u8)data))
+	finished, _ := StorageWorker_handle(
+		&worker,
+		StorageUploadFinish{blobId = blob, size = u64(len(data)), sha256 = sha},
+	)
+	assert(finished.(StorageUploadFinished).ok, "expected the blob stored")
+	ready := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest {
+			action = .Finish,
+			userId = alice,
+			blobId = blob,
+			size = u64(len(data)),
+			sha256 = sha,
+		},
+	)
+	assert(ready.outcome == .Applied, "expected the blob Ready")
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, u64(len(data)), sha)}
+	_, messageID := attachmentSQLTestPost(conn, room, alice, "doomed", refs[:])
+	assert(messageID > 0, "expected the message stored")
+	path := storageBlobPath(&worker, blob)
+	defer delete(path)
+	assert(os.exists(path), "expected the blob's file stored")
+
+	sweep :: proc(conn: pg.Conn) -> common.DatabaseAttachmentResult {
+		return attachmentSQLTestRun(
+			conn,
+			common.DatabaseAttachmentRequest{action = .Sweep, pendingHours = 24, limit = 100},
+		)
+	}
+	attachmentSQLTestAge(conn, blob, 2, 2)
+	assert(len(sweep(conn).blobs) == 0, "expected a bound blob never swept")
+
+	databaseDefaultRoomTestExec(
+		conn,
+		"delete the room",
+		fmt.tprintf("DELETE FROM rooms WHERE id = %d", room),
+	)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT (chat_message_id IS NULL AND room_id IS NULL)::text FROM attachments " +
+				"WHERE blob_id = decode('%s', 'hex')",
+				attachmentSQLTestHex(blob),
+			),
+		) ==
+		"true",
+		"expected the blob's message and room links gone with the room",
+	)
+	swept := sweep(conn)
+	assert(
+		len(swept.blobs) == 1 && swept.blobs[0].blobId == blob && swept.blobs[0].state == .Bound,
+		fmt.tprintf("expected the room's blob swept, got %v", swept.blobs),
+	)
+	assert(attachmentSQLTestState(conn, blob) == "none", "expected the row deleted")
+	blobs := make([dynamic]common.DatabaseAttachmentBlob)
+	append(&blobs, ..swept.blobs[:])
+	deleteRequest := StorageDeleteBlobs {
+		blobs = blobs,
+	}
+	deleted, _ := StorageWorker_handle(&worker, deleteRequest)
+	StorageRequest_deinit(deleteRequest)
+	assert(deleted.(StorageBlobsDeleted).deleted == 1, "expected the file deleted")
+	assert(!os.exists(path), "expected the blob gone from the directory")
 }

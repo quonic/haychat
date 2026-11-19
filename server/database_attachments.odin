@@ -2,6 +2,7 @@ package server
 
 import "../common"
 import "core:fmt"
+import "core:strconv"
 import "core:strings"
 import "shared:pg"
 
@@ -10,11 +11,189 @@ import "shared:pg"
 // byte ever reaches PostgreSQL. Each client action is one statement whose checks and change
 // cannot be separated by a concurrent change.
 
-// The room permissions an upload to a room needs (D11), as a mask: the requester's set
-// (DATABASE_ROOM_PERMISSIONS_*) must contain all of them. F2 adds AttachFiles (D20) here, as
-// "(" + DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL + " | " +
-// DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL + ")", and nothing else in the statement changes.
-DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL :: DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL
+// The room permissions an upload to a room needs (D11, D20), as a mask: the requester's set
+// (DATABASE_ROOM_PERMISSIONS_*) must contain all of them, SendMessages and (protocol 27)
+// AttachFiles. Binding a blob to a message checks the same (DATABASE_POST_ROOM_CHAT_MESSAGE_SQL).
+DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL ::
+	"(" + DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL + " | " +
+	DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL + ")"
+
+// Binding (protocol 27, D1, D11): the four message inserts (DATABASE_POST_ROOM_CHAT_MESSAGE_SQL
+// for plaintext and sealed room messages, DATABASE_POST_DIRECT_MESSAGE_SQL for plaintext and
+// sealed direct messages) bind the blobs a message lists in the statement that stores it, from
+// these shared pieces:
+//
+// - bind_in: the listed blobs in order, from five comma-separated text parameters
+//   (databaseAttachmentBindParams): blob IDs (hex), stored sizes, and for a plaintext message
+//   the hashes, names and media types (hex; '' for a sealed message, which leaves them NULL).
+//   DATABASE_ATTACHMENT_BIND_INPUT_OPEN_SQL + "$a" + _NEXT_ + "$b" + _NEXT_ + "$c" + _NEXT_ +
+//   "$d" + _NEXT_ + "$e" + DATABASE_ATTACHMENT_BIND_INPUT_CLOSE_SQL.
+// - bind_rows and bind_ok: the listed rows, locked, and whether every one may be bound: it
+//   exists, is the sender's, is Ready and bound to nothing, was uploaded to this conversation,
+//   is encrypted exactly when the message is sealed, has the size the message names and (a
+//   plaintext message) its hash; and no blob is listed twice.
+//   DATABASE_ATTACHMENT_BIND_CHECK_OPEN_SQL + "<sender>" + _SEALED_ + "<message is sealed>" +
+//   _CONVERSATION_ + "<a.room_id or a.peer_user_id mismatch>" + _CLOSE_SQL.
+// - bound: after the insert (a CTE named stored returning id), the rows become Bound to it
+//   with their position, name and media type. DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL +
+//   "chat_message_id" or "direct_message_id" + DATABASE_ATTACHMENT_BIND_UPDATE_CLOSE_SQL.
+//
+// The insert itself stores (SELECT count(*) FROM bind_in) as attachment_count and only when
+// (SELECT ok FROM bind_ok), so a message with a blob that fails stores nothing.
+DATABASE_ATTACHMENT_BIND_INPUT_OPEN_SQL ::
+	"bind_in AS (SELECT decode(u.blob, 'hex') AS blob_id, u.size::bigint AS size, " +
+	"decode(NULLIF(u.sha, ''), 'hex') AS sha256, " +
+	"convert_from(decode(NULLIF(u.name, ''), 'hex'), 'UTF8') AS name, " +
+	"convert_from(decode(NULLIF(u.kind, ''), 'hex'), 'UTF8') AS media_type, " +
+	"(u.ord - 1)::smallint AS position FROM unnest(string_to_array(("
+DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL :: ")::text, ','), string_to_array(("
+DATABASE_ATTACHMENT_BIND_INPUT_CLOSE_SQL ::
+	")::text, ',')) WITH ORDINALITY AS u(blob, size, sha, name, kind, ord) " +
+	"WHERE u.blob IS NOT NULL), "
+DATABASE_ATTACHMENT_BIND_CHECK_OPEN_SQL ::
+	"bind_rows AS (SELECT a.id, a.blob_id, a.owner_user_id, a.room_id, a.peer_user_id, " +
+	"a.encrypted, a.state, a.size, a.sha256, a.chat_message_id, a.direct_message_id " +
+	"FROM attachments a WHERE a.blob_id IN (SELECT blob_id FROM bind_in) FOR UPDATE), " +
+	"bind_ok AS (SELECT (SELECT count(DISTINCT blob_id) FROM bind_in) = " +
+	"(SELECT count(*) FROM bind_in) AND NOT EXISTS (SELECT 1 FROM bind_in i " +
+	"LEFT JOIN bind_rows a ON a.blob_id = i.blob_id WHERE a.id IS NULL OR a.state <> 1 " +
+	"OR a.chat_message_id IS NOT NULL OR a.direct_message_id IS NOT NULL " +
+	"OR a.size <> i.size OR (NOT a.encrypted AND a.sha256 IS DISTINCT FROM i.sha256) " +
+	"OR a.owner_user_id <> ("
+DATABASE_ATTACHMENT_BIND_CHECK_SEALED_SQL :: ")::bigint OR a.encrypted <> ("
+DATABASE_ATTACHMENT_BIND_CHECK_CONVERSATION_SQL :: ") OR "
+DATABASE_ATTACHMENT_BIND_CHECK_CLOSE_SQL :: ") AS ok), "
+DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL ::
+	"bound AS (UPDATE attachments a SET state = 2, bound_at = now(), position = i.position, " +
+	"name = i.name, media_type = i.media_type, "
+DATABASE_ATTACHMENT_BIND_UPDATE_CLOSE_SQL ::
+	" = s.id FROM stored s, bind_in i WHERE a.blob_id = i.blob_id RETURNING a.id) "
+
+// A message's attachments as one text column, for the history and conversation statements:
+// one entry per blob in the message's order, comma separated, each
+// "blobId:size:sha256:name:mediaType:removed" with the hash, name and media type hex ('' for a
+// sealed message's blob, whose fields are inside the seal) and removed 'true' for a Removed
+// tombstone (F3). '' for a message without attachments. Parsed by
+// databaseParseAttachmentRefs. OPEN + "chat_message_id = <id>" (or direct_message_id) + CLOSE.
+DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL ::
+	"COALESCE((SELECT string_agg(encode(ma.blob_id, 'hex') || ':' || ma.size::text || ':' || " +
+	"CASE WHEN ma.encrypted THEN '' ELSE COALESCE(encode(ma.sha256, 'hex'), '') END || ':' || " +
+	"COALESCE(encode(convert_to(ma.name, 'UTF8'), 'hex'), '') || ':' || " +
+	"COALESCE(encode(convert_to(ma.media_type, 'UTF8'), 'hex'), '') || ':' || " +
+	"(ma.state = 3)::text, ',' ORDER BY ma.position, ma.id) FROM attachments ma WHERE ma."
+DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL :: "), '')"
+
+// The five bind parameters for a message's attachments (see the binding comment above), as
+// owned C strings: blob IDs, sizes, hashes, names and media types. A sealed message sends only
+// blob IDs and sizes.
+databaseAttachmentBindParams :: proc(
+	refs: []common.AttachmentRef,
+	sealed: bool,
+) -> (
+	params: [5]cstring,
+) {
+	builders: [5]strings.Builder
+	for &builder in builders {
+		builder = strings.builder_make()
+	}
+	defer for &builder in builders {
+		strings.builder_destroy(&builder)
+	}
+	for ref, index in refs {
+		ref := ref
+		if index > 0 {
+			strings.write_byte(&builders[0], ',')
+			strings.write_byte(&builders[1], ',')
+			if !sealed {
+				strings.write_byte(&builders[2], ',')
+				strings.write_byte(&builders[3], ',')
+				strings.write_byte(&builders[4], ',')
+			}
+		}
+		databaseAttachmentWriteHex(&builders[0], ref.blobId[:])
+		fmt.sbprintf(&builders[1], "%d", ref.size)
+		if !sealed {
+			databaseAttachmentWriteHex(&builders[2], ref.sha256[:])
+			databaseAttachmentWriteHex(&builders[3], transmute([]u8)ref.name)
+			databaseAttachmentWriteHex(&builders[4], transmute([]u8)ref.mediaType)
+		}
+	}
+	for index in 0 ..< len(params) {
+		params[index], _ = strings.clone_to_cstring(strings.to_string(builders[index]))
+	}
+	return
+}
+
+@(private = "file")
+databaseAttachmentWriteHex :: proc(builder: ^strings.Builder, bytes: []u8) {
+	hex := common.encodeBytesToHex(bytes)
+	strings.write_string(builder, hex)
+	delete(hex)
+}
+
+// Parses the column DATABASE_MESSAGE_ATTACHMENTS_* returns (owned references; nil for '').
+// A malformed entry is skipped: a message whose list is then incomplete fails its signature or
+// its seal check in the client, never silently.
+databaseParseAttachmentRefs :: proc(text: string) -> [dynamic]common.AttachmentRef {
+	if len(text) == 0 {
+		return nil
+	}
+	refs := make([dynamic]common.AttachmentRef, 0, common.ATTACHMENTS_PER_MESSAGE_MAX)
+	entries := text
+	for entry in strings.split_iterator(&entries, ",") {
+		fields: [6]string
+		count := 0
+		rest := entry
+		for field in strings.split_iterator(&rest, ":") {
+			if count == len(fields) {
+				count += 1
+				break
+			}
+			fields[count] = field
+			count += 1
+		}
+		if count != len(fields) {
+			continue
+		}
+		ref: common.AttachmentRef
+		size, sizeOK := strconv.parse_u64(fields[1])
+		if !common.decodeHexIntoBuffer(fields[0], ref.blobId[:]) || !sizeOK {
+			continue
+		}
+		ref.size = size
+		if len(fields[2]) > 0 && !common.decodeHexIntoBuffer(fields[2], ref.sha256[:]) {
+			continue
+		}
+		name, nameOK := databaseAttachmentHexText(fields[3])
+		mediaType, mediaTypeOK := databaseAttachmentHexText(fields[4])
+		if !nameOK || !mediaTypeOK {
+			delete(name)
+			delete(mediaType)
+			continue
+		}
+		ref.name = name
+		ref.mediaType = mediaType
+		ref.removed = fields[5] == "true"
+		append(&refs, ref)
+	}
+	return refs
+}
+
+@(private = "file")
+databaseAttachmentHexText :: proc(hex: string) -> (string, bool) {
+	if len(hex) == 0 {
+		return "", true
+	}
+	if len(hex) % 2 != 0 {
+		return "", false
+	}
+	bytes := make([]u8, len(hex) / 2)
+	if !common.decodeHexIntoBuffer(hex, bytes) {
+		delete(bytes)
+		return "", false
+	}
+	return string(bytes), true
+}
 
 // The begin statement (D11, D21). $1 the owner, $2 the room (0 for a direct message), $3 the
 // recipient (0 for a room), $4 whether the client encrypts, $5 the declared size, $6 the new
@@ -28,15 +207,16 @@ DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL :: DATABASE_ROOM_PERMISSION_SE
 // that are not Removed, the rate every row of the owner created in the last hour, the capacity
 // every row that is not Removed; the insert reserves the declared size at once, so later
 // begins see it. One row: each check (member, send, chat, encryption, recipient, visibility,
-// size, quota, rate, capacity) and the new row's ID (NULL when nothing was stored).
+// size, quota, rate, capacity; protocol 27 reports Send and AttachFiles apart) and the new row's
+// ID (NULL when nothing was stored).
 DATABASE_ATTACHMENT_BEGIN_SQL ::
 	"WITH room AS (SELECT r.encrypted, r.room_type FROM rooms r " +
 	"WHERE r.id = $2::bigint AND $2::bigint > 0), " +
 	"member AS (SELECT 1 FROM room_members WHERE room_id = $2::bigint AND user_id = $1::bigint), " +
-	"may_send AS (SELECT ((" + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" +
-	DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$2" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " & " +
-	DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL + ") = " +
-	DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL + ") AS ok), " +
+	"may_send AS (SELECT p.mask, ((p.mask & " + DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL +
+	") = " + DATABASE_ATTACHMENT_ROOM_PERMISSIONS_REQUIRED_SQL + ") AS ok FROM (SELECT " +
+	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$2" +
+	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " AS mask) p), " +
 	"peer AS (SELECT id FROM users WHERE id = $3::bigint AND id <> $1::bigint " +
 	"AND $3::bigint > 0), " +
 	"allowed AS (SELECT " + DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" +
@@ -49,7 +229,10 @@ DATABASE_ATTACHMENT_BEGIN_SQL ::
 	"checks AS (SELECT " +
 	"(NOT $2::bigint > 0 OR (EXISTS (SELECT 1 FROM room) AND EXISTS (SELECT 1 FROM member))) " +
 	"AS member_ok, " +
-	"(NOT $2::bigint > 0 OR (SELECT ok FROM may_send)) AS send_ok, " +
+	"(NOT $2::bigint > 0 OR ((SELECT mask FROM may_send) & " +
+	DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL + ") <> 0) AS send_ok, " +
+	"(NOT $2::bigint > 0 OR ((SELECT mask FROM may_send) & " +
+	DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL + ") <> 0) AS attach_ok, " +
 	"(NOT $2::bigint > 0 OR COALESCE((SELECT room_type IN (1, 3) FROM room), false)) AS chat_ok, " +
 	"(NOT $2::bigint > 0 OR COALESCE((SELECT encrypted FROM room), false) = $4::boolean) " +
 	"AS encryption_ok, " +
@@ -62,10 +245,12 @@ DATABASE_ATTACHMENT_BEGIN_SQL ::
 	"stored AS (INSERT INTO attachments (blob_id, owner_user_id, room_id, peer_user_id, " +
 	"encrypted, size) SELECT decode($6::text, 'hex'), $1::bigint, NULLIF($2::bigint, 0), " +
 	"NULLIF($3::bigint, 0), $4::boolean, $5::bigint FROM checks " +
-	"WHERE member_ok AND send_ok AND chat_ok AND encryption_ok AND peer_ok AND meet_ok " +
+	"WHERE member_ok AND (NOT $2::bigint > 0 OR (SELECT ok FROM may_send)) AND chat_ok " +
+	"AND encryption_ok AND peer_ok AND meet_ok " +
 	"AND size_ok AND quota_ok AND rate_ok AND capacity_ok " +
 	"AND (($2::bigint > 0) <> ($3::bigint > 0)) RETURNING id) " +
-	"SELECT c.member_ok, c.send_ok, c.chat_ok, c.encryption_ok, c.peer_ok, c.meet_ok, " +
+	"SELECT c.member_ok, c.send_ok, c.attach_ok, c.chat_ok, c.encryption_ok, c.peer_ok, " +
+	"c.meet_ok, " +
 	"c.size_ok, c.quota_ok, c.rate_ok, c.capacity_ok, (SELECT id FROM stored)::text FROM checks c"
 
 // The owner's ($2) Uploading blob $1 (hex): its declared size and the bytes recorded so far.
@@ -101,13 +286,30 @@ DATABASE_ATTACHMENT_DELETE_NEW_SQL ::
 	"DELETE FROM attachments WHERE blob_id = decode($1::text, 'hex') " +
 	"AND owner_user_id = $2::bigint AND state = 0 AND received = 0 RETURNING id"
 
-// May $2 download blob $1? F1 (no message binds a blob yet): only the owner, and only a Ready or
-// Bound blob. F2 replaces this statement with D10's check (room membership and From join, or a
-// direct message's sender or recipient, sharing the history statements' predicate) and keeps
-// the owner's right to its own unbound blob. One row: the stored size and the hash as hex.
+// May $2 download blob $1 (D10, protocol 27)? Whoever may read the message's history may
+// download its files, and nobody else:
+//
+// - a Bound blob of a room message: $2 is a member of the room and, in a From join room
+//   (DATABASE_HISTORY_SINCE_*, the cut the room history statement uses), the message was
+//   created after $2 joined;
+// - a Bound blob of a direct message: $2 is its sender or its recipient (a restricted account
+//   keeps its direct message history, D17, so it keeps these files too);
+// - the owner's own Ready blob, before any message binds it.
+//
+// Admins get no bypass, as for history. A Removed blob (state 3) and an Uploading one are never
+// downloadable. One row when allowed: the stored size and the hash as hex.
 DATABASE_ATTACHMENT_DOWNLOAD_CHECK_SQL ::
-	"SELECT size::text, encode(sha256, 'hex') FROM attachments " +
-	"WHERE blob_id = decode($1::text, 'hex') AND owner_user_id = $2::bigint AND state IN (1, 2)"
+	"SELECT a.size::text, encode(a.sha256, 'hex') FROM attachments a " +
+	"LEFT JOIN chat_messages cm ON cm.id = a.chat_message_id " +
+	"LEFT JOIN direct_messages dm ON dm.id = a.direct_message_id " +
+	"WHERE a.blob_id = decode($1::text, 'hex') AND (" +
+	"(a.state = 1 AND a.owner_user_id = $2::bigint) OR (a.state = 2 AND (" +
+	"(cm.id IS NOT NULL AND EXISTS (SELECT 1 FROM room_members dl_rm " +
+	"WHERE dl_rm.room_id = cm.room_id AND dl_rm.user_id = $2::bigint) " +
+	"AND cm.created_at > COALESCE(" + DATABASE_HISTORY_SINCE_OPEN_SQL + "cm.room_id" +
+	DATABASE_HISTORY_SINCE_MIDDLE_SQL + "$2::bigint" + DATABASE_HISTORY_SINCE_CLOSE_SQL +
+	", '-infinity'::timestamptz)) OR " +
+	"(dm.id IS NOT NULL AND $2::bigint IN (dm.sender_user_id, dm.recipient_user_id)))))"
 
 // The rows the sweeper may delete (D17), for an alias a of attachments and $1 the pending window
 // in hours: never one younger than an hour, never one bound to a message; an upload with no
@@ -391,6 +593,7 @@ databaseExecuteAttachmentBegin :: proc(
 	refusals := [?]common.DatabaseAttachmentOutcome {
 		.NotMember,
 		.SendDenied,
+		.AttachDenied,
 		.ChatDisabled,
 		.EncryptionMismatch,
 		.UnknownRecipient,

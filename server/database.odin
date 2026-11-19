@@ -65,7 +65,7 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // permission mask (database_roles.odin; for a new account also its code's roles' bits, which
 // the subquery's snapshot does not see), and (protocol 25) needs_registration, the
 // registration mode, the key's request status (0 none), a decline's reason and whether the
-// account is restricted.
+// account is restricted, and (protocol 27, D18) the account's stored attachment bytes.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WITH settings AS (SELECT COALESCE((SELECT registration_mode FROM server_settings " +
 	"WHERE id = 1), 1) AS mode), " +
@@ -135,7 +135,9 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"AND NOT (SELECT ok FROM may_create))::text, (SELECT mode FROM settings)::text, " +
 	"COALESCE((SELECT status FROM request), 0)::text, " +
 	"COALESCE((SELECT decision_reason FROM request), ''), " +
-	"COALESCE(resolved.restricted, false)::text " +
+	"COALESCE(resolved.restricted, false)::text, " +
+	"COALESCE((SELECT sum(ua.size) FROM attachments ua WHERE ua.owner_user_id = resolved.id " +
+	"AND ua.state <> 3), 0)::text " +
 	"FROM (SELECT 1) one LEFT JOIN resolved ON true LEFT JOIN users u ON u.id = resolved.id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
@@ -400,6 +402,9 @@ databaseExecuteUserIdentityResolution :: proc(
 			identity.decisionReason = databaseGetText(result, 0, 12)
 		}
 		identity.isRestricted = databaseGetBool(result, 0, 13)
+		if used, usedOK := databaseGetInt(result, 0, 14); usedOK && used > 0 {
+			identity.attachmentUsedBytes = u64(used)
+		}
 		if identity.userId <= 0 {
 			// Only a resolved account's columns mean anything.
 			delete(identity.nickname)
@@ -553,32 +558,55 @@ databaseExecuteListRoomMemberUserIDs :: proc(
 // encrypted, and its log version.
 //
 // Protocol 24: the sender must hold SendMessages in the room (database_room_permissions.odin),
-// plaintext or sealed; the last column says whether it does.
+// plaintext or sealed; the ninth column says whether it does.
+//
+// Protocol 27 (attachments plan D1, D11, D20): $10..$14 list the message's attachments
+// (databaseAttachmentBindParams; all '' for none). A message with attachments needs AttachFiles
+// in the room too (tenth column) and every listed blob must qualify (bind_ok, the eleventh
+// column: the sender's, Ready, unbound, uploaded to this room, encrypted exactly when the
+// message is sealed, with the size and, for plaintext, the hash the message names); the insert
+// stores the count and the bound CTE binds the blobs to the new message, all in this statement.
 DATABASE_POST_ROOM_CHAT_MESSAGE_SQL ::
 	"WITH member AS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2), " +
-	"may_send AS (SELECT ((" + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$2" +
-	DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " & " +
-	DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL + ") <> 0) AS ok), " +
+	"perms AS (SELECT " + DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$2" +
+	DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL +
+	" AS mask), " +
+	"may_send AS (SELECT ((mask & " + DATABASE_ROOM_PERMISSION_SEND_MESSAGES_SQL +
+	") <> 0) AS ok FROM perms), " +
 	"room AS (SELECT room_type, encrypted, log_version FROM rooms WHERE id = $1), " +
 	"chat AS (SELECT 1 FROM room WHERE room_type IN (1, 3) AND encrypted = ($4::text <> '') " +
 	"AND (NOT encrypted OR log_version = $6::bigint)), " +
+	DATABASE_ATTACHMENT_BIND_INPUT_OPEN_SQL + "$10" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL +
+	"$11" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL + "$12" +
+	DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL + "$13" + DATABASE_ATTACHMENT_BIND_INPUT_NEXT_SQL +
+	"$14" + DATABASE_ATTACHMENT_BIND_INPUT_CLOSE_SQL +
+	"may_attach AS (SELECT (NOT EXISTS (SELECT 1 FROM bind_in) OR (mask & " +
+	DATABASE_ROOM_PERMISSION_ATTACH_FILES_SQL + ") <> 0) AS ok FROM perms), " +
+	DATABASE_ATTACHMENT_BIND_CHECK_OPEN_SQL + "$2" + DATABASE_ATTACHMENT_BIND_CHECK_SEALED_SQL +
+	"$4::text <> ''" + DATABASE_ATTACHMENT_BIND_CHECK_CONVERSATION_SQL +
+	"a.room_id IS DISTINCT FROM $1::bigint" + DATABASE_ATTACHMENT_BIND_CHECK_CLOSE_SQL +
 	"stored AS (INSERT INTO chat_messages (room_id, sender_user_id, content, sealed, " +
-	"client_message_id, epoch, chain_id, chain_index, signature) " +
+	"client_message_id, epoch, chain_id, chain_index, signature, attachment_count) " +
 	"SELECT $1, $2, $3, " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE decode($4::text, 'hex') END, " +
 	"decode($5::text, 'hex'), " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE $6::bigint END, " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE decode($7::text, 'hex') END, " +
 	"CASE WHEN $4::text = '' THEN NULL ELSE $8::integer END, " +
-	"CASE WHEN $4::text = '' THEN decode($9::text, 'hex') ELSE NULL END " +
+	"CASE WHEN $4::text = '' THEN decode($9::text, 'hex') ELSE NULL END, " +
+	"(SELECT count(*) FROM bind_in)::smallint " +
 	"WHERE EXISTS (SELECT 1 FROM member) AND EXISTS (SELECT 1 FROM chat) " +
-	"AND (SELECT ok FROM may_send) ON CONFLICT DO NOTHING RETURNING id, created_at) " +
+	"AND (SELECT ok FROM may_send) AND (SELECT ok FROM may_attach) " +
+	"AND (SELECT ok FROM bind_ok) ON CONFLICT DO NOTHING RETURNING id, created_at), " +
+	DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL + "chat_message_id" +
+	DATABASE_ATTACHMENT_BIND_UPDATE_CLOSE_SQL +
 	"SELECT EXISTS (SELECT 1 FROM member), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT string_agg(user_id::text, ',') FROM room_members WHERE room_id = $1), ''), " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $2), ''), " +
 	"COALESCE((SELECT room_type IN (1, 3) FROM room), false), " +
 	"COALESCE((SELECT encrypted FROM room), false), " +
-	"COALESCE((SELECT log_version FROM room), 0)::text, (SELECT ok FROM may_send)::text " +
+	"COALESCE((SELECT log_version FROM room), 0)::text, (SELECT ok FROM may_send)::text, " +
+	"(SELECT ok FROM may_attach)::text, (SELECT ok FROM bind_ok)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 databaseExecutePostRoomChatMessage :: proc(
@@ -621,6 +649,10 @@ databaseExecutePostRoomChatMessage :: proc(
 	defer delete(chainIDParam)
 	chainIndexParam := databaseIntParam(request.chainIndex)
 	defer delete(chainIndexParam)
+	bindParams := databaseAttachmentBindParams(request.attachments[:], sealed)
+	defer for param in bindParams {
+		delete(param)
+	}
 	params := [?][^]byte {
 		transmute([^]byte)roomIDParam,
 		transmute([^]byte)senderIDParam,
@@ -631,6 +663,11 @@ databaseExecutePostRoomChatMessage :: proc(
 		transmute([^]byte)chainIDParam,
 		transmute([^]byte)chainIndexParam,
 		transmute([^]byte)signatureParam,
+		transmute([^]byte)bindParams[0],
+		transmute([^]byte)bindParams[1],
+		transmute([^]byte)bindParams[2],
+		transmute([^]byte)bindParams[3],
+		transmute([^]byte)bindParams[4],
 	}
 	result := databaseExecParams(conn, DATABASE_POST_ROOM_CHAT_MESSAGE_SQL, params[:])
 	if result == nil {
@@ -670,6 +707,16 @@ databaseExecutePostRoomChatMessage :: proc(
 			common.DatabasePostRoomChatMessageResult{isMember = true, staleEpoch = true},
 		)
 	}
+	if !databaseGetBool(result, 0, 9) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, attachDenied = true},
+		)
+	}
+	if !databaseGetBool(result, 0, 10) {
+		return databaseSuccess(
+			common.DatabasePostRoomChatMessageResult{isMember = true, attachmentsRefused = true},
+		)
+	}
 	if pg.get_is_null(result, 0, 1) {
 		// Every check passed and nothing was inserted: a unique index refused it.
 		return databaseSuccess(
@@ -700,11 +747,25 @@ databaseExecutePostRoomChatMessage :: proc(
 				clientMessageId = request.clientMessageId,
 				sealed = storedSealed,
 				signature = sealed ? {} : request.signature,
+				// Bound as listed: the statement checked each size (and plaintext hash).
+				attachments = common.AttachmentRefs_clone(request.attachments[:]),
 			},
 			recipientUserIDs = databaseParseIDList(recipientsText),
 		},
 	)
 }
+
+// The From join cut (protocol 15), shared by the room history statement and the attachment
+// download check (D10): the time after which an account reads a room's messages, or NULL when
+// it reads all of them (a Public or Full history room) or is not a member. A message is in the
+// account's history when the account is a member and the message was created after the cut.
+// OPEN + "<room ID expression>" + MIDDLE + "<account ID expression>" + CLOSE; aliases start
+// with hs_.
+DATABASE_HISTORY_SINCE_OPEN_SQL ::
+	"(SELECT hs_rm.joined_at FROM room_members hs_rm JOIN rooms hs_r ON hs_r.id = hs_rm.room_id " +
+	"WHERE hs_rm.room_id = ("
+DATABASE_HISTORY_SINCE_MIDDLE_SQL :: ") AND hs_rm.user_id = ("
+DATABASE_HISTORY_SINCE_CLOSE_SQL :: ") AND hs_r.access <> 1 AND hs_r.history_visibility = 1)"
 
 // Returns the membership flag on every row, with message columns NULL when the requester is
 // not a member or the page is empty. Fetches one extra row to detect older messages. The
@@ -716,18 +777,21 @@ databaseExecutePostRoomChatMessage :: proc(
 // addition. `first_visible` is the first such message's ID, found through
 // chat_messages_by_room_id_and_created_at, so a page that reaches the cut stops there instead
 // of scanning every older message; the created_at test stays as the rule itself.
+//
+// Protocol 27: the last column is the message's attachments (DATABASE_MESSAGE_ATTACHMENTS_*).
 DATABASE_GET_ROOM_HISTORY_SQL ::
 	"WITH member AS (SELECT EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $1 AND user_id = $2) AS ok, " +
-	"(SELECT rm.joined_at FROM room_members rm JOIN rooms r ON r.id = rm.room_id " +
-	"WHERE rm.room_id = $1 AND rm.user_id = $2 AND r.access <> 1 " +
-	"AND r.history_visibility = 1) AS since), " +
+	DATABASE_HISTORY_SINCE_OPEN_SQL + "$1::bigint" + DATABASE_HISTORY_SINCE_MIDDLE_SQL +
+	"$2::bigint" + DATABASE_HISTORY_SINCE_CLOSE_SQL + " AS since), " +
 	"first_visible AS (SELECT CASE WHEN m.since IS NULL THEN 0 ELSE COALESCE((" +
 	"SELECT cm.id FROM chat_messages cm WHERE cm.room_id = $1 AND cm.created_at > m.since " +
 	"ORDER BY cm.created_at, cm.id LIMIT 1), 9223372036854775807) END AS id FROM member m) " +
 	"SELECT m.ok, c.id::text, c.sender_user_id::text, c.created_at::text, c.content, " +
 	"c.nickname, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
-	"COALESCE(encode(c.sealed, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), '') " +
+	"COALESCE(encode(c.sealed, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), ''), " +
+	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "chat_message_id = c.id" +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " " +
 	"FROM member m CROSS JOIN first_visible f LEFT JOIN LATERAL (" +
 	"SELECT cm.id, cm.sender_user_id, cm.created_at, cm.content, u.nickname, " +
 	"cm.client_message_id, cm.sealed, cm.signature " +
@@ -821,6 +885,9 @@ databaseExecuteGetRoomHistory :: proc(
 		if !databaseGetHexBytes(result, row, 8, message.signature[:]) {
 			message.signature = {}
 		}
+		attachmentsText := databaseGetText(result, row, 9)
+		message.attachments = databaseParseAttachmentRefs(attachmentsText)
+		delete(attachmentsText)
 		append(&messages, message)
 	}
 	return databaseSuccess(
@@ -883,7 +950,8 @@ DATABASE_CREATE_ROOM_SQL ::
 	"(SELECT CASE WHEN p.mask = -1 THEN -1 ELSE " + DATABASE_ROOM_PERMISSION_EDIT_ROOM_SQL +
 	" | CASE WHEN (p.mask & " + DATABASE_PERMISSION_MANAGE_ROOM_MEMBERS_SQL + ") <> 0 THEN " +
 	DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL + " ELSE 0 END | CASE WHEN EXISTS (" +
-	"SELECT 1 FROM members WHERE user_id = $1::bigint) THEN 3 ELSE 0 END END " +
+	"SELECT 1 FROM members WHERE user_id = $1::bigint) THEN " +
+	DATABASE_ROOM_PERMISSIONS_DEFAULT_SQL + " ELSE 0 END END " +
 	"FROM (SELECT " + DATABASE_ACTOR_PERMISSIONS_SQL + " AS mask) p)::text " +
 	"FROM (SELECT 1) AS one LEFT JOIN created_room ON true"
 
