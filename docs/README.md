@@ -45,3 +45,4 @@ describe the current state.
 | [plan/e2ee-design.md](plan/e2ee-design.md) | End-to-end encryption design (direct messages, room access modes, encrypted rooms, voice) |
 | [plan/e2ee-voice-design.md](plan/e2ee-voice-design.md) | End-to-end encrypted voice in encrypted rooms (E6, protocol 21) |
 | [plan/2026-11-18-roles-and-registration.md](plan/2026-11-18-roles-and-registration.md) | Roles and permissions, room permissions, and registration with invite codes (#43, protocols 23-25) |
+| [plan/2026-11-19-file-attachments.md](plan/2026-11-19-file-attachments.md) | File attachments design: storage, transfer, access checks, client-side encryption, moderation (#118) |
