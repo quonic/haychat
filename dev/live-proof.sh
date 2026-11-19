@@ -140,6 +140,9 @@ SQL_TESTS+=,server.testAttachmentRoomDeletionSweepsItsFilesAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentRemovalAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentUsageAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentSQLRemovalFileIsDeletedByTheHourlyPassAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentRemovalsMigrationUpgradesVersion15AgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentRemovalLogAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentRemovalLogListingAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

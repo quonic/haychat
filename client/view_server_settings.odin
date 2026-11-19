@@ -28,7 +28,8 @@ import "ui"
 // ManageRoomMembers see the section with the room list only.
 //
 // Storage (attachments plan F4; admins), after the Admin section: admin-storage-refresh
-// (server ID).
+// (server ID). Removed files (protocol 29; admins), after Storage: admin-removals-refresh and
+// admin-removals-more (server ID).
 
 SERVER_SETTINGS_COLUMN_WIDTH :: 520
 SERVER_SETTINGS_SHORT_WIDTH :: 96
@@ -388,12 +389,16 @@ viewServerSettings :: proc(
 	// ── Admin (admins only) ──
 	adminAction: AdminSectionAction
 	storageRefresh := false
+	removalsAction := AttachmentRemovalsAction.None
 	if view.admin.visible {
 		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
 		_ = ui.cutTop(&column, sectionGap)
 		// Admin → Storage (attachments plan F4, D22): admins only, like the account controls.
 		if view.admin.showMembers {
 			storageRefresh = viewAdminStorage(state, ctx, &column, serverID)
+			_ = ui.cutTop(&column, sectionGap)
+			// Removed files (protocol 29, #138): the removal log, next to Storage.
+			removalsAction = viewAttachmentRemovals(state, ctx, &column, serverID)
 			_ = ui.cutTop(&column, sectionGap)
 		}
 	}
@@ -475,6 +480,18 @@ viewServerSettings :: proc(
 			delete(state.serverSettings.error)
 			state.serverSettings.error = strings.clone(errorMessage)
 		}
+	}
+	removalsError := ""
+	switch removalsAction {
+	case .None:
+	case .Refresh:
+		removalsError = State_requestAttachmentRemovals(state, serverID)
+	case .LoadMore:
+		removalsError = State_requestMoreAttachmentRemovals(state, serverID)
+	}
+	if len(removalsError) > 0 {
+		delete(state.serverSettings.error)
+		state.serverSettings.error = strings.clone(removalsError)
 	}
 	if adminAction.registration.kind != .None {
 		runRegistrationAdminAction(

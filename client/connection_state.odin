@@ -53,6 +53,13 @@ ServerConnection :: struct {
 	attachmentUsage:          common.ServerAdminAttachmentUsagePayload,
 	hasAttachmentUsage:       bool,
 	attachmentUsagePending:   bool,
+	// Protocol 29 (#138, attachment_moderation.odin): the removal log pages received, newest
+	// first (entries owned), whether one arrived, whether older entries follow, and whether a
+	// request waits for its answer.
+	attachmentRemovals:        [dynamic]common.AttachmentRemovalEntry,
+	hasAttachmentRemovals:     bool,
+	attachmentRemovalsHasMore: bool,
+	attachmentRemovalsPending: bool,
 	// The sign-up screen: its phase, the server's sentence for it (owned), and the request's
 	// state from ServerRegistrationRequired.
 	signUp:                   SignUpPhase,
@@ -62,6 +69,7 @@ ServerConnection :: struct {
 
 ServerConnection_deinit :: proc(connection: ^ServerConnection) {
 	common.ServerAdminAttachmentUsagePayload_deinit(&connection.attachmentUsage)
+	common.AttachmentRemovalEntries_deinit(&connection.attachmentRemovals)
 	delete(connection.signUpMessage)
 	delete(connection.nickname)
 	delete(connection.detail)
@@ -286,6 +294,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = true
 	connection.attachmentUsagePending = false
+	connection.attachmentRemovalsPending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}
@@ -317,6 +326,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.retryAt = event.retryAt
 	connection.lastAttemptFailed = false
 	connection.attachmentUsagePending = false
+	connection.attachmentRemovalsPending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}

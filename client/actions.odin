@@ -793,6 +793,9 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.inviteID,
 			event.requestID,
 		)
+		if event.adminAction == .RemoveAttachment {
+			State_attachmentRemovalApplied(state, event.serverID)
+		}
 	case .RegistrationRequired:
 		State_registrationRequired(state, event)
 	case .RegistrationResult:
@@ -818,9 +821,11 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.pendingCount,
 		)
 	case .AttachmentRemoved:
-		State_attachmentRemoved(state, event.serverID, event.attachmentRemoved)
+		_, _ = State_attachmentRemoved(state, event.serverID, event.attachmentRemoved)
 	case .AttachmentUsageReceived:
 		State_attachmentUsageReceived(state, event.serverID, &event.attachmentUsage)
+	case .AttachmentRemovalsReceived:
+		State_attachmentRemovalsReceived(state, event.serverID, &event.attachmentRemovals)
 	case .RoleListReceived:
 		State_receiveRoleList(state, event.serverID, &event.roles)
 	case .RoleUpdated:

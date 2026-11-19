@@ -137,6 +137,9 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerAdminAttachmentUsage, 213},
 	{.ClientAdminRemoveAttachment, 214},
 	{.ServerAttachmentRemoved, 215},
+	// Protocol 29 (#138: the attachment removal log).
+	{.ClientAdminListAttachmentRemovals, 216},
+	{.ServerAdminAttachmentRemovals, 217},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -518,10 +521,12 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// DirectConversationSummary.lastAttachments, the v2 plaintext signatures, the sealed
 	// "attachments" key, RoomPermission.AttachFiles and ServerAuthSuccess.attachments); 28 added
 	// attachment moderation (F3: ClientAdminAttachmentUsage ... ServerAttachmentRemoved,
-	// AdminAction.RemoveAttachment and ServerAdminActionResult.blobId).
+	// AdminAction.RemoveAttachment and ServerAdminActionResult.blobId); 29 added the removal log
+	// (#138: ClientAdminListAttachmentRemovals, ServerAdminAttachmentRemovals, and
+	// chatMessageId and directMessageId in ServerAttachmentRemoved).
 	assert(
-		protocolVersion == 28,
-		fmt.tprintf("expected protocol version 28 for attachments, got %d", protocolVersion),
+		protocolVersion == 29,
+		fmt.tprintf("expected protocol version 29 for attachments, got %d", protocolVersion),
 	)
 }
 

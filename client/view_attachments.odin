@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:fmt"
 import "ui"
 import SDL "vendor:sdl3"
 
@@ -20,6 +21,8 @@ import SDL "vendor:sdl3"
 // - the Remove attachment confirmation: attachment-remove-dialog (the overlay),
 //   attachment-remove-reason, attachment-remove-confirm and attachment-remove-cancel (server);
 // - Admin → Storage: admin-storage-refresh (server).
+// - Removed files (protocol 29): admin-removals-refresh and admin-removals-more (Load more)
+//   (server).
 //
 // Automation cannot drive the native dialogs: `attach-file PATH` and `save-path PATH` answer
 // them (ui_script.odin).
@@ -601,4 +604,93 @@ viewAdminStorage :: proc(
 	}
 	serverSettingsWrapped(ctx, column, "Asking the server…", ctx.theme.fgMuted)
 	return refresh
+}
+
+// What Removed files asks for.
+AttachmentRemovalsAction :: enum u8 {
+	None,
+	Refresh,
+	LoadMore,
+}
+
+// Removed files (admins, protocol 29, #138), after Storage: the removal log newest first, each
+// row the file, when, whose, who removed it, where and the reason, with Load more while the
+// server has older entries.
+viewAttachmentRemovals :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	serverID: int,
+) -> AttachmentRemovalsAction {
+	view := buildAttachmentRemovalsView(state, serverID)
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	action := AttachmentRemovalsAction.None
+	{
+		header := ui.cutTop(column, rowH)
+		refreshControl := AdminControl {
+			label   = view.pending ? "Refreshing…" : "Refresh",
+			enabled = !view.pending,
+		}
+		refreshW := ui.textSize(ui.textGet(ctx, 0, .Regular, refreshControl.label)).x
+		refreshW += ui.dp(ctx, ctx.theme.padding * 3)
+		refreshRect := header
+		_ = ui.cutLeft(&refreshRect, header.w - refreshW)
+		if adminButton(
+			ctx,
+			&refreshRect,
+			ui.idOf("admin-removals-refresh", serverID),
+			refreshControl,
+		) {
+			action = .Refresh
+		}
+		ui.label(ctx, header, "Removed files", ctx.theme.fgMuted, .Bold)
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	}
+	if !view.loaded {
+		text := view.pending ? "Asking the server…" : "Click Refresh to see removed files."
+		serverSettingsWrapped(ctx, column, text, ctx.theme.fgMuted)
+		return action
+	}
+	if len(view.rows) == 0 {
+		serverSettingsWrapped(ctx, column, "No file has been removed.", ctx.theme.fgMuted)
+		return action
+	}
+	lineH := ui.lineHeight(ctx) + ui.dp(ctx, 4)
+	for row in view.rows {
+		first := ui.cutTop(column, lineH)
+		timeW := ui.textSize(ui.textGet(ctx, 0, .Regular, row.time)).x + ui.dp(ctx, 8)
+		ui.label(ctx, ui.cutRight(&first, timeW), row.time, ctx.theme.fgMuted, align = .Right)
+		ui.pushClip(ctx, first)
+		ui.label(ctx, first, row.name, ctx.theme.fg, .Bold)
+		ui.popClip(ctx)
+		serverSettingsWrapped(
+			ctx,
+			column,
+			fmt.tprintf("%s · owner %s · removed by %s", row.place, row.owner, row.removedBy),
+			ctx.theme.fgMuted,
+		)
+		if len(row.reason) > 0 {
+			serverSettingsWrapped(
+				ctx,
+				column,
+				fmt.tprintf("Reason: %s", row.reason),
+				ctx.theme.fg,
+			)
+		}
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP * 2))
+	}
+	if view.hasMore {
+		moreRow := ui.cutTop(column, rowH)
+		moreControl := AdminControl {
+			label   = view.pending ? "Loading…" : "Load more",
+			enabled = !view.pending,
+		}
+		moreW := ui.textSize(ui.textGet(ctx, 0, .Regular, moreControl.label)).x
+		moreW += ui.dp(ctx, ctx.theme.padding * 3)
+		moreRect := ui.cutLeft(&moreRow, moreW)
+		if adminButton(ctx, &moreRect, ui.idOf("admin-removals-more", serverID), moreControl) {
+			action = .LoadMore
+		}
+	}
+	return action
 }

@@ -363,8 +363,8 @@ Since protocol 28 admins look after the server's storage and can remove any file
 ([protocol.md](protocol.md#attachment-moderation-protocol-28)). This is for admins only, like
 kick and ban: no role permission grants it, and the server checks the admin role in the
 statement that reads or changes. In the client: **Remove attachment…** in a file card's
-right-click menu, and **Storage** in Server settings after the Admin section (see the
-[user guide](user-guide.md#removing-files-and-storage)).
+right-click menu, and **Storage** and **Removed files** in Server settings after the Admin
+section (see the [user guide](user-guide.md#removing-files-and-storage)).
 
 - **Storage use.** An admin sees the bytes stored on the server, the configured capacity, the
   free space on the server's disk, and the 100 accounts that store the most, with their file
@@ -375,8 +375,14 @@ right-click menu, and **Storage** in Server settings after the Admin section (se
   where the file was, nobody can download it again, and it stops counting toward its owner's
   quota. A download in progress is cut off with the same sentence. The message's signature still
   verifies, because the server keeps everything the sender signed. An optional reason (at most
-  500 bytes) is written to the server's log with the file, the admin and the owner, and is
-  shown to nobody; nothing else records the removal.
+  500 bytes) is written to the server's log with the file, the admin and the owner.
+- **The removal log** (protocol 29). Every removal is also kept in a log on the server, with its
+  reason: when, whose file, which admin removed it (or "an operator" for a removal made with
+  SQL), where (the room, or a direct message), and the file's name unless it was encrypted (the
+  server never sees an encrypted file's name). Admins, and only admins, see it as **Removed
+  files** in Server settings, newest first, with **Load more** for older removals. Entries are
+  kept indefinitely; there are few, and each is small. A removal before protocol 29 is listed
+  without a reason, which was only in the server's log then.
 - **Who is told.** Everyone who may read the message hears of the removal at once: the room's
   members who may read it, or the two sides of a direct conversation, or for a file that was
   never sent, its owner.
@@ -384,7 +390,7 @@ right-click menu, and **Storage** in Server settings after the Admin section (se
   (`deploy/sql/attachment-usage.sql`, `deploy/sql/remove-attachment.sql`, see
   [deploy/README.md](../deploy/README.md#attachment-storage-and-removing-files)). The file is
   then deleted by the server's hourly pass, and clients see the removal on their next history
-  fetch.
+  fetch. The removal log lists it as removed by an operator, with the reason the operator gave.
 
 ## Direct Messages
 

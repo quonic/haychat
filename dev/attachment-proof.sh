@@ -40,6 +40,10 @@ set -euo pipefail
 #                 Then the operator helpers: deploy/sql/attachment-usage.sql lists the
 #                 accounts, and deploy/sql/remove-attachment.sql removes A's step 7 file, which
 #                 B's next history fetch lists as removed and the server refuses to send.
+#                 (Protocol 29, #138) attachment_removed names the message
+#                 (chatMessageID), and A's attach-removals lists both removals newest first:
+#                 the helper's with no admin and its -v reason, then A's with A's reason; the
+#                 cursor pages past the first, and B, not an admin, is refused the list.
 #  11. limits:    (F5) the second server allows 2 MiB per file and 3 MiB per account at a pace of
 #                 512 KiB/s. C's client refuses a file one byte over the size and, after C
 #                 stored 2 MiB, a 1.5 MiB file over the quota (D18); with attach-upload
@@ -463,7 +467,7 @@ error_line=$(expect_event b '"event":"attachment_error".*"direction":"download"'
 for client in a b; do
 	start=$astart
 	[[ $client == b ]] && start=$removal_start
-	expect_event "$client" "\"event\":\"attachment_removed\",\"serverID\":[0-9]+,\"blobID\":\"$big_blob\",\"roomID\":1,\"senderID\":$b_id,\"recipientID\":0}" \
+	expect_event "$client" "\"event\":\"attachment_removed\",\"serverID\":[0-9]+,\"blobID\":\"$big_blob\",\"roomID\":1,\"senderID\":$b_id,\"recipientID\":0,\"chatMessageID\":$big_message,\"directMessageID\":0}" \
 		"$start" >/dev/null
 done
 if [[ -n "$attachment_dir" ]]; then
@@ -495,13 +499,35 @@ start=$(lines b)
 expect_ok b "attach-remove $small_blob not an admin"
 expect_event b '"event":"protocol_error".*"Admin permission required"' "$start" >/dev/null
 
+# removals_page CLIENT [BEFORE_ID]: the attachment_removals line answering attach-removals.
+removals_page() {
+	local client=$1 before=${2:-} start
+	start=$(lines "$client")
+	expect_ok "$client" "attach-removals${before:+ $before}" >&2
+	expect_event "$client" "\"event\":\"attachment_removals\",\"serverID\":[0-9]+,\"beforeID\":${before:-0}," \
+		"$start"
+}
+# removal_entry BLOB OWNER REMOVER REASON MESSAGE NAME: one entry of an attachment_removals line.
+removal_entry() {
+	printf '"blobID":"%s","ownerID":%s,"removedByID":%s,"removedAt":"[^"]+","reason":"%s","roomID":1,"direct":false,"encrypted":false,"chatMessageID":%s,"directMessageID":0,"name":"%s"' \
+		"$1" "$2" "$3" "$4" "$5" "$6"
+}
+page=$(removals_page a)
+[[ "$page" =~ \"entries\":\[\{\"id\":[0-9]+,$(removal_entry "$big_blob" "$b_id" "$a_id" \
+	"proof of a removal" "$big_message" big.bin)\} ]] ||
+	fail "expected A's removal first in the removal log: $page"
+start=$(lines b)
+expect_ok b "attach-removals"
+expect_event b '"event":"protocol_error".*"Admin permission required"' "$start" >/dev/null
+
 # The operator helpers: usage lists both accounts, and a removal in SQL reaches B on its next
 # history fetch (the file goes with the server's hourly pass, or its next start).
 usage_out=$(proof_psql -v limit=10 -f "$repo_dir/deploy/sql/attachment-usage.sql")
 grep -q "att-a-$run_tag" <<<"$usage_out" || fail "attachment-usage.sql does not list A: $usage_out"
 owner_out=$(proof_psql -v owner="att-a-$run_tag" -f "$repo_dir/deploy/sql/attachment-usage.sql")
 grep -q "$small_blob" <<<"$owner_out" || fail "attachment-usage.sql -v owner does not list A's file"
-proof_psql -v blob="$small_blob" -f "$repo_dir/deploy/sql/remove-attachment.sql" >/dev/null 2>&1 ||
+proof_psql -v blob="$small_blob" -v reason="Removed by the operator" \
+	-f "$repo_dir/deploy/sql/remove-attachment.sql" >/dev/null 2>&1 ||
 	fail "remove-attachment.sql failed"
 if proof_psql -v blob="$small_blob" -f "$repo_dir/deploy/sql/remove-attachment.sql" \
 	>/dev/null 2>&1; then
@@ -516,6 +542,19 @@ start=$(lines b)
 expect_ok b "attach-download $small_blob $work_dir/b-small-raw.bin"
 expect_event b '"event":"attachment_error".*"error":"Attachment removed by an admin"' "$start" \
 	>/dev/null
+# The helper's removal heads the log, with no admin and its reason; A's follows, also on the
+# page before it.
+page=$(removals_page a)
+[[ "$page" =~ \"entries\":\[\{\"id\":([0-9]+),$(removal_entry "$small_blob" "$a_id" 0 \
+	"Removed by the operator" "$message_id" notes.txt)\},\{\"id\":[0-9]+,$(removal_entry \
+	"$big_blob" "$b_id" "$a_id" "proof of a removal" "$big_message" big.bin)\} ]] ||
+	fail "expected the SQL helper's removal first, with no admin: $page"
+helper_id=${BASH_REMATCH[1]}
+older=$(removals_page a "$helper_id")
+[[ "$older" =~ \"entries\":\[\{\"id\":[0-9]+,$(removal_entry "$big_blob" "$b_id" "$a_id" \
+	"proof of a removal" "$big_message" big.bin)\} ]] ||
+	fail "expected the page before the helper's removal to start with A's: $older"
+echo "[attachments] the removal log lists the SQL helper's removal and A's, newest first"
 
 stop_client a
 stop_client b

@@ -48,6 +48,14 @@ attachmentSQLTestRun :: proc(
 	append(&copied.removal.readerUserIds, ..result.removal.readerUserIds[:])
 	copied.accounts = make([dynamic]common.AttachmentAccountUsage, context.temp_allocator)
 	append(&copied.accounts, ..result.accounts[:])
+	copied.removals = make([dynamic]common.AttachmentRemovalEntry, context.temp_allocator)
+	for entry in result.removals {
+		kept := entry
+		kept.removedAt = strings.clone(entry.removedAt, context.temp_allocator)
+		kept.reason = strings.clone(entry.reason, context.temp_allocator)
+		kept.name = strings.clone(entry.name, context.temp_allocator)
+		append(&copied.removals, kept)
+	}
 	IPC__database_query_response_deinit(response)
 	return copied
 }
@@ -1258,10 +1266,16 @@ attachmentSQLTestRemove :: proc(
 	conn: pg.Conn,
 	userID: int,
 	blob: common.AttachmentBlobID,
+	reason := "",
 ) -> common.DatabaseAttachmentResult {
 	return attachmentSQLTestRun(
 		conn,
-		common.DatabaseAttachmentRequest{action = .Remove, userId = userID, blobId = blob},
+		common.DatabaseAttachmentRequest {
+			action = .Remove,
+			userId = userID,
+			blobId = blob,
+			reason = strings.clone(reason, context.temp_allocator),
+		},
 	)
 }
 
@@ -1687,4 +1701,352 @@ testAttachmentSQLRemovalFileIsDeletedByTheHourlyPassAgainstPostgreSQL :: proc(t:
 	assert(again.(StorageBlobsDeleted).deleted == 0, "expected a second pass to delete nothing")
 	assert(!os.exists(path), "expected the blob gone from the directory")
 	assert(attachmentSQLTestState(conn, blob) == "3", "expected the tombstone row kept")
+}
+
+// ── Removal log (protocol 29, #138) ─────────────────────────────────────────────────────
+
+// The DO block of deploy/sql/remove-attachment.sql, as the file has it: the test runs the
+// helper's own code, with the two settings its psql lines set.
+ATTACHMENT_SQL_TEST_REMOVE_HELPER :: #load("../deploy/sql/remove-attachment.sql", string)
+
+@(private = "file")
+attachmentSQLTestHelperBlock :: proc() -> string {
+	helper := ATTACHMENT_SQL_TEST_REMOVE_HELPER
+	start := strings.index(helper, "DO $$")
+	end := strings.last_index(helper, "$$;")
+	assert(start >= 0 && end > start, "expected one DO block in remove-attachment.sql")
+	return helper[start:end + 3]
+}
+
+// Runs the SQL helper's block for blob with reason; "" when it removed the blob, otherwise the
+// error PostgreSQL raised.
+@(private = "file")
+attachmentSQLTestRunHelper :: proc(
+	conn: pg.Conn,
+	blob: common.AttachmentBlobID,
+	reason: string,
+) -> string {
+	settings := fmt.tprintf(
+		"SELECT set_config('haychat.blob', '%s', false), " +
+		"set_config('haychat.reason', '%s', false)",
+		attachmentSQLTestHex(blob),
+		reason,
+	)
+	databaseDefaultRoomTestExec(conn, "set the helper's settings", settings)
+	// The test's schema lives in a transaction: a refusal must undo only the helper's block.
+	databaseDefaultRoomTestExec(conn, "mark the helper's savepoint", "SAVEPOINT helper")
+	block, _ := strings.clone_to_cstring(attachmentSQLTestHelperBlock(), context.temp_allocator)
+	result := pg.exec(conn, block)
+	defer pg.clear(result)
+	if pg.result_status(result) == .Command_OK {
+		databaseDefaultRoomTestExec(conn, "keep the helper's change", "RELEASE SAVEPOINT helper")
+		return ""
+	}
+	message := strings.clone_from_cstring(pg.result_error_message(result), context.temp_allocator)
+	databaseDefaultRoomTestExec(conn, "undo the helper", "ROLLBACK TO SAVEPOINT helper")
+	return message
+}
+
+// One log row of blob as text: owner/remover/reason/room/direct/encrypted/chat/direct
+// message/name ('-' for NULL), or 'none'.
+@(private = "file")
+attachmentSQLTestLogRow :: proc(conn: pg.Conn, blob: common.AttachmentBlobID) -> string {
+	return databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT COALESCE((SELECT string_agg(owner_user_id || '/' || " +
+			"COALESCE(removed_by_user_id::text, '-') || '/' || COALESCE(reason, '-') || '/' || " +
+			"COALESCE(room_id::text, '-') || '/' || direct || '/' || encrypted || '/' || " +
+			"COALESCE(chat_message_id::text, '-') || '/' || " +
+			"COALESCE(direct_message_id::text, '-') || '/' || COALESCE(name, '-'), ';') " +
+			"FROM attachment_removals WHERE blob_id = decode('%s', 'hex')), 'none')",
+			attachmentSQLTestHex(blob),
+		),
+	)
+}
+
+@(private = "file")
+attachmentSQLTestLogCount :: proc(conn: pg.Conn) -> string {
+	return databaseAdminTestValue(conn, "SELECT count(*)::text FROM attachment_removals")
+}
+
+// #138: the removal statement writes exactly one log row with the reason, in the same
+// statement as the tombstone; a refused removal writes none; the SQL helper writes one with no
+// admin; and the row outlives the sweeper deleting the tombstone's row.
+@(test)
+testAttachmentRemovalLogAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_removal_log")
+	alice := databaseAdminTestUser(conn, "log-alice")
+	bob := databaseAdminTestUser(conn, "log-bob")
+	admin := databaseAdminTestUser(conn, "log-admin")
+	databaseAdminTestGrant(conn, admin)
+	room := attachmentSQLTestRoom(conn, "log-room")
+	attachmentSQLTestJoin(conn, room, alice)
+	attachmentSQLTestJoin(conn, room, bob)
+
+	blob, sha := attachmentSQLTestReady(conn, alice, 100, roomID = room)
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, 100, sha, "report.pdf")}
+	_, messageID := attachmentSQLTestPost(conn, room, alice, "the report", refs[:])
+	assert(messageID > 0, "expected the message stored")
+
+	// Refusals write nothing: a non-admin, an unknown blob, an upload in progress.
+	assert(
+		attachmentSQLTestRemove(conn, bob, blob, "mine now").outcome == .NotAdmin,
+		"expected a non-admin refused",
+	)
+	assert(
+		attachmentSQLTestRemove(conn, admin, attachmentSQLTestBlob(), "gone").outcome ==
+		.NotFound,
+		"expected an unknown blob not found",
+	)
+	uploading: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, bob, 10, roomID = room, blobOut = &uploading) == .Applied,
+		"expected an upload",
+	)
+	assert(
+		attachmentSQLTestRemove(conn, admin, uploading).outcome == .NotFound,
+		"expected an upload in progress not found",
+	)
+	assert(attachmentSQLTestLogCount(conn) == "0", "expected no log row for a refusal")
+
+	removed := attachmentSQLTestRemove(conn, admin, blob, "Reported as spam")
+	assert(removed.outcome == .Applied, fmt.tprintf("expected the removal, got %v", removed))
+	logged := attachmentSQLTestLogRow(conn, blob)
+	assert(
+		logged ==
+		fmt.tprintf(
+			"%d/%d/Reported as spam/%d/false/false/%d/-/report.pdf",
+			alice,
+			admin,
+			room,
+			messageID,
+		),
+		fmt.tprintf("expected one log row with the reason, got %s", logged),
+	)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT (r.removed_at = a.removed_at)::text FROM attachment_removals r " +
+				"JOIN attachments a ON a.blob_id = r.blob_id WHERE r.blob_id = decode('%s', 'hex')",
+				attachmentSQLTestHex(blob),
+			),
+		) ==
+		"true",
+		"expected the log row written in the tombstone's statement (one transaction time)",
+	)
+	assert(
+		attachmentSQLTestRemove(conn, admin, blob, "again").outcome == .NotFound &&
+		attachmentSQLTestLogCount(conn) == "1",
+		"expected a second removal to write no second row",
+	)
+
+	// An encrypted file for a direct conversation: no name, direct, and no reason.
+	secret, _ := attachmentSQLTestReady(conn, bob, 40, recipientID = alice, encrypted = true)
+	assert(
+		attachmentSQLTestRemove(conn, admin, secret).outcome == .Applied,
+		"expected the encrypted file removed",
+	)
+	assert(
+		attachmentSQLTestLogRow(conn, secret) ==
+		fmt.tprintf("%d/%d/-/-/true/true/-/-/-", bob, admin),
+		fmt.tprintf(
+			"expected an encrypted direct file logged without a name, got %s",
+			attachmentSQLTestLogRow(conn, secret),
+		),
+	)
+
+	// The SQL helper (deploy/sql/remove-attachment.sql): the same tombstone, with a row whose
+	// admin is NULL, and its refusals change nothing.
+	helped, helpedSHA := attachmentSQLTestReady(conn, bob, 30, roomID = room)
+	helpedRefs := [1]common.AttachmentRef{attachmentSQLTestRef(helped, 30, helpedSHA, "b.txt")}
+	_, helpedMessage := attachmentSQLTestPost(conn, room, bob, "", helpedRefs[:])
+	assert(helpedMessage > 0, "expected bob's message stored")
+	failure := attachmentSQLTestRunHelper(conn, helped, "Court order 7")
+	assert(failure == "", fmt.tprintf("expected the helper to remove the blob: %s", failure))
+	assert(attachmentSQLTestState(conn, helped) == "3", "expected the helper's tombstone")
+	assert(
+		attachmentSQLTestLogRow(conn, helped) ==
+		fmt.tprintf("%d/-/Court order 7/%d/false/false/%d/-/b.txt", bob, room, helpedMessage),
+		fmt.tprintf(
+			"expected the helper's row with no admin, got %s",
+			attachmentSQLTestLogRow(conn, helped),
+		),
+	)
+	again := attachmentSQLTestRunHelper(conn, helped, "")
+	assert(
+		strings.contains(again, "already removed") && attachmentSQLTestLogCount(conn) == "3",
+		fmt.tprintf("expected a second helper run refused with no row, got %q", again),
+	)
+	plain, _ := attachmentSQLTestReady(conn, bob, 20, roomID = room)
+	badReason := attachmentSQLTestRunHelper(
+		conn,
+		plain,
+		strings.repeat("r", 501, context.temp_allocator),
+	)
+	assert(
+		strings.contains(badReason, "at most 500 bytes") &&
+		attachmentSQLTestState(conn, plain) == "1" &&
+		attachmentSQLTestLogCount(conn) == "3",
+		fmt.tprintf("expected a long reason refused with nothing changed, got %q", badReason),
+	)
+	assert(attachmentSQLTestRunHelper(conn, plain, "") == "", "expected the helper with no reason")
+	assert(
+		attachmentSQLTestLogRow(conn, plain) ==
+		fmt.tprintf("%d/-/-/%d/false/false/-/-/-", bob, room),
+		fmt.tprintf(
+			"expected an unsent file logged with no reason or name, got %s",
+			attachmentSQLTestLogRow(conn, plain),
+		),
+	)
+
+	// The room goes: its messages with it, then the sweeper deletes the tombstone's row. The
+	// log row stays, its room and message links NULL.
+	databaseDefaultRoomTestExec(
+		conn,
+		"delete the room",
+		fmt.tprintf("DELETE FROM rooms WHERE id = %d", room),
+	)
+	attachmentSQLTestAge(conn, blob, 2, 2)
+	swept := attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest{action = .Sweep, pendingHours = 24, limit = 100},
+	)
+	sweptBlob := false
+	for entry in swept.blobs {
+		sweptBlob ||= entry.blobId == blob
+	}
+	assert(sweptBlob, fmt.tprintf("expected the tombstone's row swept, got %v", swept.blobs))
+	assert(attachmentSQLTestState(conn, blob) == "none", "expected the attachment row deleted")
+	assert(
+		attachmentSQLTestLogRow(conn, blob) ==
+		fmt.tprintf("%d/%d/Reported as spam/-/false/false/-/-/report.pdf", alice, admin),
+		fmt.tprintf(
+			"expected the log row kept with its links gone, got %s",
+			attachmentSQLTestLogRow(conn, blob),
+		),
+	)
+}
+
+// #138: the log lists only for admins, newest first, paged by row ID without dropping or
+// repeating a row at a page boundary.
+@(test)
+testAttachmentRemovalLogListingAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_removal_list")
+	alice := databaseAdminTestUser(conn, "list-alice")
+	admin := databaseAdminTestUser(conn, "list-admin")
+	helper := databaseAdminTestUser(conn, "list-helper")
+	databaseAdminTestGrant(conn, admin)
+	databaseDefaultRoomTestExec(
+		conn,
+		"a role with every assignable permission",
+		fmt.tprintf(
+			"INSERT INTO server_roles (name, permissions) VALUES ('list-helpers', %d); " +
+			"INSERT INTO user_server_roles (user_id, role_id) " +
+			"SELECT %d, id FROM server_roles WHERE name = 'list-helpers'",
+			transmute(u64)common.SERVER_PERMISSIONS_ASSIGNABLE,
+			helper,
+		),
+	)
+	room := attachmentSQLTestRoom(conn, "list-room")
+	attachmentSQLTestJoin(conn, room, alice)
+
+	list :: proc(conn: pg.Conn, userID, beforeID, limit: int) -> common.DatabaseAttachmentResult {
+		return attachmentSQLTestRun(
+			conn,
+			common.DatabaseAttachmentRequest {
+				action = .Removals,
+				userId = userID,
+				beforeId = beforeID,
+				limit = limit,
+			},
+		)
+	}
+	empty := list(conn, admin, 0, 2)
+	assert(
+		empty.outcome == .Applied && len(empty.removals) == 0 && !empty.hasMore,
+		fmt.tprintf("expected an empty log, got %v", empty),
+	)
+
+	REMOVALS :: 5
+	blobs: [REMOVALS]common.AttachmentBlobID
+	for index in 0 ..< REMOVALS {
+		blobs[index], _ = attachmentSQLTestReady(conn, alice, u64(10 + index), roomID = room)
+		reason := fmt.tprintf("reason %d", index)
+		assert(
+			attachmentSQLTestRemove(conn, admin, blobs[index], reason).outcome == .Applied,
+			"expected the removal",
+		)
+	}
+	for userID in ([]int{alice, helper}) {
+		refused := list(conn, userID, 0, 2)
+		assert(
+			refused.outcome == .NotAdmin && len(refused.removals) == 0,
+			fmt.tprintf("expected user %d refused with nothing, got %v", userID, refused),
+		)
+	}
+
+	// Pages of two: 5 4 | 3 2 | 1, each strictly older than the last.
+	seen := make([dynamic]int, context.temp_allocator)
+	cursor := 0
+	pages := 0
+	for {
+		page := list(conn, admin, cursor, 2)
+		assert(page.outcome == .Applied, "expected the admin's page")
+		pages += 1
+		for entry in page.removals {
+			assert(
+				cursor == 0 || entry.id < cursor,
+				fmt.tprintf("expected entry %d older than the cursor %d", entry.id, cursor),
+			)
+			if len(seen) > 0 {
+				assert(entry.id < seen[len(seen) - 1], "expected newest first")
+			}
+			append(&seen, entry.id)
+		}
+		if !page.hasMore {
+			assert(len(page.removals) == 1, fmt.tprintf("expected a last page of 1, got %v", page))
+			break
+		}
+		assert(len(page.removals) == 2, "expected a full page before hasMore")
+		cursor = page.removals[len(page.removals) - 1].id
+		assert(pages < 10, "expected the paging to end")
+	}
+	assert(
+		pages == 3 && len(seen) == REMOVALS,
+		fmt.tprintf("expected 5 rows in 3 pages, got %v in %d", seen, pages),
+	)
+	// The newest page names the last removal with every field.
+	first := list(conn, admin, 0, 50)
+	assert(len(first.removals) == REMOVALS && !first.hasMore, "expected every row on one page")
+	newest := first.removals[0]
+	assert(
+		newest.blobId == blobs[REMOVALS - 1] &&
+		newest.ownerUserId == alice &&
+		newest.removedByUserId == admin &&
+		newest.reason == fmt.tprintf("reason %d", REMOVALS - 1) &&
+		newest.roomId == room &&
+		!newest.direct &&
+		!newest.encrypted &&
+		newest.chatMessageId == 0 &&
+		newest.directMessageId == 0 &&
+		newest.name == "" &&
+		len(newest.removedAt) > 0,
+		fmt.tprintf("expected the newest removal first, got %v", newest),
+	)
+	// An exact page boundary: a full page with nothing older says hasMore false.
+	exact := list(conn, admin, first.removals[1].id, 3)
+	assert(
+		len(exact.removals) == 3 && !exact.hasMore,
+		fmt.tprintf("expected the last three rows and no more, got %v", exact),
+	)
 }

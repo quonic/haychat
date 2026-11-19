@@ -1607,3 +1607,144 @@ testAttachmentsOnMessagesMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		"expected schema validation to require migration 15's checks",
 	)
 }
+
+// Migration 16 (#138) upgrades a version 15 database: one log row for every admin or SQL
+// removal (a tombstone that was Ready or Bound, so completed_at is set), none for the
+// tombstones of cancelled or mismatched uploads, whoever their owner is, and nothing else
+// changes.
+@(test)
+testAttachmentRemovalsMigrationUpgradesVersion15AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "attachment_removals_v15")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:15])
+	// a: an admin (1) removed user 2's plaintext file on a lounge message;
+	// b: the admin removed its own unsent file; c: an operator removed (SQL, no remover) user
+	// 2's encrypted file on a direct message; d: user 2 cancelled an upload; e: the admin's own
+	// upload failed its hash (owner and remover both the admin); f: a Ready file.
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 15 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL +
+		"; INSERT INTO attachments (blob_id, owner_user_id, room_id, peer_user_id, encrypted, " +
+		"state, size, received, sha256, chat_message_id, direct_message_id, completed_at, " +
+		"bound_at, removed_by_user_id, removed_at, position, name, media_type) VALUES " +
+		"(decode(repeat('a1', 16), 'hex'), 2, 2, NULL, false, 3, 5, 5, " +
+		"decode(repeat('0b', 32), 'hex'), 2, NULL, now() - interval '3 hours', " +
+		"now() - interval '3 hours', 1, now() - interval '2 hours', 0, 'a.txt', 'text/plain'), " +
+		"(decode(repeat('b2', 16), 'hex'), 1, 1, NULL, false, 3, 6, 6, " +
+		"decode(repeat('0c', 32), 'hex'), NULL, NULL, now() - interval '3 hours', NULL, 1, " +
+		"now() - interval '90 minutes', NULL, NULL, NULL), " +
+		"(decode(repeat('c3', 16), 'hex'), 2, NULL, 1, true, 3, 7, 7, " +
+		"decode(repeat('0d', 32), 'hex'), NULL, 2, now() - interval '3 hours', " +
+		"now() - interval '3 hours', NULL, now() - interval '1 hour', 0, NULL, NULL), " +
+		"(decode(repeat('d4', 16), 'hex'), 2, 1, NULL, false, 3, 8, 2, NULL, NULL, NULL, " +
+		"NULL, NULL, 2, now() - interval '30 minutes', NULL, NULL, NULL), " +
+		"(decode(repeat('e5', 16), 'hex'), 1, 1, NULL, false, 3, 9, 9, NULL, NULL, NULL, " +
+		"NULL, NULL, 1, now() - interval '20 minutes', NULL, NULL, NULL), " +
+		"(decode(repeat('f6', 16), 'hex'), 2, 1, NULL, false, 1, 4, 4, " +
+		"decode(repeat('0e', 32), 'hex'), NULL, NULL, now(), NULL, NULL, NULL, NULL, NULL, " +
+		"NULL)",
+	)
+	ATTACHMENTS_SQL ::
+		"SELECT string_agg(encode(blob_id, 'hex') || ':' || state || ':' || " +
+		"COALESCE(removed_by_user_id::text, '-'), ',' ORDER BY id) FROM attachments"
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+	attachments := databaseMigrationTestValue(conn, ATTACHMENTS_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:16])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 15, version = 16},
+		fmt.tprintf("expected only migration 16 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:16])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept &&
+		databaseMigrationTestValue(conn, ATTACHMENTS_SQL) == attachments,
+		"expected every account, room, message and attachment intact",
+	)
+	backfilled := databaseMigrationTestValue(
+		conn,
+		"SELECT string_agg(substr(encode(r.blob_id, 'hex'), 1, 2) || '/' || r.owner_user_id || " +
+		"'/' || COALESCE(r.removed_by_user_id::text, '-') || '/' || " +
+		"COALESCE(r.reason, '-') || '/' || COALESCE(r.room_id::text, '-') || '/' || r.direct || " +
+		"'/' || r.encrypted || '/' || COALESCE(r.chat_message_id::text, '-') || '/' || " +
+		"COALESCE(r.direct_message_id::text, '-') || '/' || COALESCE(r.name, '-') || '/' || " +
+		"(r.removed_at = a.removed_at), ',' ORDER BY r.id) FROM attachment_removals r " +
+		"JOIN attachments a ON a.blob_id = r.blob_id",
+	)
+	assert(
+		backfilled ==
+		"a1/2/1/-/2/false/false/2/-/a.txt/true," +
+		"b2/1/1/-/1/false/false/-/-/-/true," +
+		"c3/2/-/-/-/true/true/-/2/-/true",
+		fmt.tprintf(
+			"expected the admin, own-file and SQL removals backfilled, oldest first, and no " +
+			"cancelled upload, got %s",
+			backfilled,
+		),
+	)
+
+	probes := [?]string {
+		"INSERT INTO attachment_removals (blob_id, owner_user_id, reason) " +
+		"VALUES (decode(repeat('01', 16), 'hex'), 1, '')",
+		"INSERT INTO attachment_removals (blob_id, owner_user_id, reason) " +
+		"VALUES (decode(repeat('01', 16), 'hex'), 1, repeat('r', 501))",
+		"INSERT INTO attachment_removals (blob_id, owner_user_id, name) " +
+		"VALUES (decode(repeat('01', 16), 'hex'), 1, '')",
+		"INSERT INTO attachment_removals (blob_id, owner_user_id) " +
+		"VALUES (decode(repeat('01', 15), 'hex'), 1)",
+		"INSERT INTO attachment_removals (blob_id, owner_user_id, chat_message_id, " +
+		"direct_message_id) VALUES (decode(repeat('01', 16), 'hex'), 1, 1, 1)",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+	// A log, not a copy of attachments: the row stays when the attachment row goes, and its
+	// message link turns NULL with the message.
+	databaseDefaultRoomTestExec(
+		conn,
+		"delete the attachment rows and the lounge message",
+		"DELETE FROM attachments; DELETE FROM chat_messages WHERE id = 2",
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT count(*) || '/' || count(chat_message_id) FROM attachment_removals",
+		) ==
+		"3/0",
+		"expected every log row kept and the deleted message's link NULL",
+	)
+}
+
+@(test)
+testAttachmentRemovalsMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[15]
+	assert(
+		migration.version == 16 && migration.name == "attachment removals",
+		fmt.tprintf("expected migration 16 to be attachment removals, got %v", migration),
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN") &&
+		!strings.contains(migration.sql, "REFERENCES attachments"),
+		"expected migration 16 to drop nothing and not to reference attachments",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "attachment_removals columns"),
+		"expected schema validation to require migration 16's checks",
+	)
+}

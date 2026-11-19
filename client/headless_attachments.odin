@@ -14,10 +14,15 @@ package client
 // Protocol 28 (F3): attach-usage and attach-remove BLOB [REASON...] (admins), answered by
 // attachment_usage and admin_result attachment-remove; every reader of a removed file's
 // message hears attachment_removed (after State marked its files removed).
+//
+// Protocol 29 (#138): attachment_removed also names the message (chatMessageID or
+// directMessageID); attach-removals [BEFORE_ID] (admins) asks for a page of the removal log,
+// answered by attachment_removals.
 
 import "../common"
 import "core:fmt"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 
@@ -545,14 +550,44 @@ headlessAttachDownloadMessage :: proc(harness: ^HeadlessHarness, command: ^Headl
 
 // attachment_removed: an admin removed blobID. roomID names a room message's room (or the room
 // an unbound blob was uploaded to); senderID and recipientID a direct message's two sides
-// (senderID is the owner otherwise). Printed before State marks the files.
+// (senderID is the owner otherwise). Protocol 29: chatMessageID or directMessageID is the
+// message the file was on (0 for none). Printed before State marks the files.
 HeadlessAttachmentRemovedJSON :: struct {
-	event:       string,
-	serverID:    int,
-	blobID:      string,
-	roomID:      int,
-	senderID:    int,
-	recipientID: int,
+	event:           string,
+	serverID:        int,
+	blobID:          string,
+	roomID:          int,
+	senderID:        int,
+	recipientID:     int,
+	chatMessageID:   int,
+	directMessageID: int,
+}
+
+// One removal log entry (protocol 29): removedByID 0 for a removal made in SQL; name "" for an
+// encrypted file (encrypted true) or one never sent.
+HeadlessAttachmentRemovalJSON :: struct {
+	id:              int,
+	blobID:          string,
+	ownerID:         int,
+	removedByID:     int,
+	removedAt:       string,
+	reason:          string,
+	roomID:          int,
+	direct:          bool,
+	encrypted:       bool,
+	chatMessageID:   int,
+	directMessageID: int,
+	name:            string,
+}
+
+// attachment_removals: a page of the removal log, newest first; beforeID the cursor it answers
+// (0 for the newest page) and hasMore whether older entries follow.
+HeadlessAttachmentRemovalsJSON :: struct {
+	event:    string,
+	serverID: int,
+	beforeID: int,
+	hasMore:  bool,
+	entries:  []HeadlessAttachmentRemovalJSON,
 }
 
 HeadlessAttachmentUsageAccountJSON :: struct {
@@ -602,6 +637,44 @@ headlessRenderAttachmentModerationEvent :: proc(
 				roomID = notice.roomId,
 				senderID = notice.senderId,
 				recipientID = notice.recipientId,
+				chatMessageID = notice.chatMessageId,
+				directMessageID = notice.directMessageId,
+			},
+			allocator,
+		)
+		return line, kind, true
+	case .AttachmentRemovalsReceived:
+		kind = .AttachmentRemovals
+		page := &event.attachmentRemovals
+		entries := make(
+			[]HeadlessAttachmentRemovalJSON,
+			len(page.entries),
+			context.temp_allocator,
+		)
+		for entry, index in page.entries {
+			blobID := entry.blobId
+			entries[index] = {
+				id              = entry.id,
+				blobID          = headlessHex(blobID[:], context.temp_allocator),
+				ownerID         = entry.ownerUserId,
+				removedByID     = entry.removedByUserId,
+				removedAt       = entry.removedAt,
+				reason          = entry.reason,
+				roomID          = entry.roomId,
+				direct          = entry.direct,
+				encrypted       = entry.encrypted,
+				chatMessageID   = entry.chatMessageId,
+				directMessageID = entry.directMessageId,
+				name            = entry.name,
+			}
+		}
+		line = headlessMarshal(
+			HeadlessAttachmentRemovalsJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				beforeID = page.beforeId,
+				hasMore = page.hasMore,
+				entries = entries,
 			},
 			allocator,
 		)
@@ -674,5 +747,29 @@ headlessCommandAttachRemove :: proc(harness: ^HeadlessHarness, command: ^Headles
 			serverID = serverID,
 			blobID = command.args[0],
 		},
+	)
+}
+
+// attach-removals [BEFORE_ID]
+headlessCommandAttachRemovals :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	beforeID := 0
+	if command.argCount > 0 {
+		value, ok := strconv.parse_int(command.args[0])
+		if !ok || value < 0 {
+			headlessWriteError(harness, command.name, "BEFORE_ID must be a removal ID (0 or more)")
+			return
+		}
+		beforeID = value
+	}
+	state := &harness.state
+	serverID := state.selected_server_id
+	if errorMessage := State_requestAttachmentRemovals(state, serverID, beforeID);
+	   len(errorMessage) > 0 {
+		headlessWriteError(harness, command.name, errorMessage)
+		return
+	}
+	headlessWriteJSON(
+		harness,
+		HeadlessAttachmentRequestJSON{ok = true, cmd = command.name, serverID = serverID},
 	)
 }

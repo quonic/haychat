@@ -1204,6 +1204,8 @@ MainRouterState_handleAttachmentResult :: proc(
 		MainRouterState_attachmentRemoveResult(pm, state, request, result)
 	case .Usage:
 		MainRouterState_attachmentUsageResult(pm, state, request, result)
+	case .Removals:
+		MainRouterState_attachmentRemovalsResult(pm, state, request, result)
 	case .TombstoneFiles:
 		MainRouterState_attachmentTombstoneFilesResult(pm, state, result)
 	}
@@ -1434,7 +1436,7 @@ MainRouterState_attachmentDatabaseFailed :: proc(
 		attachments.sweepInFlight = false
 	case .Known:
 		attachmentEndScan(attachments)
-	case .Remove, .Usage:
+	case .Remove, .Usage, .Removals:
 		if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
 			MainRouterState_sendProtocolError(
 				pm,

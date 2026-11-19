@@ -120,6 +120,8 @@ PendingDBRequest :: struct {
 	attachmentRequestID:   u32,
 	attachmentSize:        u64,
 	attachmentOffset:      u64,
+	// Removals (protocol 29): the page's cursor, echoed in ServerAdminAttachmentRemovals.
+	attachmentBeforeID:    int,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -1545,6 +1547,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAdminRemoveAttachment(pm, state, peerID, packet.payload)
 	case .ClientAdminAttachmentUsage:
 		MainRouterState_handleClientAdminAttachmentUsage(pm, state, peerID, packet.payload)
+	case .ClientAdminListAttachmentRemovals:
+		MainRouterState_handleClientAdminListAttachmentRemovals(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
