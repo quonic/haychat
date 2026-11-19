@@ -355,8 +355,6 @@ viewComposerChips :: proc(
 			conversationID,
 			index,
 		)
-		// Registers the chip for automation; a press on it does nothing else.
-		_ = ui.interact(ctx, chipID, rect)
 		border := chip.failed ? ctx.theme.danger : ctx.theme.border
 		ui.fillRoundedRect(ctx, rect, radius, border)
 		ui.fillRoundedRect(ctx, ui.shrink(rect, max(1, ui.dp(ctx, 1))), radius, ctx.theme.elevated)
@@ -370,10 +368,13 @@ viewComposerChips :: proc(
 			conversationID,
 			index,
 		)
-		if ui.button(ctx, removeID, removeRect, "✕", {align = .Center, color = ctx.theme.fgMuted}) {
+		if ui.button(ctx, removeID, removeRect, "×", {align = .Center, color = ctx.theme.fgMuted}) {
 			action.removeIndex = index
 		}
 		ui.tooltip(ctx, removeID, removeRect, "Remove from the message")
+		// Registers the chip for automation after its remove button, which takes a press
+		// first; a press elsewhere on the chip does nothing.
+		_ = ui.interact(ctx, chipID, rect)
 		{
 			ui.pushClip(ctx, inner)
 			defer ui.popClip(ctx)
@@ -480,14 +481,25 @@ viewAttachmentRemoveDialog :: proc(state: ^State, ctx: ^ui.Context) {
 	ui.wrappedLabel(ctx, ui.cutTop(&content, textH), view.text, ctx.theme.fgMuted)
 	_ = ui.cutTop(&content, gap)
 	ui.label(ctx, ui.cutTop(&content, ui.lineHeight(ctx)), "Reason (optional)", ctx.theme.fgMuted)
-	submitted := serverSettingsField(
+	if !dialog.focused {
+		dialog.focused = true
+		ui.focusTextInput(ctx, reasonID)
+	}
+	// Enter removes, with or without a reason; the field stays one line.
+	reasonResult := ui.textInput(
 		ctx,
-		ui.cutTop(&content, inputH),
 		reasonID,
+		ui.cutTop(&content, inputH),
 		&dialog.reason,
 		"Why it was removed",
 		common.ATTACHMENT_REMOVE_REASON_MAX_BYTES,
 	)
+	for index := len(dialog.reason) - 1; index >= 0; index -= 1 {
+		if dialog.reason[index] == '\n' || dialog.reason[index] == '\r' {
+			ordered_remove(&dialog.reason, index)
+		}
+	}
+	submitted := reasonResult.entered
 	_ = ui.cutTop(&content, gap)
 	if statusH > 0 {
 		color := view.statusError ? ctx.theme.danger : ctx.theme.fgMuted

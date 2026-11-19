@@ -270,6 +270,18 @@ testComposerChipsFollowTheirUploads :: proc(t: ^testing.T) {
 			fmt.tprintf("expected files refused without AttachFiles, got %q", denied),
 		)
 	}
+	// The transfer worker stops (a reconfigure): uploads still running fail, and their transfer
+	// IDs, which a new worker hands out again, no longer match anything.
+	uiTestChip(&state, 0, ATTACHMENT_TEST_PEER, 12, .Uploading)
+	State_stopTransfers(&state)
+	dmChips := State_composerFiles(&state, UI_TEST_SERVER, 0, ATTACHMENT_TEST_PEER)
+	assert(
+		len(dmChips) == 1 &&
+		dmChips[0].status == .Failed &&
+		dmChips[0].transferID == 0 &&
+		dmChips[0].error == "The connection was lost; try again",
+		fmt.tprintf("expected the running upload failed by the stop, got %v", dmChips),
+	)
 	// Attachments off: no paperclip at all.
 	State_serverConnection(&state, UI_TEST_SERVER).attachmentLimits = {}
 	view = buildComposerAttachmentsView(&state, UI_TEST_SERVER, 0, ATTACHMENT_TEST_PEER)

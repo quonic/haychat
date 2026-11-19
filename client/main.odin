@@ -246,6 +246,8 @@ State_transferWorker :: proc(state: ^State) -> ^ClientTransferWorker {
 State_stopTransfers :: proc(state: ^State) {
 	ClientTransferWorker_stop(state.transferWorker)
 	state.transferWorker = nil
+	// A new worker numbers its transfers from 1 again: chips and saves of this one end here.
+	State_attachmentUITransfersStopped(state)
 }
 
 // Stops the network worker without closing any session, applying the events it had already

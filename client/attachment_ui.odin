@@ -138,6 +138,9 @@ State_composerAttachBlocked :: proc(state: ^State, serverID, roomID, peerUserID:
 		return NOT_CONNECTED_MESSAGE
 	}
 	if roomID > 0 {
+		if !State_roomAllowsChat(state, serverID, roomID) {
+			return ROOM_VOICE_ONLY_NOTE
+		}
 		if !State_hasRoomPermission(state, serverID, roomID, .SendMessages) {
 			return ROOM_SEND_NOT_PERMITTED_NOTE
 		}
@@ -576,7 +579,7 @@ attachmentSaveErrorText :: proc(message: string) -> string {
 	case common.ATTACHMENT_NOT_FOUND_MESSAGE, common.ATTACHMENT_UNAVAILABLE_MESSAGE:
 		return ATTACHMENT_UNAVAILABLE_TEXT
 	case "connection lost":
-		return "The connection was lost; save it again"
+		return "The connection was lost; try again"
 	case "":
 		return "The file could not be saved"
 	}
@@ -673,6 +676,35 @@ State_attachmentUITransferEvent :: proc(state: ^State, event: ^ClientTransferEve
 			}
 			return
 		}
+	}
+}
+
+// The transfer worker stopped (a reconfigure, or the end): its transfers end without events,
+// so the chips still uploading and the cards still saving fail here, and their transfer IDs
+// are never matched against a new worker's.
+State_attachmentUITransfersStopped :: proc(state: ^State) {
+	for &file in state.composerFiles {
+		if file.status == .Uploading {
+			file.status = .Failed
+			file.transferID = 0
+			delete(file.error)
+			file.error = strings.clone(attachmentSaveErrorText("connection lost"))
+		}
+	}
+	for index := len(state.attachmentSaves) - 1; index >= 0; index -= 1 {
+		save := &state.attachmentSaves[index]
+		if save.status != .Saving {
+			continue
+		}
+		if save.cancelling {
+			AttachmentSave_deinit(save)
+			ordered_remove(&state.attachmentSaves, index)
+			continue
+		}
+		save.status = .Failed
+		save.transferID = 0
+		delete(save.error)
+		save.error = strings.clone(attachmentSaveErrorText("connection lost"))
 	}
 }
 
@@ -842,6 +874,8 @@ AttachmentRemoveDialog :: struct {
 	reason: [dynamic]u8,
 	sent:   bool,
 	error:  string, // a refusal before anything was sent
+	// The view put the keyboard in the reason field once (the dialog's first frame).
+	focused: bool,
 }
 
 AttachmentRemoveDialog_deinit :: proc(dialog: ^AttachmentRemoveDialog) {
