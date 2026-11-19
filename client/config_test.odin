@@ -917,8 +917,8 @@ testEncryptionKeyNeedsAnIdentityKeyAndIsCloned :: proc(t: ^testing.T) {
 }
 
 // Protocol 25 (#43 G2): Use an invite code is stored per server as use_invite_code (false or
-// left out while off, as the JSON writer decides), survives a round trip and a clone, and sets the transport's registering. The code
-// itself is never in the config.
+// left out while off, as the JSON writer decides) and survives a round trip and a clone. The
+// code itself is never in the config.
 @(test)
 testUseInviteCodeConfigKeyRoundTrips :: proc(t: ^testing.T) {
 	config := Config {

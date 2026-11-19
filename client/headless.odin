@@ -2620,7 +2620,10 @@ headlessCommandStatus :: proc(harness: ^HeadlessHarness, command: ^HeadlessParse
 		result.signUpMessage = connection.signUpMessage
 		result.registrationMode = headlessRegistrationModeName(connection.registrationMode)
 		result.isRestricted = connection.isRestricted
-		result.pendingRegistrations = State_pendingRegistrationCount(state, state.selected_server_id)
+		result.pendingRegistrations = State_pendingRegistrationCount(
+			state,
+			state.selected_server_id,
+		)
 	}
 	headlessWriteJSON(harness, result)
 }

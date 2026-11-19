@@ -224,7 +224,8 @@ parseHaychatLink :: proc(
 		if name != "key" {
 			continue
 		}
-		parsed, keyOK := common.identityPublicKeyFromHex(strings.to_lower(value, context.temp_allocator))
+		lowerValue := strings.to_lower(value, context.temp_allocator)
+		parsed, keyOK := common.identityPublicKeyFromHex(lowerValue)
 		if hasKey || !keyOK || len(value) != 2 * len(common.IdentityPublicKeyBytes{}) {
 			return {}, .BadKey
 		}
@@ -281,7 +282,13 @@ LinkServerMatch :: enum u8 {
 }
 
 // Which configured server the link names, and whether its key agrees with the pin.
-linkServerMatch :: proc(config: Config, link: HaychatLink) -> (match: LinkServerMatch, serverID: int) {
+linkServerMatch :: proc(
+	config: Config,
+	link: HaychatLink,
+) -> (
+	match: LinkServerMatch,
+	serverID: int,
+) {
 	for server in config.servers {
 		if !strings.equal_fold(server.host, link.host) || server.port != link.port {
 			continue

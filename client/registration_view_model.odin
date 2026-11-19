@@ -121,8 +121,10 @@ buildSignUpView :: proc(state: ^State, allocator := context.temp_allocator) -> (
 		view.showCheckAgain = connection.status != .Registering
 	case .Declined:
 		view.title = strings.clone("Sign-up declined", allocator)
-		view.text =
-			len(connection.signUpMessage) > 0 ? connection.signUpMessage : common.REGISTRATION_DECLINED_MESSAGE
+		view.text = connection.signUpMessage
+		if len(view.text) == 0 {
+			view.text = common.REGISTRATION_DECLINED_MESSAGE
+		}
 		view.showStartAgain = true
 	case .Ended:
 		view.title = fmt.aprintf("Sign up on %s", server.name, allocator = allocator)
@@ -188,7 +190,11 @@ buildLinkConfirmView :: proc(
 	address := serverLabel(link.host, link.port, allocator)
 	if link.hasKey {
 		fingerprint := common.fingerprintToHex(common.fingerprintIdentityPublicKey(link.key))
-		view.fingerprint = fmt.aprintf("Server key fingerprint: %s", fingerprint, allocator = allocator)
+		view.fingerprint = fmt.aprintf(
+			"Server key fingerprint: %s",
+			fingerprint,
+			allocator = allocator,
+		)
 		delete(fingerprint)
 	}
 	view.canConfirm = true
@@ -323,12 +329,14 @@ inviteDetail :: proc(
 			}
 		}
 		if len(names) > 0 {
-			fmt.sbprintf(&builder, " · roles: %s", strings.join(names[:], ", ", context.temp_allocator))
+			joined := strings.join(names[:], ", ", context.temp_allocator)
+			fmt.sbprintf(&builder, " · roles: %s", joined)
 		}
 	}
 	if invite.restricted {
 		roomName := "a deleted room"
-		if room := State_knownRoom(state, serverID, invite.roomId); room != nil && invite.roomId > 0 {
+		room := State_knownRoom(state, serverID, invite.roomId)
+		if room != nil && invite.roomId > 0 {
 			roomName = fmt.tprintf("#%s", room.name)
 		}
 		fmt.sbprintf(&builder, " · restricted to %s", roomName)

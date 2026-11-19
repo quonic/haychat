@@ -825,7 +825,12 @@ ClientServerTransport_handleRegisteringPacketBytes :: proc(
 			if !strings.has_prefix(message, common.REGISTRATION_DECLINED_MESSAGE) {
 				message = common.REGISTRATION_DECLINED_MESSAGE
 			}
-			event := ClientServerTransport_failStopped(transport, now, message, .RegistrationDeclined)
+			event := ClientServerTransport_failStopped(
+				transport,
+				now,
+				message,
+				.RegistrationDeclined,
+			)
 			event.kind = .RegistrationResult
 			event.registerStatus = .Declined
 			return event, true

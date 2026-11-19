@@ -697,7 +697,8 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 			},
 			`{"event":"user_updated","serverID":955,"user":{"id":9,"nickname":"bob",` +
 			`"isOnline":true,"identityPublicKey":"","hasEncryptionKey":false,` +
-			`"keyState":"unknown","isAdmin":false,"isBanned":true,"roleIds":[],"isRestricted":false}}`,
+			`"keyState":"unknown","isAdmin":false,"isBanned":true,"roleIds":[],` +
+			`"isRestricted":false}}`,
 			.UserUpdated,
 		},
 		{

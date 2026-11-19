@@ -476,7 +476,9 @@ testRegistrationAdminPacketsBecomeEvents :: proc(t: ^testing.T) {
 		)
 		testing.expect(
 			t,
-			event.kind == .AdminActionResult && event.adminAction == .RevokeInvite && event.inviteID == 5,
+			event.kind == .AdminActionResult &&
+			event.adminAction == .RevokeInvite &&
+			event.inviteID == 5,
 			"expected the revoke answer with the invite ID",
 		)
 		ClientTransportRuntimeEvent_deinit(&event)
@@ -532,7 +534,11 @@ testInviteCodeFieldIsTrimmedAndCheckedBeforeSending :: proc(t: ^testing.T) {
 	)
 	testing.expect(
 		t,
-		validateSignUp(.InviteApproval, normalized, strings.repeat("x", 501, context.temp_allocator)) ==
+		validateSignUp(
+			.InviteApproval,
+			normalized,
+			strings.repeat("x", 501, context.temp_allocator),
+		) ==
 		SIGN_UP_REASON_INVALID_LOCAL,
 		"expected a reason over 500 characters to be refused",
 	)
@@ -1115,7 +1121,10 @@ testHeadlessRegistrationCommandsAndEvents :: proc(t: ^testing.T) {
 			`{"event":"registration_result","serverID":1212,"status":"created","message":"",` +
 			`"userID":31}` + "\n" + `{"event":"connected","serverID":1212,"userID":31,`,
 		) &&
-		strings.contains(output, `"registrationMode":"approval","isRestricted":false,"registered":true}`),
+		strings.contains(
+			output,
+			`"registrationMode":"approval","isRestricted":false,"registered":true}`,
+		),
 		fmt.tprintf("expected created then connected, got %s", output),
 	)
 	testing.expect(
@@ -1160,7 +1169,10 @@ testHeadlessRegistrationCommandsAndEvents :: proc(t: ^testing.T) {
 		t,
 		strings.has_prefix(output, `{"event":"invite_created","serverID":1212,"invite":{"id":9,`) &&
 		strings.contains(output, `"code":"`+REGISTRATION_TEST_CODE+`"`) &&
-		strings.contains(output, `"link":"haychat://localhost:1/invite/`+REGISTRATION_TEST_CODE+`?key="`),
+		strings.contains(
+			output,
+			`"link":"haychat://localhost:1/invite/` + REGISTRATION_TEST_CODE + `?key="`,
+		),
 		fmt.tprintf("expected the invite_created line, got %s", output),
 	)
 

@@ -13,8 +13,9 @@ import "core:strings"
 //   as soon as registration_required arrives (implies --register). Startup then ends once the
 //   session is connected, or registering (after the first registration_result when a code was
 //   given), so a script can `wait registration_result` or `wait connected`.
-// - register CODE|-|form [REASON...]: one ClientRegister in the registering session (- for no
-//   code, which only an Open server accepts; form for the code an invite link filled in). Answered by registration_result, or by connected (with
+// - register CODE|-|form [REASON...]: one ClientRegister in the registering session (- for
+//   no code, which only an Open server accepts; form for the code an invite link filled
+//   in). Answered by registration_result, or by connected (with
 //   registered true, after a registration_result created) when the account was made.
 // - Events: registration_required {mode, status, message}; registration_result {status
 //   created|pending|refused|declined, message, userID}; registration_mode {mode}.
@@ -342,7 +343,10 @@ headlessRenderRegistrationEvent :: proc(
 }
 
 // Before a Connected from a sign-up, a registration_result created line.
-headlessWriteRegistrationCreated :: proc(harness: ^HeadlessHarness, event: ^ClientTransportRuntimeEvent) {
+headlessWriteRegistrationCreated :: proc(
+	harness: ^HeadlessHarness,
+	event: ^ClientTransportRuntimeEvent,
+) {
 	headlessWriteJSON(
 		harness,
 		HeadlessRegistrationResultJSON {

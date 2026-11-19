@@ -57,7 +57,8 @@ viewSignUp :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect) {
 	submit, paste, checkAgain, startAgain := false, false, false, false
 	if view.showForm {
 		form := State_signUpFormFor(state, serverID)
-		serverSettingsLabel(ctx, &column, view.codeOptional ? "Invite code (optional)" : "Invite code")
+		codeLabel := view.codeOptional ? "Invite code (optional)" : "Invite code"
+		serverSettingsLabel(ctx, &column, codeLabel)
 		codeID := ui.idOf("signup-code", serverID)
 		pasteW := ui.dp(ctx, SERVER_SETTINGS_BUTTON_WIDTH)
 		fieldH := ui.textInputHeight(ctx, codeID, form.code[:], width - pasteW - gap)
@@ -408,7 +409,10 @@ viewRegistrationAdmin :: proc(
 			_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING * 2))
 		}
 		if len(view.invites) == 0 {
-			text := view.invitesLoaded ? "No invite codes yet." : "The invite list has not arrived yet."
+			text := "The invite list has not arrived yet."
+			if view.invitesLoaded {
+				text = "No invite codes yet."
+			}
 			serverSettingsWrapped(ctx, column, text, ctx.theme.fgMuted)
 		}
 		_ = ui.cutTop(column, sectionGap)
@@ -457,15 +461,18 @@ viewRegistrationAdmin :: proc(
 			ui.wrappedLabel(ctx, detail, request.detail, ctx.theme.fgMuted)
 			if request.decisionOpen {
 				_ = ui.cutTop(column, labelGap)
-				if declineAction := viewDeclineForm(state, ctx, column, serverID, request.requestID);
-				   declineAction.kind != .None {
+				declineAction := viewDeclineForm(state, ctx, column, serverID, request.requestID)
+				if declineAction.kind != .None {
 					action = declineAction
 				}
 			}
 			_ = ui.cutTop(column, ui.dp(ctx, ROW_SPACING * 2))
 		}
 		if len(view.requests) == 0 {
-			text := view.requestsLoaded ? "No sign-up requests." : "The request list has not arrived yet."
+			text := "The request list has not arrived yet."
+			if view.requestsLoaded {
+				text = "No sign-up requests."
+			}
 			serverSettingsWrapped(ctx, column, text, ctx.theme.fgMuted)
 		}
 		_ = ui.cutTop(column, sectionGap)
@@ -512,7 +519,8 @@ viewCreatedInvite :: proc(
 	ui.wrappedLabel(ctx, ui.cutTop(&inner, noteH), note, ctx.theme.warning)
 	_ = ui.cutTop(&inner, labelGap * 2)
 	buttons := ui.cutTop(&inner, rowH)
-	if serverSettingsButton(ctx, &buttons, ui.idOf("admin-invite-copy", serverID), "Copy", .Primary) {
+	copyID := ui.idOf("admin-invite-copy", serverID)
+	if serverSettingsButton(ctx, &buttons, copyID, "Copy", .Primary) {
 		action = {kind = .CopyCode}
 	}
 	if serverSettingsButton(

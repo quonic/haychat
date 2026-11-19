@@ -293,29 +293,6 @@ viewServerSettings :: proc(
 	}
 	_ = ui.cutTop(&column, sectionGap)
 
-	// ── Sign-up (protocol 25): acts at once ──
-	inviteCodeClicked := false
-	{
-		serverSettingsLabel(ctx, &column, "Signing up")
-		inviteCodeClicked = adminCheckbox(
-			ctx,
-			&column,
-			ui.idOf("server-settings-invite-code", serverID),
-			"Use an invite code",
-			view.useInviteCode,
-			true,
-		)
-		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
-		serverSettingsWrapped(
-			ctx,
-			&column,
-			"On a server where anyone may sign up, ask for the sign-up screen instead, to " +
-			"enter a code that gives you roles or a room. It changes nothing once you have an " +
-			"account here.",
-			ctx.theme.fgMuted,
-		)
-		_ = ui.cutTop(&column, sectionGap)
-	}
 
 	// ── Voice ──
 	serverSettingsHeading(ctx, &column, "Voice")
@@ -381,10 +358,46 @@ viewServerSettings :: proc(
 
 	_ = ui.cutTop(&column, sectionGap)
 
+	// ── Sign-up (protocol 25): acts at once; after Voice, which keeps its place ──
+	inviteCodeClicked := false
+	{
+		serverSettingsLabel(ctx, &column, "Signing up")
+		inviteCodeClicked = adminCheckbox(
+			ctx,
+			&column,
+			ui.idOf("server-settings-invite-code", serverID),
+			"Use an invite code",
+			view.useInviteCode,
+			true,
+		)
+		_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		serverSettingsWrapped(
+			ctx,
+			&column,
+			"On a server where anyone may sign up, ask for the sign-up screen instead, to " +
+			"enter a code that gives you roles or a room. It changes nothing once you have an " +
+			"account here.",
+			ctx.theme.fgMuted,
+		)
+		_ = ui.cutTop(&column, sectionGap)
+	}
+
 	// ── Admin (admins only) ──
 	adminAction: AdminSectionAction
 	if view.admin.visible {
 		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
+		// Protocol 25: Registration, Invites and Sign-up requests (view_registration.odin),
+		// last in the section so the parts above keep their place.
+		_ = ui.cutTop(&column, sectionGap)
+		if registrationAction := viewRegistrationAdmin(
+			state,
+			ctx,
+			&column,
+			view.admin.registration,
+			serverID,
+		); registrationAction.kind != .None {
+			adminAction = {registration = registrationAction}
+		}
 		_ = ui.cutTop(&column, sectionGap)
 	}
 
@@ -461,7 +474,12 @@ viewServerSettings :: proc(
 		State_setUseInviteCode(state, serverID, !view.useInviteCode)
 	}
 	if adminAction.registration.kind != .None {
-		runRegistrationAdminAction(state, serverID, adminAction.registration, view.admin.registration)
+		runRegistrationAdminAction(
+			state,
+			serverID,
+			adminAction.registration,
+			view.admin.registration,
+		)
 	}
 	switch adminAction.kind {
 	case .None:
@@ -784,18 +802,6 @@ viewAdminSection :: proc(
 			"The member list has not arrived yet.",
 			ctx.theme.fgMuted,
 		)
-	}
-
-	// Protocol 25: Registration, Invites, Sign-up requests (view_registration.odin).
-	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_SECTION_GAP))
-	if registrationAction := viewRegistrationAdmin(
-		state,
-		ctx,
-		column,
-		view.registration,
-		serverID,
-	); registrationAction.kind != .None {
-		action = {registration = registrationAction}
 	}
 
 	if view.showRoles {
