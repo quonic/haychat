@@ -1334,3 +1334,268 @@ testRoomChainsFromJoinNeverForwards :: proc(t: ^testing.T) {
 		"expected carol to hold no older chain",
 	)
 }
+
+// ── Sealed edits (#76 M2) ────────────────────────────────────────
+
+// The server's ServerRoomMessageEdited of sent (a SealedEdit request) to state, as edit editID
+// of messageID (by default the one the edit names).
+@(private = "file")
+roomChainTestDeliverEdit :: proc(
+	state: ^State,
+	sent: RoomChainTestSent,
+	editID: int,
+	messageID := 0,
+	senderID := 0,
+) {
+	sealed := make([]u8, len(sent.request.bytes))
+	copy(sealed, sent.request.bytes)
+	event := ClientTransportRuntimeEvent {
+		kind = .MessageEdited,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		editKind = .Room,
+		roomID = sent.request.roomID,
+		messageID = messageID > 0 ? messageID : sent.request.messageID,
+		senderID = senderID > 0 ? senderID : sent.userID,
+		editCount = editID,
+		messageEdit = common.MessageEdit {
+			id = editID,
+			clientMessageId = sent.request.clientMessageID,
+			timestamp = strings.clone("2024-11-14 16:01:00+00"),
+			content = strings.clone(""),
+			sealed = sealed,
+		},
+	}
+	roomChainTestApply(state, &event)
+}
+
+// alice's room with one opened message (100, "hello room") on both sides; returns alice's
+// distribution.
+@(private = "file")
+roomChainTestEditPair :: proc(pair: ^RoomChainTestPair) -> RoomChainTestSent {
+	roomChainTestSend(&pair.alice, "hello room")
+	distribution := roomChainTestLast(.KeyEnvelope)
+	roomChainTestDeliverEnvelope(&pair.alice, distribution, 1)
+	roomChainTestDeliverEnvelope(&pair.bob, distribution, 1)
+	message := roomChainTestLast(.SealedMessage)
+	roomChainTestDeliverMessage(&pair.alice, message, 100)
+	roomChainTestDeliverMessage(&pair.bob, message, 100)
+	return distribution
+}
+
+// An encrypted room's edit is the next index of the sender's chain, opens for every member,
+// and fails when it is moved to another message, signed by someone else, replayed or shown as
+// a new message; the last good version stays.
+@(test)
+testRoomChainsSealedEditsOpenOnTheSendersChain :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	pair := roomChainTestPair()
+	defer roomChainTestPairDeinit(&pair)
+	alice, bob := &pair.alice, &pair.bob
+	distribution := roomChainTestEditPair(&pair)
+	original := roomChainTestEntry(alice, 100).clientMessageId
+
+	failure := State_editRoomMessage(
+		alice,
+		ROOM_CHAIN_TEST_SERVER,
+		ROOM_CHAIN_TEST_ROOM,
+		100,
+		"hello, edited",
+	)
+	assert(failure == "", fmt.tprintf("expected the edit sent, got %q", failure))
+	edit := roomChainTestLast(.SealedEdit)
+	header, headerErr := common.decodeSealedRoomMessage(edit.request.bytes)
+	assert(
+		headerErr == .None &&
+		edit.request.messageID == 100 &&
+		edit.request.originalID == original &&
+		edit.request.clientMessageID != original &&
+		header.header.chainID == distribution.request.chainID &&
+		header.header.index == 1 &&
+		header.header.epoch == 2,
+		fmt.tprintf("expected index 1 of alice's chain naming message 100, got %v", header.header),
+	)
+	room := State_roomChainRoom(alice, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
+	assert(len(room.inFlight) == 1, "expected the edit in flight")
+	for state in ([]^State{alice, bob}) {
+		roomChainTestDeliverEdit(state, edit, 1)
+		entry := roomChainTestEntry(state, 100)
+		assert(
+			entry.edit.status == .Verified &&
+			entry.edit.shownContent == "hello, edited" &&
+			entry.content == "hello room",
+			fmt.tprintf(
+				"expected the edit opened, got %v %v",
+				entry.edit.status,
+				entry.edit.failure,
+			),
+		)
+	}
+	room = State_roomChainRoom(alice, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
+	assert(len(room.inFlight) == 0, "expected the edit's echo to settle it")
+
+	// The same edit again under another edit ID is a replay; the shown version stays.
+	roomChainTestDeliverEdit(bob, edit, 2)
+	entry := roomChainTestEntry(bob, 100)
+	assert(
+		entry.edit.status == .Failed &&
+		entry.edit.failure == .Replayed &&
+		entry.edit.shownContent == "hello, edited",
+		fmt.tprintf("expected a replayed edit to fail, got %v", entry.edit.failure),
+	)
+
+	// alice's edit of her second message, moved by the server onto the first: refused.
+	roomChainTestSend(alice, "second")
+	second := roomChainTestLast(.SealedMessage)
+	roomChainTestDeliverMessage(alice, second, 101)
+	roomChainTestDeliverMessage(bob, second, 101)
+	assert(
+		State_editRoomMessage(alice, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM, 101, "moved") ==
+		"",
+		"expected the second edit sent",
+	)
+	moved := roomChainTestLast(.SealedEdit)
+	roomChainTestDeliverEdit(bob, moved, 3, messageID = 100)
+	entry = roomChainTestEntry(bob, 100)
+	assert(
+		entry.edit.status == .Failed &&
+		entry.edit.failure == .Moved &&
+		entry.edit.shownContent == "hello, edited",
+		fmt.tprintf("expected a moved edit to fail, got %v", entry.edit.failure),
+	)
+	// A failure is final: the same edit is not checked again when keys change.
+	State_roomChainsReopenPending(bob, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
+	assert(roomChainTestEntry(bob, 100).edit.failure == .Moved, "expected the failure kept")
+
+	// An edit's seal shown as a new message is not a message.
+	asMessage := moved
+	asMessage.request.kind = .SealedMessage
+	roomChainTestDeliverMessage(bob, asMessage, 102)
+	shown := roomChainTestEntry(bob, 102)
+	assert(
+		shown.security.protection == .Failed &&
+		shown.security.sealedError == .BadPlaintext &&
+		shown.content == "",
+		fmt.tprintf("expected an edit shown as a message to fail, got %v", shown.security),
+	)
+
+	// bob seals an "edit" of alice's message (the harness's unchecked edit) and the server
+	// presents it as alice's: the signature is bob's, so it fails.
+	failure = State_editRoomMessage(
+		bob,
+		ROOM_CHAIN_TEST_SERVER,
+		ROOM_CHAIN_TEST_ROOM,
+		100,
+		"not alice",
+		checkRights = false,
+	)
+	assert(failure == "", fmt.tprintf("expected bob's edit queued, got %q", failure))
+	bobChain := roomChainTestLast(.KeyEnvelope)
+	assert(bobChain.userID == ROOM_CHAIN_TEST_BOB, "expected bob's chain distributed first")
+	roomChainTestDeliverEnvelope(bob, bobChain, 2)
+	roomChainTestDeliverEnvelope(alice, bobChain, 2)
+	forged := roomChainTestLast(.SealedEdit)
+	assert(forged.userID == ROOM_CHAIN_TEST_BOB, "expected bob's edit sent after his chain")
+	roomChainTestDeliverEdit(alice, forged, 4, senderID = ROOM_CHAIN_TEST_ALICE)
+	entry = roomChainTestEntry(alice, 100)
+	assert(
+		entry.edit.status == .Failed &&
+		entry.edit.failure == .Signature &&
+		entry.edit.shownContent == "hello, edited",
+		fmt.tprintf("expected another signer's edit to fail, got %v", entry.edit.failure),
+	)
+
+	// The fetched list opens each sealed edit and marks the copy a replay.
+	listEvent := ClientTransportRuntimeEvent {
+		kind      = .MessageEditsReceived,
+		serverID  = ROOM_CHAIN_TEST_SERVER,
+		editKind  = .Room,
+		roomID    = ROOM_CHAIN_TEST_ROOM,
+		messageID = 100,
+	}
+	for id in 1 ..= 2 {
+		sealed := make([]u8, len(edit.request.bytes))
+		copy(sealed, edit.request.bytes)
+		append(
+			&listEvent.messageEdits,
+			common.MessageEdit {
+				id = id,
+				clientMessageId = edit.request.clientMessageID,
+				timestamp = strings.clone("t"),
+				content = strings.clone(""),
+				sealed = sealed,
+			},
+		)
+	}
+	roomChainTestApply(bob, &listEvent)
+	edits, statuses, loaded := State_messageEdits(
+		bob,
+		ROOM_CHAIN_TEST_SERVER,
+		.Room,
+		ROOM_CHAIN_TEST_ROOM,
+		100,
+	)
+	assert(
+		loaded &&
+		len(edits) == 2 &&
+		statuses[0] == .Verified &&
+		edits[0].content == "hello, edited" &&
+		statuses[1] == .Failed &&
+		edits[1].content == "",
+		fmt.tprintf("expected the list opened with its copy failed, got %v", statuses),
+	)
+}
+
+// A sealed edit on a chain the reader does not hold waits, asks for the chain, and opens once
+// the key arrives.
+@(test)
+testRoomChainsSealedEditWaitsForItsChain :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	pair := roomChainTestPair()
+	defer roomChainTestPairDeinit(&pair)
+	alice, bob := &pair.alice, &pair.bob
+	roomChainTestEditPair(&pair)
+
+	// alice's next run (a new chain): its distribution reaches alice only for now.
+	room := State_roomChainRoom(alice, ROOM_CHAIN_TEST_SERVER, ROOM_CHAIN_TEST_ROOM)
+	RoomChainRoom_dropSending(room)
+	failure := State_editRoomMessage(
+		alice,
+		ROOM_CHAIN_TEST_SERVER,
+		ROOM_CHAIN_TEST_ROOM,
+		100,
+		"edited on a new chain",
+	)
+	assert(failure == "", fmt.tprintf("expected the edit queued, got %q", failure))
+	assert(len(roomChainTestOfKind(.SealedEdit)) == 0, "expected the edit to wait for its chain")
+	fresh := roomChainTestLast(.KeyEnvelope)
+	roomChainTestDeliverEnvelope(alice, fresh, 2)
+	edit := roomChainTestLast(.SealedEdit)
+	decoded, _ := common.decodeSealedRoomMessage(edit.request.bytes)
+	assert(
+		decoded.header.chainID == fresh.request.chainID && decoded.header.index == 0,
+		"expected the edit at index 0 of the new chain",
+	)
+
+	before := len(roomChainTestOfKind(.FetchKeys))
+	roomChainTestDeliverEdit(bob, edit, 1)
+	entry := roomChainTestEntry(bob, 100)
+	assert(
+		entry.edit.status == .Pending && entry.edit.shownEditID == 0,
+		fmt.tprintf("expected the edit pending, got %v", entry.edit.status),
+	)
+	assert(
+		len(roomChainTestOfKind(.FetchKeys)) > before ||
+		len(roomChainTestOfKind(.RequestKey)) > 0,
+		"expected bob to fetch or ask for the chain",
+	)
+	roomChainTestDeliverEnvelope(bob, fresh, 2)
+	entry = roomChainTestEntry(bob, 100)
+	assert(
+		entry.edit.status == .Verified && entry.edit.shownContent == "edited on a new chain",
+		fmt.tprintf("expected the edit opened once the key arrived, got %v", entry.edit.status),
+	)
+}

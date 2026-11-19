@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Live proof of editing and deleting messages (protocol 30, #76 M1,
+# Live proof of editing and deleting messages (protocol 30, #76 M1 and M2,
 # docs/plan/2026-11-19-message-edit-delete.md) with three headless clients
 # (docs/testing-harness.md) against a running server:
 #
@@ -17,14 +17,20 @@ set -euo pipefail
 #   4. direct:      B's encryption key is removed in the database so A's DM to B goes out as
 #                   signed plaintext (dm-plain); A edits it and B sees the edit verified and
 #                   fetches its history; B's edit and delete of A's message are refused; A
-#                   deletes it and B sees the signed tombstone. An encrypted DM from A to C: A's
-#                   edit is refused locally (sealed edits are M2), A's signed delete reaches C.
+#                   deletes it and B sees the signed tombstone. An encrypted DM from A to C
+#                   (M2): A's sealed edit opens for both and in C's fetched history, a forged
+#                   one is refused, and A's signed delete reaches C.
 #   5. from join:   in a Member invite room with From join history, A edits a message from
 #                   before C joined: B hears of it, C does not (and is refused its edit
 #                   history); A's edit of a later message reaches C.
 #   6. files:       A sends a file in #general, B downloads it, A deletes the message: B hears
 #                   attachment_removed and message_deleted, and B's next download of the blob is
 #                   refused.
+#   7. encrypted:   (M2) in an encrypted Full history room A edits its sealed message: B opens
+#                   the edit and its fetched history, the stored edit holds no text, a forged
+#                   seal is refused; C, added afterwards, reads the latest version through the
+#                   forwarded chain; A's signed delete reaches B, and A's admin delete of B's
+#                   sealed message reads "Removed by the server" (removedByServer) for both.
 #
 # dev/live-proof.sh --edits (and --all) runs it against its throwaway server. It needs bash,
 # coreutils, sha256sum and psql (make-admin.sql and the key removal, through the
@@ -133,7 +139,7 @@ expect_edited() {
 	local client=$1 kind=$2 conversation=$3 message=$4 text=$5 start=$6 pattern
 	pattern="^\\{\"event\":\"message_edited\",\"serverID\":1,\"kind\":\"$kind\","
 	pattern+="\"conversationID\":$conversation,\"messageID\":$message,.*\"found\":true,"
-	pattern+=".*\"editStatus\":\"verified\",\"content\":\"$text\"\\}$"
+	pattern+=".*\"editStatus\":\"verified\",\"editFailure\":\"none\",\"content\":\"$text\"\\}$"
 	expect_event "$client" "$pattern" "$start" \
 		"client $client did not see message $message edited to \"$text\""
 }
@@ -298,16 +304,32 @@ expect_refusal b "You can only edit or delete your own messages (message $dm_pla
 bstart=$(lines b)
 expect_ok a dm-delete "$user_b" "$dm_plain"
 expect_deleted b dm "$user_a" "$dm_plain" false "$bstart"
-# An encrypted DM to C: deleting it is signed and works; editing it is M2.
+# An encrypted DM to C (M2): its edit is sealed to both pinned keys; deleting it is signed.
+astart=$(lines a)
 cstart=$(lines c)
 expect_ok a dm "$user_c" "secret for c $run_tag"
 expect_event c "^\\{\"event\":\"direct_message\",.*\"protection\":\"encrypted\",\"content\":\"secret for c $run_tag\"\\}$" \
 	"$cstart" "client c did not get a's encrypted DM"
 dm_sealed=$(json_field "$last_event" id)
-reply=$(client_command a dm-edit "$user_c" "$dm_sealed" "sealed edit") ||
-	fail "no answer to a's sealed dm-edit"
-[[ "$reply" == '{"ok":false,'*'Editing encrypted messages is not available yet'* ]] ||
-	fail "a's edit of an encrypted DM was not refused locally: $reply"
+expect_event a "^\\{\"event\":\"direct_message\",\"serverID\":1,\"id\":$dm_sealed,.*\"protection\":\"encrypted\"," \
+	"$astart" "client a did not open its own encrypted DM"
+astart=$(lines a)
+cstart=$(lines c)
+expect_ok a dm-edit "$user_c" "$dm_sealed" "secret for c, edited $run_tag"
+expect_edited c dm "$user_a" "$dm_sealed" "secret for c, edited $run_tag" "$cstart"
+expect_edited a dm "$user_c" "$dm_sealed" "secret for c, edited $run_tag" "$astart"
+cstart=$(lines c)
+expect_ok c msg-edits dm "$user_a" "$dm_sealed"
+expect_event c "^\\{\"event\":\"message_edits\",\"serverID\":1,\"kind\":\"dm\",\"conversationID\":$user_a,\"messageID\":$dm_sealed,\"found\":true,\"edits\":\\[\\{.*\"status\":\"verified\",\"content\":\"secret for c, edited $run_tag\"\\}\\]\\}$" \
+	"$cstart" "client c did not open the encrypted DM's edit history"
+sealed_edits=$(run_sql "SELECT count(*) FROM direct_message_edits
+	WHERE message_id = $dm_sealed AND envelope IS NOT NULL AND content = ''
+	AND position(convert_to('secret for c', 'UTF8') in envelope) = 0")
+[[ "$sealed_edits" == 1 ]] || fail "expected one sealed DM edit without its text, got $sealed_edits"
+astart=$(lines a)
+expect_ok a dm-edit "$user_c" "$dm_sealed" --forge "forged for c $run_tag"
+expect_refusal a "Invalid encrypted direct message (message $dm_sealed)" "$astart" \
+	"client a's forged sealed DM edit was not refused"
 cstart=$(lines c)
 expect_ok a dm-delete "$user_c" "$dm_sealed"
 expect_deleted c dm "$user_a" "$dm_sealed" false "$cstart"
@@ -378,6 +400,98 @@ expect_event b '"event":"attachment_error".*"direction":"download"' "$bstart" \
 	"client b's download of a deleted message's file was not refused"
 [[ ! -e "$work_dir/after.txt" ]] || fail "client b saved a deleted message's file"
 echo "==> [edits] files passed"
+
+echo "==> [edits] 7. encrypted room: sealed edits, a Full history newcomer, deletes"
+# opened_message CLIENT ROOM TEXT START: an opened sealed room message (live or once its key
+# arrived); its ID in message_id.
+opened_message() {
+	local client=$1 room=$2 text=$3 start=$4 pattern
+	pattern="^\\{\"event\":\"room_(chat|opened)\",\"serverID\":1,\"roomID\":$room,.*"
+	pattern+="\"protection\":\"encrypted\",\"content\":\"$text\"\\}$"
+	expect_event "$client" "$pattern" "$start" "client $client did not open \"$text\""
+	message_id=$(json_field "$last_event" messageID)
+}
+# room_log_at CLIENT ROOM VERSION START: the client verified ROOM's log at VERSION.
+room_log_at() {
+	expect_event "$1" \
+		"^\\{\"event\":\"room_log\",\"serverID\":1,\"roomID\":$2,\"status\":\"verified\",\"logVersion\":$3," \
+		"$4" "client $1 did not verify room $2's log at version $3"
+}
+# Step 4 removed B's encryption key: B publishes it again on a new session, and A and C pin it.
+expect_ok b reconnect
+expect_ok b wait connected 8000
+for ((attempt = 0; attempt < 50; attempt++)); do
+	[[ $(run_sql "SELECT count(*) FROM user_encryption_keys WHERE user_id = $user_b") == 1 ]] &&
+		break
+	sleep 0.1
+done
+pin_keys a "$user_b"
+[[ "$last_event" == *'"canEncrypt":true,'* ]] || fail "client a cannot encrypt to b: $last_event"
+pin_keys c "$user_b"
+[[ "$last_event" == *'"canEncrypt":true,'* ]] || fail "client c cannot encrypt to b: $last_event"
+start=$(lines a)
+expect_ok a room-create "text,member-invite,full,encrypted,managers=none" "edit-secret-$run_tag"
+expect_event a "^\\{\"event\":\"room_created\",.*\"name\":\"edit-secret-$run_tag\"," "$start" \
+	"client a did not receive room_created for the encrypted room"
+secret_room=$(json_field "$last_event" roomID)
+room_log_at a "$secret_room" 1 "$start"
+bstart=$(lines b)
+expect_ok a room-add "$secret_room" "$user_b"
+room_log_at b "$secret_room" 2 "$bstart"
+astart=$(lines a)
+bstart=$(lines b)
+expect_ok a send "$secret_room" "sealed from a $run_tag"
+opened_message b "$secret_room" "sealed from a $run_tag" "$bstart"
+sealed_message=$message_id
+opened_message a "$secret_room" "sealed from a $run_tag" "$astart"
+astart=$(lines a)
+bstart=$(lines b)
+expect_ok a msg-edit "$secret_room" "$sealed_message" "sealed from a, edited $run_tag"
+expect_edited a room "$secret_room" "$sealed_message" "sealed from a, edited $run_tag" "$astart"
+expect_edited b room "$secret_room" "$sealed_message" "sealed from a, edited $run_tag" "$bstart"
+bstart=$(lines b)
+expect_ok b msg-edits room "$secret_room" "$sealed_message"
+edits_pattern="^\\{\"event\":\"message_edits\",\"serverID\":1,\"kind\":\"room\","
+edits_pattern+="\"conversationID\":$secret_room,\"messageID\":$sealed_message,\"found\":true,"
+edits_pattern+="\"edits\":\\[\\{\"id\":[0-9]+,\"timestamp\":\"[^\"]+\",\"status\":\"verified\","
+edits_pattern+="\"content\":\"sealed from a, edited $run_tag\"\\}\\]\\}$"
+expect_event b "$edits_pattern" "$bstart" "client b did not open the sealed edit history"
+stored=$(run_sql "SELECT count(*) FROM chat_message_edits
+	WHERE message_id = $sealed_message AND sealed IS NOT NULL AND content = ''
+	AND position(convert_to('sealed from a', 'UTF8') in sealed) = 0")
+[[ "$stored" == 1 ]] || fail "expected one sealed room edit without its text, got $stored"
+astart=$(lines a)
+expect_ok a msg-edit "$secret_room" "$sealed_message" --forge "forged seal $run_tag"
+expect_refusal a "Invalid encrypted room message (message $sealed_message)" "$astart" \
+	"client a's forged sealed edit was not refused"
+if grep -F '"event":"message_edited"' "$work_dir/b.out" | grep -qF -- "forged seal $run_tag"; then
+	fail "a forged sealed edit reached a client"
+fi
+# C joins the Full history room afterwards: A forwards its chain, and C reads the edit.
+cstart=$(lines c)
+expect_ok a room-add "$secret_room" "$user_c"
+room_log_at c "$secret_room" 3 "$cstart"
+cstart=$(lines c)
+expect_ok c history "$secret_room"
+newcomer="^\\{\"event\":\"room_(history|opened)\",\"serverID\":1,\"roomID\":$secret_room,"
+newcomer+=".*\"editStatus\":\"verified\",.*\"content\":\"sealed from a, edited $run_tag\""
+expect_event c "$newcomer" "$cstart" "client c, added later, did not read the latest edit"
+# A's signed delete, then A's admin delete of B's sealed message.
+bstart=$(lines b)
+expect_ok a msg-delete "$secret_room" "$sealed_message"
+expect_deleted b room "$secret_room" "$sealed_message" false "$bstart"
+astart=$(lines a)
+bstart=$(lines b)
+expect_ok b send "$secret_room" "sealed from b $run_tag"
+opened_message a "$secret_room" "sealed from b $run_tag" "$astart"
+sealed_from_b=$message_id
+opened_message b "$secret_room" "sealed from b $run_tag" "$bstart"
+astart=$(lines a)
+bstart=$(lines b)
+expect_ok a msg-delete "$secret_room" "$sealed_from_b" admin
+expect_deleted a room "$secret_room" "$sealed_from_b" true "$astart"
+expect_deleted b room "$secret_room" "$sealed_from_b" true "$bstart"
+echo "==> [edits] encrypted room passed"
 
 stop_client a
 stop_client b

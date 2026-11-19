@@ -234,6 +234,54 @@ Where the code needed something the design above leaves open, M1 chose:
   that it has no attachments. The harness's `msg-edit`/`dm-edit` go through those procedures, so
   they pick sealed or plaintext by the conversation as `send`/`dm` do.
 
+### Notes from M2 (2026-11-19)
+
+M2 needed no protocol change: no wire, enum or schema change, and the server is unchanged.
+Where the design above leaves something open, M2 chose:
+
+- **The codec is strict.** `decodeSealedDirectMessagePlaintext` refuses a `"replaces"` that is
+  not a 16-byte byte string, an all-zero one, and a plaintext with both `"replaces"` and
+  `"attachments"`; `encodeSealedMessagePlaintext(..., replaces)` refuses the same, and its edit
+  form allows empty content (whether that is allowed depends on the message, which the client
+  checks: Failed `Empty`). The client checks the empty rule for plaintext edits too. New
+  messages encode byte for byte as before (vector `KAT_SEALED_EDIT_PLAINTEXT` added).
+- **Invalid combinations.** A new sealed message (room or DM) whose plaintext has `"replaces"`
+  is Failed (`BadPlaintext`), so an edit the server replays under its own client message ID is
+  never shown as a message; a sealed plaintext without `"replaces"` that arrives as an edit is
+  Failed `NotEdit`, one naming another message `Moved`.
+- **Replays.** An edit is Failed `Replayed` when it carries the message's own client message ID
+  or (rooms) chain position, when it repeats the shown edit under another edit ID, or, in the
+  fetched list, an earlier edit's client message ID or chain position. Copies across different
+  messages are left to the server, which refuses every reused ID and index.
+- **Failures are final.** `MessageEditView.checkedEditID` records which edit a verdict is
+  about; a Failed edit is never checked again, a Pending one is checked when keys, a chain or
+  the log arrive (`State_messageEditsKeysChanged`, `State_roomChainsReopenPending`), and the
+  room follow-up fetches or asks for the chains pending edits need.
+- **Sending.** A room edit waits in the sender chain queue like a message ("Setting up
+  encryption…" while its chain is distributed). A refusal naming the message ("Room key is out
+  of date (message N)") sends it again first with a new chain; any other refusal drops it, and
+  an edit's text never goes into the draft. A DM edit is sealed only while the peer's key can be
+  encrypted to: it is never queued and never falls back to plaintext (D11), and is refused
+  locally otherwise ("Setting up encryption…" while the key is fetched). A sealed message that
+  did not open cannot be edited ("That message could not be opened, so it cannot be edited").
+- **Harness.** `message_edited` gains `editFailure`. A sealed edit printed `pending` is not
+  printed again when it opens; history, `room_opened` and `msg-edits` show it. `--forge` on a
+  sealed edit spoils the seal's signature (the server answers "Invalid encrypted room message
+  (message N)" or "Invalid encrypted direct message (message N)").
+- **Proof.** In `dev/message-edit-proof.sh` (steps 4 and 7), not `dev/e2ee-proof.sh`, so the
+  edit proof stays in one place. Step 7 has B reconnect first, because step 4 removes B's
+  encryption key in the database.
+
+### M3 hooks (from M2)
+
+- `MessageEditView.failure` (`MessageEditFailure`) and `sealedError` say why the latest edit
+  Failed; `status` Pending also covers a sealed edit waiting for its chain or the room's log.
+- In the cached list (`State_messageEdits`) a Verified sealed edit's `content` is its opened
+  text, so the hover list reads `content` for both kinds.
+- `State_editRoomMessage` returns "" when a sealed edit is queued: the new version appears only
+  with the server's notice, as for plaintext. Its refusals arrive as protocol errors naming the
+  message.
+
 ## Packages
 
 Strictly sequential, one PR each against `main`, each from fresh `main` after the previous merge.
@@ -291,3 +339,6 @@ Strictly sequential, one PR each against `main`, each from fresh `main` after th
 - 2026-11-19: plan written. M1 in progress.
 - 2026-11-19: M1 implemented (protocol 30, migration 17, wire values 218-227); departures are
   under "Notes from M1" in the Design section. M2 and M3 to follow.
+- 2026-11-19: M1 merged (PR #150). M2 implemented with no protocol change: sealed edits in
+  encrypted rooms and DMs, sent and opened; departures are under "Notes from M2" and the GUI's
+  hooks under "M3 hooks (from M2)". M3 to follow.

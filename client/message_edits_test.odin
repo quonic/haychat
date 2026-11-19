@@ -750,3 +750,96 @@ testDirectMessageEditsAndTombstones :: proc(t: ^testing.T) {
 		fmt.tprintf("expected the preview tombstoned and not unread, got %v", summary.unreadCount),
 	)
 }
+
+// #76 M2: an opened sealed edit must name its message, carry no files, be empty only when the
+// message has files, and not reuse the message's own ID.
+@(test)
+testSealedEditPlaintextChecks :: proc(t: ^testing.T) {
+	_ = t
+	original := common.ClientMessageID{0 = 1, 1 = 2, 2 = 3}
+	check := MessageChangeCheck {
+		kind     = .Room,
+		original = original,
+		sealed   = true,
+	}
+	edit := common.MessageEdit {
+		id              = 1,
+		clientMessageId = common.ClientMessageID{0 = 4, 1 = 5, 2 = 6},
+	}
+	Case :: struct {
+		content:        string,
+		replaces:       common.ClientMessageID,
+		hasReplaces:    bool,
+		attachments:    int,
+		hasAttachments: bool,
+		editID:         common.ClientMessageID,
+		want:           MessageEditFailure,
+	}
+	other := common.ClientMessageID{0 = 9}
+	cases := [?]Case {
+		{content = "ok", replaces = original, hasReplaces = true, want = .None},
+		{content = "no replaces", want = .NotEdit},
+		{content = "moved", replaces = other, hasReplaces = true, want = .Moved},
+		{
+			content = "files",
+			replaces = original,
+			hasReplaces = true,
+			attachments = 1,
+			want = .Attachments,
+		},
+		{content = "", replaces = original, hasReplaces = true, want = .Empty},
+		{content = "", replaces = original, hasReplaces = true, hasAttachments = true},
+		{
+			content = "own ID",
+			replaces = original,
+			hasReplaces = true,
+			editID = original,
+			want = .Replayed,
+		},
+	}
+	for testCase, index in cases {
+		opened := common.SealedDirectMessagePlaintext {
+			content     = strings.clone(testCase.content),
+			replaces    = testCase.replaces,
+			hasReplaces = testCase.hasReplaces,
+		}
+		for _ in 0 ..< testCase.attachments {
+			append(&opened.attachments, common.SealedAttachment{blobId = {0 = 1}})
+		}
+		caseCheck := check
+		caseCheck.hasAttachments = testCase.hasAttachments
+		caseEdit := edit
+		if testCase.editID != {} {
+			caseEdit.clientMessageId = testCase.editID
+		}
+		verdict := messageEditCheckOpened(caseCheck, caseEdit, &opened)
+		common.SealedDirectMessagePlaintext_deinit(&opened)
+		wantStatus := testCase.want == .None ? MessageEditStatus.Verified : MessageEditStatus.Failed
+		assert(
+			verdict.status == wantStatus &&
+			verdict.failure == testCase.want &&
+			(wantStatus != .Verified || verdict.content == testCase.content),
+			fmt.tprintf(
+				"case %d: expected %v, got %v %v",
+				index,
+				testCase.want,
+				verdict.status,
+				verdict.failure,
+			),
+		)
+		MessageEditVerdict_wipe(&verdict)
+	}
+	// A plaintext edit of a sealed message, and a sealed one of a plaintext message (D11).
+	assert(
+		messageEditCheck(check, edit) == .Failed,
+		"expected a plaintext edit of a sealed message to fail",
+	)
+	plain := check
+	plain.sealed = false
+	sealedEdit := edit
+	sealedEdit.sealed = []u8{1}
+	assert(
+		messageEditCheck(plain, sealedEdit) == .Failed,
+		"expected a sealed edit of a plaintext message to fail",
+	)
+}

@@ -150,6 +150,12 @@ openDirectMessageContent :: proc(
 			keys.ownKeyPair,
 			allocator,
 		)
+		if err == .None && plaintext.hasReplaces {
+			// #76 M2: an edit's envelope presented as a new message is not a message.
+			wipeString(plaintext.content)
+			common.SealedDirectMessagePlaintext_deinit(&plaintext, allocator)
+			err = .BadPlaintext
+		}
 		if err != .None {
 			return "", directEnvelopeSecurity(err)
 		}

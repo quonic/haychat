@@ -879,3 +879,281 @@ testDirectSendModeAndComposerAreDecidedByTheKeyState :: proc(t: ^testing.T) {
 	}
 	free_all(context.temp_allocator)
 }
+
+// ── Sealed edits (#76 M2) ────────────────────────────────────────
+
+// What State_editDirectMessage sent (owned copies, guarded by messageChangeSendBridgeTestMutex).
+@(private = "file")
+dmTestEditSends: [dynamic]common.ClientEditDirectMessagePayload
+
+@(private = "file")
+dmTestEditBridge :: proc(transport: ^ClientServerTransport, send: MessageChangeSend) -> bool {
+	if transport.serverID != DM_E2EE_TEST_SERVER {
+		return false
+	}
+	copied := send.directEdit
+	copied.content = strings.clone(send.directEdit.content)
+	copied.envelope = make([]u8, len(send.directEdit.envelope))
+	copy(copied.envelope, send.directEdit.envelope)
+	append(&dmTestEditSends, copied)
+	return true
+}
+
+// The server's ServerDirectMessageEdited to state: edit editID of messageID, sealed.
+@(private = "file")
+dmTestApplyEdit :: proc(
+	state: ^State,
+	senderID, recipientID, messageID, editID: int,
+	clientMessageID: common.ClientMessageID,
+	envelope: []u8,
+) {
+	sealed := make([]u8, len(envelope))
+	copy(sealed, envelope)
+	event := ClientTransportRuntimeEvent {
+		kind = .MessageEdited,
+		serverID = DM_E2EE_TEST_SERVER,
+		editKind = .Direct,
+		messageID = messageID,
+		senderID = senderID,
+		peerUserID = recipientID,
+		editCount = editID,
+		messageEdit = common.MessageEdit {
+			id = editID,
+			clientMessageId = clientMessageID,
+			timestamp = strings.clone("t2"),
+			content = strings.clone(""),
+			sealed = sealed,
+		},
+	}
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+}
+
+// An encrypted DM's edit is an envelope to both pinned keys naming the original; both sides
+// open it, the preview follows it, and an edit sealed to another recipient key, signed by
+// someone else, moved, replayed or shown as a new message fails.
+@(test)
+testDirectSealedEditsOpenWithThePinnedKeys :: proc(t: ^testing.T) {
+	dmTestBegin()
+	defer dmTestEnd()
+	sync.mutex_lock(&messageChangeSendBridgeTestMutex)
+	defer sync.mutex_unlock(&messageChangeSendBridgeTestMutex)
+	messageChangeSendBridge = dmTestEditBridge
+	defer {
+		messageChangeSendBridge = ClientServerTransport_sendMessageChange
+		for &send in dmTestEditSends {
+			common.ClientEditDirectMessagePayload_deinit(&send)
+		}
+		delete(dmTestEditSends)
+		dmTestEditSends = nil
+	}
+	defer free_all(context.temp_allocator)
+	alice, bob, serverKey := dmTestPair()
+	defer State_deinit(&alice)
+	defer State_deinit(&bob)
+	aliceBundle := [1]common.UserKeyBundle{dmTestBundle(&alice, DM_E2EE_TEST_ALICE)}
+	bobBundle := [1]common.UserKeyBundle{dmTestBundle(&bob, DM_E2EE_TEST_BOB)}
+	dmTestApplyKeys(&alice, bobBundle[:])
+	dmTestApplyKeys(&bob, aliceBundle[:])
+
+	send, envelope, _ := dmTestSend(&alice, DM_E2EE_TEST_BOB, "hello bob")
+	assert(len(envelope) > 0, "expected the DM sealed")
+	for state in ([]^State{&alice, &bob}) {
+		dmTestApplyMessage(
+			state,
+			10,
+			DM_E2EE_TEST_ALICE,
+			DM_E2EE_TEST_BOB,
+			send.clientMessageID,
+			envelope,
+		)
+	}
+	assert(
+		dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 10).security.protection == .Encrypted,
+		"expected bob to open the DM",
+	)
+
+	failure := State_editDirectMessage(
+		&alice,
+		DM_E2EE_TEST_SERVER,
+		DM_E2EE_TEST_BOB,
+		10,
+		"hello bob, edited",
+	)
+	assert(
+		failure == "" && len(dmTestEditSends) == 1,
+		fmt.tprintf("expected the edit sent, got %q", failure),
+	)
+	edit := dmTestEditSends[0]
+	assert(
+		edit.messageId == 10 &&
+		edit.originalClientMessageId == send.clientMessageID &&
+		edit.clientMessageId != send.clientMessageID &&
+		len(edit.envelope) > 0 &&
+		edit.content == "" &&
+		edit.signature == {},
+		"expected a sealed edit with no plaintext and no signature",
+	)
+	for state in ([]^State{&alice, &bob}) {
+		dmTestApplyEdit(
+			state,
+			DM_E2EE_TEST_ALICE,
+			DM_E2EE_TEST_BOB,
+			10,
+			1,
+			edit.clientMessageId,
+			edit.envelope,
+		)
+	}
+	entry := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 10)
+	assert(
+		entry.edit.status == .Verified && entry.edit.shownContent == "hello bob, edited",
+		fmt.tprintf(
+			"expected bob to open the edit, got %v %v",
+			entry.edit.status,
+			entry.edit.failure,
+		),
+	)
+	assert(
+		dmTestEntry(&alice, DM_E2EE_TEST_BOB, 10).edit.shownContent == "hello bob, edited",
+		"expected alice to open her own edit",
+	)
+	cache := State_serverDirectCache(&bob, DM_E2EE_TEST_SERVER)
+	preview := cache.conversations[ServerDirectCache_conversationIndex(cache^, DM_E2EE_TEST_ALICE)]
+	assert(preview.lastContent == "hello bob, edited", "expected the preview to show the edit")
+
+	// The same edit again under a new edit ID: a replay.
+	dmTestApplyEdit(
+		&bob,
+		DM_E2EE_TEST_ALICE,
+		DM_E2EE_TEST_BOB,
+		10,
+		2,
+		edit.clientMessageId,
+		edit.envelope,
+	)
+	entry = dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 10)
+	assert(
+		entry.edit.failure == .Replayed && entry.edit.shownContent == "hello bob, edited",
+		fmt.tprintf("expected a replay to fail, got %v", entry.edit.failure),
+	)
+
+	// An edit sealed to a recipient identity that is not bob's pin does not open.
+	alicePrivate, _ := common.identityPrivateKeyFromHex(alice.config.private_key)
+	alicePublic, _ := common.identityPublicKeyFromHex(alice.config.public_key)
+	aliceKeys, _, _ := Config_encryptionKey(alice.config)
+	defer common.EncryptionKeyPair_wipe(&aliceKeys)
+	_, otherIdentity, _ := common.generateIdentityKeyPair()
+	wrongID := common.ClientMessageID{0 = 9, 1 = 9}
+	buffer: [common.SEALED_ENVELOPE_MAX_BYTES]u8
+	n, sealErr := common.sealDirectMessage(
+		common.DirectMessageAADFields {
+			serverIdentityPublicKey = serverKey,
+			senderUserID = DM_E2EE_TEST_ALICE,
+			recipientUserID = DM_E2EE_TEST_BOB,
+			senderIdentityPublicKey = alicePublic,
+			recipientIdentityPublicKey = otherIdentity,
+			clientMessageID = wrongID,
+		},
+		"to another key",
+		aliceKeys.publicKey,
+		bobBundle[0].encryptionPublicKey,
+		alicePrivate,
+		buffer[:],
+		nil,
+		send.clientMessageID,
+	)
+	assert(sealErr == .None, "expected the wrong-key edit to seal")
+	dmTestApplyEdit(&bob, DM_E2EE_TEST_ALICE, DM_E2EE_TEST_BOB, 10, 3, wrongID, buffer[:n])
+	entry = dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 10)
+	assert(
+		entry.edit.status == .Failed &&
+		entry.edit.failure == .Sealed &&
+		entry.edit.shownContent == "hello bob, edited",
+		fmt.tprintf("expected the wrong recipient key to fail, got %v", entry.edit.failure),
+	)
+
+	// bob seals an "edit" of alice's message in her name: the signature is bob's.
+	bobPrivate, _ := common.identityPrivateKeyFromHex(bob.config.private_key)
+	bobPublic, _ := common.identityPublicKeyFromHex(bob.config.public_key)
+	bobOwn, _, _ := Config_encryptionKey(bob.config)
+	defer common.EncryptionKeyPair_wipe(&bobOwn)
+	forgedID := common.ClientMessageID{0 = 7, 1 = 7}
+	n, sealErr = common.sealDirectMessage(
+		common.DirectMessageAADFields {
+			serverIdentityPublicKey = serverKey,
+			senderUserID = DM_E2EE_TEST_BOB,
+			recipientUserID = DM_E2EE_TEST_ALICE,
+			senderIdentityPublicKey = bobPublic,
+			recipientIdentityPublicKey = alicePublic,
+			clientMessageID = forgedID,
+		},
+		"not alice",
+		bobOwn.publicKey,
+		aliceKeys.publicKey,
+		bobPrivate,
+		buffer[:],
+		nil,
+		send.clientMessageID,
+	)
+	assert(sealErr == .None, "expected bob's edit to seal")
+	dmTestApplyEdit(&alice, DM_E2EE_TEST_ALICE, DM_E2EE_TEST_BOB, 10, 4, forgedID, buffer[:n])
+	mine := dmTestEntry(&alice, DM_E2EE_TEST_BOB, 10)
+	assert(
+		mine.edit.status == .Failed && mine.edit.shownContent == "hello bob, edited",
+		fmt.tprintf("expected another signer's edit to fail, got %v", mine.edit.failure),
+	)
+
+	// alice's edit of a second message, moved onto the first, and its envelope shown as a
+	// new message.
+	second, secondEnvelope, _ := dmTestSend(&alice, DM_E2EE_TEST_BOB, "second")
+	dmTestApplyMessage(
+		&bob,
+		11,
+		DM_E2EE_TEST_ALICE,
+		DM_E2EE_TEST_BOB,
+		second.clientMessageID,
+		secondEnvelope,
+	)
+	dmTestApplyMessage(
+		&alice,
+		11,
+		DM_E2EE_TEST_ALICE,
+		DM_E2EE_TEST_BOB,
+		second.clientMessageID,
+		secondEnvelope,
+	)
+	failure = State_editDirectMessage(&alice, DM_E2EE_TEST_SERVER, DM_E2EE_TEST_BOB, 11, "moved")
+	assert(failure == "" && len(dmTestEditSends) == 2, "expected the second edit sent")
+	moved := dmTestEditSends[1]
+	dmTestApplyEdit(
+		&bob,
+		DM_E2EE_TEST_ALICE,
+		DM_E2EE_TEST_BOB,
+		10,
+		5,
+		moved.clientMessageId,
+		moved.envelope,
+	)
+	entry = dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 10)
+	assert(
+		entry.edit.failure == .Moved && entry.edit.shownContent == "hello bob, edited",
+		fmt.tprintf("expected a moved edit to fail, got %v", entry.edit.failure),
+	)
+	dmTestApplyMessage(
+		&bob,
+		12,
+		DM_E2EE_TEST_ALICE,
+		DM_E2EE_TEST_BOB,
+		moved.clientMessageId,
+		moved.envelope,
+	)
+	asMessage := dmTestEntry(&bob, DM_E2EE_TEST_ALICE, 12)
+	assert(
+		asMessage != nil &&
+		asMessage.security.protection == .Failed &&
+		asMessage.security.envelopeError == .BadPlaintext &&
+		asMessage.content == "",
+		"expected an edit's envelope shown as a message to fail",
+	)
+}

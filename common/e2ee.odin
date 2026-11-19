@@ -83,6 +83,20 @@ import "core:unicode/utf8"
 //   shortest form. Old messages have no "attachments" key and decode as before. Blob IDs are
 //   distinct within a message.
 //
+//   Protocol 30 (#76 M2, docs/plan/2026-11-19-message-edit-delete.md): a sealed edit is an
+//   ordinary sealed room message or direct message envelope, whose clientMessageId is the
+//   edit's, with an optional key in its plaintext:
+//
+//     "replaces" bytes(16)   the edited message's clientMessageId (never all zero)
+//
+//   An edit's plaintext has no "attachments" (D9: an edit changes the text only), and its
+//   content is 0..CHAT_MESSAGE_MAX_BYTES bytes: it may be empty only when the edited message
+//   has files, which the client checks against the original. The canonical form is A2
+//   "content" <text> "replaces" 50 <16 bytes>. The decoder refuses a "replaces" of another
+//   type or length, and a plaintext with both "replaces" and "attachments". A new message has
+//   no "replaces" and encodes byte for byte as before; a client treats a new message that has
+//   one, and an edit without one, as invalid.
+//
 // SenderKeyDistribution plaintext, version 1 (design 6.4), 69 bytes, sealed in a SenderKey
 //   envelope:
 //
@@ -1035,9 +1049,13 @@ SealedAttachment :: struct {
 
 // The opened plaintext of a sealed direct or room message. content and the attachments' names
 // and media types are owned (allocator); attachments is nil for a message without them.
+// Protocol 30 (#76 M2): replaces is the edited message's clientMessageId when the plaintext is
+// an edit's (hasReplaces), which then has no attachments.
 SealedDirectMessagePlaintext :: struct {
 	content:     string,
 	attachments: [dynamic]SealedAttachment,
+	replaces:    ClientMessageID,
+	hasReplaces: bool,
 }
 
 SealedDirectMessagePlaintext_deinit :: proc(
@@ -1053,6 +1071,8 @@ SealedDirectMessagePlaintext_deinit :: proc(
 	}
 	delete(plaintext.attachments)
 	plaintext.attachments = nil
+	plaintext.replaces = {}
+	plaintext.hasReplaces = false
 }
 
 // The canonical CBOR of one "attachments" entry at its largest: the map head (1), "blobId"
@@ -1078,18 +1098,27 @@ encodeSealedDirectMessagePlaintext :: proc(content: string, dst: []u8) -> (n: in
 // {"content": content}, plus "attachments" when there are any. content is valid UTF-8 of 1..
 // CHAT_MESSAGE_MAX_BYTES bytes, or empty with attachments; at most ATTACHMENTS_PER_MESSAGE_MAX
 // attachments with set, distinct blob IDs, valid names and valid media types.
+//
+// Protocol 30 (#76 M2): replaces, when set, makes it an edit's plaintext {"content": content,
+// "replaces": replaces}: no attachments, and content 0..CHAT_MESSAGE_MAX_BYTES bytes (whether
+// it may be empty depends on the edited message, which the caller checks).
 encodeSealedMessagePlaintext :: proc(
 	content: string,
 	attachments: []SealedAttachment,
 	dst: []u8,
+	replaces: Maybe(ClientMessageID) = nil,
 ) -> (
 	n: int,
 	ok: bool,
 ) {
-	if !sealedMessageFieldsAreValid(content, attachments) {
+	replacesID, isEdit := replaces.?
+	if !sealedMessageFieldsAreValid(content, attachments, isEdit, replacesID) {
 		return 0, false
 	}
 	total := 1 + 8 + cborHeadSize(u64(len(content))) + len(content)
+	if isEdit {
+		total += 1 + len("replaces") + 1 + CLIENT_MESSAGE_ID_SIZE
+	}
 	if len(attachments) > 0 {
 		total += 12 + 1
 		for attachment in attachments {
@@ -1100,9 +1129,14 @@ encodeSealedMessagePlaintext :: proc(
 		return 0, false
 	}
 	writer := e2eeWriter(dst[:total])
-	e2eeWriteU8(&writer, len(attachments) > 0 ? 0xA2 : 0xA1)
+	e2eeWriteU8(&writer, len(attachments) > 0 || isEdit ? 0xA2 : 0xA1)
 	cborWriteText(&writer, "content")
 	cborWriteText(&writer, content)
+	if isEdit {
+		cborWriteText(&writer, "replaces")
+		cborWriteHead(&writer, 2, CLIENT_MESSAGE_ID_SIZE)
+		e2eeWriteBytes(&writer, replacesID[:])
+	}
 	if len(attachments) > 0 {
 		cborWriteText(&writer, "attachments")
 		cborWriteHead(&writer, 4, u64(len(attachments)))
@@ -1137,6 +1171,9 @@ encodeSealedMessagePlaintext :: proc(
 //
 // Protocol 27: an "attachments" array is decoded too (see the top of this file); the content
 // may then be empty. Anything malformed in it refuses the whole plaintext.
+//
+// Protocol 30 (#76 M2): a "replaces" byte string of CLIENT_MESSAGE_ID_SIZE bytes makes it an
+// edit's plaintext (hasReplaces); its content may be empty and it may not have "attachments".
 decodeSealedDirectMessagePlaintext :: proc(
 	data: []u8,
 	allocator := context.allocator,
@@ -1147,9 +1184,17 @@ decodeSealedDirectMessagePlaintext :: proc(
 	fields, ok := cborFindMessageFields(data)
 	defer crypto.zero_explicit(&fields.attachments, size_of(fields.attachments))
 	attachments := fields.attachments[:fields.attachmentCount]
-	if !ok || !sealedMessageFieldsAreValid(string(fields.content), attachments) {
+	if !ok ||
+	   !sealedMessageFieldsAreValid(
+		   string(fields.content),
+		   attachments,
+		   fields.hasReplaces,
+		   fields.replaces,
+	   ) {
 		return {}, .BadPlaintext
 	}
+	plaintext.replaces = fields.replaces
+	plaintext.hasReplaces = fields.hasReplaces
 	cloned, cloneErr := make([]u8, len(fields.content), allocator)
 	if cloneErr != nil {
 		return {}, .BadPlaintext
@@ -1168,9 +1213,24 @@ decodeSealedDirectMessagePlaintext :: proc(
 	return plaintext, .None
 }
 
-// The checks both the encoder and the decoder apply (D15, D16).
+// The checks both the encoder and the decoder apply (D15, D16). An edit's plaintext (#76 M2,
+// isEdit) names a set original, has no attachments, and may have empty content.
 @(private = "file")
-sealedMessageFieldsAreValid :: proc(content: string, attachments: []SealedAttachment) -> bool {
+sealedMessageFieldsAreValid :: proc(
+	content: string,
+	attachments: []SealedAttachment,
+	isEdit := false,
+	replaces: ClientMessageID = {},
+) -> bool {
+	if isEdit {
+		if len(attachments) > 0 ||
+		   replaces == {} ||
+		   !messageEditContentLengthIsValid(len(content)) ||
+		   !utf8.valid_string(content) {
+			return false
+		}
+		return true
+	}
 	if !messageContentLengthIsValid(len(content), len(attachments)) ||
 	   !utf8.valid_string(content) {
 		return false
@@ -1357,13 +1417,15 @@ cborSkipValue :: proc(cursor: ^CborCursor, depth: int) -> bool {
 	return false
 }
 
-// What a sealed message plaintext map holds: its "content" text and its "attachments", all
-// borrowing data.
+// What a sealed message plaintext map holds: its "content" text, its "attachments" and (#76
+// M2) the "replaces" of an edit, all borrowing data.
 @(private = "file")
 CborMessageFields :: struct {
 	content:         []u8,
 	attachments:     [ATTACHMENTS_PER_MESSAGE_MAX]SealedAttachment,
 	attachmentCount: int,
+	replaces:        ClientMessageID,
+	hasReplaces:     bool,
 }
 
 // The "content" text (required) and the "attachments" array (optional, 1..
@@ -1411,6 +1473,13 @@ cborFindMessageFields :: proc(data: []u8) -> (fields: CborMessageFields, ok: boo
 				}
 			}
 			fields.attachmentCount = int(entries)
+		case "replaces":
+			bytes, bytesOK := cborReadString(&cursor, 2)
+			if !bytesOK || len(bytes) != CLIENT_MESSAGE_ID_SIZE {
+				return {}, false
+			}
+			copy(fields.replaces[:], bytes)
+			fields.hasReplaces = true
 		case:
 			if !cborSkipValue(&cursor, 1) {
 				return {}, false
@@ -1510,7 +1579,8 @@ cborReadSealedAttachment :: proc(cursor: ^CborCursor, attachment: ^SealedAttachm
 // Seals content as a DirectMessage envelope with exactly two wraps, the sender's first, so the
 // sender can read its own history. senderIdentityPrivateKey must belong to
 // aadFields.senderIdentityPublicKey. attachments (protocol 27) go inside the seal; with them the
-// content may be empty.
+// content may be empty. replaces (protocol 30, #76 M2) seals an edit of the message with that
+// clientMessageId instead (aadFields.clientMessageID is the edit's own), without attachments.
 sealDirectMessage :: proc(
 	aadFields: DirectMessageAADFields,
 	content: string,
@@ -1519,6 +1589,7 @@ sealDirectMessage :: proc(
 	senderIdentityPrivateKey: IdentityPrivateKeyBytes,
 	dst: []u8,
 	attachments: []SealedAttachment = nil,
+	replaces: Maybe(ClientMessageID) = nil,
 ) -> (
 	n: int,
 	err: E2EEError,
@@ -1529,7 +1600,12 @@ sealDirectMessage :: proc(
 	}
 	plaintext: [DIRECT_MESSAGE_PLAINTEXT_MAX_SIZE]u8
 	defer crypto.zero_explicit(&plaintext, size_of(plaintext))
-	plaintextLength, encodeOK := encodeSealedMessagePlaintext(content, attachments, plaintext[:])
+	plaintextLength, encodeOK := encodeSealedMessagePlaintext(
+		content,
+		attachments,
+		plaintext[:],
+		replaces,
+	)
 	if !encodeOK {
 		return 0, .BadPlaintext
 	}
