@@ -41,8 +41,9 @@ read-write repository mount) run without SELinux confinement. All of them are ro
 | `./dev.sh live --all` | Also the two-client room chat, direct message and voice proofs, and every proof below |
 | `./dev.sh live --harness` | `dev/harness-smoke.sh`: headless clients connect, list rooms, chat, exchange a direct message, rename, manage rooms as an admin, and check read state |
 | `./dev.sh live --admin` | `dev/admin-proof.sh`: two headless clients prove the admin actions: a role change pushed live, a locked rename that survives a reconnect, a kick, a ban and its unban, and a room made text-only that ends its voice |
+| `./dev.sh live --registration` | `dev/registration-proof.sh`: headless clients sign up in Invite only and Invite + approval mode: no code, an inviter's code, expired, revoked and used-up codes, an invite link, a request approved live and one declined, a room code that makes a restricted account, and the admin key on a second server with a fresh database |
 | `./dev.sh live --voice` | `dev/voice-proof.sh`: two client processes send a 440 Hz tone through the server, checked by `dev/tools/voice-check`; then through SDL's disk audio driver, through injected loss (5 % dropped, up to 20 ms delay, repaired by FEC and PLC), and one voice session per user |
-| `./dev.sh live --ui` | `dev/ui-smoke.sh`: the real client window on SDL's offscreen driver, driven by `--ui-script`, chats, exchanges a direct message, manages rooms and accounts as an admin, uses voice and context menus, and takes screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them) |
+| `./dev.sh live --ui` | `dev/ui-smoke.sh`: the real client window on SDL's offscreen driver, driven by `--ui-script`, chats, exchanges a direct message, manages rooms, accounts, roles, invite codes and sign-up requests as an admin, uses voice and context menus, and takes screenshots (set `HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to keep them) |
 | `./dev.sh live --sql` | The server SQL proofs (database-backed tests gated on `HAYCHAT_DATABASE_SQL_TEST=1`) and the check that a failed startup exits with status 1 |
 | `./dev.sh ci` | `check`, then `live --all`: the same steps Forgejo CI runs |
 

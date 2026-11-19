@@ -1,22 +1,27 @@
 # Rooms and Accounts
 
-The rules the server enforces for accounts, rooms, admins, direct messages and read state. The
+The rules the server enforces for accounts, sign-up, roles, rooms, admins, direct messages and
+read state. The
 server is authoritative for all of them; clients only show what it reports. How these look in
 the client is in the [user guide](user-guide.md).
 
 ## Accounts and Identity
 
 An account is its client identity key; the nickname is only its current name. There are no
-passwords and no registration step (`ClientRegister` is not implemented): the first time a key
+passwords. How a new key gets an account depends on the server's
+[registration mode](#registration): on an **Open** server (the default) the first time a key
 connects, the server creates an account under the client's display name, or, for a keyless
-fixture account such as `haypeer`, binds the key to it. Keyless accounts that hold a server role,
-such as the fixture's `admin`, can be claimed only by `HAYCHAT_ADMIN_PUBLIC_KEY` (see
-[server-configuration.md](server-configuration.md#runtime)).
+fixture account such as `haypeer`, binds the key to it. On an **Invite only** or **Invite +
+approval** server a new key has to sign up with an invite code first. A key that already has an
+account always signs in, whatever the mode. Keyless accounts that hold a server role, such as
+the fixture's `admin`, can be claimed only by `HAYCHAT_ADMIN_PUBLIC_KEY` (see
+[server-configuration.md](server-configuration.md#runtime)), which may also always sign up.
 
 The server lists every account with an online flag (online while at least one of its sessions is
 authenticated) and tells connected sessions when an account comes online or goes offline. Every
 account sees which accounts are admins and which are banned, and (protocol 23) which roles each
-account holds; banned accounts stay listed because history names them.
+account holds; banned accounts stay listed because history names them. A
+[restricted account](#restricted-accounts) sees, and is seen by, fewer accounts.
 
 ### Display Names
 
@@ -186,8 +191,9 @@ below in the database for every request, in the same statement as the change.
 - **Ban and unban:** a ban ends every session of the account and refuses its sign-in ("This
   account is banned from this server", with the admin's reason); its client does not retry. The
   same rules as for a kick apply. An unban lets the account sign in again. Bans are per account,
-  and sign-up is open, so a banned person can connect again with a new identity key as a new
-  account.
+  so on an Open server a banned person can connect again with a new identity key as a new
+  account. Closing sign-up ([Invite only or Invite + approval](#registration), protocol 25)
+  stops that: a new key then needs a code.
 
 ## Roles and Permissions
 
@@ -199,8 +205,8 @@ The permissions are fixed in code; there are no custom ones.
 | --- | --- | --- |
 | **Manage rooms** | Create, edit and delete rooms (also encrypted ones: create and change their access) | Any role |
 | **Manage room members** | Add and remove members of invite rooms, see every room in the Admin section | Any role |
-| **Create invites** | Create invite codes (used once sign-up by invitation arrives, #43) | Any role |
-| **Approve sign-ups** | Accept or decline sign-up requests (#43) | Any role |
+| **Create invites** | Create invite codes (see [Registration](#registration)) | Any role |
+| **Approve sign-ups** | Accept or decline sign-up requests, and see every account | Any role |
 | Manage roles, Manage sign-up, Kick, Ban, Rename | Admin actions | The admin role only |
 
 - `admin` is the **built-in role**. It holds every permission and cannot be renamed, deleted or
@@ -218,6 +224,62 @@ The permissions are fixed in code; there are no custom ones.
 - Every account lists the roles. A created, edited or deleted role reaches every connected
   session at once, an account given or denied roles shows its new roles to everyone, and an
   account whose permissions changed learns its new set without reconnecting.
+
+## Registration
+
+Since protocol 25 (schema migration 13, #43) a server has a **registration mode**, which only
+admins change (from the client, or `deploy/sql/set-registration-mode.sql`):
+
+| Mode | A new key |
+| --- | --- |
+| **Open** (the default; upgraded servers start here) | Gets an account at once. A client may still ask for the sign-up screen (**I have an invite code**, **Use an invite code**, or an invite link) to use a code that gives roles or a room. |
+| **Invite only** | Needs a valid invite code. |
+| **Invite + approval** | Needs a valid invite code and a written reason (1 to 500 characters); that makes a **sign-up request**, which an account with Approve sign-ups accepts or declines. A code created with **Skip approval** signs up at once and needs no reason. |
+
+- **Signing up** happens inside the encrypted session: a key without an account is told to
+  sign up instead of being signed in, and only then sends its code, so the code never travels in
+  plaintext. A session gets 5 attempts and 10 minutes. Every invalid code (unknown, revoked,
+  expired or used up) gets the same "This invite code is not valid". The account takes the name
+  the client signs in with; a name already in use is refused as at sign-in.
+- **Invite codes** are 32 symbols (20 random bytes, shown as `XXXX-XXXX-…`; dashes, spaces and
+  case do not matter). The server shows a code once, when it is made, and stores only its hash.
+  A code has a note, an optional expiry, an optional use limit, and can be revoked. A use counts
+  when a sign-up or a request is accepted; a declined request does not give it back.
+- **Who makes codes:** holders of Create invites. Codes from accounts other than admins are
+  plain (no roles, room or Skip approval), expire within 7 days, and at most 25 can be usable at
+  once; those accounts list and revoke only their own. Admins list and revoke every code, and
+  only admins attach roles (never `admin` itself), a room, or Skip approval. An operator without
+  an admin yet prints a code with `deploy/sql/create-invite.sql`.
+- **Invite links** carry the server's address, the code and the server's identity key:
+  `haychat://HOST:PORT/invite/CODE?key=SERVER_KEY`. The client pins that key, so the code only
+  ever goes to that server, and it refuses a link whose key differs from the one it already
+  pinned for the address. Opening a link never signs up by itself; the client asks first.
+- **Requests:** one per key. Approvers see a count of waiting requests as a badge (no pop-up)
+  and approve or decline them, with an optional reason that the applicant is shown. Approval
+  creates the account at the applicant's next sign-in, or at once while they are still waiting
+  in the client, with the code's roles and room. A declined applicant sees the decision and its
+  reason, and is not retried until they ask.
+- `HAYCHAT_ADMIN_PUBLIC_KEY` may always sign up, in every mode, unrestricted and without
+  approval, so a fresh server can start closed.
+
+## Restricted Accounts
+
+An account that signs up with a **room code** (an admin's code for one unencrypted Member invite
+or Admin invite room) is **restricted** to that room:
+
+- It joins only that room (and the Role rooms of the code's roles), never Public rooms: not at
+  sign-up, not when a room is created Public or made Public, and not as the default room.
+- Only holders of Manage members in a room (admins included) can add it there ("Only a member
+  manager can add this restricted account"), and the encrypted member log follows the same rule.
+- It sees, and exchanges direct messages with, only accounts it shares a room with and admins;
+  only those accounts, admins and approvers see it. The user list, presence, account changes and
+  key changes are filtered that way for each recipient, and when a membership change alters who
+  shares a room with it, the affected sessions get a fresh user list. A direct message without a
+  shared room is refused ("You no longer share a room with this person"); history from before
+  stays readable.
+- An admin can lift the restriction (**Lift restriction** in the Admin section), which joins the
+  account to every Public room. A room code cannot target an encrypted room yet, because the
+  server cannot sign the room's member list.
 
 ## Room Permissions
 
@@ -294,9 +356,16 @@ newest message.
 - The Admin section's room list does not refresh by itself when another admin changes a room
   the admin is not in; reopening Server settings fetches it again.
 - The Admin section lists every account of the server at once, with no search or paging.
-- Bans are per account and sign-up is open; closed sign-up (#43) is the fix.
+- Bans are per account. On an Open server a banned person can come back with a new key; set the
+  server to Invite only or Invite + approval to stop that.
+- A new account reaches other connected clients first as a presence notice, so their lists show
+  its Restricted badge and identity key only after their next user list (the next sign-in).
+- A few requests still tell a restricted account that another account exists by its ID (the key
+  bundle fetch, a direct conversation's mark-read refusal, voice participant names in a shared
+  room). A restricted account that sits in a room when it is made Public gets no fresh user list.
+- There is no per-address limit on sign-up attempts, only the per-session one (5 attempts,
+  10 minutes) and at most 64 sessions signing up at once.
 - Roles do not rank accounts, so kick, ban and rename cannot be delegated. Room permissions
   only allow, never deny: a room cannot take something from a role another grant gives.
-- Account registration (`ClientRegister`) is not implemented.
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.

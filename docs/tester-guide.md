@@ -122,6 +122,17 @@ That key is what proves to the server that you are you. Do not share the file. I
 it, the client makes a new key, and the server will no longer let you use your old name: pick
 a new one, or ask the maintainer to free the old one.
 
+### Invite Codes
+
+A server may let people join only with an invite code. Then, instead of the rooms, the client
+shows **Sign up on …** with a field for the code: paste the code the maintainer gave you and
+press **Sign up**. If someone has to approve sign-ups, also say in a few words who you are; the
+client then shows **Waiting for approval** until they do (keep it open, or press **Check again**
+later). An invite link (`haychat://…/invite/…`) fills the code in for you after you confirm the
+server. If you were given a code for a server where anyone may join, tick **I have an invite
+code** when you add the server, so the code's roles or room apply to your new account. See the
+[user guide](user-guide.md#signing-up).
+
 ## What You See on Screen
 
 The narrow bar on the left lists your servers. A **dot** on each server button shows its

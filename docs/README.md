@@ -14,7 +14,7 @@
 | --- | --- |
 | [deploy/README.md](../deploy/README.md) | Running a server for real users: the server image, quadlet units, first-time setup, firewall, backups, upgrades, and release builds |
 | [server-configuration.md](server-configuration.md) | Every `HAYCHAT_*` environment variable, startup exit status, schema migrations, and the `[Status]` log line |
-| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, rooms, admin actions, direct messages, and unread counts |
+| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, registration (invite codes, approval, restricted accounts), roles, rooms and room permissions, admin actions, direct messages, and unread counts |
 
 ## Developing HayChat
 
@@ -25,7 +25,7 @@
 | [AGENTS.md](../AGENTS.md), [client/AGENTS.md](../client/AGENTS.md), [server/AGENTS.md](../server/AGENTS.md) | Project conventions and component internals, written for coding agents and useful to anyone changing the code |
 | [protocol.md](protocol.md) | Transport encryption, what each protocol version added, and the end-to-end encryption primitives in `common/e2ee.odin` (not yet used on the wire) |
 | [server-networking.md](server-networking.md) | The server's threads, IPC queues, and network loop |
-| [testing-harness.md](testing-harness.md) | The headless client (`client --headless`), voice test commands, and GUI automation (`client --ui-script`) |
+| [testing-harness.md](testing-harness.md) | The headless client (`client --headless`), voice test commands, GUI automation (`client --ui-script`), and the live proofs (`./dev.sh live --admin`, `--registration`, …) |
 | [voice-manual-test.md](voice-manual-test.md) | Measuring voice on real audio devices with PipeWire, and the Windows voice checklist |
 | [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) | Third-party code, libraries and fonts in each release artifact, with their licences |
 
@@ -44,3 +44,4 @@ describe the current state.
 | [plan/2026-11-14-admin-settings-menus.md](plan/2026-11-14-admin-settings-menus.md) | Admin interface, per-server settings, and context menus |
 | [plan/e2ee-design.md](plan/e2ee-design.md) | End-to-end encryption design (direct messages, room access modes, encrypted rooms, voice) |
 | [plan/e2ee-voice-design.md](plan/e2ee-voice-design.md) | End-to-end encrypted voice in encrypted rooms (E6, protocol 21) |
+| [plan/2026-11-18-roles-and-registration.md](plan/2026-11-18-roles-and-registration.md) | Roles and permissions, room permissions, and registration with invite codes (#43, protocols 23-25) |

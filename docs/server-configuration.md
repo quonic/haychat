@@ -79,7 +79,10 @@ client. A new or upgraded server is **Open**. Two SQL helpers change things with
 - `deploy/sql/create-invite.sql` (`psql -v uses=1 -v days=7 -v note=... -f ...`) prints a new
   invite code, for an operator who has no admin account yet. Only its sha256 is stored.
 
-`HAYCHAT_ADMIN_PUBLIC_KEY` can always sign up, whatever the mode.
+`HAYCHAT_ADMIN_PUBLIC_KEY` can always sign up, whatever the mode. What each mode, invite codes
+and restricted accounts mean is in
+[rooms-and-accounts.md](rooms-and-accounts.md#registration); how sign-up looks in the client is
+in the [user guide](user-guide.md#signing-up).
 
 ## Startup and Exit Status
 

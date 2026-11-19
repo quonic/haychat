@@ -28,6 +28,9 @@ SettingsForm :: struct {
 	serverPort:      [dynamic]u8,
 	// The server whose address the form edits; 0 while adding a new one.
 	editingServerID: int,
+	// I have an invite code: the server's use_invite_code (protocol 25), so the first
+	// connection asks for the sign-up screen even on an Open server.
+	useInviteCode:   bool,
 	error:           string, // Owned
 }
 
@@ -251,13 +254,20 @@ State_closeSettings :: proc(state: ^State) {
 State_settingsEditServer :: proc(state: ^State, serverID: int) {
 	form := &state.settings
 	form.editingServerID = 0
+	form.useInviteCode = false
 	clear(&form.serverHost)
 	setBuffer(&form.serverPort, fmt.tprintf("%d", common.DEFAULT_SERVER_PORT))
 	if server, ok := State_serverConfig(state, serverID); ok {
 		form.editingServerID = serverID
+		form.useInviteCode = server.use_invite_code
 		setBuffer(&form.serverHost, server.host)
 		setBuffer(&form.serverPort, fmt.tprintf("%d", server.port))
 	}
+}
+
+// I have an invite code, on the first-run and add-server form: applied with the form.
+State_toggleSettingsInviteCode :: proc(state: ^State) {
+	state.settings.useInviteCode = !state.settings.useInviteCode
 }
 
 // Validates and applies the form. Returns false (with form.error set) when nothing changed.
@@ -289,6 +299,8 @@ State_applySettings :: proc(state: ^State) -> bool {
 	addedServerID := 0
 	if input.hasServer && editingExisting {
 		Server_setAddress(editingServer, input.host, input.port)
+		// A rebuilt transport reads the flag from the config; a kept one is told below.
+		editingServer.use_invite_code = form.useInviteCode
 	} else if input.hasServer {
 		addedServerID = 1
 		for server in state.config.servers {
@@ -303,12 +315,24 @@ State_applySettings :: proc(state: ^State) -> bool {
 				short_name = getShortServerName(name),
 				host = strings.clone(input.host),
 				port = input.port,
+				use_invite_code = form.useInviteCode,
 			},
 		)
 	}
 
 	State_saveConfig(state)
 	State_reconfigureNetwork(state)
+	if input.hasServer && editingExisting {
+		transportIndex := State_selectedTransportIndexForServerID(state^, form.editingServerID)
+		if transportIndex >= 0 {
+			ClientNetworkWorker_lock(state.networkWorker)
+			ClientServerTransport_setRegistering(
+				&state.serverTransports[transportIndex],
+				form.useInviteCode,
+			)
+			ClientNetworkWorker_unlock(state.networkWorker)
+		}
+	}
 	state.settingsOpen = false
 	delete(form.error)
 	form.error = ""

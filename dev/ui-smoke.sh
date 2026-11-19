@@ -54,6 +54,19 @@ set -euo pipefail
 #      manager, the Managers and Admins sections, and the room's SQL row is encrypted.
 #      Protocol 19: alice sends a message there; the header shows the lock, the message
 #      carries the lock badge, and its SQL row is sealed with an empty content.
+#  12. roles (protocol 23): in Server settings → Admin alice clicks "New role…", names the
+#      role, ticks Create invites and creates it; SQL must find the role with that permission.
+#  13. registration (protocol 25): before the window opens, headless erin asks to sign up with
+#      an operator's code (deploy/sql/create-invite.sql) while the server is briefly in
+#      Invite + approval mode, so her request waits. alice's sidebar gear shows the approver
+#      badge ("⚙ N") and Sign-up requests "N pending"; she switches the registration mode and
+#      back (bob sees both registration_mode events), creates an invite code with "New
+#      invite…" and "Create code" (the code and "Copy link" are shown once; SQL must find it
+#      under her account), and approves erin's request, which drops the badge; erin, still
+#      connected, is signed up at once.
+#
+# Under --all the server holds every earlier proof's accounts, so the Admin section is several
+# screens long: the script reaches each control with `scroll-until`, never by a fixed scroll.
 #
 # alice takes a screenshot (BMP) at each step. They are kept after the run, in
 # HAYCHAT_UI_SCREENSHOT_DIR when it is set and in a new temporary directory otherwise, and the
@@ -100,6 +113,10 @@ on_exit() {
 	if [[ -n "$gui_pid" ]]; then
 		kill "$gui_pid" 2>/dev/null || true
 	fi
+	if [[ -n "$original_mode" ]]; then
+		ui_psql -c "UPDATE server_settings SET registration_mode = $original_mode" >/dev/null ||
+			echo "could not restore the registration mode" >&2
+	fi
 	if [[ $status -ne 0 ]]; then
 		print_client_output
 		if [[ -f "$work_dir/alice.out" ]]; then
@@ -131,14 +148,22 @@ nickname_dave="ui-dave-$run_tag"
 plain_message="ui smoke unencrypted to dave $run_tag"
 encrypted_room="ui-secret-$run_tag"
 encrypted_room_message="ui smoke sealed room message $run_tag"
+gui_role="ui-role-$run_tag"
+nickname_erin="ui-erin-$run_tag"
+# The registration mode the server had, restored on exit whatever happens (step 13 changes it).
+original_mode=""
 
-# run_sql SQL: runs statements against the server's database, like make_admin.
-run_sql() {
-	command -v psql >/dev/null 2>&1 || fail "the UI smoke test needs psql on PATH"
+# ui_psql ARGS...: psql against the server's database, like make_admin.
+ui_psql() {
 	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -t -A -v ON_ERROR_STOP=1 \
 		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
-		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
-		-c "$1" || fail "SQL failed: $1"
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" "$@"
+}
+
+# run_sql SQL: runs statements against the server's database.
+run_sql() {
+	command -v psql >/dev/null 2>&1 || fail "the UI smoke test needs psql on PATH"
+	ui_psql -c "$1" || fail "SQL failed: $1"
 }
 
 echo "==> [ui] starting headless bob"
@@ -181,6 +206,41 @@ expect_ok dave users
 user_alice_for_dave=${BASH_REMATCH[1]}
 # dave pins alice, so he can check her signature.
 expect_ok dave user-keys "$user_alice_for_dave"
+
+# erin's sign-up request waits for alice's approval in the window, so its ID can go into the
+# script. The server is in Invite + approval mode only while she asks.
+echo "==> [ui] erin asks to sign up in Invite + approval mode; alice will approve her"
+original_mode=$(run_sql "SELECT registration_mode FROM server_settings")
+[[ "$original_mode" =~ ^[123]$ ]] || fail "unexpected registration mode '$original_mode'"
+pending_before=$(run_sql "SELECT count(*) FROM registration_requests WHERE status = 1")
+pending_with_erin=$((pending_before + 1))
+run_sql "UPDATE server_settings SET registration_mode = 3" >/dev/null
+erin_code=$(ui_psql -v uses=1 -v days=1 -v note="ui smoke $run_tag" \
+	-f deploy/sql/create-invite.sql | tail -n 1) || fail "create-invite.sql failed"
+start_client_at erin "$nickname_erin" "$server_address" --invite-code "$erin_code" \
+	--reason "ui smoke applicant $run_tag"
+erin_pending=$(wait_for_match erin '^\{"event":"registration_result",.*"status":"pending",') ||
+	fail "[registration] erin's sign-up request is not pending"
+echo "    erin< $erin_pending"
+run_sql "UPDATE server_settings SET registration_mode = $original_mode" >/dev/null
+request_erin=$(run_sql "SELECT id FROM registration_requests
+	WHERE nickname = '$nickname_erin' AND status = 1")
+[[ "$request_erin" =~ ^[0-9]+$ ]] || fail "[registration] erin's request has no ID"
+# The mode alice switches to in the window, and the sentence each mode shows under the picker.
+other_mode=2
+[[ "$original_mode" == 2 ]] && other_mode=3
+mode_texts=(
+	""
+	"Anyone may sign up on this server; an invite code can give you roles or a room."
+	"This server needs an invite code to sign up"
+	"This server needs an invite code and approval to sign up"
+)
+mode_words=("" open invite approval)
+if ((pending_before == 0)); then
+	badge_after_approval="wait-gone \"1 pending\" 10000"
+else
+	badge_after_approval="wait-text \"$pending_before pending\" 10000"
+fi
 
 # alice's profile is fresh, so its only server gets ID 1; the DM composer's widget ID is
 # idOf("dm-input", serverID, peerUserID).
@@ -427,6 +487,50 @@ key Return
 wait-text "$encrypted_room_message" 15000
 wait-text "🔒" 5000
 screenshot $screenshot_dir/37-encrypted-room-message.bmp
+# The approver badge (D18) on the sidebar gear: erin's request waited before the window opened.
+wait-text "⚙ $pending_with_erin" 10000
+screenshot $screenshot_dir/38-approver-badge.bmp
+# Roles (protocol 23): a new role with Create invites from Server settings → Admin → Roles.
+click-id server-settings 1
+wait-text "Display name on this server" 5000
+scroll-until "New role…" 760 400 2 30000
+click-id admin-role-new 1
+scroll-until "Room keepers" 760 400 2 10000
+click-id admin-role-name 1 0
+type "$gui_role"
+scroll-until "Create invites" 760 400 2 10000
+click-id admin-role-permission 1 0 2
+scroll-until "Create" 760 400 2 10000
+screenshot $screenshot_dir/39-role-form.bmp
+click-id admin-role-save 1 0
+scroll-until "$gui_role" 760 400 2 10000
+screenshot $screenshot_dir/40-role-created.bmp
+# Registration (protocol 25): the mode picker, there and back.
+scroll-until "Invite + approval" 760 400 2 10000
+click-id admin-registration-mode 1 $other_mode
+wait-text "${mode_texts[$other_mode]}" 10000
+screenshot $screenshot_dir/41-registration-mode.bmp
+click-id admin-registration-mode 1 $original_mode
+wait-text "${mode_texts[$original_mode]}" 10000
+# Invites: a code made with the form's defaults is shown once, with Copy and Copy link.
+scroll-until "New invite…" 760 400 2 10000
+click-id admin-invite-new 1
+scroll-until "Create code" 760 400 2 10000
+click-id admin-invite-create 1
+scroll-until "Copy link" 760 400 -2 10000
+screenshot $screenshot_dir/42-invite-created.bmp
+click-id admin-invite-done 1
+wait-gone "Copy link" 5000
+# Sign-up requests: the badge counts erin, and Approve drops it.
+scroll-until "$nickname_erin" 760 400 2 10000
+wait-text "$pending_with_erin pending" 5000
+screenshot $screenshot_dir/43-signup-requests.bmp
+click-id admin-request-approve 1 $request_erin
+$badge_after_approval
+# erin's new account joins the list above, which pushes her request down.
+scroll-until "Approved" 760 400 2 10000
+screenshot $screenshot_dir/44-request-approved.bmp
+click-id server-settings-close 1
 quit
 EOF
 
@@ -610,6 +714,39 @@ sealed_rows=$(run_sql "SELECT count(*) || ':' ||
 [[ "$sealed_rows" == "1:1:0" ]] ||
 	fail "[e2ee] alice's room message is not one sealed row without its text: $sealed_rows"
 
+echo "==> [ui] alice created a role with Create invites on the Roles page"
+role_bits=$(run_sql "SELECT permissions FROM server_roles WHERE name = '$gui_role'")
+[[ "$role_bits" == 4 ]] ||
+	fail "[roles] the role $gui_role does not hold only Create invites (bit 4): '$role_bits'"
+
+echo "==> [ui] alice switched the registration mode and back; bob saw both"
+mode_pattern="^\\{\"event\":\"registration_mode\",\"serverID\":1,"
+mode_pattern+="\"mode\":\"${mode_words[$other_mode]}\"\\}$"
+mode_line=$(wait_for_match bob "$mode_pattern" "$reconnect_start") ||
+	fail "[registration] bob never saw the mode become ${mode_words[$other_mode]}"
+echo "    bob< $mode_line"
+mode_at=$(grep -nE -m1 "$mode_pattern" "$work_dir/bob.out" | cut -d: -f1)
+back_pattern="^\\{\"event\":\"registration_mode\",\"serverID\":1,"
+back_pattern+="\"mode\":\"${mode_words[$original_mode]}\"\\}$"
+back_line=$(wait_for_match bob "$back_pattern" "$mode_at") ||
+	fail "[registration] bob never saw the mode go back to ${mode_words[$original_mode]}"
+echo "    bob< $back_line"
+[[ $(run_sql "SELECT registration_mode FROM server_settings") == "$original_mode" ]] ||
+	fail "[registration] the server is not back in mode $original_mode"
+
+echo "==> [ui] alice created an invite code in the window"
+invites=$(run_sql "SELECT count(*) FROM invites WHERE created_by_user_id = $user_alice")
+[[ "$invites" == 1 ]] || fail "[registration] alice's account has $invites invite codes, not 1"
+
+echo "==> [ui] alice approved erin's request; erin, still connected, is signed up"
+erin_created=$(wait_for_match erin '^\{"event":"connected",.*"registered":true') ||
+	fail "[registration] erin was not signed up after the approval"
+echo "    erin< $erin_created"
+# The sign-in that created the account used the approved request up (D14).
+[[ $(run_sql "SELECT count(*) FROM registration_requests WHERE id = $request_erin") == 0 ]] ||
+	fail "[registration] erin's approved request was not used up by her sign-up"
+
+stop_client erin
 stop_client alice-watch
 stop_client bob
 stop_client dave

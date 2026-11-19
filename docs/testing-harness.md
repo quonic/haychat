@@ -777,6 +777,42 @@ refused the history; and A creates an Admin invite room with `no-join`, finds it
 `admin-rooms`, adds B, lists its members, is refused its history, makes it Public (C is added
 and reads the whole history) and deletes it.
 
+`./dev.sh live --registration` runs `dev/registration-proof.sh` (also part of `--all`, after
+the encryption proof) with headless clients, through the [Registration](#registration) commands:
+
+1. Admin alice gives bob a role with `create-invites` and switches the server to Invite only;
+   bob sees `registration_mode`.
+2. carol, a new key with no code, gets `registration_required` (`invite`): `status` reports
+   `registering` and not connected, and `send` is refused.
+3. bob's code signs carol up in the same session (`registration_result` `created`, `connected`
+   with `"registered":true`), and her message in `#general` reaches alice.
+4. frank is refused an expired code (its `expires_at` moved into the past with SQL), a revoked
+   code and carol's used-up one, each with "This invite code is not valid".
+5. henry opens bob's invite link: a copy naming another server key gets `link_pending`
+   `key_differs`, the real one `pinned` (the code is never printed); `link-confirm` reconnects
+   registering and `register form` signs him up.
+6. In Invite + approval mode dave's code makes a pending request: alice gets
+   `registration_request` with `pendingCount`, `registration-list` and `status`
+   (`pendingRegistrations`) agree, she approves it, the count drops, and dave, still connected,
+   is created at once and joins `#general`. george's request is declined with a reason, which
+   he sees in `registration_result` `declined` and again in `registration_required` on his next
+   attempt.
+7. alice's room code (with `skip-approval`) for an Admin invite room signs erin up restricted:
+   erin's `rooms` hold only that room, her `users` show alice but not carol or bob, bob does not
+   see her, and SQL finds her restricted. Her direct message to carol is refused ("You no longer
+   share a room with this person") until alice adds carol to the room; erin's `user_list` then
+   gains carol and carol receives the next message.
+8. A second server (`HAYCHAT_REGISTRATION_PROOF_PORT`, default 12346) on a database the proof
+   creates and drops, in Invite only mode from the start (`set-registration-mode.sql`) and with
+   `HAYCHAT_ADMIN_PUBLIC_KEY` set to boss's key: zed is told to register, boss signs in
+   unrestricted, an operator code from `create-invite.sql` signs zed up, and `make-admin.sql`
+   makes boss an admin.
+
+The proof restores the running server's registration mode when it ends, also after a failure,
+so the proofs after it find the server as it was. Step 8 needs a database role that may create
+databases, as the throwaway PostgreSQL of `./dev.sh` and CI provide. `dev/live-proof.sh` passes
+its server binary in `HAYCHAT_SERVER_BIN`; run alone, the proof builds one.
+
 `./dev.sh live --all` runs it after the live client tests. Step 2 relies on Public rooms: a new
 account joins every Public room, and the server creates `#general` (room 1) on an empty
 database before it reports readiness, which `dev/live-proof.sh` checks before any client
@@ -794,7 +830,7 @@ times a normal run, the compile included:
 | Step | Limit |
 | --- | --- |
 | Live client tests (startup auth, room chat, direct message, in-process voice) | 20 min |
-| `dev/harness-smoke.sh`, `dev/admin-proof.sh`, `dev/room-access-proof.sh` | 10 min each |
+| `dev/harness-smoke.sh`, `dev/admin-proof.sh`, `dev/room-access-proof.sh`, `dev/registration-proof.sh` | 10 min each |
 | `dev/voice-proof.sh`, `dev/ui-smoke.sh` | 15 min each |
 | `dev/e2ee-proof.sh` | 20 min |
 | Server SQL proof (`HAYCHAT_DATABASE_SQL_TEST=1 odin test server`) | 20 min |
@@ -874,6 +910,7 @@ Timeouts default to 5000 ms and may be at most 600000.
 | `click X Y` | Clicks at window coordinates. |
 | `right-click "TEXT"`, `right-click-id NAME [INT...]`, `right-click X Y` | The same lookups as `click`, `click-id` and `click X Y`, with the right mouse button: this opens a context menu (see [Context Menus](#context-menus)). |
 | `scroll X Y N` | Moves the pointer to window coordinates X Y and turns the wheel N notches (-100 to 100; positive scrolls the content down), for widgets below the fold of a scrolling screen. |
+| `scroll-until "TEXT" X Y N [TIMEOUT_MS]` | Turns the wheel N notches at a time at X Y (as `scroll`) until TEXT is drawn in view, then succeeds; fails at the timeout. Use it for controls whose place on a long screen depends on what the server lists above them (Server settings → Admin with many accounts), then `click-id` the control. Keep N small enough that one turn moves less than the visible area. |
 | `type "TEXT"` | Delivers TEXT as one `SDL_EVENT_TEXT_INPUT` to the focused text field (click the field first). |
 | `key NAME` | Presses and releases a key. Names (any case): `Return`, `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `A`, `C`, `V`, `X`, with optional `Shift+`, `Ctrl+`, `Alt+`, `Gui+`/`Cmd+` prefixes, e.g. `Shift+Return`, `Ctrl+A`. |
 | `screenshot FILE.bmp` | Writes the next frame to FILE as a BMP (SDL has no PNG writer). Convert with `magick FILE.bmp FILE.png`. |
@@ -1072,8 +1109,20 @@ room form, picks Admin invite, sees **Encrypt this room: on** with herself check
 manager, and creates the room; its Members page opens with her as member and manager and the
 Managers section, and SQL must find the room encrypted at log version 1. Then (protocol 19) she
 sends a message in it: the header shows "🔒 # room", the message carries the 🔒 badge, and SQL
-must find one sealed row without its text. alice takes 38 screenshots on the way (`01-…` to
-`37-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
+must find one sealed row without its text. Then the roles and registration steps (protocols
+23 and 25): before the window opens, headless erin asks to sign up with an operator code from
+`create-invite.sql` while SQL holds the server in Invite + approval mode for a moment, so her
+request waits and its ID goes into the script. alice's sidebar gear must show the approver badge
+("⚙ N"); in Server settings → Admin she makes a role with **New role…**, a name and **Create
+invites** (SQL must find it with that bit only), switches **Registration** to another mode and
+back (bob must print both `registration_mode` events, and the server must end in its old mode),
+makes a code with **New invite…** and **Create code** ("Copy link" is shown, then **Done**; SQL
+must find one code under her account), and, with "N pending" on **Sign-up requests**, clicks
+**Approve** on erin's request: the badge drops, the row reads "Approved", and erin, still
+connected, must print `connected` with `"registered":true` (her request is used up). Under
+`--all` the Admin section is several screens long, so these steps reach every control with
+`scroll-until` rather than a fixed scroll. alice takes 45 screenshots on the way (`01-…` to
+`44-…` and `06b-server-settings.bmp`). The script reads their names from the `screenshot`
 lines of the GUI script it generates, deletes any files with those names before the window
 opens, and at the end prints every path and fails naming each one that was not written, so a
 new shot needs no count to update and leftovers from an earlier run never count. They stay in

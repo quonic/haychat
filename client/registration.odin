@@ -233,8 +233,6 @@ State_sendRegistrationRequest :: proc(
 SIGN_UP_CODE_INVALID_LOCAL ::
 	"An invite code has 32 letters and digits (dashes and spaces do not matter)."
 SIGN_UP_CODE_REQUIRED_LOCAL :: "Enter the invite code you were given."
-SIGN_UP_REASON_REQUIRED_LOCAL ::
-	"Say in a few words who you are, for the people who approve sign-ups."
 SIGN_UP_REASON_INVALID_LOCAL ::
 	"The reason must be at most 500 characters, without control characters other than line breaks."
 
@@ -249,9 +247,8 @@ validateSignUp :: proc(mode: common.RegistrationMode, code, reason: string) -> s
 	} else if _, ok := common.parseInviteCode(code); !ok {
 		return SIGN_UP_CODE_INVALID_LOCAL
 	}
-	if mode == .InviteApproval && len(strings.trim_space(reason)) == 0 {
-		return SIGN_UP_REASON_REQUIRED_LOCAL
-	}
+	// An empty reason may go out in Invite + approval mode too: a code with Skip approval
+	// needs none, and only the server knows the code (REGISTRATION_REASON_REQUIRED_MESSAGE).
 	if !common.registrationTextIsValid(reason, 0, common.REGISTRATION_REASON_MAX_CHARS) {
 		return SIGN_UP_REASON_INVALID_LOCAL
 	}
