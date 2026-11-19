@@ -14,6 +14,8 @@ TEXT_INPUT_MAX_LINES :: 8
 TextInputResult :: struct {
 	changed:   bool,
 	submitted: bool, // Enter was pressed with non-blank content
+	// Enter was pressed, blank content or not (a message with only files may be sent).
+	entered:   bool,
 }
 
 // Context menus on text inputs. A right press on an input focuses it (keeping its selection)
@@ -237,6 +239,7 @@ textInput :: proc(
 		keys := textInputHandleKeys(ctx, id, buf, wrapW, maxBytes)
 		result.changed ||= keys.changed
 		result.submitted = keys.submitted
+		result.entered = keys.entered
 	}
 	if ctx.textMenu.watched == id {
 		ctx.textMenu.facts = TextFieldFacts {
@@ -386,8 +389,9 @@ textInputHandleKeys :: proc(
 			case SDL.K_RETURN, SDL.K_KP_ENTER:
 				if shift {
 					edited = TextEdit_insert(st, buf, "\n", maxBytes)
-				} else if len(strings.trim_space(string(buf[:]))) > 0 {
-					result.submitted = true
+				} else {
+					result.entered = true
+					result.submitted ||= len(strings.trim_space(string(buf[:]))) > 0
 				}
 			case SDL.K_A:
 				if ctrl {

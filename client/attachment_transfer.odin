@@ -120,6 +120,7 @@ ClientTransferCommand :: struct {
 	encrypted:       bool, // Upload: seal the file (protocol 27)
 	expect:          ClientTransferExpect, // Download: what to check (protocol 27)
 	message:         string, // Abandon: why (static, not owned)
+	transferID:      int, // Cancel (F4): the transfer to stop, by its local ID; 0 by blob ID
 }
 
 ClientTransferInboundKind :: enum u8 {
@@ -206,6 +207,9 @@ ClientTransfer :: struct {
 	opener:        common.AttachmentOpener,
 	openerBuffer:  []u8,
 	written:       u64,
+	// F4: an upload cancelled before the server named its blob. Its Ready, if one still
+	// comes, is answered with a cancel, so the server does not keep the upload open.
+	cancelled:     bool,
 }
 
 ClientTransferWorker :: struct {
@@ -408,6 +412,19 @@ ClientTransferWorker_cancel :: proc(
 	return clientTransferQueue(
 		worker,
 		ClientTransferCommand{kind = .Cancel, serverID = serverID, blobId = blobId},
+	)
+}
+
+// Stops the transfer with local ID transferID (an upload or a download), also an upload the
+// server has not named a blob for yet (attachments plan F4: a chip removed while uploading).
+// Its Error event says "cancelled".
+ClientTransferWorker_cancelTransfer :: proc(
+	worker: ^ClientTransferWorker,
+	serverID, transferID: int,
+) -> int {
+	return clientTransferQueue(
+		worker,
+		ClientTransferCommand{kind = .Cancel, serverID = serverID, transferID = transferID},
 	)
 }
 
@@ -700,6 +717,11 @@ clientTransferEmit :: proc(
 	sync.mutex_lock(&worker.mutex)
 	append(&worker.events, event)
 	sync.mutex_unlock(&worker.mutex)
+	// F4: the GUI draws progress from these events, so they wake its loop like network events
+	// do (appWakeFromWorker coalesces wakes and is safe on any thread).
+	if network := worker.network; network != nil && network.onEventQueued != nil {
+		network.onEventQueued(network.onEventQueuedData)
+	}
 }
 
 @(private = "file")
@@ -961,6 +983,10 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 		}
 		transfer.generation = generation
 	case .Cancel:
+		if command.transferID != 0 {
+			clientTransferCancelByID(worker, command.serverID, command.transferID)
+			return
+		}
 		_, _ = clientTransferSendControl(
 			worker,
 			command.serverID,
@@ -991,6 +1017,37 @@ clientTransferHandleCommand :: proc(worker: ^ClientTransferWorker, command: Clie
 	}
 }
 
+// Cancel by local transfer ID: the server is told when it named the blob already; an upload
+// still waiting for its Ready is marked so that Ready is answered with a cancel.
+@(private = "file")
+clientTransferCancelByID :: proc(worker: ^ClientTransferWorker, serverID, transferID: int) {
+	for transfer in worker.transfers {
+		if transfer.serverID != serverID ||
+		   transfer.id != transferID ||
+		   transfer.state == .Finished {
+			continue
+		}
+		if transfer.hasBlobId {
+			_, _ = clientTransferSendControl(
+				worker,
+				serverID,
+				.ClientAttachmentCancel,
+				common.ClientAttachmentCancelPayload{blobId = transfer.blobId},
+			)
+		} else if transfer.direction == .Upload {
+			transfer.cancelled = true
+		}
+		clientTransferFail(worker, transfer, "cancelled")
+		if transfer.direction == .Upload {
+			// A cancelled upload is a tombstone on the server: it cannot be resumed.
+			transfer.hasBlobId = false
+		}
+		clientTransferDropUnacked(transfer)
+		clientTransferWipeCrypto(transfer)
+		return
+	}
+}
+
 @(private = "file")
 clientTransferHandleInbound :: proc(
 	worker: ^ClientTransferWorker,
@@ -1014,6 +1071,22 @@ clientTransferHandleInbound :: proc(
 			}
 		}
 		if transfer == nil {
+			// An upload cancelled before this Ready came (F4): the server stops it too.
+			for candidate in worker.transfers {
+				if candidate.cancelled &&
+				   candidate.serverID == inbound.serverID &&
+				   inbound.requestId != 0 &&
+				   candidate.requestId == inbound.requestId {
+					candidate.cancelled = false
+					_, _ = clientTransferSendControl(
+						worker,
+						inbound.serverID,
+						.ClientAttachmentCancel,
+						common.ClientAttachmentCancelPayload{blobId = inbound.blobId},
+					)
+					break
+				}
+			}
 			return
 		}
 		if inbound.offset > transfer.size {

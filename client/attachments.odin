@@ -15,7 +15,8 @@ package client
 // listing it comes back from the server.
 //
 // Receiving: every shown message keeps the files the client checked as MessageFile entries
-// (RoomMessageEntry.files, DirectMessageEntry.files), which the harness prints and F4 draws:
+// (RoomMessageEntry.files, DirectMessageEntry.files), which the harness prints and the file
+// cards draw (attachment_ui.odin):
 // a plaintext message's from its references once the v2 signature verified, a sealed
 // message's from the list inside the seal. A sealed message whose outer list (what the server
 // bound) is not the inner one, or whose stored size does not fit the sealed file's layout, keeps
@@ -608,42 +609,6 @@ State_downloadMessageAttachment :: proc(
 MessageFilesResult :: struct {
 	files:   [dynamic]MessageFile,
 	changed: bool,
-}
-
-// A message's text with a line per checked file after it ("Attachment: name (size)"), or the
-// changed-list sentence; text unchanged without files. Until F4 draws file cards this keeps a
-// message with only files from showing nothing. allocator holds the result.
-messageTextWithFiles :: proc(
-	text: string,
-	files: []MessageFile,
-	changed: bool,
-	allocator := context.temp_allocator,
-) -> string {
-	if len(files) == 0 && !changed {
-		return text
-	}
-	builder := strings.builder_make(allocator)
-	strings.write_string(&builder, text)
-	if changed {
-		if len(text) > 0 {
-			strings.write_byte(&builder, '\n')
-		}
-		strings.write_string(&builder, common.ATTACHMENT_LIST_CHANGED_MESSAGE)
-	}
-	for file, index in files {
-		if len(text) > 0 || index > 0 {
-			strings.write_byte(&builder, '\n')
-		}
-		strings.write_string(&builder, "Attachment: ")
-		strings.write_string(&builder, file.name)
-		strings.write_string(&builder, " (")
-		strings.write_string(&builder, attachmentSizeText(file.fileSize))
-		strings.write_byte(&builder, ')')
-		if file.removed {
-			strings.write_string(&builder, ", removed by an admin")
-		}
-	}
-	return strings.to_string(builder)
 }
 
 // A size for people: bytes, KB, MB or GB with one decimal (temp).

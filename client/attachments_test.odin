@@ -17,13 +17,11 @@ ATTACHMENT_TEST_SERVER :: 982
 ATTACHMENT_TEST_SELF :: 50
 ATTACHMENT_TEST_PEER :: 51
 
-@(private = "file")
 attachmentTestFetchBridge :: proc(transport: ^ClientServerTransport, userIDs: []int) -> bool {
 	_ = userIDs
 	return transport.serverID == ATTACHMENT_TEST_SERVER
 }
 
-@(private = "file")
 attachmentTestRefs :: proc() -> [2]common.AttachmentRef {
 	refs: [2]common.AttachmentRef
 	for index in 0 ..< 2 {
@@ -41,7 +39,6 @@ attachmentTestRefs :: proc() -> [2]common.AttachmentRef {
 
 // A live plaintext room message from the peer listing listed, signed by privateKey over
 // signedRefs (the v2 label when there are any).
-@(private = "file")
 attachmentTestDeliver :: proc(
 	state: ^State,
 	messageID: int,
@@ -80,7 +77,6 @@ attachmentTestDeliver :: proc(
 	ClientTransportRuntimeEvent_deinit(&event)
 }
 
-@(private = "file")
 attachmentTestEntry :: proc(state: ^State, messageID: int) -> ^RoomMessageEntry {
 	cache := State_serverRoomCache(state, ATTACHMENT_TEST_SERVER)
 	room := ServerRoomCache_roomCache(cache, common.GENERAL_ROOM_ID)
@@ -124,11 +120,15 @@ testRoomMessageFilesNeedTheirSendersSignature :: proc(t: ^testing.T) {
 		shown.files[1].blobId == refs[1].blobId,
 		"expected the files as the message signed them",
 	)
-	text := messageTextWithFiles(shown.content, shown.files[:], shown.filesChanged)
+	// F4: a file card per file, with the name, size and media type and Save….
+	cards := buildFileCardViews(&state, ATTACHMENT_TEST_SERVER, .Room, 1, 30, shown.files[:])
 	assert(
-		strings.contains(text, "Attachment: a.txt (1000 bytes)") &&
-		strings.contains(text, "Attachment: b.txt"),
-		fmt.tprintf("expected a line per file in the transcript text, got %q", text),
+		len(cards) == 2 &&
+		cards[0].title == "a.txt" &&
+		strings.has_prefix(cards[0].detail, "1000 bytes · ") &&
+		cards[0].canSave &&
+		cards[1].title == "b.txt",
+		fmt.tprintf("expected a card per file, got %v", cards),
 	)
 	files, changed, found := State_messageFiles(
 		&state,
@@ -224,11 +224,6 @@ testSealedMessageFilesMustMatchTheOuterList :: proc(t: ^testing.T) {
 	// A message without files has none on either side.
 	none, noneChanged := messageFilesFromSealed(nil, nil)
 	assert(!noneChanged && len(none) == 0, "expected no files and no change")
-	changedText := messageTextWithFiles("hi", nil, true)
-	assert(
-		changedText == "hi\n" + common.ATTACHMENT_LIST_CHANGED_MESSAGE,
-		fmt.tprintf("expected the changed sentence, got %q", changedText),
-	)
 }
 
 @(test)
@@ -437,10 +432,14 @@ testRemovedAttachmentsStaySignedAndAreMarked :: proc(t: ^testing.T) {
 		entry.files[1].name == "b.txt",
 		fmt.tprintf("expected the message verified with its second file removed, got %v", entry^),
 	)
-	text := messageTextWithFiles(entry.content, entry.files[:], entry.filesChanged)
+	cards := buildFileCardViews(&state, ATTACHMENT_TEST_SERVER, .Room, 1, entry.id, entry.files[:])
 	assert(
-		strings.contains(text, "b.txt (2.0 KB), removed by an admin"),
-		fmt.tprintf("expected the removed file labelled, got %q", text),
+		len(cards) == 2 &&
+		cards[0].state == .Idle &&
+		cards[1].state == .Removed &&
+		cards[1].status == common.ATTACHMENT_REMOVED_MESSAGE &&
+		!cards[1].canSave,
+		fmt.tprintf("expected the removed file's card without Save…, got %v", cards),
 	)
 	_, removedError := State_downloadMessageAttachment(
 		&state,

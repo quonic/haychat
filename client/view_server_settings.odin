@@ -26,6 +26,9 @@ import "ui"
 // role ID, then the ServerPermission value), admin-role-save, admin-role-delete and
 // admin-role-cancel (server, role ID; 0 for a new role). Holders of ManageRooms or
 // ManageRoomMembers see the section with the room list only.
+//
+// Storage (attachments plan F4; admins), after the Admin section: admin-storage-refresh
+// (server ID).
 
 SERVER_SETTINGS_COLUMN_WIDTH :: 520
 SERVER_SETTINGS_SHORT_WIDTH :: 96
@@ -384,9 +387,15 @@ viewServerSettings :: proc(
 
 	// ── Admin (admins only) ──
 	adminAction: AdminSectionAction
+	storageRefresh := false
 	if view.admin.visible {
 		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
 		_ = ui.cutTop(&column, sectionGap)
+		// Admin → Storage (attachments plan F4, D22): admins only, like the account controls.
+		if view.admin.showMembers {
+			storageRefresh = viewAdminStorage(state, ctx, &column, serverID)
+			_ = ui.cutTop(&column, sectionGap)
+		}
 	}
 
 	// ── Key and removal, last: rarely needed and not undone by Close ──
@@ -460,6 +469,12 @@ viewServerSettings :: proc(
 	}
 	if inviteCodeClicked {
 		State_setUseInviteCode(state, serverID, !view.useInviteCode)
+	}
+	if storageRefresh {
+		if errorMessage := State_requestAttachmentUsage(state, serverID); len(errorMessage) > 0 {
+			delete(state.serverSettings.error)
+			state.serverSettings.error = strings.clone(errorMessage)
+		}
 	}
 	if adminAction.registration.kind != .None {
 		runRegistrationAdminAction(

@@ -17,6 +17,32 @@ TranscriptUnit :: struct {
 	// badge). It is not part of the unit's text: never selected or copied. Empty for none.
 	badge:      string,
 	badgeColor: Color,
+	// A card drawn instead of text (a message's file): name, details, a status line, an
+	// optional progress bar and up to two buttons. A card unit's text is empty, so it is never
+	// selected or copied. nil for a text unit.
+	card:       ^TranscriptCard,
+}
+
+TRANSCRIPT_CARD_MAX_ACTIONS :: 2
+
+TranscriptCardAction :: struct {
+	id:      ID, // the button's widget ID
+	label:   string,
+	primary: bool,
+}
+
+TranscriptCard :: struct {
+	id:           ID, // the card's own widget ID, recorded for automation (never a press)
+	icon:         string, // drawn in a square at the left; empty for none
+	title:        string,
+	detail:       string,
+	status:       string, // empty for none
+	statusColor:  Color,
+	muted:        bool, // title and details drawn muted (a removed file)
+	showProgress: bool,
+	progress:     f32, // 0..1
+	actions:      [TRANSCRIPT_CARD_MAX_ACTIONS]TranscriptCardAction,
+	actionCount:  int,
 }
 
 TranscriptPos :: struct {

@@ -81,6 +81,9 @@ viewContextMenu :: proc(state: ^State, ctx: ^ui.Context) {
 		if effect.focusInput != 0 {
 			ui.focusTextInput(ctx, effect.focusInput)
 		}
+		if ref, save := effect.saveFile.?; save {
+			viewSaveAttachment(state, ctx, ref)
+		}
 		ui.requestFrame(ctx)
 	} else if result.dismissed {
 		State_closeContextMenu(state)
@@ -132,8 +135,9 @@ viewServerContextMenu :: proc(
 	}
 }
 
-// Records a right-click on a transcript built by transcriptUnits: an even unit key is the
-// sender header of message key / 2, an odd one the message itself.
+// Records a right-click on a transcript built by transcriptUnits: the unit key names the
+// message and its slot (transcriptUnitDecode): the sender header, the message itself (its text
+// or the changed-list notice), or one of its file cards.
 viewTranscriptContextMenu :: proc(
 	state: ^State,
 	ctx: ^ui.Context,
@@ -145,11 +149,15 @@ viewTranscriptContextMenu :: proc(
 	if !result.contextMenu {
 		return
 	}
-	messageID := int(result.unitKey / 2)
+	messageID, slot := transcriptUnitDecode(result.unitKey)
 	target: ContextMenuTarget
-	if result.unitKey % 2 == 0 {
+	switch {
+	case slot == TRANSCRIPT_SLOT_SENDER:
 		target = SenderMenuTarget{serverID, kind, conversationID, messageID}
-	} else {
+	case slot >= TRANSCRIPT_SLOT_FIRST_CARD && slot < TRANSCRIPT_SLOT_FILES_CHANGED:
+		index := slot - TRANSCRIPT_SLOT_FIRST_CARD
+		target = AttachmentMenuTarget{serverID, kind, conversationID, messageID, index}
+	case:
 		target = MessageMenuTarget{serverID, kind, conversationID, messageID}
 	}
 	State_requestContextMenu(state, target, ctx.input.mousePos, result.selectionText)

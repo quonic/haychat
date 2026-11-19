@@ -111,3 +111,14 @@ contextMenuRequested :: proc(ctx: ^Context, id: ID, r: Rect) -> bool {
 	ctx.rightPressTaken = true
 	return true
 }
+
+// Hands the keyboard input the overlay with id took back to the widgets drawn inside it, so a
+// text field in a dialog can be typed into. Call it between beginOverlay and endOverlay, before
+// those widgets, after reading any keys the overlay itself handles (Escape).
+overlayKeyboardToWidgets :: proc(ctx: ^Context, id: ID) {
+	if !overlayWasOpen(ctx, id) {
+		return
+	}
+	append(&ctx.input.events, ..ctx.overlay.events[:])
+	clear(&ctx.overlay.events)
+}

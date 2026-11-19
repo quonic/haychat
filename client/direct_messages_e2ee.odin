@@ -442,18 +442,18 @@ State_sendDirectMessageTo :: proc(
 	state: ^State,
 	serverID, peerUserID: int,
 	attachments: []common.AttachmentBlobID = nil,
-) {
+) -> bool {
 	if peerUserID <= 0 {
 		State_setChatStatus(state, "No conversation selected")
-		return
+		return false
 	}
 	if peerUserID == State_selfUserID(state, serverID) {
 		State_setChatStatus(state, "Cannot send a direct message to yourself")
-		return
+		return false
 	}
 	if State_selectedTransportIndexForServerID(state^, serverID) < 0 {
 		State_setChatStatus(state, "No server transport selected")
-		return
+		return false
 	}
 	cache := State_serverDirectCache(state, serverID)
 	conversation := ServerDirectCache_conversationCache(cache, peerUserID)
@@ -465,7 +465,7 @@ State_sendDirectMessageTo :: proc(
 	if len(strings.trim_space(content)) == 0 {
 		if len(attachments) == 0 {
 			State_setChatStatus(state, "Cannot send an empty message")
-			return
+			return false
 		}
 		wipeString(content)
 		delete(content)
@@ -473,7 +473,7 @@ State_sendDirectMessageTo :: proc(
 	}
 	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
 		State_setChatStatus(state, "Message is too long")
-		return
+		return false
 	}
 
 	info := State_e2eePeerKeyInfo(state, serverID, peerUserID)
@@ -483,7 +483,7 @@ State_sendDirectMessageTo :: proc(
 			State_setChatStatus(state, DIRECT_SETTING_UP_TEXT)
 			ids := [1]int{peerUserID}
 			State_e2eeRequestUserKeys(state, serverID, ids[:])
-			return
+			return false
 		}
 		append(&conversation.queued, strings.clone(content))
 		wipeBytes(conversation.draft[:])
@@ -492,6 +492,7 @@ State_sendDirectMessageTo :: proc(
 		ids := [1]int{peerUserID}
 		State_e2eeRequestUserKeys(state, serverID, ids[:])
 		State_directNote(state, .Queued, serverID, peerUserID, 0)
+		return true
 	case .Blocked:
 		name := State_e2eeUserName(state, serverID, peerUserID)
 		State_setChatStatus(state, e2eeKeyStateText(info, name))
@@ -506,14 +507,16 @@ State_sendDirectMessageTo :: proc(
 		)
 		if !sent {
 			State_setChatStatus(state, sendError)
-			return
+			return false
 		}
 		cache = State_serverDirectCache(state, serverID)
 		conversation = ServerDirectCache_conversationCache(cache, peerUserID)
 		wipeBytes(conversation.draft[:])
 		clear(&conversation.draft)
 		State_clearChatStatus(state)
+		return true
 	}
+	return false
 }
 
 // Seals (canEncrypt) or signs content and sends it. sendError (temp) says why it failed.

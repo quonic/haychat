@@ -21,6 +21,8 @@ PANEL_PADDING :: 8
 viewApp :: proc(state: ^State, ctx: ^ui.Context) {
 	// Last, on top of whichever screen is drawn, after it recorded its right-clicks.
 	defer viewContextMenu(state, ctx)
+	// Under the context menu: the Remove attachment confirmation (F4).
+	defer viewAttachmentRemoveDialog(state, ctx)
 	// Under the context menu, above everything else.
 	defer viewVerifyDialog(state, ctx)
 	// A haychat:// link waiting for the user's answer (plan D19).
@@ -582,43 +584,9 @@ viewSidebarUnreadBadge :: proc(ctx: ^ui.Context, content: ^ui.Rect, count: int) 
 	_ = ui.cutRight(content, ui.dp(ctx, 6))
 }
 
-// Builds transcript units for room and direct messages. Consecutive messages from the same
-// sender share one sender header.
-transcriptUnits :: proc(ctx: ^ui.Context, lines: []TranscriptLine) -> []ui.TranscriptUnit {
-	units := make([dynamic]ui.TranscriptUnit, 0, len(lines) * 2, context.temp_allocator)
-	for line, index in lines {
-		sameSender := index > 0 && lines[index - 1].senderLabel == line.senderLabel
-		if !sameSender {
-			append(
-				&units,
-				ui.TranscriptUnit {
-					key = u64(line.messageID) * 2,
-					text = line.senderLabel,
-					font = .Bold,
-					color = line.isSelf ? ctx.theme.primary : ctx.theme.fg,
-					gapBefore = index > 0 ? MESSAGE_GROUP_GAP : 0,
-					copySep = ": ",
-				},
-			)
-		}
-		append(
-			&units,
-			ui.TranscriptUnit {
-				key = u64(line.messageID) * 2 + 1,
-				text = line.content,
-				font = .Regular,
-				color = line.placeholder ? ctx.theme.fgMuted : ctx.theme.fg,
-				gapBefore = MESSAGE_LINE_GAP,
-				copySep = "\n",
-				badge = line.badge,
-				badgeColor = e2eeIndicatorColor(ctx, line.badgeTone),
-			},
-		)
-	}
-	return units[:]
-}
-
-// Lays out the composer and status line along the bottom of area. Returns the composer result.
+// Lays out the composer and status line along the bottom of area, with the paperclip at the
+// left of the input when the conversation takes files (attach.showAttach). Returns the
+// composer's result and whether the paperclip was clicked.
 viewComposer :: proc(
 	ctx: ^ui.Context,
 	area: ^ui.Rect,
@@ -626,12 +594,21 @@ viewComposer :: proc(
 	draft: ^[dynamic]u8,
 	placeholder: string,
 	status: string,
-) -> ui.TextInputResult {
+	attach: ComposerAttachmentsView = {},
+	attachID: ui.ID = 0,
+) -> (
+	result: ui.TextInputResult,
+	attachClicked: bool,
+) {
 	padding := ui.dp(ctx, COMPOSER_PADDING)
 	inputW := area.w - padding * 2
+	if attach.showAttach {
+		inputW -= ui.dp(ctx, ROW_HEIGHT + 4 + PANEL_PADDING)
+	}
 	inputH := ui.textInputHeight(ctx, inputID, draft[:], inputW)
 	composer := ui.shrink(ui.cutBottom(area, inputH + padding * 2), padding)
-	result := ui.textInput(
+	attachClicked = viewComposerAttachButton(ctx, &composer, attach, attachID)
+	result = ui.textInput(
 		ctx,
 		inputID,
 		composer,
@@ -650,7 +627,7 @@ viewComposer :: proc(
 			ctx.theme.danger,
 		)
 	}
-	return result
+	return
 }
 
 @(private = "file")
@@ -710,10 +687,21 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 			)
 		}
 		inputID := ui.idOf("room-input", serverID, roomID)
-		result := viewComposer(ctx, &area, inputID, draft, placeholder, view.status)
-		if result.submitted {
-			State_sendChannelChat(state)
-		}
+		attach := buildComposerAttachmentsView(state, serverID, roomID, 0)
+		result, attachClicked := viewComposer(
+			ctx,
+			&area,
+			inputID,
+			draft,
+			placeholder,
+			view.status,
+			attach,
+			ui.idOf("room-attach", serverID, roomID),
+		)
+		chips := viewComposerChips(ctx, &area, attach, serverID, .Room, roomID)
+		// Enter sends a message with only files too (D15).
+		chips.send ||= result.submitted || (result.entered && len(attach.chips) > 0)
+		viewRunComposerAttachments(state, ctx, serverID, roomID, 0, attachClicked, chips)
 	} else if len(view.status) > 0 {
 		viewComposerStatusOnly(ctx, &area, view.status)
 	}
@@ -747,10 +735,11 @@ viewRoomChat :: proc(state: ^State, ctx: ^ui.Context, r: ui.Rect, banner: ^Conne
 		ctx,
 		ui.idOf("room-transcript", serverID, roomID),
 		area,
-		transcriptUnits(ctx, view.lines),
+		transcriptUnits(ctx, view.lines, serverID, .Room, roomID),
 		emptyText,
 	)
 	viewTranscriptContextMenu(state, ctx, transcript, serverID, .Room, roomID)
+	viewTranscriptCardAction(state, ctx, transcript, view.lines, serverID, .Room, roomID)
 
 	// Last, so the form replaces the room only from the next frame on.
 	switch {

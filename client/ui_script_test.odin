@@ -303,3 +303,37 @@ testUIScriptParsesScrollUntil :: proc(t: ^testing.T) {
 		testing.expectf(t, lineErr == UI_SCRIPT_SCROLL_UNTIL_USAGE, "%q: got %q", line, lineErr)
 	}
 }
+
+// Attachments (F4): the commands that answer the native file dialogs and drop a file.
+@(test)
+testUIScriptParsesFileDialogCommands :: proc(t: ^testing.T) {
+	defer free_all(context.temp_allocator)
+	source := strings.join(
+		{
+			"attach-file /tmp/notes.txt",
+			`attach-file "/tmp/with space.txt"`,
+			"save-path /tmp/out.bin",
+			"drop-file /tmp/dropped.png",
+		},
+		"\n",
+		context.temp_allocator,
+	)
+	commands, errLine, err := uiScriptParse(source)
+	defer uiScriptDeleteCommands(&commands)
+	assert(err == "" && errLine == 0, "expected every file command to parse")
+	assert(len(commands) == 4, "expected four commands")
+	assert(
+		commands[0].kind == .AttachFile && commands[0].text == "/tmp/notes.txt",
+		"expected attach-file and its path",
+	)
+	assert(commands[1].text == "/tmp/with space.txt", "expected a quoted path with a space")
+	assert(commands[2].kind == .SavePath && commands[2].text == "/tmp/out.bin", "expected save-path")
+	assert(commands[3].kind == .DropFile, "expected drop-file")
+	for line in ([?]string{"attach-file", "save-path a b", `drop-file ""`}) {
+		_, _, lineErr := uiScriptParseLine(line, 1)
+		assert(
+			strings.has_prefix(lineErr, "usage: "),
+			"expected a missing or extra path refused with the usage",
+		)
+	}
+}

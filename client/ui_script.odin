@@ -156,6 +156,10 @@ UIScriptCommandKind :: enum u8 {
 	WaitGone,
 	Scroll,
 	ScrollUntil,
+	// Attachments (F4): native dialogs cannot be driven, so these answer them.
+	AttachFile,
+	SavePath,
+	DropFile,
 }
 
 UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
@@ -176,6 +180,9 @@ UI_SCRIPT_COMMAND_NAMES := [UIScriptCommandKind]string {
 	.WaitGone     = "wait-gone",
 	.Scroll       = "scroll",
 	.ScrollUntil  = "scroll-until",
+	.AttachFile   = "attach-file",
+	.SavePath     = "save-path",
+	.DropFile     = "drop-file",
 }
 
 UIScriptKey :: struct {
@@ -476,6 +483,23 @@ uiScriptParseLine :: proc(
 			return {}, false, "usage: screenshot FILE.bmp (screenshots are written as BMP)"
 		}
 		text = args[0].text
+	case "attach-file", "save-path", "drop-file":
+		// One path, quoted when it has spaces: a file to attach to the composer on screen as
+		// if picked in the open dialog, the answer to the next Save…, or a file dropped on the
+		// window (SDL_EVENT_DROP_FILE).
+		switch tokens[0].text {
+		case "attach-file":
+			command.kind = .AttachFile
+		case "save-path":
+			command.kind = .SavePath
+		case:
+			command.kind = .DropFile
+		}
+		ok = len(args) == 1 && len(args[0].text) > 0 && strings.index_byte(args[0].text, 0) < 0
+		if !ok {
+			return {}, false, fmt.tprintf("usage: %s PATH", tokens[0].text)
+		}
+		text = args[0].text
 	case "quit":
 		command.kind = .Quit
 		if len(args) != 0 {
@@ -629,6 +653,10 @@ UIScriptRunner :: struct {
 	// Text of the last pushed TEXT_INPUT event. SDL keeps only the pointer, so it lives until
 	// the frames after the push have handled it.
 	pendingText:      cstring,
+	// The path of the last pushed DROP_FILE event, kept like pendingText.
+	pendingDrop:      cstring,
+	// Where attach-file and save-path answer the file dialogs (set by runApp; borrowed).
+	dialogs:          ^FileDialogQueue,
 	failed:           int,
 	skipped:          int,
 	finished:         bool,
@@ -638,6 +666,8 @@ UIScriptRunner :: struct {
 UIScriptRunner_deinit :: proc(runner: ^UIScriptRunner) {
 	delete(runner.pendingText)
 	runner.pendingText = nil
+	delete(runner.pendingDrop)
+	runner.pendingDrop = nil
 }
 
 @(private = "file")
@@ -670,7 +700,7 @@ uiScriptResult :: proc(command: ^UIScriptCommand) -> UIScriptResultJSON {
 		result.name = command.text
 	case .Key:
 		result.key = command.text
-	case .Screenshot:
+	case .Screenshot, .AttachFile, .SavePath, .DropFile:
 		result.file = command.text
 	case .Wait:
 		result.ms = command.timeoutMS
@@ -830,6 +860,20 @@ uiScriptPushText :: proc(runner: ^UIScriptRunner, window: ^SDL.Window, text: str
 	return uiScriptPushEvent(&event)
 }
 
+// Drops path on the window as SDL does for a file dragged onto it.
+@(private = "file")
+uiScriptPushDrop :: proc(runner: ^UIScriptRunner, window: ^SDL.Window, path: string) -> bool {
+	delete(runner.pendingDrop)
+	runner.pendingDrop = strings.clone_to_cstring(path)
+	event: SDL.Event
+	event.drop = SDL.DropEvent {
+		type     = .DROP_FILE,
+		windowID = SDL.GetWindowID(window),
+		data     = runner.pendingDrop,
+	}
+	return uiScriptPushEvent(&event)
+}
+
 // Converts a rect the ui recorded (render pixels) to the window coordinates of its centre.
 @(private = "file")
 uiScriptWindowPoint :: proc(ctx: ^ui.Context, r: ui.Rect) -> ui.Vec2 {
@@ -850,6 +894,10 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 	if runner.pendingText != nil {
 		delete(runner.pendingText)
 		runner.pendingText = nil
+	}
+	if runner.pendingDrop != nil {
+		delete(runner.pendingDrop)
+		runner.pendingDrop = nil
 	}
 	if runner.index >= len(runner.commands) {
 		uiScriptFinish(runner)
@@ -983,6 +1031,23 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 		case:
 			ui.requestFrame(ctx)
 		}
+	case .AttachFile, .SavePath:
+		if runner.dialogs == nil {
+			uiScriptFail(runner, result, "the window has no file dialog queue")
+			return
+		}
+		if command.kind == .AttachFile {
+			FileDialogQueue_pushPicked(runner.dialogs, command.text)
+		} else {
+			FileDialogQueue_setNextSavePath(runner.dialogs, command.text)
+		}
+		uiScriptAdvance(runner, result)
+		// The loop takes the pick after this step; the next command sees its chip.
+		runner.settleUntilFrame = ctx.frame + UI_SCRIPT_SETTLE_FRAMES
+		ui.requestFrame(ctx)
+	case .DropFile:
+		pushOK = uiScriptPushDrop(runner, window, command.text)
+		pushed = true
 	case .Quit:
 		uiScriptAdvance(runner, result)
 		runner.skipped = len(runner.commands) - runner.index

@@ -20,6 +20,12 @@ TranscriptLine :: struct {
 	badge:        string,
 	badgeTone:    E2EEIndicatorTone,
 	placeholder:  bool,
+	// Attachments (F4): a card per checked file (buildFileCardViews), or filesChanged when the
+	// server's list is not the sender's ("This message's attachments were changed on the
+	// server", and no cards). A message with files may have no text: content is then empty and
+	// only the cards are drawn.
+	cards:        []FileCardView,
+	filesChanged: bool,
 }
 
 RoomView :: struct {
@@ -142,21 +148,28 @@ buildRoomView :: proc(state: ^State, allocator := context.temp_allocator) -> (vi
 			}
 		}
 		text, placeholder, badge := roomMessageDisplay(state, serverID, message, allocator)
-		if !placeholder {
-			text = messageTextWithFiles(text, message.files[:], message.filesChanged, allocator)
+		line := TranscriptLine {
+			messageID    = message.id,
+			senderUserID = message.senderId,
+			senderLabel  = senderLabel,
+			isSelf       = isSelf,
+			content      = text,
+			badge        = badge,
+			placeholder  = placeholder,
 		}
-		append(
-			&lines,
-			TranscriptLine {
-				messageID = message.id,
-				senderUserID = message.senderId,
-				senderLabel = senderLabel,
-				isSelf = isSelf,
-				content = text,
-				badge = badge,
-				placeholder = placeholder,
-			},
-		)
+		if !placeholder {
+			line.filesChanged = message.filesChanged
+			line.cards = buildFileCardViews(
+				state,
+				serverID,
+				.Room,
+				state.selected_channel_id,
+				message.id,
+				message.files[:],
+				allocator,
+			)
+		}
+		append(&lines, line)
 	}
 	for nextLog < len(logLines) {
 		append(&lines, logLines[nextLog])
@@ -488,15 +501,7 @@ buildDirectConversationView :: proc(
 		}
 		badge, tone := directMessageBadge(message.security, len(message.envelope) > 0)
 		content, placeholder := directMessageText(message)
-		if !placeholder {
-			content = messageTextWithFiles(
-				content,
-				message.files[:],
-				message.filesChanged,
-				allocator,
-			)
-		}
-		append(&lines, TranscriptLine {
+		line := TranscriptLine {
 			messageID    = message.id,
 			senderUserID = message.senderId,
 			senderLabel  = senderLabel,
@@ -505,7 +510,20 @@ buildDirectConversationView :: proc(
 			badge        = badge,
 			badgeTone    = tone,
 			placeholder  = placeholder,
-		})
+		}
+		if !placeholder {
+			line.filesChanged = message.filesChanged
+			line.cards = buildFileCardViews(
+				state,
+				serverID,
+				.Direct,
+				peerUserID,
+				message.id,
+				message.files[:],
+				allocator,
+			)
+		}
+		append(&lines, line)
 	}
 	view.lines = lines[:]
 	return
