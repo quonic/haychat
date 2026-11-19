@@ -490,14 +490,21 @@ ClientServerTransport_serviceHandshake :: proc(
 			// Protocol 25 (D12): registering from here on. There is no handshake deadline any
 			// more; the server allows REGISTER_SESSION_SECONDS and then ends the session.
 			transport.connection.status = .Registering
-			return ClientTransportRuntimeEvent {
-					kind = .RegistrationRequired,
-					serverID = transport.serverID,
-					registrationMode = result.registration.mode,
-					registrationRequestStatus = result.registration.status,
-					message = result.registration.message,
-				},
-				true
+			event := ClientTransportRuntimeEvent {
+				kind                      = .RegistrationRequired,
+				serverID                  = transport.serverID,
+				registrationMode          = result.registration.mode,
+				registrationRequestStatus = result.registration.status,
+				message                   = result.registration.message,
+			}
+			// A key pinned on first use is kept now, as on Connected: the server proved it
+			// in ServerHello, and an invite link for this address must find the pin.
+			if transport.connection.newlyPinned {
+				event.serverPublicKey = strings.clone(transport.pinnedServerPublicKey)
+				event.serverFingerprint = strings.clone(transport.pinnedServerFingerprint)
+				transport.connection.newlyPinned = false
+			}
+			return event, true
 		}
 		if transport.transport.phase == .Established {
 			return ClientServerTransport_connected(transport), true

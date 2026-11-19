@@ -1214,3 +1214,57 @@ testHeadlessRegistrationCommandsAndEvents :: proc(t: ^testing.T) {
 	registerOnly, _ := headlessParseOptions({"--register"})
 	testing.expect(t, registerOnly.register, "expected --register")
 }
+
+@(test)
+testRegistrationRequiredKeepsAKeyPinnedOnFirstUse :: proc(t: ^testing.T) {
+	server := testRegistrationServer(1213)
+	server.pinned_server_public_key = ""
+	server.pinned_server_fingerprint = ""
+	state := testUpdateStateForServer(server)
+	defer State_deinit(&state)
+	event := ClientTransportRuntimeEvent {
+		kind              = .RegistrationRequired,
+		serverID          = 1213,
+		registrationMode  = .InviteOnly,
+		message           = strings.clone(common.REGISTRATION_REQUIRED_MESSAGE),
+		serverPublicKey   = strings.repeat("12", 32),
+		serverFingerprint = strings.repeat("34", 32),
+	}
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+	pinned, _ := State_serverConfig(&state, 1213)
+	testing.expect(
+		t,
+		pinned.pinned_server_public_key == strings.repeat("12", 32, context.temp_allocator) &&
+		pinned.pinned_server_fingerprint == strings.repeat("34", 32, context.temp_allocator),
+		"expected the key pinned during sign-up to reach the config",
+	)
+}
+
+@(test)
+testHeadlessRegisterFormUsesTheLinksCode :: proc(t: ^testing.T) {
+	sync.mutex_lock(&registrationSendBridgeTestMutex)
+	defer sync.mutex_unlock(&registrationSendBridgeTestMutex)
+	testRegistrationUseStub(1214)
+	defer testRegistrationRestore()
+
+	builder := strings.builder_make()
+	harness := testHeadlessHarness(&builder, 1214)
+	defer testHeadlessHarnessDeinit(&harness, &builder)
+	testApplyRegistrationRequired(&harness.state, 1214, .InviteOnly)
+	State_prefillSignUpCode(&harness.state, 1214, REGISTRATION_TEST_CODE)
+	headlessHandleLine(&harness, "register form")
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"ok":true,"cmd":"register","serverID":1214}` + "\n",
+		"the register form result",
+	)
+	testing.expect(
+		t,
+		len(registrationTestRequests) == 1 &&
+		registrationTestRequests[0].code == "0123456789ABCDEFGHJKMNPQRSTVWXYZ" &&
+		registrationTestRequests[0].reason == "",
+		"expected the form's code sent, without a reason outside approval mode",
+	)
+}

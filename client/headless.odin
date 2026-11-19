@@ -1837,8 +1837,9 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"roles-assign", 2, 0, .None, "roles-assign USER_ID ROLE_ID,ROLE_ID|none",
 		"admins: makes the list every role of the account other than admin",
 		headlessCommandRolesAssign},
-	{"register", 1, 0, .Optional, "register CODE|- [REASON...]",
-		"while registering: signs up with an invite code (- for none, Open servers only); " +
+	{"register", 1, 0, .Optional, "register CODE|-|form [REASON...]",
+		"while registering: signs up with an invite code (- for none, Open servers only; " +
+		"form for the one an invite link filled in); " +
 		"answered by registration_result, or connected when the account was made",
 		headlessCommandRegister},
 	{"invite-create", 1, 0, .Optional,

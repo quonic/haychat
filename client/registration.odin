@@ -339,6 +339,13 @@ State_registrationRequired :: proc(state: ^State, event: ^ClientTransportRuntime
 		// The code went out with an earlier session; it is not needed again.
 		State_wipeSignUpFormFor(state, event.serverID)
 	}
+	// The worker pinned the server's key on first use; remember it, as Connected does.
+	if len(event.serverPublicKey) > 0 {
+		if server, ok := State_serverConfig(state, event.serverID); ok {
+			Server_setPins(server, event.serverPublicKey, event.serverFingerprint)
+			State_saveConfig(state)
+		}
+	}
 }
 
 // ServerRegisterResponse other than Created. Takes the event's message for a failure.
