@@ -360,7 +360,7 @@ All five packages merged in order, each from fresh `main`:
 | F2: attachments on messages | #121 | #127 | protocol 27, migration 15 (`attachment_count`, AttachFiles) |
 | F3: moderation and usage | #122 | #128 | protocol 28, no migration |
 | F4: client UI | #123 | #129 | no protocol or migration change |
-| F5: proof and docs | #124 | F5_PR | no protocol or migration change |
+| F5: proof and docs | #124 | #130 | no protocol or migration change |
 
 The documents in `docs/` describe what was built. These departures changed a decision above:
 
