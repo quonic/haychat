@@ -65,8 +65,9 @@ set -euo pipefail
 #      under her account), and approves erin's request, which drops the badge; erin, still
 #      connected, is signed up at once.
 #  14. attachments (attachments plan F4): in #general alice attaches a file (`attach-file`, as
-#      if picked in the open dialog) and one far over the size limit, which is refused before
-#      its upload and stays as a failed chip while Send waits; she removes the failed chip, the
+#      if picked in the open dialog) and drops one far over the size limit on the window
+#      (`drop-file`), which is refused before its upload and stays as a failed chip while Send
+#      waits; she removes the failed chip, the
 #      upload finishes and she sends the file with a line of text. bob must list it signed and
 #      save it with a matching hash. bob sends alice an encrypted file in their direct
 #      conversation; she saves it through its card (`save-path` answers the save dialog) and
@@ -420,16 +421,13 @@ assert-text "Mark as read"
 wait-gone "Join voice" 1000
 screenshot $screenshot_dir/26-text-only-menu.bmp
 key Escape
-# Server settings from the rail button's menu, scrolled to the end (the offset clamps there),
-# where the Admin section's rooms list sits above the server key. Under --all the server has
-# every earlier proof's accounts, so the page is long.
+# Server settings from the rail button's menu, scrolled down to the Admin section's rooms list
+# (Storage follows it). Under --all the server has every earlier proof's accounts, so the page
+# is long and its length depends on them: scroll-until, never a fixed scroll.
 right-click-id rail-server 1
 click "Server settings"
 wait-text "Display name on this server" 5000
-scroll 760 400 100
-scroll 760 400 100
-scroll 760 400 100
-wait-text "Create room…" 5000
+scroll-until "Create room…" 760 400 3 30000
 screenshot $screenshot_dir/27-admin-rooms.bmp
 click-id server-settings-close 1
 # Access modes: an Admin invite room from the form, bob invited from his member menu, and the
@@ -557,11 +555,12 @@ scroll-until "Approved" 760 400 2 10000
 screenshot $screenshot_dir/44-request-approved.bmp
 click-id server-settings-close 1
 # Attachments (F4). The native dialogs cannot be driven: attach-file adds a file as if it was
-# picked, save-path answers the next Save…. Chip indexes count from 0 in the order added.
+# picked, save-path answers the next Save…; drop-file drops one on the window
+# (SDL_EVENT_DROP_FILE). Chip indexes count from 0 in the order added.
 click "# general"
 wait-text "Message #general (Enter to send, Shift+Enter for newline)" 5000
 attach-file $alice_file
-attach-file $huge_file
+drop-file $huge_file
 wait-text "Attachment is too large" 5000
 wait-text "Waiting for 1 upload to finish…" 5000
 screenshot $screenshot_dir/45-composer-chips.bmp

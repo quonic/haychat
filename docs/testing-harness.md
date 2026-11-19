@@ -1236,7 +1236,8 @@ must find one code under her account), and, with "N pending" on **Sign-up reques
 **Approve** on erin's request: the badge drops, the row reads "Approved", and erin, still
 connected, must print `connected` with `"registered":true` (her request is used up). Then
 the attachments (plan F4, [File Attachments](#file-attachments)): in `#general` she adds an
-8 MiB file with `attach-file` and a 2 GiB sparse one, which is refused before its upload and
+8 MiB file with `attach-file` and drops a 2 GiB sparse one on the window with `drop-file`,
+which is refused before its upload and
 stays as a failed chip ("Attachment is too large") while Send waits; she removes it, waits for
 the upload, types a line and clicks **Send**. bob must list the file signed with its hash and
 save it with `attach-download 1 MESSAGE 0` to a matching copy. bob uploads a 6 MiB file to
