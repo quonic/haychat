@@ -47,6 +47,13 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientStoreFile, 120},
 	{.ServerStoreFileResponse, 121},
 	{.ServerProtocolError, 122},
+	// Retired placeholders (attachments plan D24): never sent, pinned so nothing reuses them.
+	{.ClientUploadFile, 123},
+	{.ServerUploadFileResponse, 124},
+	{.ClientDownloadFile, 125},
+	{.ServerDownloadFileResponse, 126},
+	{.ClientDeleteFile, 127},
+	{.ServerDeleteFileResponse, 128},
 	{.ClientFetchDirectHistory, 136},
 	{.ServerDirectHistory, 137},
 	{.ClientListDirectConversations, 138},
@@ -115,6 +122,16 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientDecideRegistration, 200},
 	{.ServerRegistrationRequestUpdated, 201},
 	{.ClientAdminSetRestricted, 202},
+	// Protocol 26 (attachments F1).
+	{.ClientAttachmentUploadBegin, 203},
+	{.ServerAttachmentUploadReady, 204},
+	{.ClientAttachmentUploadResume, 205},
+	{.ClientAttachmentUploadFinish, 206},
+	{.ServerAttachmentUploadDone, 207},
+	{.ClientAttachmentDownload, 208},
+	{.ServerAttachmentDownloadBegin, 209},
+	{.ClientAttachmentCancel, 210},
+	{.ServerAttachmentRefused, 211},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -480,10 +497,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// encrypted ClientRegister{inviteCode, reason} and ServerRegisterResponse{status, message,
 	// auth}, invites, sign-up requests, the registration mode, restricted accounts:
 	// UserSummary.isRestricted, registrationMode and isRestricted in ServerAuthSuccess, and
-	// ClientAdminSetRegistrationMode ... ClientAdminSetRestricted).
+	// ClientAdminSetRegistrationMode ... ClientAdminSetRestricted); 26 added attachment
+	// transfers (F1: transport v3 with the file channel's keys, ENet channel 5,
+	// ClientAttachmentUploadBegin ... ServerAttachmentRefused, the binary chunks of
+	// attachment_wire.odin) and retired ClientUploadFile ... ServerDeleteFileResponse.
 	assert(
-		protocolVersion == 25,
-		fmt.tprintf("expected protocol version 25 for registration, got %d", protocolVersion),
+		protocolVersion == 26,
+		fmt.tprintf("expected protocol version 26 for attachments, got %d", protocolVersion),
 	)
 }
 

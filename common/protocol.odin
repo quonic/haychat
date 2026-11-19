@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 25
+protocolVersion: ProtocolVersion = 26
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -320,18 +320,16 @@ MessageType :: enum {
 	ServerStoreFileResponse,
 	ServerProtocolError, // Generic protocol decode/validation error response
 
-	// File Management
-	// Upload operations
-	ClientUploadFile, // Request to upload a file, includes file metadata (e.g. filename, size, etc.) and file data
-	ServerUploadFileResponse, // Response to ClientUploadFile, includes success/failure and reason if failure, and file URL if success
-
-	// Download operations
-	ClientDownloadFile, // Request to download a file, includes file ID
-	ServerDownloadFileResponse, // Response to ClientDownloadFile, includes success/failure and reason if failure, and file data if success
-
-	// Delete operations
-	ClientDeleteFile, // Request to delete a file, includes file ID
-	ServerDeleteFileResponse, // Response to ClientDeleteFile, includes success/failure and reason if failure, and file ID if success
+	// Retired placeholders (attachments plan D24), never sent: the server answers them with
+	// "Unsupported message type". Kept so that every member after them keeps its wire value;
+	// protocol_test.odin pins them at 123 to 128. Attachments (protocol 26) use the members at
+	// the end of the enum.
+	ClientUploadFile,
+	ServerUploadFileResponse,
+	ClientDownloadFile,
+	ServerDownloadFileResponse,
+	ClientDeleteFile,
+	ServerDeleteFileResponse,
 
 	// Server Status Notifications (server-only, no client counterpart)
 	ServerRestart, // Notification of the server restarting, includes estimated downtime
@@ -444,6 +442,17 @@ MessageType :: enum {
 	ClientDecideRegistration, // ClientDecideRegistrationPayload: approve or decline a request
 	ServerRegistrationRequestUpdated, // ServerRegistrationRequestUpdatedPayload: to approvers
 	ClientAdminSetRestricted, // ClientAdminSetRestrictedPayload: admins: set or lift it
+	// Attachments (protocol 26, attachments plan F1), appended so no existing wire value moves.
+	// The chunks themselves are binary on ENet channel 5 (attachment_wire.odin).
+	ClientAttachmentUploadBegin, // ClientAttachmentUploadBeginPayload: reserve a new blob
+	ServerAttachmentUploadReady, // ServerAttachmentUploadReadyPayload: send chunks from received
+	ClientAttachmentUploadResume, // ClientAttachmentUploadResumePayload: continue an upload
+	ClientAttachmentUploadFinish, // ClientAttachmentUploadFinishPayload: every byte sent
+	ServerAttachmentUploadDone, // ServerAttachmentUploadDonePayload: the blob is stored
+	ClientAttachmentDownload, // ClientAttachmentDownloadPayload: read a blob from an offset
+	ServerAttachmentDownloadBegin, // ServerAttachmentDownloadBeginPayload: chunks follow
+	ClientAttachmentCancel, // ClientAttachmentCancelPayload: stop an upload or a download
+	ServerAttachmentRefused, // ServerAttachmentRefusedPayload: any refusal, by request or blob
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -2092,6 +2101,8 @@ DatabaseQueryRequest :: union {
 	DatabaseRegistrationModeRequest,
 	DatabaseSharedRoomsRequest,
 	DatabaseRestrictedUsersRequest,
+	// Attachments (protocol 26, common/attachment_protocol.odin).
+	DatabaseAttachmentRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -2396,6 +2407,7 @@ DatabaseQueryResult :: union {
 	DatabaseRegistrationModeResult,
 	DatabaseSharedRoomsResult,
 	DatabaseRestrictedUsersResult,
+	DatabaseAttachmentResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound

@@ -51,9 +51,9 @@ RUN microdnf install -y --setopt=install_weak_deps=0 libpq enet \
 # first time they are mounted, so the server can write its logs and state.
 RUN echo 'haychat:x:10001:10001:HayChat server:/var/lib/haychat:/sbin/nologin' >>/etc/passwd \
 	&& echo 'haychat:x:10001:' >>/etc/group \
-	&& mkdir -p /var/lib/haychat/logs /var/lib/haychat/storage \
+	&& mkdir -p /var/lib/haychat/logs /var/lib/haychat/storage /var/lib/haychat/attachments \
 	&& chown -R 10001:10001 /var/lib/haychat \
-	&& chmod 0700 /var/lib/haychat/storage
+	&& chmod 0700 /var/lib/haychat/storage /var/lib/haychat/attachments
 
 COPY --from=build /out/haychat-server /usr/local/bin/haychat-server
 COPY --from=build /out/licenses/ /usr/share/licenses/haychat-server/
@@ -67,11 +67,12 @@ ENV HAYCHAT_LISTEN_ADDR=0.0.0.0 \
 	HAYCHAT_LISTEN_PORT=12345 \
 	HAYCHAT_LOG_DIR=/var/lib/haychat/logs \
 	HAYCHAT_FILE_STORAGE_PATH=/var/lib/haychat/storage \
-	HAYCHAT_SERVER_IDENTITY_FILE=/var/lib/haychat/storage/server_identity.json
+	HAYCHAT_SERVER_IDENTITY_FILE=/var/lib/haychat/storage/server_identity.json \
+	HAYCHAT_ATTACHMENT_DIR=/var/lib/haychat/attachments
 
 USER 10001:10001
 WORKDIR /var/lib/haychat
-VOLUME ["/var/lib/haychat/logs", "/var/lib/haychat/storage"]
+VOLUME ["/var/lib/haychat/logs", "/var/lib/haychat/storage", "/var/lib/haychat/attachments"]
 EXPOSE 12345/udp
 
 # SIGINT is the server's graceful shutdown signal: it stops its worker processes first.

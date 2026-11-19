@@ -311,6 +311,10 @@ HeadlessEventKind :: enum {
 	RegistrationRequests,
 	RegistrationRequest,
 	LinkPending,
+	// Attachments (protocol 26, headless_attachments.odin): the transfer worker's events.
+	AttachmentProgress,
+	AttachmentDone,
+	AttachmentError,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -365,6 +369,9 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.RegistrationRequests = "registration_requests",
 	.RegistrationRequest = "registration_request",
 	.LinkPending    = "link_pending",
+	.AttachmentProgress = "attachment_progress",
+	.AttachmentDone = "attachment_done",
+	.AttachmentError = "attachment_error",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -1914,6 +1921,21 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"voice-key-rotate", 1, 0, .None, "voice-key-rotate SECONDS",
 		"rotates this client's voice key in encrypted rooms every SECONDS (default 1800)",
 		headlessCommandVoiceKeyRotate},
+	{"attach-upload", 1, 0, .Required, "attach-upload ROOM_ID|@USER_ID FILE...",
+		"uploads a file to a room or a direct conversation; attachment_progress, then " +
+		"attachment_done with its blobID (or attachment_error)", headlessCommandAttachUpload},
+	{"attach-resume", 1, 0, .None, "attach-resume BLOB",
+		"continues an upload this process started at the offset the server acknowledged",
+		headlessCommandAttachResume},
+	{"attach-download", 1, 0, .Required, "attach-download BLOB OUT...",
+		"downloads a blob to OUT (through OUT.part); attachment_done carries its sha256",
+		headlessCommandAttachDownload},
+	{"attach-cancel", 1, 0, .None, "attach-cancel BLOB",
+		"stops an upload (which cannot be resumed after) or a download; attachment_error " +
+		"cancelled", headlessCommandAttachCancel},
+	{"chat-latency", 2, 1, .None, "chat-latency ROOM_ID COUNT [INTERVAL_MS]",
+		"sends COUNT room messages INTERVAL_MS apart (default 50) and reports their echo " +
+		"times (p50MS, p95MS, maxMS, meanMS)", headlessCommandChatLatency},
 	{"wait", 1, 1, .None, "wait EVENT_KIND [TIMEOUT_MS]",
 		"waits for an unconsumed event of that kind (default 5000 ms)", headlessCommandWait},
 	{"sleep", 1, 0, .None, "sleep MS", "keeps servicing the connection for MS milliseconds",
@@ -2042,9 +2064,12 @@ HeadlessHarness :: struct {
 	autoReason:           string,
 	autoRegisterSent:     bool,
 	autoRegisterAnswered: bool,
+	// chat-latency's probe (headless_attachments.odin).
+	latency:              HeadlessLatencyProbe,
 }
 
 HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
+	HeadlessLatencyProbe_deinit(&harness.latency)
 	State_deinit(&harness.state)
 	delete(harness.connectAttempts)
 	harness.connectAttempts = nil
@@ -2087,6 +2112,9 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 	// A server with a display name of its own signs in with that one.
 	if server, ok := State_serverConfig(&harness.state, event.serverID); ok {
 		info.displayName = Server_displayName(server^, harness.state.config)
+	}
+	if event.kind == .RoomChatReceived {
+		headlessLatencyProbeSaw(harness, event.message)
 	}
 	#partial switch event.kind {
 	case .Connecting:
@@ -2430,6 +2458,7 @@ headlessDrainEvents :: proc(harness: ^HeadlessHarness) {
 	}
 	// Speaking changes without any event, and commands change the voice status.
 	headlessPollVoice(harness)
+	headlessDrainTransferEvents(harness)
 }
 
 headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {

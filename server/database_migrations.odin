@@ -850,6 +850,78 @@ DATABASE_REGISTRATION_CHECKS ::
 	"WHERE table_schema = current_schema() AND table_name = 'users' " +
 	"AND column_name = 'invite_id' AND data_type = 'bigint' AND is_nullable = 'YES'))"
 
+// Migration 14 (attachments, protocol 26, attachments plan F1): one row per uploaded blob. The
+// file itself is in HAYCHAT_ATTACHMENT_DIR under a name made from blob_id (16 random bytes the
+// server chose). owner_user_id uploaded it to a room (room_id) or a direct conversation with
+// peer_user_id; state is 0 Uploading, 1 Ready, 2 Bound, 3 Removed; size is declared at begin and
+// exact at finish; sha256 is set at finish. A blob is bound to at most one message
+// (chat_message_id or direct_message_id, F2), and the link turns NULL when the message goes, so
+// the sweeper can delete the blob. removed_* record a tombstone (a cancelled or mismatched
+// upload, or an admin's removal in F3).
+DATABASE_MIGRATION_14_ATTACHMENTS_SQL ::
+	"CREATE TABLE attachments (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"blob_id BYTEA NOT NULL, " +
+	"owner_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, " +
+	"room_id BIGINT NULL REFERENCES rooms(id) ON DELETE SET NULL, " +
+	"peer_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"encrypted BOOLEAN NOT NULL, " +
+	"state SMALLINT NOT NULL DEFAULT 0, " +
+	"size BIGINT NOT NULL, " +
+	"received BIGINT NOT NULL DEFAULT 0, " +
+	"sha256 BYTEA NULL, " +
+	"chat_message_id BIGINT NULL REFERENCES chat_messages(id) ON DELETE SET NULL, " +
+	"direct_message_id BIGINT NULL REFERENCES direct_messages(id) ON DELETE SET NULL, " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"last_chunk_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"completed_at TIMESTAMPTZ NULL, " +
+	"bound_at TIMESTAMPTZ NULL, " +
+	"removed_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"removed_at TIMESTAMPTZ NULL, " +
+	"CONSTRAINT attachments_blob_id_unique UNIQUE (blob_id), " +
+	"CONSTRAINT attachments_blob_id_size CHECK (octet_length(blob_id) = 16), " +
+	"CONSTRAINT attachments_state_check CHECK (state IN (0, 1, 2, 3)), " +
+	"CONSTRAINT attachments_size_check CHECK (size > 0 AND received >= 0 AND received <= size), " +
+	"CONSTRAINT attachments_sha256_size CHECK (sha256 IS NULL OR octet_length(sha256) = 32), " +
+	"CONSTRAINT attachments_one_conversation CHECK (room_id IS NULL OR peer_user_id IS NULL), " +
+	"CONSTRAINT attachments_one_message " +
+	"CHECK (chat_message_id IS NULL OR direct_message_id IS NULL)); " +
+	"CREATE INDEX attachments_by_owner_and_state ON attachments (owner_user_id, state); " +
+	"CREATE INDEX attachments_by_chat_message_id ON attachments (chat_message_id); " +
+	"CREATE INDEX attachments_by_direct_message_id ON attachments (direct_message_id); " +
+	"CREATE INDEX attachments_by_state_and_last_chunk_at " +
+	"ON attachments (state, last_chunk_at);"
+
+// What migration 14 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_ATTACHMENTS_CHECKS ::
+	"('attachments table', to_regclass('attachments') IS NOT NULL), " +
+	"('attachments columns', (SELECT count(*) = 18 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'attachments' AND column_name IN " +
+	"('id', 'blob_id', 'owner_user_id', 'room_id', 'peer_user_id', 'encrypted', 'state', " +
+	"'size', 'received', 'sha256', 'chat_message_id', 'direct_message_id', 'created_at', " +
+	"'last_chunk_at', 'completed_at', 'bound_at', 'removed_by_user_id', 'removed_at'))), " +
+	"('attachments blob id unique', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachments') AND contype = 'u' " +
+	"AND conname = 'attachments_blob_id_unique')), " +
+	"('attachments checks', (SELECT count(*) = 6 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachments') AND contype = 'c' AND conname IN " +
+	"('attachments_blob_id_size', 'attachments_state_check', 'attachments_size_check', " +
+	"'attachments_sha256_size', 'attachments_one_conversation', " +
+	"'attachments_one_message'))), " +
+	"('attachments message links set null', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachments') AND contype = 'f' AND confdeltype = 'n' " +
+	"AND confrelid IN (to_regclass('chat_messages'), to_regclass('direct_messages')))), " +
+	"('attachments owner cascades', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('attachments') AND contype = 'f' AND confdeltype = 'c' " +
+	"AND confrelid = to_regclass('users'))), " +
+	"('attachments owner index', to_regclass('attachments_by_owner_and_state') IS NOT NULL), " +
+	"('attachments chat message index', " +
+	"to_regclass('attachments_by_chat_message_id') IS NOT NULL), " +
+	"('attachments direct message index', " +
+	"to_regclass('attachments_by_direct_message_id') IS NOT NULL), " +
+	"('attachments sweep index', " +
+	"to_regclass('attachments_by_state_and_last_chunk_at') IS NOT NULL)"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -924,6 +996,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "registration",
 		sql = DATABASE_MIGRATION_13_REGISTRATION_SQL,
 		checks = DATABASE_REGISTRATION_CHECKS,
+	},
+	{
+		version = 14,
+		name = "attachments",
+		sql = DATABASE_MIGRATION_14_ATTACHMENTS_SQL,
+		checks = DATABASE_ATTACHMENTS_CHECKS,
 	},
 }
 
@@ -1049,6 +1127,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ROOM_PERMISSIONS_CHECKS +
 	", " +
 	DATABASE_REGISTRATION_CHECKS +
+	", " +
+	DATABASE_ATTACHMENTS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

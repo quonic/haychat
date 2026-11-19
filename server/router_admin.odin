@@ -356,6 +356,7 @@ MainRouterState_endUserSessions :: proc(
 		// While the session still exists and is authenticated, so the other participants keep
 		// its nickname and it is skipped.
 		MainRouterState_voiceLeave(pm, state, peerID, skipSelf = true)
+		MainRouterState_attachmentsEndSession(pm, state, peerID)
 		MainRouterState_removePendingRequestsForPeer(state, peerID)
 		if session, sessionOK := &state.peerSessions[peerID]; sessionOK {
 			session.transport.phase = .Failed

@@ -11,7 +11,7 @@ set -euo pipefail
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
 # Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --e2ee | --registration |
-#                          --voice | --ui | --sql | test_name...]
+#                          --attachments | --voice | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
 #                   harness smoke test, the admin proof, the room access proof, the encryption
@@ -35,6 +35,10 @@ set -euo pipefail
 #                   invite codes (an inviter's, expired, revoked and used up), an invite link,
 #                   Invite + approval (approved live and declined), a room code that makes a
 #                   restricted account, and the admin key on a fresh database
+#   --attachments   only the attachment proof (dev/attachment-proof.sh): a 25 MiB upload and
+#                   download between client processes while both measure their chat echo
+#                   latency against a baseline, the blob on disk, the owner-only download, a
+#                   refused upload, a resume after a reconnect, and a cancel
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -55,7 +59,7 @@ set -euo pipefail
 # Every step runs under `timeout` (run_step below), so a hung client, proof or test binary fails
 # the run within minutes instead of using up CI's job limit. The limits are generous (several
 # times a normal run, compile included): client tests 20 minutes, the harness, admin, access and
-# registration proofs 10, the voice and GUI proofs 15, the encryption proof 20, the SQL proof
+# registration proofs 10, the voice, GUI and attachment proofs 15, the encryption proof 20, the SQL proof
 # 20, its failing run 2, and the failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit
 # (for a slow machine, or a short one while debugging). A step that times out prints "[live]
 # STEP timed out after N s" and the run fails; timeout signals the step's whole process group,
@@ -120,6 +124,10 @@ SQL_TESTS+=,server.testIdentityRegistrationPathsAgainstPostgreSQL
 SQL_TESTS+=,server.testInviteStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRegistrationRequestStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRestrictedAccountsAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentsMigrationUpgradesVersion13AgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentBeginStatementAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentUploadStepsAgainstPostgreSQL
+SQL_TESTS+=,server.testAttachmentSweeperAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
@@ -127,6 +135,7 @@ run_admin=false
 run_access=false
 run_e2ee=false
 run_registration=false
+run_attachments=false
 run_voice=false
 run_ui=false
 run_sql=false
@@ -140,6 +149,7 @@ if [[ $# -gt 0 ]]; then
 			run_access=true
 			run_e2ee=true
 			run_registration=true
+			run_attachments=true
 			run_voice=true
 			run_ui=true
 			run_sql=true
@@ -164,6 +174,10 @@ if [[ $# -gt 0 ]]; then
 		--registration)
 			tests=()
 			run_registration=true
+			;;
+		--attachments)
+			tests=()
+			run_attachments=true
 			;;
 		--voice)
 			tests=()
@@ -190,6 +204,10 @@ server_pid=""
 export HAYCHAT_LOG_DIR="$runtime_dir/logs"
 export HAYCHAT_FILE_STORAGE_PATH="$runtime_dir/storage"
 export HAYCHAT_SERVER_IDENTITY_FILE="$runtime_dir/storage/server_identity.json"
+# Attachments (protocol 26): the blob directory the attachment proof inspects, and a free-disk
+# reserve small enough for a CI runner's temporary directory.
+export HAYCHAT_ATTACHMENT_DIR="$runtime_dir/attachments"
+export HAYCHAT_ATTACHMENT_MIN_FREE_BYTES=$((64 * 1024 * 1024))
 
 stop_server() {
 	if [[ -z "$server_pid" ]] || ! kill -0 "$server_pid" 2>/dev/null; then
@@ -217,6 +235,12 @@ on_exit() {
 	stop_server
 	if [[ $status -ne 0 ]]; then
 		print_server_log
+	elif [[ "${run_attachments:-false}" == true ]]; then
+		# The shutdown [Status] line's attachment pairs: the router thread's time in file
+		# crypto (attachment_crypto_ms) for the bytes it sealed and opened.
+		echo "==> [live] attachment counters at shutdown:"
+		grep -F '[Status]' "$server_log" | tail -n 1 | tr ' ' '\n' |
+			grep -E '^(storage_|attachment_)' | sed 's/^/    /' || true
 	fi
 	rm -rf -- "$runtime_dir"
 	exit "$status"
@@ -341,6 +365,12 @@ if [[ "$run_registration" == true ]]; then
 	echo "==> [live] running dev/registration-proof.sh"
 	run_step 600 "dev/registration-proof.sh" env HAYCHAT_SERVER_BIN="$server_bin" \
 		dev/registration-proof.sh 127.0.0.1:12345
+fi
+
+# After the registration proof, which restores the Open mode the attachment clients sign up in.
+if [[ "$run_attachments" == true ]]; then
+	echo "==> [live] running dev/attachment-proof.sh"
+	run_step 900 "dev/attachment-proof.sh" dev/attachment-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

@@ -21,6 +21,10 @@ ServerConfig :: struct {
 	databaseFd:             linux.Fd,
 	databaseSocketName:     string,
 	databaseProcess:        ProcessInfo,
+	// The storage worker (protocol 26, storage.odin): attachment file I/O.
+	storageSocket:          IPC_Server_Context,
+	storageFd:              linux.Fd,
+	storageSocketName:      string,
 
 	// Database connection settings
 	databaseURL:            string,
@@ -62,6 +66,18 @@ ServerConfig :: struct {
 	voiceMaxParticipants:     int, // voice sessions per room
 	voiceMaxPacketsPerSecond: int, // per-peer relay rate limit; the burst is a third of it
 	voiceMaxFrameBytes:       int, // largest Opus payload the relay forwards
+
+	// Attachments (protocol 26, attachments plan D4, D21; loadAttachmentConfig). Byte limits
+	// are i64; 0 means none for the quota, the hourly rate and the capacity.
+	attachmentsEnabled:              bool, // false refuses every upload begin
+	attachmentDir:                   string, // blob directory: incoming/ and blobs/
+	attachmentMaxBytes:              i64, // largest stored blob
+	attachmentAccountQuotaBytes:     i64, // stored per account
+	attachmentUploadBytesPerHour:    i64, // uploaded per account in any hour
+	attachmentCapacityBytes:         i64, // stored on the server
+	attachmentMinFreeBytes:          i64, // free-disk reserve on the blob directory's volume
+	attachmentPendingHours:          int, // unbound uploads are swept after this
+	attachmentSessionBytesPerSecond: i64, // per-session pace, both directions together
 }
 
 ServerIdentityFile :: struct {
@@ -86,6 +102,35 @@ VOICE_MAX_PACKETS_PER_SECOND_MAX :: 1000
 DEFAULT_VOICE_MAX_FRAME_BYTES :: 512
 VOICE_MAX_FRAME_BYTES_MIN :: 64
 VOICE_MAX_FRAME_BYTES_MAX :: common.VOICE_OPUS_MAX_BYTES
+
+// Attachment defaults (attachments plan D21) and the ranges validateAttachmentConfig clamps to.
+// Limits whose default is "none" take 0 for none.
+ATTACHMENT_KIB :: i64(1024)
+ATTACHMENT_MIB :: 1024 * ATTACHMENT_KIB
+ATTACHMENT_GIB :: 1024 * ATTACHMENT_MIB
+ATTACHMENT_TIB :: 1024 * ATTACHMENT_GIB
+DEFAULT_ATTACHMENTS_ENABLED :: true
+DEFAULT_ATTACHMENT_DIR :: "attachments"
+DEFAULT_ATTACHMENT_MAX_BYTES :: 25 * ATTACHMENT_MIB
+ATTACHMENT_MAX_BYTES_MIN :: ATTACHMENT_KIB
+ATTACHMENT_MAX_BYTES_MAX :: 4 * ATTACHMENT_GIB
+DEFAULT_ATTACHMENT_ACCOUNT_QUOTA_BYTES :: ATTACHMENT_GIB
+ATTACHMENT_ACCOUNT_QUOTA_BYTES_MAX :: ATTACHMENT_TIB
+DEFAULT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR :: 512 * ATTACHMENT_MIB
+ATTACHMENT_UPLOAD_BYTES_PER_HOUR_MAX :: ATTACHMENT_TIB
+DEFAULT_ATTACHMENT_CAPACITY_BYTES :: i64(0)
+ATTACHMENT_CAPACITY_BYTES_MAX :: 1024 * ATTACHMENT_TIB
+DEFAULT_ATTACHMENT_MIN_FREE_BYTES :: ATTACHMENT_GIB
+ATTACHMENT_MIN_FREE_BYTES_MAX :: ATTACHMENT_TIB
+DEFAULT_ATTACHMENT_PENDING_HOURS :: 24
+ATTACHMENT_PENDING_HOURS_MIN :: 1
+ATTACHMENT_PENDING_HOURS_MAX :: 30 * 24
+DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND :: 4 * ATTACHMENT_MIB
+ATTACHMENT_SESSION_BYTES_PER_SECOND_MIN :: 64 * ATTACHMENT_KIB
+ATTACHMENT_SESSION_BYTES_PER_SECOND_MAX :: ATTACHMENT_GIB
+// The blob directory's subdirectories (storage.odin), created at startup with mode 0700.
+ATTACHMENT_INCOMING_DIR_NAME :: "incoming"
+ATTACHMENT_BLOBS_DIR_NAME :: "blobs"
 
 loadConfig :: proc() -> (ServerConfig, string) {
 	logDir := getEnvOr("HAYCHAT_LOG_DIR", DEFAULT_LOG_PATH)
@@ -124,6 +169,7 @@ loadConfig :: proc() -> (ServerConfig, string) {
 		adminPublicKey         = getEnvOr("HAYCHAT_ADMIN_PUBLIC_KEY", ""),
 	}
 	loadVoiceConfig(&config)
+	loadAttachmentConfig(&config)
 
 	validateAndNormalizeConfig(&config)
 	if preflightErr := startupPreflightError(config); len(preflightErr) > 0 {
@@ -137,7 +183,8 @@ loadConfig :: proc() -> (ServerConfig, string) {
 
 // Variables the server no longer reads. Startup warns when one is set, so an operator does not
 // believe a limit still applies. HAYCHAT_MAX_FILE_SIZE and HAYCHAT_MAX_STORAGE_CAPACITY limited
-// the file upload endpoint removed in #31.
+// the file upload endpoint removed in #31; attachments (protocol 26) use
+// HAYCHAT_ATTACHMENT_MAX_BYTES and HAYCHAT_ATTACHMENT_CAPACITY_BYTES instead.
 RETIRED_CONFIG_VARIABLES :: [?]string{"HAYCHAT_MAX_FILE_SIZE", "HAYCHAT_MAX_STORAGE_CAPACITY"}
 
 // Returns the retired variables set in the environment, allocated with the given allocator.
@@ -191,6 +238,85 @@ validateVoiceConfig :: proc(config: ^ServerConfig) {
 	)
 }
 
+// Reads the HAYCHAT_ATTACHMENT* keys and clamps them to their ranges. A value that does not
+// parse falls back to the default.
+loadAttachmentConfig :: proc(config: ^ServerConfig) {
+	config.attachmentsEnabled = parseBoolOr(
+		"HAYCHAT_ATTACHMENTS_ENABLED",
+		DEFAULT_ATTACHMENTS_ENABLED,
+	)
+	config.attachmentDir = getEnvOr("HAYCHAT_ATTACHMENT_DIR", DEFAULT_ATTACHMENT_DIR)
+	config.attachmentMaxBytes = parseOr(
+		"HAYCHAT_ATTACHMENT_MAX_BYTES",
+		DEFAULT_ATTACHMENT_MAX_BYTES,
+	)
+	config.attachmentAccountQuotaBytes = parseOr(
+		"HAYCHAT_ATTACHMENT_ACCOUNT_QUOTA_BYTES",
+		DEFAULT_ATTACHMENT_ACCOUNT_QUOTA_BYTES,
+	)
+	config.attachmentUploadBytesPerHour = parseOr(
+		"HAYCHAT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR",
+		DEFAULT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR,
+	)
+	config.attachmentCapacityBytes = parseOr(
+		"HAYCHAT_ATTACHMENT_CAPACITY_BYTES",
+		DEFAULT_ATTACHMENT_CAPACITY_BYTES,
+	)
+	config.attachmentMinFreeBytes = parseOr(
+		"HAYCHAT_ATTACHMENT_MIN_FREE_BYTES",
+		DEFAULT_ATTACHMENT_MIN_FREE_BYTES,
+	)
+	config.attachmentPendingHours = parseOr(
+		"HAYCHAT_ATTACHMENT_PENDING_HOURS",
+		int(DEFAULT_ATTACHMENT_PENDING_HOURS),
+	)
+	config.attachmentSessionBytesPerSecond = parseOr(
+		"HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND",
+		DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND,
+	)
+	validateAttachmentConfig(config)
+}
+
+// Clamps the attachment limits into their ranges: a typo cannot make a limit negative, the
+// pending window shorter than the sweeper's one hour, or the session pace stall transfers.
+validateAttachmentConfig :: proc(config: ^ServerConfig) {
+	config.attachmentMaxBytes = clamp(
+		config.attachmentMaxBytes,
+		ATTACHMENT_MAX_BYTES_MIN,
+		ATTACHMENT_MAX_BYTES_MAX,
+	)
+	config.attachmentAccountQuotaBytes = clamp(
+		config.attachmentAccountQuotaBytes,
+		0,
+		ATTACHMENT_ACCOUNT_QUOTA_BYTES_MAX,
+	)
+	config.attachmentUploadBytesPerHour = clamp(
+		config.attachmentUploadBytesPerHour,
+		0,
+		ATTACHMENT_UPLOAD_BYTES_PER_HOUR_MAX,
+	)
+	config.attachmentCapacityBytes = clamp(
+		config.attachmentCapacityBytes,
+		0,
+		ATTACHMENT_CAPACITY_BYTES_MAX,
+	)
+	config.attachmentMinFreeBytes = clamp(
+		config.attachmentMinFreeBytes,
+		0,
+		ATTACHMENT_MIN_FREE_BYTES_MAX,
+	)
+	config.attachmentPendingHours = clamp(
+		config.attachmentPendingHours,
+		ATTACHMENT_PENDING_HOURS_MIN,
+		ATTACHMENT_PENDING_HOURS_MAX,
+	)
+	config.attachmentSessionBytesPerSecond = clamp(
+		config.attachmentSessionBytesPerSecond,
+		ATTACHMENT_SESSION_BYTES_PER_SECOND_MIN,
+		ATTACHMENT_SESSION_BYTES_PER_SECOND_MAX,
+	)
+}
+
 // serverLogLevelIsDebug reports whether HAYCHAT_LOG_LEVEL asks for per-packet debug lines.
 serverLogLevelIsDebug :: proc(logLevel: string) -> bool {
 	return strings.equal_fold(strings.trim_space(logLevel), "debug")
@@ -226,8 +352,13 @@ validateAndNormalizeConfig :: proc(config: ^ServerConfig) {
 		)
 	}
 
+	if len(config.attachmentDir) == 0 {
+		config.attachmentDir = DEFAULT_ATTACHMENT_DIR
+	}
+
 	ensureDirectoryPathExists(config.logPath)
 	ensureDirectoryPathExists(config.fileStoragePath)
+	ensureDirectoryPathExists(config.attachmentDir)
 	identityDir := pathDirname(config.serverIdentityFilePath)
 	if len(identityDir) > 0 {
 		ensureDirectoryPathExists(identityDir)
@@ -320,6 +451,10 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 		return storageErr
 	}
 
+	if attachmentErr := attachmentDirectoryPreflightError(config); len(attachmentErr) > 0 {
+		return attachmentErr
+	}
+
 	if len(config.adminPublicKey) > 0 {
 		if _, ok := common.identityPublicKeyFromHex(config.adminPublicKey); !ok {
 			return "startup preflight failed: HAYCHAT_ADMIN_PUBLIC_KEY must be a hex Ed25519 public key"
@@ -355,6 +490,84 @@ startupPreflightError :: proc(config: ServerConfig) -> string {
 	}
 
 	return ""
+}
+
+// Checks the blob directory (D4): it must not be the state directory and must not contain the
+// server identity file, so a sweep can never touch the server's key, and it must be writable.
+// Creates incoming/ and blobs/ and makes all three mode 0700. Returns "" when it is usable.
+attachmentDirectoryPreflightError :: proc(config: ServerConfig) -> string {
+	if len(config.attachmentDir) == 0 {
+		return "startup preflight failed: HAYCHAT_ATTACHMENT_DIR is empty"
+	}
+	if !os.exists(config.attachmentDir) {
+		ensureDirectoryPathExists(config.attachmentDir)
+	}
+	attachmentAbs, attachmentErr := os.get_absolute_path(
+		config.attachmentDir,
+		context.temp_allocator,
+	)
+	if attachmentErr != nil {
+		return fmt.aprintf(
+			"startup preflight failed: attachment directory %q is not usable: %v",
+			config.attachmentDir,
+			attachmentErr,
+		)
+	}
+	if storageAbs, storageErr := os.get_absolute_path(
+		config.fileStoragePath,
+		context.temp_allocator,
+	); storageErr == nil && storageAbs == attachmentAbs {
+		return fmt.aprintf(
+			"startup preflight failed: HAYCHAT_ATTACHMENT_DIR %q must not be " +
+			"HAYCHAT_FILE_STORAGE_PATH",
+			config.attachmentDir,
+		)
+	}
+	if identityDirAbs, identityOK := attachmentIdentityDirectory(config); identityOK {
+		inside := strings.concatenate({attachmentAbs, "/"}, context.temp_allocator)
+		if identityDirAbs == attachmentAbs || strings.has_prefix(identityDirAbs, inside) {
+			return fmt.aprintf(
+				"startup preflight failed: HAYCHAT_ATTACHMENT_DIR %q must not contain the " +
+				"server identity file %q",
+				config.attachmentDir,
+				config.serverIdentityFilePath,
+			)
+		}
+	}
+	for name in ([]string{"", ATTACHMENT_INCOMING_DIR_NAME, ATTACHMENT_BLOBS_DIR_NAME}) {
+		path := config.attachmentDir
+		if len(name) > 0 {
+			path = fmt.tprintf("%s/%s", config.attachmentDir, name)
+			if !os.exists(path) {
+				if err := os.make_directory(path, os.perm(0o700)); err != nil {
+					return fmt.aprintf(
+						"startup preflight failed: could not create %q: %v",
+						path,
+						err,
+					)
+				}
+			}
+		}
+		if err := os.change_mode(path, os.perm(0o700)); err != nil {
+			return fmt.aprintf(
+				"startup preflight failed: could not make %q private (mode 0700): %v",
+				path,
+				err,
+			)
+		}
+	}
+	return startupProbeWriteError(config.attachmentDir, "attachment directory")
+}
+
+// The absolute directory that holds the server identity file, when it exists.
+@(private = "file")
+attachmentIdentityDirectory :: proc(config: ServerConfig) -> (string, bool) {
+	identityDir := pathDirname(config.serverIdentityFilePath)
+	if len(identityDir) == 0 {
+		identityDir = "."
+	}
+	absolute, err := os.get_absolute_path(identityDir, context.temp_allocator)
+	return absolute, err == nil
 }
 
 // Helper procedures for environment variable parsing

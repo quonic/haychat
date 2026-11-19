@@ -1,5 +1,6 @@
-# The HayChat server. Logs and state (the server identity key) live in the haychat-logs and
-# haychat-storage volumes. Optional settings go in the environment file
+# The HayChat server. Logs, state (the server identity key) and attachment files live in the
+# haychat-logs, haychat-storage and haychat-attachments volumes; back up haychat-attachments
+# together with the database. Optional settings go in the environment file
 # %E/haychat-server/server.env: /etc/haychat-server/server.env for a system service, or
 # ~/.config/haychat-server/server.env for a user service. See deploy/README.md.
 
@@ -16,6 +17,7 @@ Image=git.spyingwind.com/quonic/haychat/server:latest
 RunInit=true
 Volume=haychat-logs:/var/lib/haychat/logs
 Volume=haychat-storage:/var/lib/haychat/storage
+Volume=haychat-attachments:/var/lib/haychat/attachments
 Environment=HAYCHAT_DATABASE_URL=127.0.0.1 HAYCHAT_DATABASE_PORT=5432
 Environment=HAYCHAT_DATABASE_USER=haychat HAYCHAT_DATABASE_NAME=haychat
 Secret=haychat-db-password,type=env,target=HAYCHAT_DATABASE_PASS

@@ -63,6 +63,10 @@ PendingDBRequestType :: enum {
 	InviteAction,
 	RegistrationRequests,
 	RegistrationMode,
+	// Attachments (router_attachments.odin, protocol 26): one statement of a transfer step, the
+	// sweeper or the startup scan. It outlives its peer's disconnect: the session ID below
+	// decides whether anyone is still there to answer.
+	Attachment,
 }
 
 PendingDBRequest :: struct {
@@ -108,6 +112,14 @@ PendingDBRequest :: struct {
 	// Register (protocol 25): the applicant's identity key. The request outlives a disconnect
 	// and ENet reuses peer IDs, so its answer applies only to a session with this key.
 	identityPublicKey:     common.IdentityPublicKeyBytes,
+	// Attachment (protocol 26): the step, its session, the blob, the client's begin request
+	// ID, the declared size, and a download's start offset.
+	sessionID:             common.SessionID,
+	attachmentAction:      common.DatabaseAttachmentAction,
+	blobID:                common.AttachmentBlobID,
+	attachmentRequestID:   u32,
+	attachmentSize:        u64,
+	attachmentOffset:      u64,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -212,6 +224,8 @@ MainRouterState :: struct {
 	// by request ID, wiped once answered.
 	restrictedUserIDs:        map[int]bool,
 	pendingInviteCodes:       map[u64]common.InviteCodeBytes,
+	// Protocol 26 (router_attachments.odin): uploads, downloads and storage steps.
+	attachments:              RouterAttachmentState,
 }
 
 MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
@@ -225,6 +239,7 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 		roomLogVersions         = make(map[int]int),
 		restrictedUserIDs       = make(map[int]bool),
 		pendingInviteCodes      = make(map[u64]common.InviteCodeBytes),
+		attachments             = RouterAttachmentState_init(),
 	}
 
 	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
@@ -262,6 +277,7 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	MainRouterState_wipeInviteCodes(state)
 	delete(state.pendingInviteCodes)
 	MainRouterState_voiceFreeState(state)
+	RouterAttachmentState_deinit(&state.attachments)
 }
 
 // Wipes and forgets every pending invite code.
@@ -325,8 +341,11 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 	defer delete(requestIDs)
 
 	for requestID, request in state.pendingDatabaseRequests {
-		// A ClientRegister stays: its answer still tells the approvers of a new request.
-		if request.peerID == peerID && request.requestType != .Register {
+		// A ClientRegister stays: its answer still tells the approvers of a new request. So does
+		// an attachment step, which must finish what the storage worker started.
+		if request.peerID == peerID &&
+		   request.requestType != .Register &&
+		   request.requestType != .Attachment {
 			append(&requestIDs, requestID)
 		}
 	}
@@ -457,8 +476,9 @@ MainRouterState_protocolViolation :: proc(
 		session.isRegistering = false
 		MainRouterState_setPeerSession(state, peerID, session)
 		// The session no longer counts as online, and its later disconnect event will not
-		// see it as authenticated, so presence and voice must be settled here.
+		// see it as authenticated, so presence, voice and transfers must be settled here.
 		MainRouterState_voiceLeave(pm, state, peerID, skipSelf = true)
+		MainRouterState_attachmentsEndSession(pm, state, peerID)
 		if wasAuthenticated {
 			MainRouterState_noteSessionEnded(
 				pm,
@@ -561,6 +581,8 @@ MainRouterState_completeAuthentication :: proc(
 	// The voice halves move to the network thread's relay (Q8). Taken from this copy before it
 	// is stored, so the stored session holds zeros and the router never touches voice crypto.
 	voiceSend, voiceReceive := common.TransportState_takeVoiceState(&session.transport)
+	// Protocol 26: the file halves move to the router's attachment state the same way.
+	MainRouterState_attachmentsOpenChannel(state, peerID, &session.transport)
 	MainRouterState_setPeerSession(state, peerID, session)
 	MainRouterState_sendVoiceSessionOpen(
 		pm,
@@ -743,6 +765,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 				)
 			}
 		case .VisibleRecipients, .LoadRestrictedUsers:
+		case .Attachment:
+			MainRouterState_attachmentDatabaseFailed(pm, state, request)
 		case .RoomKeyRequestCheck:
 		// Never answered (router_room_keys.odin).
 		case .JoinVoiceMemberCheck:
@@ -768,11 +792,16 @@ MainRouterState_prepareForProcessStop :: proc(
 	switch procType {
 	case .Network:
 		MainRouterState_failPendingDatabaseRequests(pm, state, message)
+		// Every session goes with the network service: their transfers end first.
+		for peerID in state.peerSessions {
+			MainRouterState_attachmentsEndSession(pm, state, peerID)
+		}
 		MainRouterState_clearTransientRuntimeState(state)
 		MainRouterState_voiceReset(pm, state)
 	case .Database:
 		MainRouterState_failPendingDatabaseRequests(pm, state, message)
-	case:
+	case .Storage:
+		MainRouterState_attachmentsStorageStopped(pm, state)
 	}
 }
 
@@ -1487,6 +1516,16 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientDecideRegistration(pm, state, peerID, packet.payload)
 	case .ClientAdminSetRestricted:
 		MainRouterState_handleClientAdminSetRestricted(pm, state, peerID, packet.payload)
+	case .ClientAttachmentUploadBegin:
+		MainRouterState_handleClientAttachmentUploadBegin(pm, state, peerID, packet.payload)
+	case .ClientAttachmentUploadResume:
+		MainRouterState_handleClientAttachmentUploadResume(pm, state, peerID, packet.payload)
+	case .ClientAttachmentUploadFinish:
+		MainRouterState_handleClientAttachmentUploadFinish(pm, state, peerID, packet.payload)
+	case .ClientAttachmentDownload:
+		MainRouterState_handleClientAttachmentDownload(pm, state, peerID, packet.payload)
+	case .ClientAttachmentCancel:
+		MainRouterState_handleClientAttachmentCancel(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -1556,16 +1595,20 @@ MainRouterState_handleNetworkDataReceived :: proc(
 	state: ^MainRouterState,
 	msg: NetworkDataReceived,
 ) {
-	// Only the control channel reaches the router. Anything else is dropped without a protocol
-	// violation: datagrams on other channels (voice is channel 2) are not authenticated by
-	// ENet, so letting them end a session would hand any spoofer a way to disconnect people.
+	// The control channel and the file channel (protocol 26) reach the router. Anything else is
+	// dropped without a protocol violation: datagrams on other channels (voice is channel 2)
+	// are not authenticated by ENet, so letting them end a session would hand any spoofer a
+	// way to disconnect people. Channel 5 is reliable and sequenced like channel 1.
 	switch msg.channel {
 	case .Chat:
+	case .FileTransfer:
+		MainRouterState_handleFilePacket(pm, state, msg.peerId, msg.data)
+		return
 	case .Voice:
 		// The network thread's VoiceRelay consumes channel 2; count anything that slips by.
 		state.unexpectedVoiceDatagrams += 1
 		return
-	case .None, .Video, .Screenshare, .FileTransfer:
+	case .None, .Video, .Screenshare:
 		return
 	}
 	if len(msg.data) == 0 {
@@ -2084,6 +2127,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleRegistrationRequestsResult(pm, state, request, response)
 	case .RegistrationMode:
 		MainRouterState_handleRegistrationModeResult(pm, state, request, response)
+	case .Attachment:
+		MainRouterState_handleAttachmentResult(pm, state, request, response)
 	}
 }
 
@@ -2128,6 +2173,7 @@ main :: proc() {
 
 	config.networkSocketName = fmt.aprintf("%s_network", SERVER_SOCKET)
 	config.databaseSocketName = fmt.aprintf("%s_database", SERVER_SOCKET)
+	config.storageSocketName = fmt.aprintf("%s_storage", SERVER_SOCKET)
 
 	pm := initProcessManager(&config)
 
@@ -2149,6 +2195,12 @@ main :: proc() {
 		delete(databaseStartupErr)
 		mainExitStartupFailure()
 	}
+	if !spawnProcess(&pm, .Storage) {
+		fmt.eprintln("[Startup] failed to start the storage service thread")
+		pm.shouldShutdown = true
+		shutdownAllProcesses(&pm)
+		mainExitStartupFailure()
+	}
 	if !spawnProcess(&pm, .Network) {
 		fmt.eprintln("[Startup] failed to start the network service thread")
 		pm.shouldShutdown = true
@@ -2157,7 +2209,7 @@ main :: proc() {
 	}
 
 	fmt.println("=== Server Running ===")
-	fmt.println("Main thread is supervising network and database threads")
+	fmt.println("Main thread is supervising network, database and storage threads")
 
 	mainLoop(&pm)
 
@@ -2272,6 +2324,15 @@ mainLoop :: proc(pm: ^ProcessManager) {
 				)
 				restartProcess(pm, .Database)
 			}
+			if ProcessManager_shouldScheduleRestart(pm, .Storage) {
+				MainRouterState_prepareForProcessStop(
+					pm,
+					&routerState,
+					.Storage,
+					"storage service restarted",
+				)
+				restartProcess(pm, .Storage)
+			}
 			ProcessManager_pumpRestarts(pm)
 		}
 
@@ -2280,6 +2341,9 @@ mainLoop :: proc(pm: ^ProcessManager) {
 			lastRegistrationSweep = time.tick_now()
 			MainRouterState_expireRegisteringSessions(pm, &routerState, lastRegistrationSweep)
 		}
+
+		// Attachments (protocol 26): paced transfers, progress, the sweeper and the startup scan.
+		MainRouterState_attachmentsTick(pm, &routerState, time.tick_now())
 
 		if time.since(lastStatusLog) >= SERVER_STATUS_LOG_INTERVAL {
 			mainLogStatus(pm, &routerState)
@@ -2310,10 +2374,12 @@ mainLoopHandleMessage :: proc(
 	     NetworkVoiceRoute,
 	     NetworkVoiceReset:
 	// Commands are generated by main and should not loop back here.
-	case NetworkVoiceSessionOpen:
+	case NetworkVoiceSessionOpen, StorageCommand:
 		// Never addressed to main; wipe the keys rather than drop them as they are.
 		stray := msg
 		IPC__message_deinit(&stray)
+	case StorageResponse:
+		MainRouterState_handleStorageResponse(pm, routerState, m)
 	case NetworkPeerConnected:
 		routerState.connectedPeers[m.peerId] = true
 		MainRouterState_setPeerSession(routerState, m.peerId, RouterPeerSession_init())

@@ -55,7 +55,7 @@ the dev image and CI use.
 | Entrypoint        | `/usr/local/bin/haychat-server`                                                                                                                                                                                                                                                |
 | User              | `haychat`, UID/GID `10001`, not root                                                                                                                                                                                                                                           |
 | Working directory | `/var/lib/haychat`                                                                                                                                                                                                                                                             |
-| Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`) and `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key)                                                                                                                                                  |
+| Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`), `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) and `/var/lib/haychat/attachments` (`HAYCHAT_ATTACHMENT_DIR`: attachment files, protocol 26)                                                       |
 | Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
 | Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
@@ -151,6 +151,7 @@ podman run -d --pod haychat --name haychat-server --init \
 	--env-file "$HOME/.config/haychat-server/server.env" \
 	-v haychat-logs:/var/lib/haychat/logs \
 	-v haychat-storage:/var/lib/haychat/storage \
+	-v haychat-attachments:/var/lib/haychat/attachments \
 	git.spyingwind.com/quonic/haychat/server:v0.1.0
 
 podman logs -f haychat-server       # "=== Server Running ===" means it is ready
@@ -313,12 +314,20 @@ The quadlet unit has no `HealthCmd`; systemd restarts the server whenever it exi
 
 ## Backups
 
-Back up the database and the server's storage volume together:
+Back up the database, the server's storage volume and its attachments volume together:
 
 ```sh
 podman exec haychat-db pg_dump -U haychat -d haychat -Fc >"haychat-$(date +%F).dump"
 podman volume export haychat-storage >"haychat-storage-$(date +%F).tar"
+podman volume export haychat-attachments >"haychat-attachments-$(date +%F).tar"
 ```
+
+The attachments volume (`haychat-attachments`, `HAYCHAT_ATTACHMENT_DIR`) holds the uploaded
+files; their names, owners and hashes are rows in the database, so a backup of one without
+the other is incomplete: a row without its file is unavailable to clients, and a file without
+a row is deleted by the server's startup scan once it is an hour old. Restore both from the same
+backup, the attachments volume before the first start like the storage volume. The server
+refuses an attachment directory that is the storage directory or holds the identity file.
 
 The storage archive holds the server's private key: store it as
 privately as the database dump. To restore into a fresh deployment, import the volume before

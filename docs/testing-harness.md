@@ -649,6 +649,38 @@ the accounts it shares a room with and admins; a `user_updated` for an account t
 does not have yet adds it, and a direct message to someone it no longer shares a room with is a
 `protocol_error` "You no longer share a room with this person".
 
+## Attachments
+
+Protocol 26 (attachments F1, `docs/plan/2026-11-19-file-attachments.md`): files go to and from
+the server on ENet channel 5 through the client's transfer worker
+(`client/attachment_transfer.odin`), which reads and writes the files and keeps each
+transfer's SHA-256 and window off the network worker. Files are not on messages yet, so a blob
+can only be downloaded by the account that uploaded it. `BLOB` is a blob ID as 32 hex characters.
+
+### Commands
+
+| Command | Meaning |
+| --- | --- |
+| `attach-upload ROOM_ID\|@USER_ID FILE...` | Uploads FILE (the rest of the line, spaces allowed) to a room or, with `@`, to the direct conversation with that account: `{"ok":true,"cmd":"attach-upload","id":1,"serverID":1,"roomID":1,"recipientUserID":0,"blobID":"","path":"…"}`. `id` names the transfer in its events. The server's answer comes as `attachment_progress` (the blob ID, from 0 bytes), more progress, and `attachment_done` (or `attachment_error` with the server's refusal, for example `Not a room member`, `Attachment is too large`, `Attachment storage quota exceeded`, `Too many uploads at once`). |
+| `attach-resume BLOB` | Continues an upload this process started that stopped (a lost connection, a reconnect, a refused chunk) at the offset the server holds: its first `attachment_progress` reports that offset in `bytes`. A cancelled upload, or one from an earlier run of the client, cannot be resumed (D9). |
+| `attach-download BLOB OUT...` | Downloads a blob into OUT (written as `OUT.part` and renamed once complete); `attachment_done` carries the SHA-256 of what arrived. A blob of another account is refused with `Attachment not found`. |
+| `attach-cancel BLOB` | Stops this client's upload or download of the blob: `attachment_error` `cancelled`. The server deletes a cancelled upload's file and keeps its row as a tombstone, so it cannot be resumed. |
+| `chat-latency ROOM_ID COUNT [INTERVAL_MS]` | Sends COUNT signed messages (`latency-probe NONCE N`) to the room, INTERVAL_MS apart (default 50), waits up to 10 s for the last ones, and reports how long each took to come back as this client's own `room_chat`: `{"ok":true,"cmd":"chat-latency","roomID":1,"count":40,"received":40,"p50MS":10.7,"p95MS":10.9,"maxMS":11.0,"meanMS":9.0}`. Events keep printing while it runs, so it can measure a transfer the same process runs. |
+
+### Events
+
+| Event | Example |
+| --- | --- |
+| `attachment_progress` | `{"event":"attachment_progress","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","bytes":3670016,"total":26214400}` (once the server answered, then at most every 500 ms; `bytes` is what the server acknowledged (upload) or what was written (download)) |
+| `attachment_done` | `{"event":"attachment_done","serverID":1,"id":1,"direction":"upload","blobID":"<hex>","size":26214400,"sha256":"<hex>","path":"…","elapsedMS":6009}` (an upload's `sha256` is the one the server checked and stored) |
+| `attachment_error` | `{"event":"attachment_error","serverID":1,"id":1,"direction":"download","blobID":"<hex>","bytes":0,"total":0,"path":"…","error":"Attachment not found"}` (`blobID` is empty for a begin the server refused; `connection lost` when the session ended, `cancelled` after `attach-cancel`) |
+
+`./dev.sh live --attachments` runs `dev/attachment-proof.sh`: two client processes measure
+their chat echo latency with no transfer, then during a 25 MiB upload and its download, and
+check the stored blob, the owner-only download, a refused upload, a resume after `reconnect`
+and a cancel. It prints one `[attachments] latency` line per client and phase and fails when a
+p95 during a transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 1000).
+
 ## Example: Two Agents Chatting
 
 Each agent runs its own client with its own profile. Alice's side (`>` is stdin, `<` stdout):

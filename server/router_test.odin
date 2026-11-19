@@ -103,6 +103,7 @@ routerTestHarness_init :: proc() -> RouterTestHarness {
 	pm := initProcessManager(config)
 	pm.config.networkFd, _ = IPC_Client_init(&pm.config.networkSocket)
 	pm.config.databaseFd, _ = IPC_Client_init(&pm.config.databaseSocket)
+	pm.config.storageFd, _ = IPC_Client_init(&pm.config.storageSocket)
 
 	state := MainRouterState_init(&pm)
 
@@ -559,7 +560,8 @@ testMainRouterRejectsUnsupportedApplicationMessage :: proc(t: ^testing.T) {
 
 	sealedPacket, sealOK := common.sealPacketForSession(
 		&clientTransport,
-		.ClientUploadFile,
+		// A retired placeholder from before protocol 14 that was never sent.
+		.ClientKickUser,
 		common.ClientListRoomsPayload{},
 	)
 	assert(sealOK, "expected encrypted unsupported packet sealing to succeed")
@@ -1501,6 +1503,7 @@ testConfigStartupPreflightSkipsIdentityWriteGateWhenConfigAlreadyHasValidIdentit
 	config := ServerConfig {
 		fileStoragePath        = storageDir,
 		serverIdentityFilePath = identityPath,
+		attachmentDir          = fmt.tprintf("%s/attachments", tempDir),
 	}
 	routerTestGenerateValidIdentityConfig(&config)
 

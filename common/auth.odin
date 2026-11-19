@@ -29,10 +29,10 @@ TRANSPORT_AAD_SIZE :: SESSION_ID_SIZE + 1 + 8
 FINGERPRINT_SIZE :: 32
 
 // HKDF info for the transport key schedule. Protocol 9 changed the key schedule from two keys
-// (no info) to four, so the label names the version; a peer on the old schedule derives
-// different keys and cannot open anything.
-TRANSPORT_HKDF_INFO :: "haychat transport v2"
-TRANSPORT_KEY_COUNT :: 4
+// (no info) to four, and protocol 26 to six (the file channel's pair), so the label names the
+// version; a peer on an older schedule derives different keys and cannot open anything.
+TRANSPORT_HKDF_INFO :: "haychat transport v3"
+TRANSPORT_KEY_COUNT :: 6
 
 // How far behind the highest accepted voice sequence a datagram may arrive. 64 frames are
 // 1.28 s of voice at 50 packets per second, longer than any jitter buffer waits.
@@ -47,6 +47,16 @@ VOICE_DATAGRAM_OVERHEAD :: VOICE_DATAGRAM_HEADER_SIZE + TRANSPORT_TAG_SIZE
 // Control packets keep TRANSPORT_AAD_SIZE.
 VOICE_AAD_SIZE :: TRANSPORT_AAD_SIZE + 1
 
+// File packet envelope (protocol 26, attachments plan D6-D7): kind (1) || sequence LE (8) ||
+// ciphertext (n) || tag (16). The plaintext is an attachment packet (attachment_wire.odin)
+// whose first byte is its kind; the kind travels in clear at offset 0 and is bound into the AAD
+// (makeFileAAD), and the rest is encrypted. The nonce is derived from the sequence.
+FILE_PACKET_HEADER_SIZE :: 1 + 8
+// Bytes a sealed file packet adds to its plaintext: the sequence and the tag (the kind byte is
+// part of the plaintext).
+FILE_PACKET_OVERHEAD :: 8 + TRANSPORT_TAG_SIZE
+FILE_AAD_SIZE :: TRANSPORT_AAD_SIZE + 1
+
 IdentityPrivateKeyBytes :: [AUTH_IDENTITY_PRIVATE_KEY_SIZE]u8
 IdentityPublicKeyBytes :: [AUTH_IDENTITY_PUBLIC_KEY_SIZE]u8
 SignatureBytes :: [AUTH_SIGNATURE_SIZE]u8
@@ -60,6 +70,7 @@ TransportNonce :: [TRANSPORT_NONCE_SIZE]u8
 TransportTag :: [TRANSPORT_TAG_SIZE]u8
 TransportAAD :: [TRANSPORT_AAD_SIZE]u8
 VoiceAAD :: [VOICE_AAD_SIZE]u8
+FileAAD :: [FILE_AAD_SIZE]u8
 FingerprintBytes :: [FINGERPRINT_SIZE]u8
 
 SessionRole :: enum u8 {
@@ -89,19 +100,20 @@ PeerTrustState :: enum u8 {
 TransportChannel :: enum u8 {
 	Control = 1, // reliable and ordered; every CBOR packet
 	Voice   = 2, // unsequenced datagrams; voice frames only
+	File    = 5, // reliable and ordered; attachment chunks and acks only (protocol 26)
 }
 
 // One key per channel and direction. Separate keys per channel give domain separation: the
-// voice channel's deterministic nonces and the control channel's random nonces never share
-// a key, so they cannot collide.
+// voice and file channels' deterministic nonces and the control channel's random nonces never
+// share a key, so they cannot collide.
 TransportKeySet :: struct {
-	clientToServer: [TransportChannel]TransportKey,
-	serverToClient: [TransportChannel]TransportKey,
+	clientToServer: #sparse[TransportChannel]TransportKey,
+	serverToClient: #sparse[TransportChannel]TransportKey,
 }
 
 DirectionalTransportKeys :: struct {
-	sendKey:    [TransportChannel]TransportKey,
-	receiveKey: [TransportChannel]TransportKey,
+	sendKey:    #sparse[TransportChannel]TransportKey,
+	receiveKey: #sparse[TransportChannel]TransportKey,
 }
 
 // The send half of one channel. active is false until TransportState_activate fills the key,
@@ -173,6 +185,12 @@ TransportState :: struct {
 	// TransportState_takeVoiceState.
 	voiceSend:      ChannelSendState,
 	voiceReceive:   VoiceReceiveState,
+	// Protocol 26: the file channel (attachment chunks). Strict receive counter like control,
+	// because ENet channel 5 is reliable and ordered. Owned by whoever moves file packets: the
+	// server's router, the client's network worker (receive) and transfer worker (send), both
+	// under the worker lock.
+	fileSend:       ChannelSendState,
+	fileReceive:    ControlReceiveState,
 }
 
 HandshakeTranscript :: struct {
@@ -588,9 +606,10 @@ identityPublicKeyFromHex :: proc(hexValue: string) -> (IdentityPublicKeyBytes, b
 	return publicKeyBytes, true
 }
 
-// Expands the handshake secret into four keys, in this fixed order: control client→server,
-// control server→client, voice client→server, voice server→client. Client and server must
-// agree on the order byte for byte; testTransportKeyDerivationVector pins it.
+// Expands the handshake secret into six keys, in this fixed order: control client→server,
+// control server→client, voice client→server, voice server→client, file client→server, file
+// server→client. Client and server must agree on the order byte for byte;
+// testTransportKeyDerivationVector pins it.
 deriveTransportKeySet :: proc(
 	sessionID: SessionID,
 	sharedSecret: SharedSecretBytes,
@@ -622,6 +641,8 @@ deriveTransportKeySet :: proc(
 	copy(keySet.serverToClient[.Control][:], okm[1 * TRANSPORT_KEY_SIZE:2 * TRANSPORT_KEY_SIZE])
 	copy(keySet.clientToServer[.Voice][:], okm[2 * TRANSPORT_KEY_SIZE:3 * TRANSPORT_KEY_SIZE])
 	copy(keySet.serverToClient[.Voice][:], okm[3 * TRANSPORT_KEY_SIZE:4 * TRANSPORT_KEY_SIZE])
+	copy(keySet.clientToServer[.File][:], okm[4 * TRANSPORT_KEY_SIZE:5 * TRANSPORT_KEY_SIZE])
+	copy(keySet.serverToClient[.File][:], okm[5 * TRANSPORT_KEY_SIZE:6 * TRANSPORT_KEY_SIZE])
 	return keySet
 }
 
@@ -992,11 +1013,127 @@ voiceOpenDatagramUncounted :: proc(
 	return ciphertextLength, .Ok
 }
 
+// File packets only: sessionID || channel (5) || sequence LE || kind. The kind byte travels in
+// clear at offset 0, so it is bound into the tag: nobody can relabel an upload chunk as a
+// download chunk or an ack. A separate type from makeTransportAAD and makeVoiceAAD, like the
+// voice AAD.
+makeFileAAD :: proc(sessionID: SessionID, sequence: u64, kind: u8) -> FileAAD {
+	transportAAD := makeTransportAAD(sessionID, .File, sequence)
+	aad: FileAAD
+	copy(aad[:TRANSPORT_AAD_SIZE], transportAAD[:])
+	aad[TRANSPORT_AAD_SIZE] = kind
+	return aad
+}
+
+FileOpenResult :: enum u8 {
+	Ok,
+	Malformed, // shorter than the envelope, or a destination buffer that is too small
+	OutOfOrder, // not the next sequence: the channel is reliable and ordered, so never fine
+	BadTag,
+	Inactive, // no file key: never activated, or the state was wiped
+}
+
+// Seals an attachment packet (plaintext[0] is its kind) into dst as a file packet:
+// kind || sequence LE || ciphertext of plaintext[1:] || tag. The nonce is
+// makeVoiceNonce(.File, sequence): the file keys belong to one session and direction and the
+// send counter never repeats or wraps (ChannelSendState_nextSequence), so each (key, nonce)
+// pair is used once. Allocates nothing. dst needs len(plaintext) + FILE_PACKET_OVERHEAD bytes
+// and must not overlap plaintext. Fails without consuming a sequence when dst is too small.
+sealFilePacket :: proc(
+	send: ^ChannelSendState,
+	sessionID: SessionID,
+	plaintext: []u8,
+	dst: []u8,
+) -> (
+	n: int,
+	ok: bool,
+) {
+	if !send.active || len(plaintext) < 1 {
+		return 0, false
+	}
+	total := len(plaintext) + FILE_PACKET_OVERHEAD
+	if len(dst) < total || bytesOverlap(plaintext, dst[:total]) {
+		return 0, false
+	}
+	sequence, sequenceOK := ChannelSendState_nextSequence(send)
+	if !sequenceOK {
+		return 0, false
+	}
+
+	kind := plaintext[0]
+	ciphertextEnd := FILE_PACKET_HEADER_SIZE + len(plaintext) - 1
+	dst[0] = kind
+	endian.unchecked_put_u64le(dst[1:FILE_PACKET_HEADER_SIZE], sequence)
+	nonce := makeVoiceNonce(.File, sequence)
+	aad := makeFileAAD(sessionID, sequence, kind)
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, send.key[:])
+	defer chacha20poly1305.reset(&ctx)
+	chacha20poly1305.seal(
+		&ctx,
+		dst[FILE_PACKET_HEADER_SIZE:ciphertextEnd],
+		dst[ciphertextEnd:total],
+		nonce[:],
+		aad[:],
+		plaintext[1:],
+	)
+	return total, true
+}
+
+// Opens a file packet into dst as kind || plaintext, the attachment packet sealFilePacket was
+// given. The strict counter accepts only the next sequence and moves only after the tag
+// verifies. Allocates nothing. Every failure should end the session, as a control packet's
+// does: the channel is reliable and ordered, so a gap or a bad tag is an attack or a bug.
+openFilePacket :: proc(
+	receive: ^ControlReceiveState,
+	sessionID: SessionID,
+	packet: []u8,
+	dst: []u8,
+) -> (
+	n: int,
+	result: FileOpenResult,
+) {
+	if !receive.active {
+		return 0, .Inactive
+	}
+	if len(packet) < FILE_PACKET_HEADER_SIZE + TRANSPORT_TAG_SIZE {
+		return 0, .Malformed
+	}
+	plaintextLength := len(packet) - FILE_PACKET_OVERHEAD
+	if len(dst) < plaintextLength || bytesOverlap(packet, dst[:plaintextLength]) {
+		return 0, .Malformed
+	}
+	sequence := endian.unchecked_get_u64le(packet[1:FILE_PACKET_HEADER_SIZE])
+	if sequence != receive.nextSequence {
+		return 0, .OutOfOrder
+	}
+	kind := packet[0]
+	ciphertextEnd := len(packet) - TRANSPORT_TAG_SIZE
+	nonce := makeVoiceNonce(.File, sequence)
+	aad := makeFileAAD(sessionID, sequence, kind)
+	ctx: chacha20poly1305.Context
+	chacha20poly1305.init_xchacha(&ctx, receive.key[:])
+	defer chacha20poly1305.reset(&ctx)
+	if !chacha20poly1305.open(
+		&ctx,
+		dst[1:plaintextLength],
+		nonce[:],
+		aad[:],
+		packet[FILE_PACKET_HEADER_SIZE:ciphertextEnd],
+		packet[ciphertextEnd:],
+	) {
+		return 0, .BadTag
+	}
+	dst[0] = kind
+	receive.nextSequence += 1
+	return plaintextLength, .Ok
+}
+
 TransportState_init :: proc(role: SessionRole) -> TransportState {
 	return TransportState{role = role, phase = .Disconnected, peerTrustState = .Unknown}
 }
 
-// Fills all four channel halves from the derived keys and starts every counter at zero.
+// Fills all six channel halves from the derived keys and starts every counter at zero.
 TransportState_activate :: proc(
 	state: ^TransportState,
 	sessionID: SessionID,
@@ -1026,6 +1163,14 @@ TransportState_activate :: proc(
 		key    = keysCopy.receiveKey[.Voice],
 		active = true,
 	}
+	state.fileSend = ChannelSendState {
+		key    = keysCopy.sendKey[.File],
+		active = true,
+	}
+	state.fileReceive = ControlReceiveState {
+		key    = keysCopy.receiveKey[.File],
+		active = true,
+	}
 }
 
 // Moves the voice halves out to the thread that will own them and zeroes them here, so the
@@ -1044,12 +1189,30 @@ TransportState_takeVoiceState :: proc(
 	return send, receive
 }
 
+// Moves the file halves out to the code that will own them for the session and zeroes them
+// here (protocol 26). The server's router keeps them apart from its session copies, so no copy
+// of a session written back can rewind the file send counter.
+TransportState_takeFileState :: proc(
+	state: ^TransportState,
+) -> (
+	send: ChannelSendState,
+	receive: ControlReceiveState,
+) {
+	send = state.fileSend
+	receive = state.fileReceive
+	ChannelSendState_wipe(&state.fileSend)
+	ControlReceiveState_wipe(&state.fileReceive)
+	return send, receive
+}
+
 @(private = "file")
 TransportState_wipeKeys :: proc(state: ^TransportState) {
 	ChannelSendState_wipe(&state.controlSend)
 	ControlReceiveState_wipe(&state.controlReceive)
 	ChannelSendState_wipe(&state.voiceSend)
 	VoiceReceiveState_wipe(&state.voiceReceive)
+	ChannelSendState_wipe(&state.fileSend)
+	ControlReceiveState_wipe(&state.fileReceive)
 }
 
 // Wipes every key and counter and returns to Disconnected, keeping only the role.
