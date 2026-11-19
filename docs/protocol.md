@@ -9,12 +9,15 @@ For the wire rules that code must follow (packet ownership, enum numbering, voic
 - **Identities.** Every client and server has an Ed25519 identity key. The client pins the
   server's key on its first connection and refuses a different one later (see "Failures that
   stop retrying" in the [user guide](user-guide.md#connection-status-and-reconnecting)).
-- **Key exchange and packets.** The handshake uses X25519 and derives four keys with HKDF:
-  control and voice, one per direction. Packets are sealed with XChaCha20-Poly1305.
+- **Key exchange and packets.** The handshake uses X25519 and derives six keys with HKDF
+  (`"haychat transport v3"` since protocol 26): control, voice and file, one per direction.
+  Packets are sealed with XChaCha20-Poly1305.
 - **Channels.** Everything runs over ENet on one UDP port. The control channel (ENet channel 1)
   carries CBOR packets and keeps a strict sequence counter; the voice channel (ENet channel 2)
   carries binary voice datagrams with a 64-packet replay window, and each datagram's kind byte
-  is bound into its authentication tag.
+  is bound into its authentication tag. The file channel (ENet channel 5, protocol 26) carries
+  binary attachment chunks and acknowledgements, reliable and ordered, with a strict sequence
+  counter like control ([below](#attachment-transfers-protocol-26)).
 - **End-to-end for direct messages and encrypted rooms.** Since protocol 17 a direct message is
   end-to-end encrypted whenever both sides can: the sender's client seals it to the recipient's
   pinned key, and the server stores and forwards an envelope it cannot open
@@ -66,6 +69,7 @@ version below therefore needs clients and servers rebuilt together.
 | 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 | 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
+| 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet |
 | 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
@@ -74,6 +78,39 @@ type". Nothing else on the wire changed, so the protocol version stayed 25.
 
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
+
+## Attachment transfers (protocol 26)
+
+The first part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F1): a client uploads
+a file and gets a blob ID, and downloads blobs it owns. Attaching blobs to messages, and letting
+the conversation's readers download them, comes with the next part.
+
+- **Control** (CBOR, encrypted, channel 1). `ClientAttachmentUploadBegin{requestId, roomId |
+  recipientUserId, size, encrypted}` asks to upload `size` bytes to a room or a direct
+  conversation. One database statement checks membership and SendMessages (or, for a direct
+  message, a recipient the sender may message), the size, the account's quota and hourly upload
+  limit and the server's capacity, and reserves the size; the storage worker then checks the
+  free-disk reserve. The answer is `ServerAttachmentUploadReady{requestId, blobId, received,
+  chunkBytes, windowChunks}`: a new random 16-byte blob ID. `ClientAttachmentUploadResume{blobId}`
+  asks to continue an upload (answered by Ready with the bytes the server holds),
+  `ClientAttachmentUploadFinish{blobId, sha256}` ends one (the server compares size and hash and
+  answers `ServerAttachmentUploadDone{blobId, size, sha256}`), `ClientAttachmentDownload{blobId,
+  offset}` is answered by `ServerAttachmentDownloadBegin{blobId, size, offset}`, and
+  `ClientAttachmentCancel{blobId}` stops an upload (for good) or a download. Every refusal is
+  `ServerAttachmentRefused{requestId, blobId, message}`. Until attachments are on messages, only
+  a blob's owner may download it.
+- **Chunks** (binary, channel 5). `kind u8 ‖ blobId 16 ‖ offset u64 LE ‖ data`, kinds
+  UploadChunk 1, UploadAck 2, DownloadChunk 3, DownloadAck 4; a chunk carries 1 to 65536 bytes
+  and an ack none. Each is sealed as `kind ‖ sequence u64 LE ‖ ciphertext ‖ tag` with the
+  session's file key for its direction, the nonce derived from the sequence, and the transport
+  AAD for channel 5 followed by the kind byte. A packet that does not open, or arrives out of
+  sequence, ends the session.
+- **Flow control.** At most 8 unacknowledged chunks per transfer (the server acknowledges an
+  upload chunk only once it is on disk; the client acknowledges each download chunk), at most 2
+  uploads and 4 downloads per session, and a per-session pace for both directions together
+  (`HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND`), so chat packets never wait behind a file. A
+  chunk outside the window or out of order ends that transfer. A session's transfers end with
+  it; an upload can then be resumed by its owner from another session.
 
 ## Roles and server permissions (protocol 23)
 

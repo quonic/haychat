@@ -28,6 +28,9 @@ Message :: union {
 	DatabaseError,
 	DatabaseStartupReady,
 	DatabaseStartupFailed,
+	// Storage worker messages (protocol 26, storage.odin)
+	StorageCommand,
+	StorageResponse,
 	// System messages
 	ProcessShutdown,
 	ProcessRestart,
@@ -54,10 +57,10 @@ NetworkChannel :: enum u8 {
 
 // The transport keys are per channel (common.TransportChannel), numbered as the ENet channels
 // these values name, so both enums must agree. The ENet host allocates channels
-// 0..FileTransfer-1 (network.odin), which includes Voice.
+// 0..FileTransfer (network.odin, NETWORK_CHANNEL_COUNT), which includes Voice.
 #assert(u8(NetworkChannel.Chat) == u8(common.TransportChannel.Control))
 #assert(u8(NetworkChannel.Voice) == u8(common.TransportChannel.Voice))
-#assert(NetworkChannel.Voice < NetworkChannel.FileTransfer)
+#assert(u8(NetworkChannel.FileTransfer) == u8(common.TransportChannel.File))
 
 NetworkDataReceived :: struct {
 	peerId:  u32,
@@ -157,6 +160,7 @@ IPC_Endpoint_Kind :: enum {
 	Main,
 	Network,
 	Database,
+	Storage,
 }
 
 IPC_Server_Context :: struct {
@@ -269,6 +273,7 @@ IPC_State :: struct {
 	main_queue:     IPC_Message_Queue,
 	network_queue:  IPC_Message_Queue,
 	database_queue: IPC_Message_Queue,
+	storage_queue:  IPC_Message_Queue,
 	// One condition per queue, signalled on every push, so a consumer can sleep in
 	// IPC_Client_wait instead of polling. All of them pair with state_mutex.
 	queue_ready:    [IPC_Endpoint_Kind]sync.Cond,
@@ -287,6 +292,7 @@ IPC__state_init :: proc() {
 	IPC_Ring_init(&ipcState.main_queue)
 	IPC_Ring_init(&ipcState.network_queue)
 	IPC_Ring_init(&ipcState.database_queue)
+	IPC_Ring_init(&ipcState.storage_queue)
 }
 
 // Exhaustive on purpose: a new request variant must decide what it owns.
@@ -333,6 +339,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 		delete(r.reason)
 	case common.DatabaseSharedRoomsRequest:
 		delete(r.candidateUserIds)
+	case common.DatabaseAttachmentRequest:
+		delete(r.blobIds)
 	case common.DatabaseRegistrationModeRequest, common.DatabaseRestrictedUsersRequest:
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
@@ -455,6 +463,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.userIds)
 	case common.DatabaseRestrictedUsersResult:
 		delete(r.userIds)
+	case common.DatabaseAttachmentResult:
+		delete(r.blobs)
 	case common.DatabaseRegistrationModeResult:
 	case common.DatabaseRoleResult:
 		for &role in r.roles {
@@ -527,6 +537,10 @@ IPC__message_deinit :: proc(msg: ^Message) {
 		delete(m.error)
 	case DatabaseStartupFailed:
 		delete(m.error)
+	case StorageCommand:
+		StorageRequest_deinit(m.request)
+	case StorageResponse:
+		StorageResult_deinit(m.result)
 	case ProcessError:
 		delete(m.error)
 	case:
@@ -554,6 +568,7 @@ IPC__state_deinit :: proc() {
 	IPC__queue_deinit(&ipcState.main_queue)
 	IPC__queue_deinit(&ipcState.network_queue)
 	IPC__queue_deinit(&ipcState.database_queue)
+	IPC__queue_deinit(&ipcState.storage_queue)
 	ipcState.initialized = false
 }
 
@@ -563,6 +578,9 @@ IPC__endpoint_kind_from_socket :: proc(socket_name: string) -> IPC_Endpoint_Kind
 	}
 	if strings.contains(socket_name, "database") {
 		return .Database
+	}
+	if strings.contains(socket_name, "storage") {
+		return .Storage
 	}
 	if strings.contains(socket_name, "main") {
 		return .Main
@@ -587,6 +605,8 @@ IPC__queue_for_kind :: proc(kind: IPC_Endpoint_Kind) -> ^IPC_Message_Queue {
 		return &ipcState.network_queue
 	case .Database:
 		return &ipcState.database_queue
+	case .Storage:
+		return &ipcState.storage_queue
 	case .Unknown:
 		return nil
 	case:
@@ -609,6 +629,8 @@ IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_K
 			return .Network
 		case DatabaseQuery:
 			return .Database
+		case StorageCommand:
+			return .Storage
 		case:
 			// Main addresses shutdown and restart to each service with IPC_Server_send.
 			return .Unknown
@@ -616,6 +638,8 @@ IPC__route_to :: proc(sender: IPC_Endpoint_Kind, msg: Message) -> IPC_Endpoint_K
 	case .Network:
 		return .Main
 	case .Database:
+		return .Main
+	case .Storage:
 		return .Main
 	case .Unknown:
 		return .Unknown

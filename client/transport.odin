@@ -9,14 +9,17 @@ import "core:time"
 import "vendor:ENet"
 
 // ENet channel 1 carries every control packet (the handshake and all CBOR traffic); channel
-// 2 is reserved for voice datagrams. The host allocates channels 0..4, matching the server.
+// 2 is reserved for voice datagrams and channel 5 for attachment chunks (protocol 26). The host
+// allocates channels 0..5, matching the server.
 STARTUP_AUTH_CHANNEL_CHAT :: u8(1)
 STARTUP_AUTH_CHANNEL_VOICE :: u8(2)
-STARTUP_AUTH_CHANNEL_COUNT :: uint(5)
+STARTUP_AUTH_CHANNEL_FILE :: u8(5)
+STARTUP_AUTH_CHANNEL_COUNT :: uint(6)
 
 #assert(STARTUP_AUTH_CHANNEL_CHAT == u8(common.TransportChannel.Control))
 #assert(STARTUP_AUTH_CHANNEL_VOICE == u8(common.TransportChannel.Voice))
-#assert(uint(STARTUP_AUTH_CHANNEL_VOICE) < STARTUP_AUTH_CHANNEL_COUNT)
+#assert(STARTUP_AUTH_CHANNEL_FILE == u8(common.TransportChannel.File))
+#assert(uint(STARTUP_AUTH_CHANNEL_FILE) < STARTUP_AUTH_CHANNEL_COUNT)
 
 ClientTransportResult :: struct {
 	responsePacketBytes: []u8,
@@ -296,6 +299,9 @@ ClientServerTransport :: struct {
 	// Voice datagrams in and out, and why any were dropped. Under the worker lock; never reset,
 	// so it covers every session of this transport.
 	voiceStats:                ClientVoiceNetworkStats,
+	// Protocol 26 (attachment_transfer.odin): the transfer worker this server's attachment
+	// answers and chunks go to, set and cleared under the worker lock; nil drops them.
+	transfers:                 ^ClientTransferWorker,
 }
 
 ClientServerTransport_setLastError :: proc(transport: ^ClientServerTransport, message: string) {
@@ -1485,6 +1491,13 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 	bool,
 ) {
 	#partial switch innerPacket.messageType {
+	// Protocol 26: attachment answers go straight to the transfer worker, never to State.
+	case .ServerAttachmentUploadReady,
+	     .ServerAttachmentUploadDone,
+	     .ServerAttachmentDownloadBegin,
+	     .ServerAttachmentRefused:
+		ClientServerTransport_receiveAttachmentControl(transport, innerPacket)
+		return {}, false
 	case .ServerChatMessage:
 		chatPayload: common.ServerChatMessagePayload
 		if cbor.unmarshal(innerPacket.payload, &chatPayload) != nil {
@@ -2369,6 +2382,20 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 				)
 				ENet.packet_destroy(event.packet)
 				continue
+			case .File:
+				ok := ClientServerTransport_receiveFilePacket(
+					transport,
+					event.packet.data[:event.packet.dataLength],
+				)
+				ENet.packet_destroy(event.packet)
+				if !ok {
+					return ClientServerTransport_lostConnection(
+						transport,
+						now,
+						"invalid attachment packet",
+					)
+				}
+				continue
 			case .Other:
 				transport.voiceStats.receiveDropped[.WrongChannel] += 1
 				ENet.packet_destroy(event.packet)
@@ -2376,8 +2403,19 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 			case .Control:
 			}
 			packetBytes := ClientServerTransport_copyENetPacket(event.packet)
-			defer delete(packetBytes)
-			return ClientServerTransport_handleRuntimePacketBytes(transport, packetBytes)
+			runtimeEvent, hasEvent := ClientServerTransport_handleRuntimePacketBytes(
+				transport,
+				packetBytes,
+			)
+			delete(packetBytes)
+			if hasEvent {
+				return runtimeEvent, true
+			}
+			// Attachment answers go to the transfer worker and make no event: keep reading.
+			if !ClientServerTransport_isConnected(transport) {
+				return {}, false
+			}
+			continue
 
 		case .DISCONNECT:
 			return ClientServerTransport_lostConnection(
@@ -2396,6 +2434,7 @@ ClientServerTransport_serviceEstablishedSession :: proc(
 ClientReceiveChannel :: enum u8 {
 	Control,
 	Voice,
+	File,
 	Other,
 }
 
@@ -2405,6 +2444,8 @@ clientReceiveChannel :: proc(channelID: u8) -> ClientReceiveChannel {
 		return .Control
 	case STARTUP_AUTH_CHANNEL_VOICE:
 		return .Voice
+	case STARTUP_AUTH_CHANNEL_FILE:
+		return .File
 	}
 	return .Other
 }
@@ -2420,7 +2461,7 @@ ClientServerTransport_acceptReceiveChannel :: proc(
 	switch clientReceiveChannel(channelID) {
 	case .Control:
 		return true
-	case .Voice:
+	case .Voice, .File:
 		transport.voiceStats.receiveDropped[.BeforeSession] += 1
 	case .Other:
 		transport.voiceStats.receiveDropped[.WrongChannel] += 1

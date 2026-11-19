@@ -9,6 +9,7 @@ import "core:time"
 ProcessType :: enum {
 	Network,
 	Database,
+	Storage, // protocol 26: attachment file I/O (storage.odin)
 }
 
 ProcessInfo :: struct {
@@ -26,6 +27,7 @@ ProcessInfo :: struct {
 ProcessManager :: struct {
 	networkProcess:  ProcessInfo,
 	databaseProcess: ProcessInfo,
+	storageProcess:  ProcessInfo,
 	config:          ^ServerConfig,
 	shouldShutdown:  bool,
 	startTime:       time.Time,
@@ -48,9 +50,14 @@ initProcessManager :: proc(config: ^ServerConfig) -> ProcessManager {
 
 	pm.networkProcess.type = .Network
 	pm.databaseProcess.type = .Database
+	pm.storageProcess.type = .Storage
 
 	IPC_Server_init(&pm.config.networkSocket, pm.config.networkSocketName)
 	IPC_Server_init(&pm.config.databaseSocket, pm.config.databaseSocketName)
+	if len(pm.config.storageSocketName) == 0 {
+		pm.config.storageSocketName = "haychat_storage"
+	}
+	IPC_Server_init(&pm.config.storageSocket, pm.config.storageSocketName)
 	pm.config.mainFd = IPC_Main_init()
 
 	return pm
@@ -62,6 +69,8 @@ ProcessManager_getProcessInfo :: proc(pm: ^ProcessManager, procType: ProcessType
 		return &pm.networkProcess
 	case .Database:
 		return &pm.databaseProcess
+	case .Storage:
+		return &pm.storageProcess
 	case:
 		return nil
 	}
@@ -85,6 +94,8 @@ ProcessManager__serviceThreadEntry :: proc(startDataRaw: rawptr) {
 		networkServerLoop(pm)
 	case .Database:
 		databaseServerLoop(pm)
+	case .Storage:
+		storageServerLoop(pm)
 	}
 
 	sync.mutex_lock(&pm.processMutex)
@@ -118,6 +129,8 @@ ProcessManager_signalProcess :: proc(pm: ^ProcessManager, procType: ProcessType,
 		IPC_Server_send(&pm.config.networkSocket, pm.config.networkFd, msg)
 	case .Database:
 		IPC_Server_send(&pm.config.databaseSocket, pm.config.databaseFd, msg)
+	case .Storage:
+		IPC_Server_send(&pm.config.storageSocket, pm.config.storageFd, msg)
 	case:
 	}
 }
@@ -271,6 +284,7 @@ ProcessManager_pumpRestarts :: proc(pm: ^ProcessManager) {
 	now := time.now()
 	ProcessManager_restartDue(pm, .Network, now)
 	ProcessManager_restartDue(pm, .Database, now)
+	ProcessManager_restartDue(pm, .Storage, now)
 }
 
 shutdownAllProcesses :: proc(pm: ^ProcessManager) {
@@ -278,21 +292,28 @@ shutdownAllProcesses :: proc(pm: ^ProcessManager) {
 	pm.shouldShutdown = true
 	pm.networkProcess.stopRequested = true
 	pm.databaseProcess.stopRequested = true
+	pm.storageProcess.stopRequested = true
 	pm.networkProcess.restartPending = false
 	pm.databaseProcess.restartPending = false
+	pm.storageProcess.restartPending = false
 	sync.mutex_unlock(&pm.processMutex)
 
 	fmt.println("[Shutdown] Signaling service threads to stop...")
 	ProcessManager_signalProcess(pm, .Network, ProcessShutdown{})
 	ProcessManager_signalProcess(pm, .Database, ProcessShutdown{})
+	ProcessManager_signalProcess(pm, .Storage, ProcessShutdown{})
 
 	shutdownStart := time.now()
 	for time.since(shutdownStart) < 10 * time.Second {
 		sync.mutex_lock(&pm.processMutex)
-		allStopped := !pm.networkProcess.isRunning && !pm.databaseProcess.isRunning
+		allStopped :=
+			!pm.networkProcess.isRunning &&
+			!pm.databaseProcess.isRunning &&
+			!pm.storageProcess.isRunning
 		if allStopped {
 			pm.networkProcess.threadHandle = nil
 			pm.databaseProcess.threadHandle = nil
+			pm.storageProcess.threadHandle = nil
 			sync.mutex_unlock(&pm.processMutex)
 			fmt.println("[Shutdown] All service threads exited")
 			return

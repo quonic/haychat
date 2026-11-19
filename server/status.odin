@@ -23,6 +23,12 @@ ServerStatusSnapshot :: struct {
 	voiceRooms:             int,
 	voiceParticipants:      int,
 	voiceRelay:             VoiceRelayStats,
+	// Protocol 26: the storage worker and the router's attachment counters.
+	storageRunning:         bool,
+	storageRestartPending:  bool,
+	attachmentUploads:      int,
+	attachmentDownloads:    int,
+	attachments:            AttachmentRouterStats,
 }
 
 // Takes a snapshot on the main thread, which owns routerState.
@@ -37,12 +43,18 @@ MainRouterState_statusSnapshot :: proc(
 		voiceRooms        = voiceRooms,
 		voiceParticipants = voiceParticipants,
 		voiceRelay        = VoiceRelayStats_load(&voiceRelayPublishedStats),
+		attachments       = state.attachments.stats,
 	}
+	snapshot.attachmentUploads, snapshot.attachmentDownloads = MainRouterState_attachmentCounts(
+		state,
+	)
 	sync.mutex_lock(&pm.processMutex)
 	snapshot.networkRunning = pm.networkProcess.isRunning
 	snapshot.databaseRunning = pm.databaseProcess.isRunning
 	snapshot.networkRestartPending = pm.networkProcess.restartPending
 	snapshot.databaseRestartPending = pm.databaseProcess.restartPending
+	snapshot.storageRunning = pm.storageProcess.isRunning
+	snapshot.storageRestartPending = pm.storageProcess.restartPending
 	snapshot.shutdownRequested = pm.shouldShutdown
 	sync.mutex_unlock(&pm.processMutex)
 	return snapshot
@@ -86,6 +98,23 @@ formatServerStatus :: proc(
 			snapshot.voiceRelay.drops[reason],
 		)
 	}
+	// Attachments (protocol 26): crypto_ms is the router thread's time in sealFilePacket and
+	// openFilePacket, bytes_in and bytes_out the chunk data it opened and sealed.
+	fmt.sbprintf(
+		&builder,
+		" storage_running=%v storage_restart_pending=%v attachment_uploads=%d " +
+		"attachment_downloads=%d attachment_bytes_in=%d attachment_bytes_out=%d " +
+		"attachment_crypto_ms=%d attachment_blobs_swept=%d attachment_orphans=%d",
+		snapshot.storageRunning,
+		snapshot.storageRestartPending,
+		snapshot.attachmentUploads,
+		snapshot.attachmentDownloads,
+		snapshot.attachments.bytesIn,
+		snapshot.attachments.bytesOut,
+		snapshot.attachments.cryptoNanos / 1_000_000,
+		snapshot.attachments.blobsSwept,
+		snapshot.attachments.orphansFound,
+	)
 	return strings.to_string(builder)
 }
 

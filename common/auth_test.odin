@@ -300,27 +300,34 @@ testTransportKeyDerivationVector :: proc(t: ^testing.T) {
 	keySet := deriveTransportKeySet(sessionID, sharedSecret, transcriptHash)
 
 	// HKDF-SHA256(salt = sessionID || transcriptHash, ikm = sharedSecret,
-	// info = "haychat transport v2", 128 bytes), computed independently of this code.
-	// If this changes, clients and servers built before and after cannot talk to each other.
-	expected := [4]string {
-		"b61f34905912bd0a3563f2a98da9047f6a63617595f75b3e39430a889b229715",
-		"1119af6ed5b5e6d64131f7d6f21d229a22c79db63aab12ceac32e6896f02cded",
-		"18cd20a8194a863c5aecd517167e0faffaab419b3c53af147adeb6dcf3cf2233",
-		"f528d73c05708f63d0d7e98235beb415fba03a33f5192db7c8dbffbe4b725890",
+	// info = "haychat transport v3", 192 bytes), computed independently of this code (Python's
+	// hmac and hashlib). If this changes, clients and servers built before and after cannot
+	// talk to each other.
+	expected := [6]string {
+		"ac8c04801934c525b03cc933da6082f38380e78d7f5d4f5ed5085ed663f12fa9",
+		"490aa61ea9f54fc1efef07fcdef27942a203b513e8cd1aff8afe215c71ef91b9",
+		"dd4e7a761ee9980b0e4dde204ccb52300af2a168d296a76b4d24c5702420e40e",
+		"1be76e224af069e980f865e6f79787159266cab2f81ff018a82acb75ce76a827",
+		"334b0de6946d057b3108c01a4d681f0ecfa9920c58da94e3698ef90626e812b6",
+		"a226197fafebea7aa895818b20672f9378d58f753eb31dfcebe4c476377c391a",
 	}
-	derived := [4]TransportKey {
+	derived := [6]TransportKey {
 		keySet.clientToServer[.Control],
 		keySet.serverToClient[.Control],
 		keySet.clientToServer[.Voice],
 		keySet.serverToClient[.Voice],
+		keySet.clientToServer[.File],
+		keySet.serverToClient[.File],
 	}
-	names := [4]string {
+	names := [6]string {
 		"control client->server",
 		"control server->client",
 		"voice client->server",
 		"voice server->client",
+		"file client->server",
+		"file server->client",
 	}
-	for index in 0 ..< 4 {
+	for index in 0 ..< 6 {
 		assert(
 			testKeysEqual(derived[index], testKeyFromHex(expected[index])),
 			fmt.tprintf("expected the %s key to match the fixed test vector", names[index]),
@@ -358,15 +365,17 @@ testTransportKeysAreDistinct :: proc(t: ^testing.T) {
 
 	for id in ([]SessionID{sessionID, randomSessionID}) {
 		keySet := deriveTransportKeySet(id, sharedSecret, transcriptHash)
-		keys := [4]TransportKey {
+		keys := [6]TransportKey {
 			keySet.clientToServer[.Control],
 			keySet.serverToClient[.Control],
 			keySet.clientToServer[.Voice],
 			keySet.serverToClient[.Voice],
+			keySet.clientToServer[.File],
+			keySet.serverToClient[.File],
 		}
-		for a in 0 ..< 4 {
+		for a in 0 ..< 6 {
 			assert(!testBytesAreZero(keys[a][:]), fmt.tprintf("expected key %d to be non-zero", a))
-			for b in a + 1 ..< 4 {
+			for b in a + 1 ..< 6 {
 				assert(
 					!testKeysEqual(keys[a], keys[b]),
 					fmt.tprintf("expected derived keys %d and %d to differ", a, b),
@@ -1111,4 +1120,106 @@ testTransportResetWipesEveryChannel :: proc(t: ^testing.T) {
 	_, server = testActivatedTransportPair()
 	TransportState_deinit(&server)
 	assert(testStructIsZero(&server), "expected deinit to wipe the whole state")
+}
+
+// ── File packets (protocol 26) ────────────────────────────────────
+
+@(test)
+testFilePacketLayoutIsPinned :: proc(t: ^testing.T) {
+	_ = t
+	assert(u8(TransportChannel.File) == 5, "expected the file channel to be ENet channel 5")
+	assert(FILE_PACKET_HEADER_SIZE == 9, "expected kind || sequence as the file packet header")
+	assert(FILE_PACKET_OVERHEAD == 24, "expected a sealed file packet to add 24 bytes")
+	sessionID, _, _ := testFixedKeyInputs()
+	aad := makeFileAAD(sessionID, 0x0807060504030201, 3)
+	transportAAD := makeTransportAAD(sessionID, .File, 0x0807060504030201)
+	for index in 0 ..< TRANSPORT_AAD_SIZE {
+		assert(
+			aad[index] == transportAAD[index],
+			fmt.tprintf("expected file AAD byte %d to be the transport AAD", index),
+		)
+	}
+	assert(aad[SESSION_ID_SIZE] == 5, "expected the file AAD to name channel 5")
+	assert(aad[TRANSPORT_AAD_SIZE] == 3, "expected the file AAD to end with the kind byte")
+}
+
+@(test)
+testFilePacketRoundTripBothDirectionsWithStrictCounter :: proc(t: ^testing.T) {
+	_ = t
+	client, server := testActivatedTransportPair()
+	plaintext := [?]u8{1, 0xAA, 0xBB, 0xCC, 0xDD}
+	sealed: [64]u8
+	opened: [64]u8
+
+	for round in 0 ..< 3 {
+		n, ok := sealFilePacket(&client.fileSend, client.sessionID, plaintext[:], sealed[:])
+		assert(ok && n == len(plaintext) + FILE_PACKET_OVERHEAD, "expected a sealed file packet")
+		assert(sealed[0] == 1, "expected the kind in clear at offset 0")
+		assert(
+			endian.unchecked_get_u64le(sealed[1:9]) == u64(round),
+			fmt.tprintf("expected sequence %d", round),
+		)
+		length, result := openFilePacket(
+			&server.fileReceive,
+			server.sessionID,
+			sealed[:n],
+			opened[:],
+		)
+		assert(result == .Ok, fmt.tprintf("expected the server to open it, got %v", result))
+		assert(length == len(plaintext), "expected the plaintext length back")
+		for value, index in plaintext {
+			assert(opened[index] == value, fmt.tprintf("expected byte %d to round-trip", index))
+		}
+		// A replay of the same packet is out of order and moves nothing.
+		_, replay := openFilePacket(&server.fileReceive, server.sessionID, sealed[:n], opened[:])
+		assert(replay == .OutOfOrder, fmt.tprintf("expected a replay refused, got %v", replay))
+	}
+
+	// The other direction uses the other key.
+	n, ok := sealFilePacket(&server.fileSend, server.sessionID, plaintext[:], sealed[:])
+	assert(ok, "expected the server to seal")
+	_, wrongKey := openFilePacket(&server.fileReceive, server.sessionID, sealed[:n], opened[:])
+	assert(wrongKey == .OutOfOrder || wrongKey == .BadTag, "expected the server's own key refused")
+	_, result := openFilePacket(&client.fileReceive, client.sessionID, sealed[:n], opened[:])
+	assert(result == .Ok, fmt.tprintf("expected the client to open it, got %v", result))
+
+	// Control and voice keys never open file packets.
+	assert(
+		!testKeysEqual(client.fileSend.key, client.controlSend.key) &&
+		!testKeysEqual(client.fileSend.key, client.voiceSend.key),
+		"expected the file key to differ from the control and voice keys",
+	)
+}
+
+@(test)
+testFilePacketTamperingIsRefused :: proc(t: ^testing.T) {
+	_ = t
+	plaintext := [?]u8{3, 1, 2, 3, 4, 5, 6, 7, 8}
+	for target in 0 ..< len(plaintext) + FILE_PACKET_OVERHEAD {
+		client, server := testActivatedTransportPair()
+		sealed: [64]u8
+		opened: [64]u8
+		n, ok := sealFilePacket(&client.fileSend, client.sessionID, plaintext[:], sealed[:])
+		assert(ok, "expected a sealed file packet")
+		sealed[target] ~= 0x01
+		_, result := openFilePacket(&server.fileReceive, server.sessionID, sealed[:n], opened[:])
+		// Flipping a sequence byte makes it out of order; anything else breaks the tag (the kind
+		// byte included, since it is in the AAD).
+		assert(
+			result == .BadTag || result == .OutOfOrder,
+			fmt.tprintf("expected byte %d tampering refused, got %v", target, result),
+		)
+		assert(server.fileReceive.nextSequence == 0, "expected a refused packet to move nothing")
+	}
+
+	client, server := testActivatedTransportPair()
+	sealed: [64]u8
+	opened: [64]u8
+	_, small := sealFilePacket(&client.fileSend, client.sessionID, plaintext[:], sealed[:10])
+	assert(!small && client.fileSend.nextSequence == 0, "expected a short dst to consume nothing")
+	_, short := openFilePacket(&server.fileReceive, server.sessionID, sealed[:20], opened[:])
+	assert(short == .Malformed, "expected a short packet refused as malformed")
+	TransportState_deinit(&server)
+	_, inactive := openFilePacket(&server.fileReceive, server.sessionID, sealed[:], opened[:])
+	assert(inactive == .Inactive, "expected a wiped state refused as inactive")
 }

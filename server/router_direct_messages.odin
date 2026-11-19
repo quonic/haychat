@@ -87,6 +87,7 @@ MainRouterState_handlePeerDisconnected :: proc(
 	// the departing session is skipped. The relay already forgot the peer on the network
 	// thread.
 	MainRouterState_voiceLeave(pm, state, peerID, skipSelf = true)
+	MainRouterState_attachmentsEndSession(pm, state, peerID)
 	MainRouterState_removePeerSession(state, peerID)
 	if wasAuthenticated {
 		MainRouterState_noteSessionEnded(pm, state, peerID, userID, nickname)

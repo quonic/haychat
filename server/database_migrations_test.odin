@@ -1378,3 +1378,100 @@ testRegistrationMigrationUpgradesVersion12AgainstPostgreSQL :: proc(t: ^testing.
 		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
 	}
 }
+
+// Migration 14 (protocol 26, attachments F1) from version 13 with rows: every account, room and
+// message stays, the attachments table starts empty, and its checks refuse bad rows.
+@(test)
+testAttachmentsMigrationUpgradesVersion13AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "attachments_v13")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:13])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 13 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:14])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 13, version = 14},
+		fmt.tprintf("expected only migration 14 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:14])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept,
+		"expected every account, room and message intact",
+	)
+	assert(
+		databaseMigrationTestValue(conn, "SELECT count(*)::text FROM attachments") == "0",
+		"expected no attachments after the migration",
+	)
+	owner := databaseMigrationTestValue(conn, "SELECT min(id)::text FROM users")
+	probes := [?]string {
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, encrypted, size) " +
+			"VALUES ('\\x00', %s, false, 1)",
+			owner,
+		),
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, encrypted, size, state) " +
+			"VALUES (decode(repeat('01', 16), 'hex'), %s, false, 1, 4)",
+			owner,
+		),
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, encrypted, size, received) " +
+			"VALUES (decode(repeat('02', 16), 'hex'), %s, false, 1, 2)",
+			owner,
+		),
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, encrypted, size, room_id, " +
+			"peer_user_id) VALUES (decode(repeat('03', 16), 'hex'), %s, false, 1, " +
+			"(SELECT min(id) FROM rooms), %s)",
+			owner,
+			owner,
+		),
+		fmt.tprintf(
+			"INSERT INTO attachments (blob_id, owner_user_id, encrypted, size) VALUES " +
+			"(decode(repeat('04', 16), 'hex'), %s, false, 1), " +
+			"(decode(repeat('04', 16), 'hex'), %s, false, 1)",
+			owner,
+			owner,
+		),
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"OR unique_violation THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+}
+
+@(test)
+testAttachmentsMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[13]
+	assert(
+		migration.version == 14 && migration.name == "attachments",
+		fmt.tprintf("expected migration 14 to be attachments, got %v", migration),
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN"),
+		"expected migration 14 to drop no table or column",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "attachments message links set null"),
+		"expected schema validation to require migration 14's checks",
+	)
+}

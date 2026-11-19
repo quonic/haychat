@@ -9,6 +9,7 @@ import "core:testing"
 configTestStorageConfig :: proc(storagePath: string) -> ServerConfig {
 	config := ServerConfig {
 		fileStoragePath = storagePath,
+		attachmentDir   = fmt.tprintf("%s/attachments", storagePath),
 	}
 	routerTestGenerateValidIdentityConfig(&config)
 	return config
@@ -170,5 +171,104 @@ testConfigRetiredVariablesAreReportedOnlyWhenSet :: proc(t: ^testing.T) {
 	assert(
 		len(set) == 1 && set[0] == "HAYCHAT_MAX_FILE_SIZE",
 		fmt.tprintf("expected only HAYCHAT_MAX_FILE_SIZE to be reported, got %v", set[:]),
+	)
+}
+
+@(test)
+testConfigAttachmentKeysClamp :: proc(t: ^testing.T) {
+	_ = t
+	config := ServerConfig {
+		attachmentMaxBytes              = 1,
+		attachmentAccountQuotaBytes     = -5,
+		attachmentUploadBytesPerHour    = ATTACHMENT_UPLOAD_BYTES_PER_HOUR_MAX + 1,
+		attachmentCapacityBytes         = -1,
+		attachmentMinFreeBytes          = -1,
+		attachmentPendingHours          = 0,
+		attachmentSessionBytesPerSecond = 1,
+	}
+	validateAttachmentConfig(&config)
+	assert(config.attachmentMaxBytes == ATTACHMENT_MAX_BYTES_MIN, "expected the size clamped up")
+	assert(config.attachmentAccountQuotaBytes == 0, "expected a negative quota to mean none")
+	assert(
+		config.attachmentUploadBytesPerHour == ATTACHMENT_UPLOAD_BYTES_PER_HOUR_MAX,
+		"expected the hourly limit clamped down",
+	)
+	assert(config.attachmentCapacityBytes == 0, "expected a negative capacity to mean none")
+	assert(config.attachmentMinFreeBytes == 0, "expected a negative reserve to be none")
+	assert(
+		config.attachmentPendingHours == ATTACHMENT_PENDING_HOURS_MIN,
+		"expected the pending window to stay at least the sweeper's hour",
+	)
+	assert(
+		config.attachmentSessionBytesPerSecond == ATTACHMENT_SESSION_BYTES_PER_SECOND_MIN,
+		"expected the session pace clamped up",
+	)
+
+	defaults := ServerConfig {
+		attachmentMaxBytes              = DEFAULT_ATTACHMENT_MAX_BYTES,
+		attachmentAccountQuotaBytes     = DEFAULT_ATTACHMENT_ACCOUNT_QUOTA_BYTES,
+		attachmentUploadBytesPerHour    = DEFAULT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR,
+		attachmentCapacityBytes         = DEFAULT_ATTACHMENT_CAPACITY_BYTES,
+		attachmentMinFreeBytes          = DEFAULT_ATTACHMENT_MIN_FREE_BYTES,
+		attachmentPendingHours          = DEFAULT_ATTACHMENT_PENDING_HOURS,
+		attachmentSessionBytesPerSecond = DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND,
+	}
+	kept := defaults
+	validateAttachmentConfig(&kept)
+	assert(kept == defaults, "expected the defaults inside their ranges")
+	assert(
+		DEFAULT_ATTACHMENT_MAX_BYTES == 25 * 1024 * 1024 &&
+		DEFAULT_ATTACHMENT_ACCOUNT_QUOTA_BYTES == 1024 * 1024 * 1024 &&
+		DEFAULT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR == 512 * 1024 * 1024 &&
+		DEFAULT_ATTACHMENT_MIN_FREE_BYTES == 1024 * 1024 * 1024 &&
+		DEFAULT_ATTACHMENT_SESSION_BYTES_PER_SECOND == 4 * 1024 * 1024,
+		"expected the plan's default limits (D21)",
+	)
+}
+
+@(test)
+testConfigStartupRefusesAnAttachmentDirectoryHoldingTheServerState :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
+	_ = t
+	storagePath := routerTestCreateTempDir("haychat_config_attachment_dir")
+	defer os.remove_all(storagePath)
+
+	config := configTestStorageConfig(storagePath)
+	config.serverIdentityFilePath = fmt.tprintf("%s/server_identity.json", storagePath)
+	ok := startupPreflightError(config)
+	assert(
+		len(ok) == 0,
+		fmt.tprintf("expected a separate attachment directory to pass, got %q", ok),
+	)
+	attachmentDir := config.attachmentDir
+	for name in ([]string{"", "/incoming", "/blobs"}) {
+		path := fmt.tprintf("%s%s", attachmentDir, name)
+		info, err := os.stat(path, context.temp_allocator)
+		assert(err == nil, fmt.tprintf("expected %q to exist", path))
+		assert(
+			int(transmute(u32)info.mode) & 0o777 == 0o700,
+			fmt.tprintf("expected %q to be mode 0700", path),
+		)
+	}
+
+	config.attachmentDir = storagePath
+	same := startupPreflightError(config)
+	assert(
+		strings.contains(same, "must not be HAYCHAT_FILE_STORAGE_PATH"),
+		fmt.tprintf("expected the state directory refused, got %q", same),
+	)
+
+	// The identity file inside the attachment directory, with the state directory elsewhere.
+	config.attachmentDir = attachmentDir
+	config.serverIdentityFilePath = fmt.tprintf("%s/keys/server_identity.json", attachmentDir)
+	assert(os.make_directory(fmt.tprintf("%s/keys", attachmentDir)) == nil, "expected a dir")
+	contains := startupPreflightError(config)
+	assert(
+		strings.contains(contains, "must not contain the server identity file"),
+		fmt.tprintf(
+			"expected an attachment directory holding the identity refused, got %q",
+			contains,
+		),
 	)
 }

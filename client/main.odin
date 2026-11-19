@@ -63,6 +63,9 @@ State :: struct {
 	// Connects and services every server session off the UI thread; nil until
 	// State_startNetwork. Tests that never start it get no network I/O at all.
 	networkWorker:                  ^ClientNetworkWorker,
+	// Protocol 26 (attachment_transfer.odin): started on the first transfer, stopped before the
+	// network worker it sends through.
+	transferWorker:                 ^ClientTransferWorker,
 	// Wakes the UI loop when the worker queues events; kept so the worker can be restarted
 	// after a settings change.
 	networkWake:                    NetworkWorkerEventQueuedProc,
@@ -216,14 +219,34 @@ State_startNetwork :: proc(
 	)
 }
 
+// The transfer worker for the network worker's transports, started on first use (protocol 26).
+// nil while the network is stopped.
+State_transferWorker :: proc(state: ^State) -> ^ClientTransferWorker {
+	if state.transferWorker == nil && state.networkWorker != nil {
+		state.transferWorker = ClientTransferWorker_start(
+			state.networkWorker,
+			state.serverTransports[:],
+		)
+	}
+	return state.transferWorker
+}
+
+// Stops the transfer worker; transfers in progress end without an event.
+State_stopTransfers :: proc(state: ^State) {
+	ClientTransferWorker_stop(state.transferWorker)
+	state.transferWorker = nil
+}
+
 // Stops the network worker without closing any session, applying the events it had already
 // queued so nothing it reported is lost. Used before the transport array is rebuilt.
 State_stopNetwork :: proc(state: ^State) {
 	if state.networkWorker == nil {
 		return
 	}
-	// The voice thread sends through the worker's transports, so it stops while they exist.
+	// The voice thread sends through the worker's transports, so it stops while they exist,
+	// and so does the transfer worker.
 	State_voiceSuspendForReconfigure(state)
+	State_stopTransfers(state)
 	ClientNetworkWorker_stopThread(state.networkWorker)
 	for State_drainNetworkEvents(state) {
 	}
@@ -239,6 +262,7 @@ State_deinit :: proc(state: ^State) {
 	hotkey.destroy(state.voice.globalPushToTalk)
 	state.voice.globalPushToTalk = nil
 	State_voiceShutdown(state)
+	State_stopTransfers(state)
 	ClientNetworkWorker_stop(state.networkWorker)
 	Config_deinit(&state.config)
 	ClientTransportCatalog_deinit(&state.serverTransports)

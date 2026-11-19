@@ -22,6 +22,9 @@ NETWORK_ENET_EVENT_LIMIT :: 1024
 // network thread to notice them, because ENet cannot wait on the socket and the queue at once.
 NETWORK_SERVICE_TIMEOUT_MS :: 2
 
+// ENet channels both sides allocate: 0..FileTransfer (protocol 26 added channel 5).
+NETWORK_CHANNEL_COUNT :: uint(NetworkChannel.FileTransfer) + 1
+
 // Peers the ENet host accepts per HAYCHAT_MAX_NETWORK_THREADS unit. The key once sized a worker
 // pool; it now only sets the peer capacity, which keeps the default at 64 peers.
 NETWORK_PEERS_PER_CAPACITY_UNIT :: 16
@@ -137,8 +140,10 @@ networkDrainIPC :: proc(
 		     DatabaseQueryResult,
 		     DatabaseError,
 		     DatabaseStartupReady,
-		     DatabaseStartupFailed:
-			fmt.eprintfln("[Network] Received database message, ignoring")
+		     DatabaseStartupFailed,
+		     StorageCommand,
+		     StorageResponse:
+			fmt.eprintfln("[Network] Received database or storage message, ignoring")
 			IPC__message_deinit(&ipcMsg)
 
 		case ProcessError:
@@ -171,7 +176,7 @@ networkServerLoop :: proc(pm: ^ProcessManager) {
 	enetHost := ENet.host_create(
 		&address,
 		uint(pm.config.maxNetworkThreads * NETWORK_PEERS_PER_CAPACITY_UNIT),
-		uint(NetworkChannel.FileTransfer), // Max channels
+		NETWORK_CHANNEL_COUNT, // channels 0..FileTransfer
 		0, // Incoming bandwidth
 		0, // Outgoing bandwidth
 	)

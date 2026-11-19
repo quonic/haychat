@@ -39,8 +39,8 @@ migrates the schema itself (see [Schema Migrations](#schema-migrations)).
 
 Paths are resolved relative to the server's working directory. `HAYCHAT_FILE_STORAGE_PATH` is
 the server's state directory: the server must be able to write to it at startup, and it holds
-the default identity file. Nothing else is written there; the server accepts no file uploads
-(see [Retired Variables](#retired-variables)).
+the default identity file. Nothing else is written there; attachment files go to
+`HAYCHAT_ATTACHMENT_DIR` (see [Attachments](#attachments)).
 
 ### Runtime
 
@@ -68,6 +68,34 @@ range; a value that does not parse uses the default.
 | `HAYCHAT_VOICE_MAX_PACKETS_PER_SECOND` | `60` (1 to 1000) | Per-connection rate limit for voice datagrams, as a token bucket with a burst of a third of the rate. A client sends 50 per second while talking, so values below 50 cut speech up |
 | `HAYCHAT_VOICE_MAX_FRAME_BYTES` | `512` (64 to 512) | The largest Opus payload the server forwards; 512 is the wire format's limit. A 24 kbit/s voice frame is about 60 bytes. In an encrypted room it counts the Opus bytes inside the sealed payload, without its 18 bytes of overhead |
 
+### Attachments
+
+Attachment files (protocol 26) are uploaded and downloaded over the same UDP port (ENet channel
+5). Their metadata is in PostgreSQL (the `attachments` table, migration 14); the files are in
+`HAYCHAT_ATTACHMENT_DIR`, written by the server's storage worker thread as
+`incoming/<hex>.part` while an upload runs and `blobs/<2 hex>/<hex>` once it is complete, with
+mode 0600 for files and 0700 for directories. Back the directory up together with the database
+([deploy/README.md "Backups"](../deploy/README.md#backups)). Out-of-range values are clamped to
+the range; a value that does not parse uses the default. Byte values are plain numbers of bytes.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HAYCHAT_ATTACHMENTS_ENABLED` | `true` | `false` refuses every new upload with "Attachments are disabled on this server". Stored files stay downloadable |
+| `HAYCHAT_ATTACHMENT_DIR` | `./attachments` | The blob directory. Startup creates it (and `incoming/`, `blobs/`) and fails with `[Startup]` when it is `HAYCHAT_FILE_STORAGE_PATH`, contains the server identity file, or is not writable. The server image uses `/var/lib/haychat/attachments`, the `haychat-attachments` volume |
+| `HAYCHAT_ATTACHMENT_MAX_BYTES` | `26214400` (25 MiB; 1 KiB to 4 GiB) | The largest file a client may upload, in stored bytes (in encrypted conversations the ciphertext with its padding and tags) |
+| `HAYCHAT_ATTACHMENT_ACCOUNT_QUOTA_BYTES` | `1073741824` (1 GiB; 0 = none, at most 1 TiB) | Bytes one account may have stored. An upload reserves its declared size when it begins, so concurrent uploads cannot overshoot it |
+| `HAYCHAT_ATTACHMENT_UPLOAD_BYTES_PER_HOUR` | `536870912` (512 MiB; 0 = none, at most 1 TiB) | Bytes one account may begin uploading in any hour, cancelled and failed uploads included |
+| `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` | `0` (none; at most 1 PiB) | Bytes the server stores for every account together |
+| `HAYCHAT_ATTACHMENT_MIN_FREE_BYTES` | `1073741824` (1 GiB; 0 to 1 TiB) | Free space the blob directory's volume must keep after an upload; an upload that would go below it is refused with "Server storage is full" |
+| `HAYCHAT_ATTACHMENT_PENDING_HOURS` | `24` (1 to 720) | An upload that was never sent with a message is deleted this many hours after it began |
+| `HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND` | `4194304` (4 MiB/s; 64 KiB/s to 1 GiB/s) | Each connection's transfer pace, uploads and downloads together, so file chunks never crowd out chat |
+
+The sweeper runs at startup and then hourly. It deletes uploads that received no chunk for an
+hour, uploads and unbound files older than `HAYCHAT_ATTACHMENT_PENDING_HOURS`, files whose
+message is gone (a deleted room, for example), and cancelled uploads, but never a row younger
+than an hour. At startup the server also deletes files in the blob directory that have no row
+(older than an hour) and logs each one.
+
 ### Retired Variables
 
 The server no longer reads these. When one is set, startup prints `[Startup] NAME is no longer
@@ -75,7 +103,7 @@ used and is ignored (#31)` and carries on.
 
 | Variable | Removed |
 | --- | --- |
-| `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY` | #31: they limited the `ClientStoreFile` upload endpoint, which no client used and nothing could read back. It was removed; attachments get their own design in #118 (metadata in PostgreSQL, access checks, client-side encryption in encrypted conversations) |
+| `HAYCHAT_MAX_FILE_SIZE`, `HAYCHAT_MAX_STORAGE_CAPACITY` | #31: they limited the `ClientStoreFile` upload endpoint, which no client used and nothing could read back. It was removed. Attachments (protocol 26, #118) are limited by `HAYCHAT_ATTACHMENT_MAX_BYTES` and `HAYCHAT_ATTACHMENT_CAPACITY_BYTES` instead (see [Attachments](#attachments)); the old names are not reused |
 
 ## Registration Mode
 
@@ -114,6 +142,7 @@ once), and recorded in the `schema_migrations` table.
 | 2 | Read markers behind unread counts (protocol 11) |
 | 3 | The name lock and ban columns of `users` and the room type of `rooms` (protocol 14); existing accounts stay unlocked and unbanned, existing rooms become text and voice |
 | 13 | Registration (protocol 25): `server_settings` (the registration mode, migrated as Open), `invites`, `invite_roles`, `registration_requests`, and `users.restricted`/`invite_id`; existing accounts stay unrestricted |
+| 14 | Attachments (protocol 26): the `attachments` table (one row per uploaded file: its owner, room or direct conversation, state, size, hash and, once attachments go on messages, its message); it starts empty |
 
 - An empty database gets every migration.
 - A database created before migrations existed (v0.1.0-rc1 and earlier dev databases) is adopted
@@ -140,8 +169,8 @@ thread logs one line of space-separated `key=value` pairs, for example:
 ```
 
 - `uptime` is in seconds.
-- The `*_running` and `*_restart_pending` pairs are the supervisor's view of the network and
-  database service threads.
+- The `*_running` and `*_restart_pending` pairs are the supervisor's view of the network,
+  database and (protocol 26) storage service threads.
 - `voice_rooms` and `voice_participants` count rooms with an active voice session and the
   sessions in them.
 - `voice_frames_in` counts datagrams received on the voice channel, `voice_frames_relayed` frames
@@ -152,6 +181,11 @@ thread logs one line of space-separated `key=value` pairs, for example:
   `wrong_room`, `muted`, `oversize`, `bad_duration`, `not_sealed` (protocol 21: an encrypted
   room's frame that is not a sealed payload), `no_speak_permission` (protocol 24: the sender may
   not speak in the room). A dropped datagram never disconnects anyone.
+- Attachments (protocol 26): `attachment_uploads` and `attachment_downloads` count transfers in
+  progress; `attachment_bytes_in` and `attachment_bytes_out` the file bytes received and sent
+  since startup; `attachment_crypto_ms` the main thread's time sealing and opening channel 5
+  packets; `attachment_blobs_swept` and `attachment_orphans` what the sweeper and the startup
+  scan removed.
 
 The frame counters start over when the network service restarts. In the dev pod, read the latest
 line with `./dev.sh logs | grep -F '[Status]' | tail -n 1`; in production, see [deploy/README.md

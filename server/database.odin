@@ -1193,6 +1193,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteSharedRooms(conn, r)
 	case common.DatabaseRestrictedUsersRequest:
 		return databaseExecuteRestrictedUsers(conn)
+	case common.DatabaseAttachmentRequest:
+		return databaseExecuteAttachmentRequest(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}
