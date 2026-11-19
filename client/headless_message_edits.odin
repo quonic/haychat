@@ -16,6 +16,23 @@ HEADLESS_EDIT_STATUS_NAMES := [MessageEditStatus]string {
 	.Failed   = "failed",
 }
 
+// #76 M2: why the latest edit failed (message_edited's editFailure).
+HEADLESS_EDIT_FAILURE_NAMES := [MessageEditFailure]string {
+	.None        = "none",
+	.Signature   = "signature",
+	.NoKey       = "no_key",
+	.Kind        = "kind",
+	.Sealed      = "sealed",
+	.NotEdit     = "not_edit",
+	.Moved       = "moved",
+	.Attachments = "attachments",
+	.Empty       = "empty",
+	.Replayed    = "replayed",
+	.NotMember   = "not_member",
+	.BadIndex    = "bad_index",
+	.LogFailed   = "log_failed",
+}
+
 // The text a message shows as its content: nothing for a tombstone, else the latest verified
 // edit, else the original. Borrowed.
 headlessEditedContent :: proc(content: string, view: MessageEditView, deleted: bool) -> string {
@@ -39,8 +56,9 @@ HeadlessMessageEditRequestJSON :: struct {
 
 // message_edited: an edit of a cached message, after the client checked it. editStatus is
 // verified (content is the edit), pending (the author's key is still on its way, or a sealed
-// edit this build does not open) or failed (the edit is not shown; content stays the last good
-// version). found is false for a message this client has not loaded.
+// edit's chain key or the room's log) or failed (the edit is not shown; content stays the last
+// good version), with editFailure saying why (#76 M2). found is false for a message this client
+// has not loaded.
 HeadlessMessageEditedJSON :: struct {
 	event:          string,
 	serverID:       int,
@@ -52,6 +70,7 @@ HeadlessMessageEditedJSON :: struct {
 	editCount:      int,
 	editID:         int,
 	editStatus:     string,
+	editFailure:    string,
 	content:        string,
 }
 
@@ -179,6 +198,7 @@ headlessWriteMessageEditEvent :: proc(
 			line.editCount = editCount
 			line.editID = view.shownEditID
 			line.editStatus = HEADLESS_EDIT_STATUS_NAMES[view.status]
+			line.editFailure = HEADLESS_EDIT_FAILURE_NAMES[view.failure]
 			line.content = content
 		}
 		headlessWriteJSON(harness, line)

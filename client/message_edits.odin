@@ -18,28 +18,39 @@ import "core:strings"
 //   conversation, the author and the message's own client message ID, so the server can neither
 //   forge one nor move it to another message. One that fails keeps the last good version on
 //   screen and is marked (MessageEditStatus.Failed, "An edit could not be verified"); one whose
-//   author is not pinned yet waits (Pending) and is checked again when keys change. A sealed
-//   edit (an encrypted conversation) is Pending in M1: it is never opened or shown, the previous
-//   version stays (M2 opens it).
+//   author is not pinned yet waits (Pending) and is checked again when keys change.
+// - a sealed edit (#76 M2, an encrypted conversation) is opened like a new sealed message of
+//   the same author: a room's on the author's chain (State_roomSealedEditOpen, room_chains.odin:
+//   the verified log, the author's membership of the edit's epoch, the signature against the
+//   pin before any key is looked for, then the chain key), a DM's envelope with this profile's
+//   key against both pins (messageEditOpenDirect). Its plaintext must name the original
+//   ("replaces" equal to the message's client message ID), carry no files, and be empty only
+//   when the message has files (messageEditCheckOpened). One whose chain key or log has not
+//   arrived waits (Pending) and is opened again when it does (State_roomChainsReopenPending).
+//   Every failure is final for that edit and never retried (MessageEditView.checkedEditID).
+// - a copy of an edit (the same client message ID as the version shown, an earlier edit in the
+//   list, or the message itself; for a room also the same chain position) is a replay: Failed.
 // - a tombstone always hides the content (D6). It reads "Message deleted" when its signature
 //   verifies against the author's pin, and "Removed by the server" otherwise: an admin's
 //   moderation, a missing signature or one that does not verify.
 // - the cached edit list (ClientFetchMessageEdits, fetched once per session on demand) is
-//   checked edit by edit the same way.
+//   checked edit by edit the same way; a sealed edit's opened text replaces its (empty)
+//   content in the list.
 //
 // Sending: State_editRoomMessage, State_deleteRoomMessage, State_editDirectMessage,
 // State_deleteDirectMessage and State_fetchMessageEdits sign with this profile's identity key and
 // go through messageChangeSendBridge (tests swap it under messageChangeSendBridgeTestMutex).
-// Nothing changes locally until the server's notice arrives. M1 refuses to edit a sealed
-// message locally (MESSAGE_EDIT_SEALED_UNSUPPORTED_MESSAGE); deletes are signed everywhere,
-// encrypted conversations included.
+// Nothing changes locally until the server's notice arrives. A sealed room message's edit goes
+// through the room's sender chain queue (State_roomChainsSendEdit: the next index of the
+// current chain, distributed like a new message's), a sealed DM's as an envelope to the pinned
+// keys (State_directSendEdit); deletes are signed everywhere, encrypted conversations included.
 
 MESSAGE_DELETED_TEXT :: "Message deleted"
 MESSAGE_REMOVED_BY_SERVER_TEXT :: "Removed by the server"
 MESSAGE_EDITED_SUFFIX :: " (edited)"
 MESSAGE_EDIT_PENDING_SUFFIX :: " (edited, not verified yet)"
 MESSAGE_EDIT_FAILED_SUFFIX :: " (An edit could not be verified)"
-MESSAGE_EDIT_SEALED_UNSUPPORTED_MESSAGE :: "Editing encrypted messages is not available yet"
+MESSAGE_EDIT_NOT_OPENED_MESSAGE :: "That message could not be opened, so it cannot be edited"
 MESSAGE_EDIT_NOT_OWN_MESSAGE :: "You can only edit your own messages"
 MESSAGE_DELETE_NOT_OWN_MESSAGE :: "You can only delete your own messages"
 MESSAGE_DELETE_ADMIN_ONLY_MESSAGE :: "Only admins can delete other people's messages"
@@ -50,8 +61,26 @@ MESSAGE_ALREADY_DELETED_TEXT :: "That message was deleted"
 MessageEditStatus :: enum u8 {
 	None, // Never edited, or not looked at yet
 	Verified, // shownContent is the latest edit, signed by the author
-	Pending, // Waiting for the author's pin, or a sealed edit M1 does not open
+	// Waiting for the author's pin, or (a sealed edit) the room's log or the chain's key
+	Pending,
 	Failed, // The latest edit did not verify; shownContent is the last good version
+}
+
+// Why an edit Failed (MessageEditView.failure; None otherwise).
+MessageEditFailure :: enum u8 {
+	None,
+	Signature, // Not signed by the author over this message (or unsigned)
+	NoKey, // No identity key to check it with, and none can arrive
+	Kind, // A plaintext edit of a sealed message or a sealed edit of a plaintext one (D11)
+	Sealed, // The sealed edit did not decode, verify or open (sealedError)
+	NotEdit, // A sealed plaintext without "replaces"
+	Moved, // "replaces" names another message
+	Attachments, // The edit carries files (D9)
+	Empty, // Empty text, but the message has no files
+	Replayed, // A copy of an earlier edit, or of a message
+	NotMember, // Room: the author was not a member of the edit's epoch
+	BadIndex, // Room: the index is outside the chain
+	LogFailed, // Room: the member log failed verification
 }
 
 MessageDeleteStatus :: enum u8 {
@@ -64,18 +93,27 @@ MessageDeleteStatus :: enum u8 {
 // DirectMessageEntry next to the server's fields (editCount, lastEdit, deleted, deletion).
 // shownContent and shownAt are owned; shownContent is wiped before it is freed. edits is the
 // cached list (ClientFetchMessageEdits, oldest first) with editStatuses its verdicts.
+//
+// #76 M2: failure (and for a sealed edit sealedError) says why the latest edit Failed;
+// checkedEditID is the edit status and failure are about, so a failure is never checked again;
+// shownEditClientID is the shown edit's client message ID (a copy under another ID is a
+// replay).
 MessageEditView :: struct {
-	shownContent:  string,
-	shownAt:       string,
-	shownEditID:   int,
-	status:        MessageEditStatus,
-	deleteStatus:  MessageDeleteStatus,
+	shownContent:      string,
+	shownAt:           string,
+	shownEditID:       int,
+	shownEditClientID: common.ClientMessageID,
+	status:            MessageEditStatus,
+	failure:           MessageEditFailure,
+	sealedError:       common.E2EEError,
+	checkedEditID:     int,
+	deleteStatus:      MessageDeleteStatus,
 	// D13: this message was counted unread live, so its delete may take the count back.
-	countedUnread: bool,
-	edits:         [dynamic]common.MessageEdit,
-	editStatuses:  [dynamic]MessageEditStatus,
-	editsLoaded:   bool,
-	editsLoading:  bool,
+	countedUnread:     bool,
+	edits:             [dynamic]common.MessageEdit,
+	editStatuses:      [dynamic]MessageEditStatus,
+	editsLoaded:       bool,
+	editsLoading:      bool,
 }
 
 MessageEditView_clearEdits :: proc(view: ^MessageEditView) {
@@ -149,20 +187,76 @@ MessageChangeCheck :: struct {
 	identityMayArrive:       bool,
 	// The message itself is sealed: its edits must be sealed too (D11).
 	sealed:                  bool,
+	// #76 M2: the message has files, so an edit's text may be empty (D9).
+	hasAttachments:          bool,
+	// A sealed DM edit: the recipient's pinned identity key (own key when this profile is the
+	// recipient), nil without one, and whether one may still arrive.
+	recipientIdentity:       Maybe(common.IdentityPublicKeyBytes),
+	recipientMayArrive:      bool,
+	// A sealed room edit: the message's own chain position, which no edit may repeat.
+	originalHeader:          common.RoomMessageHeader,
 }
 
-// One edit's verdict. A sealed edit is Pending in M1 (never opened); a plaintext edit of a
-// sealed message (D11) or with the message's own ID fails.
+// One edit's verdict and, once Verified, its text (owned: MessageEditVerdict_wipe frees it).
+MessageEditVerdict :: struct {
+	status:      MessageEditStatus,
+	failure:     MessageEditFailure,
+	sealedError: common.E2EEError,
+	content:     string,
+	// A sealed room edit, once decoded: its chain position.
+	header:      common.RoomMessageHeader,
+}
+
+MessageEditVerdict_wipe :: proc(verdict: ^MessageEditVerdict) {
+	wipeString(verdict.content)
+	delete(verdict.content)
+	verdict.content = ""
+}
+
+@(private = "file")
+messageEditFailed :: proc(
+	failure: MessageEditFailure,
+	sealedError := common.E2EEError.None,
+) -> MessageEditVerdict {
+	return {status = .Failed, failure = failure, sealedError = sealedError}
+}
+
+// One plaintext edit's verdict (pure). A sealed edit is Pending here: opening it needs the
+// conversation's keys (State_messageEditVerdict). A plaintext edit of a sealed message (D11),
+// one with the message's own ID, and an empty one of a message without files fail.
 messageEditCheck :: proc(check: MessageChangeCheck, edit: common.MessageEdit) -> MessageEditStatus {
+	return messageEditCheckPlain(check, edit).status
+}
+
+@(private = "file")
+messageEditCheckPlain :: proc(
+	check: MessageChangeCheck,
+	edit: common.MessageEdit,
+) -> MessageEditVerdict {
 	if len(edit.sealed) > 0 {
-		return check.sealed ? .Pending : .Failed
+		if !check.sealed {
+			return messageEditFailed(.Kind)
+		}
+		return {status = .Pending}
 	}
-	if check.sealed || edit.signature == {} {
-		return .Failed
+	if check.sealed {
+		return messageEditFailed(.Kind)
+	}
+	if edit.signature == {} {
+		return messageEditFailed(.Signature)
+	}
+	if edit.clientMessageId == check.original {
+		return messageEditFailed(.Replayed)
+	}
+	if len(edit.content) == 0 && !check.hasAttachments {
+		return messageEditFailed(.Empty)
 	}
 	identity, hasIdentity := check.senderIdentity.?
 	if !hasIdentity {
-		return check.identityMayArrive ? .Pending : .Failed
+		if check.identityMayArrive {
+			return {status = .Pending}
+		}
+		return messageEditFailed(.NoKey)
 	}
 	fields := common.MessageChangeFields {
 		serverIdentityPublicKey = check.serverIdentityPublicKey,
@@ -177,7 +271,235 @@ messageEditCheck :: proc(check: MessageChangeCheck, edit: common.MessageEdit) ->
 	} else {
 		verified = common.verifyDirectMessageEdit(fields, edit.content, identity, edit.signature)
 	}
-	return verified ? .Verified : .Failed
+	if !verified {
+		return messageEditFailed(.Signature)
+	}
+	return {status = .Verified, content = strings.clone(edit.content)}
+}
+
+// The checks an opened sealed edit's plaintext must pass (pure): it names the original, has no
+// files, is empty only when the message has files, and is not under the message's own ID.
+// Takes the plaintext's content into the verdict when it passes; the caller frees opened.
+messageEditCheckOpened :: proc(
+	check: MessageChangeCheck,
+	edit: common.MessageEdit,
+	opened: ^common.SealedDirectMessagePlaintext,
+) -> MessageEditVerdict {
+	switch {
+	case !opened.hasReplaces:
+		return messageEditFailed(.NotEdit)
+	case opened.replaces != check.original:
+		return messageEditFailed(.Moved)
+	case len(opened.attachments) > 0:
+		return messageEditFailed(.Attachments)
+	case len(opened.content) == 0 && !check.hasAttachments:
+		return messageEditFailed(.Empty)
+	case edit.clientMessageId == check.original:
+		return messageEditFailed(.Replayed)
+	}
+	verdict := MessageEditVerdict {
+		status  = .Verified,
+		content = opened.content,
+	}
+	opened.content = ""
+	return verdict
+}
+
+// Opens a sealed DM edit (pure): the envelope bound to the edit's client message ID and both
+// pinned identity keys, signed by the author, opened with this profile's key pair. Pending
+// while a pin may still arrive; every other failure is final.
+messageEditOpenDirect :: proc(
+	check: MessageChangeCheck,
+	keys: DirectOpenKeys,
+	edit: common.MessageEdit,
+) -> MessageEditVerdict {
+	sender, hasSender := check.senderIdentity.?
+	recipient, hasRecipient := check.recipientIdentity.?
+	if !keys.ready || !hasSender || !hasRecipient {
+		if (!hasSender && !check.identityMayArrive) ||
+		   (!hasRecipient && !check.recipientMayArrive) {
+			return messageEditFailed(.NoKey)
+		}
+		return {status = .Pending}
+	}
+	aadFields := common.DirectMessageAADFields {
+		serverIdentityPublicKey    = keys.serverIdentityPublicKey,
+		senderUserID               = check.senderUserID,
+		recipientUserID            = check.conversationID,
+		senderIdentityPublicKey    = sender,
+		recipientIdentityPublicKey = recipient,
+		clientMessageID            = edit.clientMessageId,
+	}
+	if !keys.hasOwnKeyPair {
+		return messageEditFailed(.Sealed, .NoWrapForRecipient)
+	}
+	opened, err := common.openDirectMessage(
+		edit.sealed,
+		aadFields,
+		keys.ownUserID,
+		keys.ownKeyPair,
+	)
+	defer {
+		wipeString(opened.content)
+		common.SealedDirectMessagePlaintext_deinit(&opened)
+	}
+	if err != .None {
+		return messageEditFailed(.Sealed, err)
+	}
+	return messageEditCheckOpened(check, edit, &opened)
+}
+
+// One edit's verdict with the keys it needs: a plaintext edit checked against the pin, a
+// sealed DM edit opened with this profile's key, a sealed room edit opened on its chain.
+State_messageEditVerdict :: proc(
+	state: ^State,
+	serverID: int,
+	check: MessageChangeCheck,
+	edit: common.MessageEdit,
+) -> MessageEditVerdict {
+	if len(edit.sealed) == 0 || !check.sealed {
+		return messageEditCheckPlain(check, edit)
+	}
+	if check.kind == .Room {
+		return State_roomSealedEditOpen(state, serverID, check, edit)
+	}
+	keys := State_directOpenKeys(state, serverID)
+	defer DirectOpenKeys_wipe(&keys)
+	return messageEditOpenDirect(check, keys, edit)
+}
+
+// Whether edit repeats one of earlier (the same client message ID, or for a sealed room edit
+// the same chain position as one of their headers).
+@(private = "file")
+messageEditRepeats :: proc(
+	edit: common.MessageEdit,
+	header: common.RoomMessageHeader,
+	earlier: []common.MessageEdit,
+	earlierHeaders: []common.RoomMessageHeader,
+) -> bool {
+	for other, index in earlier {
+		if other.clientMessageId == edit.clientMessageId {
+			return true
+		}
+		if index < len(earlierHeaders) &&
+		   header.chainID != {} &&
+		   earlierHeaders[index] == header {
+			return true
+		}
+	}
+	return false
+}
+
+// Applies the server's latest edit to view: a verified one replaces what is shown, a failed one
+// keeps the last good version, a pending one waits. A failure is final: the same edit is never
+// checked again.
+State_messageEditViewApply :: proc(
+	state: ^State,
+	serverID: int,
+	view: ^MessageEditView,
+	check: MessageChangeCheck,
+	lastEdit: common.MessageEdit,
+) {
+	if !common.messageEditIsSet(lastEdit) {
+		return
+	}
+	if lastEdit.id == view.checkedEditID && view.status != .Pending {
+		return
+	}
+	verdict := State_messageEditVerdict(state, serverID, check, lastEdit)
+	defer MessageEditVerdict_wipe(&verdict)
+	messageEditViewTake(view, check, lastEdit, &verdict)
+}
+
+// messageEditViewApply with a verdict already reached (pure but for allocation): records it,
+// marks a copy of the shown edit or of the message's position a replay, and shows a verified
+// edit. Takes verdict.content.
+messageEditViewTake :: proc(
+	view: ^MessageEditView,
+	check: MessageChangeCheck,
+	lastEdit: common.MessageEdit,
+	verdict: ^MessageEditVerdict,
+) {
+	if verdict.status == .Verified {
+		replayed :=
+			(view.shownEditID > 0 &&
+				lastEdit.id != view.shownEditID &&
+				lastEdit.clientMessageId == view.shownEditClientID) ||
+			(verdict.header.chainID != {} && verdict.header == check.originalHeader)
+		if replayed {
+			MessageEditVerdict_wipe(verdict)
+			verdict^ = messageEditFailed(.Replayed)
+		}
+	}
+	view.status = verdict.status
+	view.failure = verdict.failure
+	view.sealedError = verdict.sealedError
+	view.checkedEditID = lastEdit.id
+	if verdict.status != .Verified {
+		return
+	}
+	wipeString(view.shownContent)
+	delete(view.shownContent)
+	delete(view.shownAt)
+	view.shownContent = verdict.content
+	verdict.content = ""
+	view.shownAt = strings.clone(lastEdit.timestamp)
+	view.shownEditID = lastEdit.id
+	view.shownEditClientID = lastEdit.clientMessageId
+}
+
+// Checks every edit of a loaded list that has no final verdict yet (None or Pending), oldest
+// first: a sealed one's opened text replaces its content in the list, and a copy of an earlier
+// edit (or of the message's own position) fails as a replay.
+State_messageEditListCheck :: proc(
+	state: ^State,
+	serverID: int,
+	view: ^MessageEditView,
+	check: MessageChangeCheck,
+) {
+	if !view.editsLoaded && len(view.edits) == 0 {
+		return
+	}
+	headers := make([]common.RoomMessageHeader, len(view.edits), context.temp_allocator)
+	for &edit, index in view.edits {
+		if len(edit.sealed) > 0 && check.kind == .Room {
+			if decoded, err := common.decodeSealedRoomMessage(edit.sealed); err == .None {
+				headers[index] = decoded.header
+			}
+		}
+		status := view.editStatuses[index]
+		if status == .Verified || status == .Failed {
+			continue
+		}
+		verdict := State_messageEditVerdict(state, serverID, check, edit)
+		defer MessageEditVerdict_wipe(&verdict)
+		if verdict.status == .Verified &&
+		   (messageEditRepeats(edit, headers[index], view.edits[:index], headers[:index]) ||
+				   (headers[index].chainID != {} && headers[index] == check.originalHeader)) {
+			MessageEditVerdict_wipe(&verdict)
+			verdict = messageEditFailed(.Replayed)
+		}
+		view.editStatuses[index] = verdict.status
+		if verdict.status == .Verified && len(edit.sealed) > 0 {
+			wipeString(edit.content)
+			delete(edit.content)
+			edit.content = verdict.content
+			verdict.content = ""
+		}
+	}
+}
+
+// Whether a view still has an edit waiting (the latest or one of the list).
+messageEditViewHasPending :: proc(view: MessageEditView) -> bool {
+	if view.status == .Pending {
+		return true
+	}
+	for status in view.editStatuses {
+		if status == .Pending || status == .None {
+			return true
+		}
+	}
+	return false
 }
 
 // A tombstone's verdict (D6): Author only for a signature that verifies against the pin.
@@ -202,32 +524,6 @@ messageDeleteCheck :: proc(
 		verified = common.verifyDirectMessageDelete(fields, identity, deletion.signature)
 	}
 	return verified ? .Author : .Server
-}
-
-// Applies the server's latest edit to view: a verified one replaces what is shown, a failed one
-// keeps the last good version, a pending one waits (pure but for allocation).
-messageEditViewApply :: proc(
-	view: ^MessageEditView,
-	check: MessageChangeCheck,
-	lastEdit: common.MessageEdit,
-) {
-	if !common.messageEditIsSet(lastEdit) {
-		return
-	}
-	if lastEdit.id == view.shownEditID && view.status == .Verified {
-		return
-	}
-	status := messageEditCheck(check, lastEdit)
-	view.status = status
-	if status != .Verified {
-		return
-	}
-	wipeString(view.shownContent)
-	delete(view.shownContent)
-	delete(view.shownAt)
-	view.shownContent = strings.clone(lastEdit.content)
-	view.shownAt = strings.clone(lastEdit.timestamp)
-	view.shownEditID = lastEdit.id
 }
 
 // ── State: checking cached entries ───────────────────────────────
@@ -270,6 +566,8 @@ State_roomMessageCheck :: proc(
 		senderIdentity = State_messageSenderIdentity(state, serverID, roomID, entry.senderId, keys),
 		identityMayArrive = State_directKeyMayArrive(state, serverID, entry.senderId),
 		sealed = len(entry.sealed) > 0 || State_roomIsEncrypted(state, serverID, roomID),
+		hasAttachments = len(entry.attachments) > 0,
+		originalHeader = entry.security.header,
 	}
 }
 
@@ -290,6 +588,9 @@ State_directMessageCheck :: proc(
 		senderIdentity = State_directIdentityFor(state, serverID, keys, entry.senderId),
 		identityMayArrive = State_directKeyMayArrive(state, serverID, entry.senderId),
 		sealed = len(entry.envelope) > 0,
+		hasAttachments = len(entry.attachments) > 0,
+		recipientIdentity = State_directIdentityFor(state, serverID, keys, entry.recipientId),
+		recipientMayArrive = State_directKeyMayArrive(state, serverID, entry.recipientId),
 	}
 }
 
@@ -351,14 +652,11 @@ State_roomEntrySettleEdits :: proc(state: ^State, serverID, roomID: int, entry: 
 	case:
 		return
 	}
-	if !common.messageEditIsSet(entry.lastEdit) {
-		return
+	check := State_roomMessageCheck(state, serverID, roomID, entry^)
+	if common.messageEditIsSet(entry.lastEdit) {
+		State_messageEditViewApply(state, serverID, &entry.edit, check, entry.lastEdit)
 	}
-	messageEditViewApply(
-		&entry.edit,
-		State_roomMessageCheck(state, serverID, roomID, entry^),
-		entry.lastEdit,
-	)
+	State_messageEditListCheck(state, serverID, &entry.edit, check)
 }
 
 State_directEntrySettleEdits :: proc(state: ^State, serverID: int, entry: ^DirectMessageEntry) {
@@ -373,21 +671,22 @@ State_directEntrySettleEdits :: proc(state: ^State, serverID: int, entry: ^Direc
 	case:
 		return
 	}
-	if !common.messageEditIsSet(entry.lastEdit) {
-		return
+	check := State_directMessageCheck(state, serverID, entry^)
+	if common.messageEditIsSet(entry.lastEdit) {
+		State_messageEditViewApply(state, serverID, &entry.edit, check, entry.lastEdit)
 	}
-	messageEditViewApply(
-		&entry.edit,
-		State_directMessageCheck(state, serverID, entry^),
-		entry.lastEdit,
-	)
+	State_messageEditListCheck(state, serverID, &entry.edit, check)
 }
 
 // Whether an entry's verdicts may change when keys arrive: an edit waiting for the author's
-// pin, or a signed tombstone read as the server's for want of one.
+// pin (or a sealed one for its keys), or a signed tombstone read as the server's for want of
+// one.
 @(private = "file")
 messageEditViewWaits :: proc(view: MessageEditView, deleted: bool, signed: bool) -> bool {
-	return view.status == .Pending || (deleted && signed && view.deleteStatus == .Server)
+	if deleted {
+		return signed && view.deleteStatus == .Server
+	}
+	return messageEditViewHasPending(view)
 }
 
 // Keys changed on serverID: checks again every edit and signed tombstone that waited for one.
@@ -527,6 +826,14 @@ State_messageEdited :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) 
 		common.MessageEdit_deinit(&edit)
 	}
 	if event.editKind == .Room {
+		// #76 M2: a sealed edit this session sent leaves the chain's in-flight list.
+		State_roomChainsMessageEchoed(
+			state,
+			event.serverID,
+			event.roomID,
+			event.senderID,
+			edit.clientMessageId,
+		)
 		entry := State_roomMessageEntry(state, event.serverID, event.roomID, event.messageID)
 		if entry == nil || entry.deleted || entry.senderId != event.senderID {
 			return
@@ -539,6 +846,8 @@ State_messageEdited :: proc(state: ^State, event: ^ClientTransportRuntimeEvent) 
 			event.editCount,
 		)
 		State_roomEntrySettleEdits(state, event.serverID, event.roomID, entry)
+		// A sealed edit waiting for its chain or the log fetches or asks for it.
+		State_roomChainsEditsFollowUp(state, event.serverID, event.roomID)
 		return
 	}
 	peerUserID := directMessagePeerUserID(
@@ -613,6 +922,13 @@ State_directPreviewEdited :: proc(
 		wipeString(summary.lastContent)
 		delete(summary.lastContent)
 		summary.lastContent = strings.clone(entry.edit.shownContent)
+		return
+	}
+	// #76 M2: a preview whose message is not loaded checks (or opens) the edit itself.
+	if entry == nil {
+		keys := State_directOpenKeys(state, serverID)
+		defer DirectOpenKeys_wipe(&keys)
+		State_directPreviewSettleEdits(state, serverID, keys, summary)
 	}
 }
 
@@ -721,11 +1037,22 @@ State_directPreviewSettleEdits :: proc(
 			summary.lastSenderId,
 		),
 		sealed                  = len(summary.lastEnvelope) > 0,
+		hasAttachments          = len(summary.lastAttachments) > 0,
+		recipientIdentity       = State_directIdentityFor(state, serverID, keys, recipientID),
 	}
-	if messageEditCheck(check, summary.lastEdit) == .Verified {
+	// #76 M2: a sealed edit opens with this profile's key, like the preview's message.
+	verdict: MessageEditVerdict
+	if len(summary.lastEdit.sealed) > 0 && check.sealed {
+		verdict = messageEditOpenDirect(check, keys, summary.lastEdit)
+	} else {
+		verdict = messageEditCheckPlain(check, summary.lastEdit)
+	}
+	defer MessageEditVerdict_wipe(&verdict)
+	if verdict.status == .Verified {
 		wipeString(summary.lastContent)
 		delete(summary.lastContent)
-		summary.lastContent = strings.clone(summary.lastEdit.content)
+		summary.lastContent = verdict.content
+		verdict.content = ""
 	}
 }
 
@@ -762,11 +1089,13 @@ State_messageEditsReceived :: proc(state: ^State, event: ^ClientTransportRuntime
 	MessageEditView_clearEdits(view)
 	view.edits = edits
 	view.editStatuses = make([dynamic]MessageEditStatus, len(edits))
-	for edit, index in edits {
-		view.editStatuses[index] = messageEditCheck(check, edit)
-	}
 	view.editsLoaded = true
 	view.editsLoading = false
+	State_messageEditListCheck(state, event.serverID, view, check)
+	// #76 M2: sealed edits still waiting fetch or ask for their chains.
+	if event.editKind == .Room {
+		State_roomChainsEditsFollowUp(state, event.serverID, event.roomID)
+	}
 }
 
 // ── State: sending ───────────────────────────────────────────────
@@ -879,10 +1208,12 @@ messageEditNewID :: proc() -> (common.ClientMessageID, bool) {
 	return id, true
 }
 
-// The author edits room message messageID to content (signed, protocol 30). M1 edits only
-// plaintext messages: an encrypted room's are refused locally. forgeSignature (a test hook for
-// the live proof) sends a signature the server must refuse, and checkRights false (the harness)
-// skips the own-message check so the server's refusal shows. "" on success, else why.
+// The author edits room message messageID to content (protocol 30): a plaintext message's edit
+// is signed, an encrypted room's is sealed on this session's sender chain (#76 M2,
+// State_roomChainsSendEdit), so it may wait for the chain's distribution. forgeSignature (a
+// test hook for the live proof) sends a signature or seal the server must refuse, and
+// checkRights false (the harness) skips the own-message check so the server's refusal shows.
+// "" on success (sent or queued), else why.
 State_editRoomMessage :: proc(
 	state: ^State,
 	serverID, roomID, messageID: int,
@@ -897,8 +1228,10 @@ State_editRoomMessage :: proc(
 	if entry.deleted {
 		return MESSAGE_ALREADY_DELETED_TEXT
 	}
-	if len(entry.sealed) > 0 || State_roomIsEncrypted(state, serverID, roomID) {
-		return MESSAGE_EDIT_SEALED_UNSUPPORTED_MESSAGE
+	sealed := len(entry.sealed) > 0 || State_roomIsEncrypted(state, serverID, roomID)
+	if sealed && (len(entry.sealed) == 0 || entry.security.protection != .Encrypted) {
+		// A message that is not shown opened cannot be edited: D11 needs a sealed one.
+		return MESSAGE_EDIT_NOT_OPENED_MESSAGE
 	}
 	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
 		return "Message is too long"
@@ -913,6 +1246,17 @@ State_editRoomMessage :: proc(
 	}
 	if checkRights && entry.senderId != selfUserID {
 		return MESSAGE_EDIT_NOT_OWN_MESSAGE
+	}
+	if sealed {
+		return State_roomChainsSendEdit(
+			state,
+			serverID,
+			roomID,
+			messageID,
+			entry.clientMessageId,
+			content,
+			forge = forgeSignature,
+		)
 	}
 	editID, idOK := messageEditNewID()
 	if !idOK {
@@ -947,6 +1291,78 @@ State_editRoomMessage :: proc(
 				clientMessageId = editID,
 				content = content,
 				signature = signature,
+			},
+		},
+	)
+}
+
+// Seals an edit of the encrypted direct message messageID (its client message ID original) as a
+// DirectMessage envelope to this profile's and the peer's PINNED keys (#76 M2), bound to the
+// edit's own client message ID editID, and sends it. The peer's key must allow encryption now
+// (D10: the server stores it only while the recipient keeps that key); an edit never falls back
+// to plaintext (D11) and is never queued. "" on success, else why (static or temp).
+@(private = "file")
+State_directSendEdit :: proc(
+	state: ^State,
+	serverID, peerUserID, messageID: int,
+	original, editID: common.ClientMessageID,
+	content: string,
+	privateKey: common.IdentityPrivateKeyBytes,
+	forge: bool,
+) -> string {
+	keys := State_directOpenKeys(state, serverID)
+	defer DirectOpenKeys_wipe(&keys)
+	if !keys.ready {
+		return NOT_CONNECTED_MESSAGE
+	}
+	if !keys.hasOwnKeyPair {
+		return ROOM_NO_ENCRYPTION_KEY_NOTE
+	}
+	info := State_e2eePeerKeyInfo(state, serverID, peerUserID)
+	if !info.canEncrypt {
+		if info.blockReason == .Pending {
+			ids := [1]int{peerUserID}
+			State_e2eeRequestUserKeys(state, serverID, ids[:])
+			return DIRECT_SETTING_UP_TEXT
+		}
+		return e2eeKeyStateText(info, State_e2eeUserName(state, serverID, peerUserID))
+	}
+	envelope: [common.SEALED_ENVELOPE_MAX_BYTES]u8
+	defer crypto.zero_explicit(&envelope, size_of(envelope))
+	n, err := common.sealDirectMessage(
+		common.DirectMessageAADFields {
+			serverIdentityPublicKey = keys.serverIdentityPublicKey,
+			senderUserID = keys.ownUserID,
+			recipientUserID = peerUserID,
+			senderIdentityPublicKey = keys.ownIdentityPublicKey,
+			recipientIdentityPublicKey = info.identityPublicKey,
+			clientMessageID = editID,
+		},
+		content,
+		keys.ownKeyPair.publicKey,
+		info.encryptionPublicKey,
+		privateKey,
+		envelope[:],
+		nil,
+		original,
+	)
+	if err != .None {
+		return "Could not encrypt the edit"
+	}
+	if forge {
+		envelope[n - 1] ~= 0x01
+	}
+	return State_sendMessageChange(
+		state,
+		serverID,
+		MessageChangeSend {
+			messageType = .ClientEditDirectMessage,
+			directEdit = common.ClientEditDirectMessagePayload {
+				peerUserId = peerUserID,
+				messageId = messageID,
+				originalClientMessageId = original,
+				clientMessageId = editID,
+				envelope = envelope[:n],
 			},
 		},
 	)
@@ -1019,8 +1435,9 @@ State_deleteRoomMessage :: proc(
 	)
 }
 
-// The sender edits direct message messageID of the conversation with peerUserID. M1 edits
-// only plaintext messages. "" on success, else why.
+// The sender edits direct message messageID of the conversation with peerUserID: a signed
+// plaintext edit of a plaintext message, an envelope to the pinned keys for an encrypted one
+// (#76 M2, State_directSendEdit). "" on success, else why.
 State_editDirectMessage :: proc(
 	state: ^State,
 	serverID, peerUserID, messageID: int,
@@ -1035,8 +1452,9 @@ State_editDirectMessage :: proc(
 	if entry.deleted {
 		return MESSAGE_ALREADY_DELETED_TEXT
 	}
-	if len(entry.envelope) > 0 {
-		return MESSAGE_EDIT_SEALED_UNSUPPORTED_MESSAGE
+	sealed := len(entry.envelope) > 0
+	if sealed && entry.security.protection != .Encrypted {
+		return MESSAGE_EDIT_NOT_OPENED_MESSAGE
 	}
 	if len(content) > common.CHAT_MESSAGE_MAX_BYTES {
 		return "Message is too long"
@@ -1055,6 +1473,19 @@ State_editDirectMessage :: proc(
 	editID, idOK := messageEditNewID()
 	if !idOK {
 		return "Could not prepare the edit"
+	}
+	if sealed {
+		return State_directSendEdit(
+			state,
+			serverID,
+			peerUserID,
+			messageID,
+			entry.clientMessageId,
+			editID,
+			content,
+			privateKey,
+			forgeSignature,
+		)
 	}
 	signature, signOK := common.signDirectMessageEdit(
 		common.MessageChangeFields {

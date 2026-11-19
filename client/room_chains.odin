@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto"
 import "core:fmt"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:time"
 
@@ -143,9 +144,16 @@ RoomChainDistribution :: enum u8 {
 
 // A message waiting for the chain: its text (owned, wiped) and (protocol 27) the files it
 // lists, sealed inside it (owned: names and media types; the file keys are wiped).
+//
+// #76 M2: an edit of message editMessageID (its client message ID editOriginal) waits in the
+// same queue and takes the chain's next index like a message; it has no files. forge (a test
+// hook for the live proof) spoils its seal so the server refuses it.
 RoomChainQueued :: struct {
-	content:     string,
-	attachments: [dynamic]common.SealedAttachment,
+	content:       string,
+	attachments:   [dynamic]common.SealedAttachment,
+	editMessageID: int,
+	editOriginal:  common.ClientMessageID,
+	forge:         bool,
 }
 
 RoomChainQueued_deinit :: proc(item: ^RoomChainQueued) {
@@ -374,6 +382,7 @@ RoomChainRequestKind :: enum u8 {
 	KeyEnvelope,
 	FetchKeys,
 	RequestKey,
+	SealedEdit, // #76 M2: ClientEditRoomMessage with sealed bytes
 }
 
 RoomChainRequest :: struct {
@@ -389,6 +398,10 @@ RoomChainRequest :: struct {
 	bytes:           []u8, // SealedMessage, KeyEnvelope; borrowed for the call
 	// SealedMessage (protocol 27): the outer list, blob IDs and stored sizes; borrowed.
 	attachments:     []common.AttachmentRef,
+	// SealedEdit (#76 M2): the edited message and its client message ID; clientMessageID is
+	// the edit's own.
+	messageID:       int,
+	originalID:      common.ClientMessageID,
 }
 
 RoomChainSendBridge :: #type proc(
@@ -413,6 +426,18 @@ ClientServerTransport_sendRoomChainRequest :: proc(
 				clientMessageId = request.clientMessageID,
 				sealed = request.bytes,
 				attachments = attachmentRefsPayload(request.attachments),
+			},
+		)
+	case .SealedEdit:
+		return ClientServerTransport_sendEncryptedRuntimeMessage(
+			transport,
+			.ClientEditRoomMessage,
+			common.ClientEditRoomMessagePayload {
+				roomId = request.roomID,
+				messageId = request.messageID,
+				originalClientMessageId = request.originalID,
+				clientMessageId = request.clientMessageID,
+				sealed = request.bytes,
 			},
 		)
 	case .KeyEnvelope:
@@ -731,6 +756,13 @@ State_roomOpenEntryContent :: proc(
 		return
 	}
 	opened, plainErr := common.decodeSealedDirectMessagePlaintext(plaintext)
+	if plainErr == .None && opened.hasReplaces {
+		// #76 M2: an edit's plaintext presented as a new message (the server replaying an
+		// edit under its own client message ID) is not a message.
+		wipeString(opened.content)
+		common.SealedDirectMessagePlaintext_deinit(&opened)
+		plainErr = .BadPlaintext
+	}
 	if plainErr != .None {
 		entry.security = {
 			protection  = .Failed,
@@ -751,6 +783,100 @@ State_roomOpenEntryContent :: proc(
 	)
 	common.SealedDirectMessagePlaintext_deinit(&opened)
 	entry.security = {protection = .Encrypted, header = header}
+}
+
+// Opens a sealed room edit (#76 M2) like a new sealed message of the message's sender
+// (check.senderUserID): the verified log must reach its epoch (Pending), the sender must have
+// been a member of it, the seal must be signed by the sender's identity (check.senderIdentity:
+// own key, pin or the verified log's) over the edit's client message ID before any key is
+// looked for, then the chain key (Pending until it arrives), the index, the body and the
+// plaintext's checks (messageEditCheckOpened). Every other failure is final.
+State_roomSealedEditOpen :: proc(
+	state: ^State,
+	serverID: int,
+	check: MessageChangeCheck,
+	edit: common.MessageEdit,
+) -> MessageEditVerdict {
+	roomID := check.conversationID
+	decoded, decodeErr := common.decodeSealedRoomMessage(edit.sealed)
+	if decodeErr != .None {
+		return {status = .Failed, failure = .Sealed, sealedError = decodeErr}
+	}
+	header := decoded.header
+	keys := State_roomChainKeys(state, serverID)
+	defer RoomChainKeys_wipe(&keys)
+	log := State_findRoomLog(state, serverID, roomID)
+	switch {
+	case log != nil && log.status == .Failed:
+		return {status = .Failed, failure = .LogFailed, header = header}
+	case !keys.ready || log == nil || log.status != .Verified || header.epoch > log.state.version:
+		return {status = .Pending, header = header}
+	case !roomLogMembershipsInclude(log.memberships[:], check.senderUserID, header.epoch):
+		return {status = .Failed, failure = .NotMember, header = header}
+	}
+	identity, hasIdentity := check.senderIdentity.?
+	if !hasIdentity {
+		if check.identityMayArrive {
+			return {status = .Pending, header = header}
+		}
+		return {status = .Failed, failure = .NoKey, header = header}
+	}
+	roomContext := common.RoomMessageContext {
+		serverIdentityPublicKey = keys.serverIdentityPublicKey,
+		roomID                  = roomID,
+		senderUserID            = check.senderUserID,
+		clientMessageID         = edit.clientMessageId,
+	}
+	if verifyErr := common.verifyRoomMessageSignature(decoded, roomContext, identity);
+	   verifyErr != .None {
+		return {status = .Failed, failure = .Signature, sealedError = verifyErr, header = header}
+	}
+	store := State_roomChainStore(state, serverID)
+	if store == nil {
+		return {status = .Pending, header = header}
+	}
+	chain, chainOK := KeyStore_roomChain(
+		store,
+		roomID,
+		header.epoch,
+		check.senderUserID,
+		header.chainID,
+	)
+	if !chainOK {
+		return {status = .Pending, header = header}
+	}
+	messageKey, indexOK := common.deriveSenderChainMessageKey(
+		chain.chainKey,
+		chain.startIndex,
+		header.index,
+	)
+	defer crypto.zero_explicit(&messageKey, size_of(messageKey))
+	if !indexOK {
+		return {status = .Failed, failure = .BadIndex, header = header}
+	}
+	buffer: [common.SEALED_ROOM_MESSAGE_MAX_BYTES]u8
+	defer crypto.zero_explicit(&buffer, size_of(buffer))
+	plaintext, openErr := common.openRoomMessage(
+		decoded,
+		roomContext,
+		identity,
+		messageKey,
+		buffer[:],
+	)
+	if openErr != .None {
+		return {status = .Failed, failure = .Sealed, sealedError = openErr, header = header}
+	}
+	opened, plainErr := common.decodeSealedDirectMessagePlaintext(plaintext)
+	defer {
+		wipeString(opened.content)
+		common.SealedDirectMessagePlaintext_deinit(&opened)
+	}
+	if plainErr != .None {
+		return {status = .Failed, failure = .Sealed, sealedError = plainErr, header = header}
+	}
+	verdict := messageEditCheckOpened(check, edit, &opened)
+	verdict.header = header
+	return verdict
 }
 
 // Marks the later of two opened messages from one sender with the same client message ID or
@@ -855,6 +981,10 @@ State_roomChainsReopenPending :: proc(state: ^State, serverID, roomID: int) {
 	for index in 0 ..< len(cache.messages) {
 		entry := &cache.messages[index]
 		if entry.security.protection != .Pending {
+			// #76 M2: an opened message's sealed edits that waited for a chain or the log.
+			if !entry.deleted && messageEditViewHasPending(entry.edit) {
+				State_roomEntrySettleEdits(state, serverID, roomID, entry)
+			}
 			continue
 		}
 		State_roomOpenEntry(state, serverID, roomID, keys, entry)
@@ -870,8 +1000,81 @@ State_roomChainsReopenPending :: proc(state: ^State, serverID, roomID: int) {
 	State_roomChainsFollowUp(state, serverID, roomID)
 }
 
+// The follow-up after a sealed edit was checked (#76 M2): what State_roomChainsFollowUp does
+// for messages, for the edits that wait.
+State_roomChainsEditsFollowUp :: proc(state: ^State, serverID, roomID: int) {
+	if State_roomIsEncrypted(state, serverID, roomID) {
+		State_roomChainsFollowUp(state, serverID, roomID)
+	}
+}
+
+// What one opened message's pending sealed edits wait for (#76 M2): the log when it is behind
+// an edit's epoch, the sender's pin, else the edit's chain (appended to chains).
+@(private = "file")
+State_roomChainsEditWaits :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	entry: RoomMessageEntry,
+	waitsForLog, waitsForSender: ^bool,
+	chains: ^[dynamic]RoomChainRef,
+) {
+	if entry.deleted || !messageEditViewHasPending(entry.edit) {
+		return
+	}
+	log := State_findRoomLog(state, serverID, roomID)
+	store := State_roomChainStore(state, serverID)
+	consider := proc(
+		edit: common.MessageEdit,
+		entry: RoomMessageEntry,
+		roomID: int,
+		log: ^RoomLogRoom,
+		store: ^KeyStore,
+		waitsForLog, waitsForSender: ^bool,
+		chains: ^[dynamic]RoomChainRef,
+	) {
+		decoded, err := common.decodeSealedRoomMessage(edit.sealed)
+		if err != .None {
+			return
+		}
+		header := decoded.header
+		if log == nil || log.status != .Verified || header.epoch > log.state.version {
+			waitsForLog^ = true
+			return
+		}
+		if store == nil {
+			return
+		}
+		_, held := KeyStore_roomChain(
+			store,
+			roomID,
+			header.epoch,
+			entry.senderId,
+			header.chainID,
+		)
+		if held {
+			// Held: what it waits for is the sender's pin.
+			waitsForSender^ = true
+			return
+		}
+		ref := RoomChainRef{header.epoch, entry.senderId, header.chainID}
+		if !slice.contains(chains[:], ref) {
+			append(chains, ref)
+		}
+	}
+	if entry.edit.status == .Pending && len(entry.lastEdit.sealed) > 0 {
+		consider(entry.lastEdit, entry, roomID, log, store, waitsForLog, waitsForSender, chains)
+	}
+	for edit, index in entry.edit.edits {
+		status := entry.edit.editStatuses[index]
+		if (status == .Pending || status == .None) && len(edit.sealed) > 0 {
+			consider(edit, entry, roomID, log, store, waitsForLog, waitsForSender, chains)
+		}
+	}
+}
+
 // After messages were opened: fetch the log when it is behind them, the room's envelopes once
 // per session when a chain is missing, and then ask the senders of the chains still missing.
+// #76 M2: sealed edits that wait count too.
 @(private = "file")
 State_roomChainsFollowUp :: proc(state: ^State, serverID, roomID: int) {
 	cache := State_roomCache(state, serverID, roomID)
@@ -880,7 +1083,21 @@ State_roomChainsFollowUp :: proc(state: ^State, serverID, roomID: int) {
 	}
 	waitsForLog, waitsForKey := false, false
 	senders := make([dynamic]int, 0, 4, context.temp_allocator)
+	editChains := make([dynamic]RoomChainRef, 0, 4, context.temp_allocator)
 	for entry in cache.messages {
+		editWaitsForSender := false
+		State_roomChainsEditWaits(
+			state,
+			serverID,
+			roomID,
+			entry,
+			&waitsForLog,
+			&editWaitsForSender,
+			&editChains,
+		)
+		if editWaitsForSender && !slice.contains(senders[:], entry.senderId) {
+			append(&senders, entry.senderId)
+		}
 		if entry.security.protection != .Pending {
 			continue
 		}
@@ -890,6 +1107,7 @@ State_roomChainsFollowUp :: proc(state: ^State, serverID, roomID: int) {
 			append(&senders, entry.senderId)
 		}
 	}
+	waitsForKey = waitsForKey || len(editChains) > 0
 	// Plaintext messages whose senders' identity keys are not pinned yet (protocol 22).
 	if len(senders) > 0 {
 		State_e2eeRequestUserKeys(state, serverID, senders[:])
@@ -907,6 +1125,9 @@ State_roomChainsFollowUp :: proc(state: ^State, serverID, roomID: int) {
 	if !room.keysFetched {
 		State_roomChainsFetchKeys(state, serverID, roomID, 0)
 		return
+	}
+	for ref in editChains {
+		State_roomChainsRequestKey(state, serverID, roomID, ref)
 	}
 	cache = State_roomCache(state, serverID, roomID)
 	for entry in cache.messages {
@@ -1554,6 +1775,37 @@ State_roomChainsSend :: proc(
 	return true, queued, ""
 }
 
+// Queues an edit of messageID (its client message ID original) to content (borrowed) for
+// roomID (#76 M2) and sends what can go: the edit takes the next index of this session's
+// current chain, which is started and distributed first when needed, exactly as for a new
+// message. "" when it is queued or sent, else why not (static).
+State_roomChainsSendEdit :: proc(
+	state: ^State,
+	serverID, roomID, messageID: int,
+	original: common.ClientMessageID,
+	content: string,
+	forge := false,
+) -> string {
+	if note := State_roomChainsComposerNote(state, serverID, roomID); len(note) > 0 {
+		return note
+	}
+	room := State_roomChainRoom(state, serverID, roomID)
+	append(
+		&room.queued,
+		RoomChainQueued {
+			content = strings.clone(content),
+			editMessageID = messageID,
+			editOriginal = original,
+			forge = forge,
+		},
+	)
+	State_roomChainsPump(state, serverID, roomID)
+	if room = State_roomChainRoom(state, serverID, roomID); len(room.queued) > 0 {
+		State_setChatStatus(state, DIRECT_SETTING_UP_TEXT)
+	}
+	return ""
+}
+
 // Moves what is queued for roomID along: starts and distributes a chain when needed, sends the
 // queue once the distribution is stored, and gives the queue back to the draft when sending is
 // not possible at all.
@@ -1744,6 +1996,14 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			kind   = .SealedMessage,
 			roomID = roomID,
 		}
+		// #76 M2: an edit is a sealed message whose plaintext names the original.
+		replaces: Maybe(common.ClientMessageID)
+		if item.editMessageID > 0 {
+			send.kind = .SealedEdit
+			send.messageID = item.editMessageID
+			send.originalID = item.editOriginal
+			replaces = item.editOriginal
+		}
 		// Protocol 27: outside the seal, only each file's blob ID and stored size.
 		outer := make([]common.AttachmentRef, len(item.attachments), context.temp_allocator)
 		for attachment, attachmentIndex in item.attachments {
@@ -1768,6 +2028,7 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 			content,
 			item.attachments[:],
 			plaintext[:],
+			replaces,
 		)
 		buffer: [common.SEALED_ROOM_MESSAGE_MAX_BYTES]u8
 		n := 0
@@ -1796,6 +2057,10 @@ State_roomChainsSendQueued :: proc(state: ^State, serverID, roomID: int, now: i6
 		if sealErr != .None {
 			State_roomChainsRefuseQueue(state, serverID, roomID, "Could not encrypt the message")
 			break
+		}
+		if item.forge {
+			// The live proof's forged edit: a signature the server must refuse.
+			buffer[n - 1] ~= 0x01
 		}
 		send.bytes = buffer[:n]
 		sendError := State_sendRoomChainRequest(state, serverID, send)
@@ -1836,17 +2101,36 @@ State_roomChainsRefuseQueue :: proc(state: ^State, serverID, roomID: int, reason
 	// again (State.attachmentUploads).
 	texts := make([dynamic]string, 0, len(room.inFlight) + len(room.queued))
 	defer delete(texts)
+	// #76 M2: an edit's text is not a new message, so it never goes into the draft.
+	droppedEdits := 0
 	for &entry in room.inFlight {
+		if entry.editMessageID > 0 {
+			RoomChainQueued_deinit(&entry.item)
+			droppedEdits += 1
+			continue
+		}
 		append(&texts, entry.content)
 		sealedAttachments_deinit(&entry.attachments)
 	}
 	clear(&room.inFlight)
 	for &item in room.queued {
+		if item.editMessageID > 0 {
+			RoomChainQueued_deinit(&item)
+			droppedEdits += 1
+			continue
+		}
 		append(&texts, item.content)
 		sealedAttachments_deinit(&item.attachments)
 	}
 	clear(&room.queued)
 	if len(texts) == 0 {
+		if droppedEdits > 0 {
+			State_setChatStatus(state, reason)
+			State_roomChainNote(
+				state,
+				{kind = .QueueRefused, serverID = serverID, roomID = roomID},
+			)
+		}
 		return
 	}
 	cache := State_serverRoomCache(state, serverID)
@@ -1896,6 +2180,11 @@ State_roomChainsMessageEchoed :: proc(
 // A ServerProtocolError on serverID. Protocol errors do not say which request they answer,
 // so they apply to the rooms with requests outstanding.
 State_roomChainsProtocolError :: proc(state: ^State, serverID: int, message: string) {
+	// #76 M2: a refusal of a sealed edit names its message (common.messageRefusal).
+	if messageID, base, named := messageRefusalParse(message); named {
+		State_roomChainsEditRefused(state, serverID, messageID, base)
+		return
+	}
 	staleKey := message == common.ROOM_KEY_OUT_OF_DATE_MESSAGE
 	refused :=
 		message == common.SEALED_ROOM_MESSAGE_INVALID_MESSAGE ||
@@ -1937,6 +2226,55 @@ State_roomChainsProtocolError :: proc(state: ^State, serverID: int, message: str
 			State_requestRoomLog(state, serverID, roomID)
 		case refused:
 			State_roomChainsRefuseQueue(state, serverID, roomID, message)
+		}
+	}
+}
+
+// Splits a refusal that names its message ("… (message N)", common.messageRefusal) into the
+// message ID and the base sentence (borrowed).
+messageRefusalParse :: proc(message: string) -> (messageID: int, base: string, ok: bool) {
+	if !strings.has_suffix(message, ")") {
+		return 0, "", false
+	}
+	open := strings.last_index(message, " (message ")
+	if open < 0 {
+		return 0, "", false
+	}
+	digits := message[open + len(" (message "):len(message) - 1]
+	value, parsed := strconv.parse_int(digits, 10)
+	if !parsed || value <= 0 {
+		return 0, "", false
+	}
+	return value, message[:open], true
+}
+
+// The server refused a change of messageID (#76 M2). An edit of it in flight goes again first
+// with a new chain when the room's key was out of date (the epoch moved on); any other refusal
+// drops it, with the reason in the chat status (already set by the caller).
+@(private = "file")
+State_roomChainsEditRefused :: proc(state: ^State, serverID, messageID: int, base: string) {
+	for &chains in state.roomChains {
+		if chains.serverID != serverID {
+			continue
+		}
+		for &room in chains.rooms {
+			for index := 0; index < len(room.inFlight); {
+				entry := &room.inFlight[index]
+				if entry.editMessageID != messageID {
+					index += 1
+					continue
+				}
+				if base == common.ROOM_KEY_OUT_OF_DATE_MESSAGE {
+					inject_at(&room.queued, 0, entry.item)
+					ordered_remove(&room.inFlight, index)
+					RoomChainRoom_dropSending(&room)
+					roomID := room.roomID
+					State_requestRoomLog(state, serverID, roomID)
+					return
+				}
+				RoomChainQueued_deinit(&entry.item)
+				ordered_remove(&room.inFlight, index)
+			}
 		}
 	}
 }

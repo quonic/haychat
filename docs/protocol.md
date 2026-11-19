@@ -318,8 +318,18 @@ leaves a tombstone with the same ID, so history pagination and read markers stay
   room's current epoch on the sender's chain, checked like a new sealed message, or a direct
   message envelope, verified by the database worker against the recipient's current identity
   key; the server stores it byte for byte. An edit changes the text only (D9): the message keeps
-  its files, and a plaintext edit may be empty only when the message has some. At most
+  its files, and an edit may be empty only when the message has some. At most
   `MESSAGE_EDITS_MAX` (100) edits per message (D12), with no time limit.
+- **Sealed edits.** A sealed edit's `clientMessageId` is the edit's own, bound into the seal's
+  AAD like a new message's, and its plaintext (the sealed message plaintext at the top of
+  `common/e2ee.odin`) carries `"replaces": bytes(16)`, the edited message's `clientMessageId`,
+  after `"content"` and never `"attachments"`; its content may be empty only when the message
+  has files, which the reader checks. A room edit takes the next index on the sender's current
+  chain, so it is distributed exactly as a new message (it may wait for the chain's
+  distribution); a DM edit is a `DirectMessage` envelope to the sender's and the recipient's
+  pinned keys. New messages have no `"replaces"`, and a reader treats a new message with one, or
+  an edit without one, as invalid. No protocol change was needed for this (no wire or enum
+  change; plan package M2).
 - **What an edit needs (D10).** What a new message there needs at the time of the edit:
   membership, SendMessages, a room type with chat and, sealed, the room's current log version;
   in a direct conversation the restricted-account rule and, sealed, the recipient's current
@@ -364,11 +374,16 @@ leaves a tombstone with the same ID, so history pagination and read markers stay
   "Invalid encrypted direct message") with " (message N)" added.
 - **Clients.** A client shows an edit only when its signature verifies against the author's
   pinned identity key; one that does not is not shown, and the last good version stays, marked
-  "An edit could not be verified". A tombstone always hides the content: it reads "Message
-  deleted" when the author's signature verifies, and "Removed by the server" otherwise (D6).
-  Clients cannot tell which admin removed a message. Clients of this release do not open sealed
-  edits yet (plan package M2): they keep the previous version and mark the message "edited, not
-  verified yet", and they refuse to send one.
+  "An edit could not be verified". A sealed edit is opened like a new sealed message of the
+  same author (a room's after the verified log reaches its epoch and the author's membership of
+  it, its signature checked before any key is looked for, then the chain key; a DM's with both
+  pinned identity keys), and is shown only when its `"replaces"` names this message and it has
+  no files. One whose chain key or log has not arrived waits ("edited, not verified yet") and
+  opens when it does; a Full history newcomer reads edits through the chains forwarded to it.
+  Every failure is final. A copy of an edit (the same client message ID, or chain position, as
+  an earlier edit or as the message) is a replay and fails. A tombstone always hides the
+  content: it reads "Message deleted" when the author's signature verifies, and "Removed by the
+  server" otherwise (D6). Clients cannot tell which admin removed a message.
 
 The server can still withhold edits, reorder them, show an older version as the latest, or
 delete a message and show it as "Removed by the server". It cannot forge an edit or an author's

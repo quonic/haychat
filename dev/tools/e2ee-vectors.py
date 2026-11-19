@@ -7,7 +7,8 @@ sealed room message, a member log Create entry, the plaintext fallback signature
 plaintext room message, the safety number, a RoomKeyForward envelope, and, for encrypted voice,
 a VoiceKey envelope and a sealed voice payload; for attachments (protocol 27) the v2 plaintext
 signatures, the sealed plaintext with an "attachments" array, Padme and the encrypted file
-format; for protocol 30 the signed edits and deletes) with Python's `cryptography` package (OpenSSL), not with the Odin code.
+format; for protocol 30 the signed edits and deletes and the sealed plaintext of an edit, with
+"replaces") with Python's `cryptography` package (OpenSSL), not with the Odin code.
 The Odin tests (common/e2ee_test.odin, common/voice_e2ee_test.odin and
 common/attachment_e2ee_test.odin) compare their own output byte for byte with the values
 printed here.
@@ -521,6 +522,15 @@ def sealed_attachments_vector():
     show("KAT_SEALED_ATTACHMENTS_PLAINTEXT", out)
 
 
+def sealed_edit_vector():
+    """The canonical sealed plaintext of an edit (protocol 30, #76 M2): "content" then
+    "replaces", the edited message's clientMessageId, and no "attachments"."""
+    original = label_bytes("haychat-e2ee-test-room-plain-client-message-id", 16)
+    out = b"\xa2" + cbor_text("content") + cbor_text("hi room, edited")
+    out += cbor_text("replaces") + cbor_bytes(original)
+    show("KAT_SEALED_EDIT_PLAINTEXT", out)
+
+
 def padme(length):
     if length < 2:
         return length
@@ -581,6 +591,7 @@ def main():
     sealed_attachments_vector()
     attachment_vectors()
     edit_delete_vectors()
+    sealed_edit_vector()
 
 
 if __name__ == "__main__":
