@@ -396,55 +396,56 @@ The documents in `docs/` describe what was built. These departures changed a dec
 
 ## Follow-ups After F5 (2026-11-19)
 
-Collected from the PRs of F1-F5. The lead files them as issues.
+Collected from the PRs of F1-F5 and filed as #131-#144 (some issues cover several items).
 
-1. **Router-thread crypto** (F1): move file crypto off the router thread if concurrent
+1. **Router-thread crypto** (F1, #133): move file crypto off the router thread if concurrent
    full-pace transfers become common. F1 measured about 130 MB/s, roughly 3% of the thread per
    session transferring at full pace; the fix is handing the storage worker the session's file
    channel halves, as the voice halves go to the network thread.
-2. **Startup orphan scan size** (F1): the scan sends every file older than an hour in one
+2. **Startup orphan scan size** (F1, #134): the scan sends every file older than an hour in one
    message and one `Known` lookup; batch both for large blob directories.
-3. **Capacity and usage scans** (F1, F3): the capacity check and the usage statement scan every
-   live row; use a running total or an index on `state`.
-4. **Client network worker cadence** (F1): its 5 ms sleep sets the chat latency floor (about
+3. **Capacity and usage scans** (F1, F3, #134): the capacity check and the usage statement scan
+   every live row; use a running total or an index on `state`.
+4. **Client network worker cadence** (F1, #135): its 5 ms sleep sets the chat latency floor (about
    10 ms) and the download cadence; wake it on transfer activity.
-5. **Lost session notice** (F1): the transfer worker notices a lost session by polling every
+5. **Lost session notice** (F1, #135): the transfer worker notices a lost session by polling every
    20 ms; have the network worker notify it.
-6. **Queued direct messages with files** (F2, F4): a DM with files is not queued while the
+6. **Queued direct messages with files** (F2, F4, #136): a DM with files is not queued while the
    peer's key is being fetched.
-7. **Protocol errors name no message** (F2): one refused sealed message sends all of a room's
+7. **Protocol errors name no message** (F2, #137): one refused sealed message sends all of a room's
    in-flight messages back to the draft.
-8. **`file_deleted_at`** (F3): a column (a migration) so the hourly tombstone pass skips files it
-   already deleted, instead of repeating up to 1000 idempotent deletes an hour.
-9. **`messageId` in `ServerAttachmentRemoved`** (F3), so a client finds the entry without
+8. **`file_deleted_at`** (F3, #134): a column (a migration) so the hourly tombstone pass skips files
+   it already deleted, instead of repeating up to 1000 idempotent deletes an hour.
+9. **`messageId` in `ServerAttachmentRemoved`** (F3, #138), so a client finds the entry without
    scanning its caches.
-10. **Removal audit trail** (F3): an optional `attachment_removals` table for admins to see past
-    removals and their reasons in the client; today the reason is only logged.
-11. **Transfer worker unit tests** (F3): the client transfer worker has no unit test harness, and
-    `ClientTransferWorker_abandonDownloads` has only live coverage.
-12. **Retry on a failed upload chip** (F4), using the worker's resume.
-13. **Stale chips** (F4): clear chips when a server is removed or the account loses AttachFiles.
-14. **Hidden chips** (F4): chips stay hidden while a room's composer is replaced (read-only or
+10. **Removal audit trail** (F3, #138): an optional `attachment_removals` table for admins to see
+    past removals and their reasons in the client; today the reason is only logged.
+11. **Transfer worker unit tests** (F3, #139): the client transfer worker has no unit test harness,
+    and `ClientTransferWorker_abandonDownloads` has only live coverage.
+12. **Retry on a failed upload chip** (F4, #140), using the worker's resume.
+13. **Stale chips** (F4, #140): clear chips when a server is removed or the account loses
+    AttachFiles.
+14. **Hidden chips** (F4, #140): chips stay hidden while a room's composer is replaced (read-only or
     voice-only) and come back with it.
-15. **"Saved as" for the whole session** (F4): saves are kept per file until the app restarts.
-16. **Native file dialogs** (F4): a manual check on a real Linux desktop (portal or zenity) and
-    on Windows; CI exercises only the automation path.
-17. **Long Storage list** (F4): the account list can be 100 rows long at the end of Server
+15. **"Saved as" for the whole session** (F4, #140): saves are kept per file until the app restarts.
+16. **Native file dialogs** (F4, #141): a manual check on a real Linux desktop (portal or zenity)
+    and on Windows; CI exercises only the automation path.
+17. **Long Storage list** (F4, #140): the account list can be 100 rows long at the end of Server
     settings.
-18. **Later** (D23, D22): F6 image previews, a local download cache, and per-role quotas or an
+18. **Later** (D23, D22, #142): F6 image previews, a local download cache, and per-role quotas or an
     assignable ManageAttachments permission.
-19. **A missing blob file reads as "Server storage error"** (F5): a row whose file is gone (a
-    database restored without its blob directory) fails the download with the storage error,
-    not "Attachment not found", so the card does not say "Attachment unavailable". The storage
-    worker could report a missing file apart from a read error.
-20. **A guard for a wrong restore order** (F5): a server started with a restored blob directory
-    and an empty or older database deletes every file older than an hour as an orphan. The
-    startup scan could refuse to delete more than a share of the directory (or anything, when
-    the table is empty) without an operator's say-so. `deploy/README.md` now gives the order.
-21. **Resume after a client restart** (F5, D9): a plaintext upload could resume at the acked
-    offset after a restart if the client kept the blob ID and path on disk; encrypted uploads
-    cannot (their sealed chunks are never re-encrypted). Only worth it if users upload large
-    files over unreliable links.
-22. **A clock hook for sweeper tests** (F5): the live proof backdates rows with psql and
-    restarts its own server; a test-only way to run a sweep pass on demand would let the main
-    live server prove the hourly path (and the tombstone pass) without a restart.
+19. **A missing blob file reads as "Server storage error"** (F5, #132): a row whose file is gone (a
+    database restored without its blob directory) fails the download with the storage error, not
+    "Attachment not found", so the card does not say "Attachment unavailable". The storage worker
+    could report a missing file apart from a read error.
+20. **A guard for a wrong restore order** (F5, #131): a server started with a restored blob
+    directory and an empty or older database deletes every file older than an hour as an orphan. The
+    startup scan could refuse to delete more than a share of the directory (or anything, when the
+    table is empty) without an operator's say-so. `deploy/README.md` now gives the order.
+21. **Resume after a client restart** (F5, D9, #143): a plaintext upload could resume at the acked
+    offset after a restart if the client kept the blob ID and path on disk; encrypted uploads cannot
+    (their sealed chunks are never re-encrypted). Only worth it if users upload large files over
+    unreliable links.
+22. **A clock hook for sweeper tests** (F5, #144): the live proof backdates rows with psql and
+    restarts its own server; a test-only way to run a sweep pass on demand would let the main live
+    server prove the hourly path (and the tombstone pass) without a restart.
