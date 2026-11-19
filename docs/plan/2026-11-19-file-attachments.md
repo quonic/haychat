@@ -349,3 +349,102 @@ package is a Forgejo issue that depends on the one before it.
   files show "unavailable". Files without rows are swept by the startup scan.
 - **Disk full:** the free-disk reserve refuses uploads before the volume that also holds logs
   fills. `deploy/` puts blobs on their own volume.
+
+## Round Status (2026-11-19)
+
+All five packages merged in order, each from fresh `main`:
+
+| Package | Issue | PR | Numbers |
+| --- | --- | --- | --- |
+| F1: blob store and transfer | #120 | #126 | protocol 26, migration 14 (`attachments`), transport v3 |
+| F2: attachments on messages | #121 | #127 | protocol 27, migration 15 (`attachment_count`, AttachFiles) |
+| F3: moderation and usage | #122 | #128 | protocol 28, no migration |
+| F4: client UI | #123 | #129 | no protocol or migration change |
+| F5: proof and docs | #124 | F5_PR | no protocol or migration change |
+
+The documents in `docs/` describe what was built. These departures changed a decision above:
+
+- **The sweeper deletes rows before files** (D17 said files, then rows). A blob whose row is gone
+  can no longer be bound, resumed or downloaded, so there is no race with a bind; a file a crash
+  leaves behind has no row and the startup scan removes it.
+- **Cancelled and mismatched uploads become tombstones** (state Removed) instead of being
+  deleted, so they leave the quota at once but still count toward the hourly rate. Only the
+  free-disk refusal at begin deletes its row, since nothing was stored.
+- **Begin checks the room's encryption flag and that the room has chat** (D11 left the encryption
+  match to binding), so a plaintext blob never enters an encrypted room. Binding checks again.
+- **`attachments.name`, `media_type` and `position` columns** (F2) hold a plaintext message's
+  file names, which the plan did not place; a tombstone keeps them with `sha256` and `size`,
+  because the message's v2 signature covers them. Binding also checks the listed size and
+  plaintext hash against the stored blob.
+- **`AttachDenied`** ("You cannot attach files in this room") is reported apart from
+  `SendDenied`, at begin and at binding.
+- **A direct message with files is not queued** while the peer's key is fetched (F2, kept in
+  F4): it stays in the draft with "Setting up encryption…".
+- **The hourly tombstone pass** (F3) deletes the files of the newest 1000 bound tombstones again,
+  which is how a removal made in SQL (`deploy/sql/remove-attachment.sql`) leaves the disk.
+- **Admin → Storage is a subsection** of Server settings after the Admin section (F4), not a page.
+- **D9 in practice** (F5): the server lets the owner resume an Uploading blob from any session,
+  but the client keeps transfer state only in memory, so only an upload its own process started
+  can be resumed. After the uploader's process ends, plaintext and encrypted uploads alike start
+  over as a new blob, and the old one goes with the stalled uploads. `dev/attachment-proof.sh`
+  proves this (step 14) next to the resume after a reconnect (step 5).
+- **Live proof of the sweeper** (F5): the proof starts a second server of its own (fresh
+  database, small limits, port 12347), backdates rows with psql while it is stopped and starts it
+  again, so the startup sweep and scan run without a production knob. The chat latency bound is
+  now 250 ms (`ATTACHMENT_PROOF_P95_LIMIT_MS`); measured p95s during 25 MiB transfers were 11 to
+  16 ms on every run.
+
+## Follow-ups After F5 (2026-11-19)
+
+Collected from the PRs of F1-F5. The lead files them as issues.
+
+1. **Router-thread crypto** (F1): move file crypto off the router thread if concurrent
+   full-pace transfers become common. F1 measured about 130 MB/s, roughly 3% of the thread per
+   session transferring at full pace; the fix is handing the storage worker the session's file
+   channel halves, as the voice halves go to the network thread.
+2. **Startup orphan scan size** (F1): the scan sends every file older than an hour in one
+   message and one `Known` lookup; batch both for large blob directories.
+3. **Capacity and usage scans** (F1, F3): the capacity check and the usage statement scan every
+   live row; use a running total or an index on `state`.
+4. **Client network worker cadence** (F1): its 5 ms sleep sets the chat latency floor (about
+   10 ms) and the download cadence; wake it on transfer activity.
+5. **Lost session notice** (F1): the transfer worker notices a lost session by polling every
+   20 ms; have the network worker notify it.
+6. **Queued direct messages with files** (F2, F4): a DM with files is not queued while the
+   peer's key is being fetched.
+7. **Protocol errors name no message** (F2): one refused sealed message sends all of a room's
+   in-flight messages back to the draft.
+8. **`file_deleted_at`** (F3): a column (a migration) so the hourly tombstone pass skips files it
+   already deleted, instead of repeating up to 1000 idempotent deletes an hour.
+9. **`messageId` in `ServerAttachmentRemoved`** (F3), so a client finds the entry without
+   scanning its caches.
+10. **Removal audit trail** (F3): an optional `attachment_removals` table for admins to see past
+    removals and their reasons in the client; today the reason is only logged.
+11. **Transfer worker unit tests** (F3): the client transfer worker has no unit test harness, and
+    `ClientTransferWorker_abandonDownloads` has only live coverage.
+12. **Retry on a failed upload chip** (F4), using the worker's resume.
+13. **Stale chips** (F4): clear chips when a server is removed or the account loses AttachFiles.
+14. **Hidden chips** (F4): chips stay hidden while a room's composer is replaced (read-only or
+    voice-only) and come back with it.
+15. **"Saved as" for the whole session** (F4): saves are kept per file until the app restarts.
+16. **Native file dialogs** (F4): a manual check on a real Linux desktop (portal or zenity) and
+    on Windows; CI exercises only the automation path.
+17. **Long Storage list** (F4): the account list can be 100 rows long at the end of Server
+    settings.
+18. **Later** (D23, D22): F6 image previews, a local download cache, and per-role quotas or an
+    assignable ManageAttachments permission.
+19. **A missing blob file reads as "Server storage error"** (F5): a row whose file is gone (a
+    database restored without its blob directory) fails the download with the storage error,
+    not "Attachment not found", so the card does not say "Attachment unavailable". The storage
+    worker could report a missing file apart from a read error.
+20. **A guard for a wrong restore order** (F5): a server started with a restored blob directory
+    and an empty or older database deletes every file older than an hour as an orphan. The
+    startup scan could refuse to delete more than a share of the directory (or anything, when
+    the table is empty) without an operator's say-so. `deploy/README.md` now gives the order.
+21. **Resume after a client restart** (F5, D9): a plaintext upload could resume at the acked
+    offset after a restart if the client kept the blob ID and path on disk; encrypted uploads
+    cannot (their sealed chunks are never re-encrypted). Only worth it if users upload large
+    files over unreliable links.
+22. **A clock hook for sweeper tests** (F5): the live proof backdates rows with psql and
+    restarts its own server; a test-only way to run a sweep pass on demand would let the main
+    live server prove the hourly path (and the tombstone pass) without a restart.

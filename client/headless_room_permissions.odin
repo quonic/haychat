@@ -4,7 +4,8 @@ import "../common"
 import "core:strings"
 
 // Room permissions in the headless harness (protocol 24, room_permissions.odin). Permissions
-// are lists of the words roomPermissionWord gives: send, speak, manage-members, edit-room.
+// are lists of the words roomPermissionWord gives: send, speak, manage-members, edit-room,
+// attach-files.
 // Like the other admin commands, the harness checks nothing the server checks, so an agent can
 // see the server refuse (protocol_error).
 //

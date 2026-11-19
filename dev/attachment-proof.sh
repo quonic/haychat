@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Live proof of attachment transfers (protocol 26, attachments plan F1) and attachments on
-# messages (protocol 27, F2) with two headless client processes (docs/testing-harness.md
-# "Attachments") against a running server:
+# Live proof of file attachments (protocols 26-28, attachments plan F1-F5) with headless client
+# processes (docs/testing-harness.md "Attachments"). Steps 1-10 run against the server
+# dev/live-proof.sh started; steps 11-15 against a second server this script starts itself, on a
+# fresh database it creates and drops, with small limits and its own blob directory, so the
+# CI server's limits stay as they are and the proof may restart it.
 #
 #   1. baseline:  A and B each measure their own room message echo time with chat-latency
 #                 (no transfer running): p50, p95 and max.
@@ -11,8 +13,8 @@ set -euo pipefail
 #                 blob's file is in HAYCHAT_ATTACHMENT_DIR/blobs/<2 hex>/<hex>, mode 0600, with
 #                 the file's size, and no part file is left.
 #   3. download:  A downloads the blob while both measure again; its sha256 is the file's.
-#   4. refusals:  B cannot download A's blob (F1: owner only), and B's upload to a room it is
-#                 not in is refused.
+#   4. refusals:  B cannot download A's unbound blob (only its owner may, D10), and B's upload
+#                 to a room that does not exist is refused.
 #   5. resume:    A starts a second 25 MiB upload, reconnects in the middle, and resumes it with
 #                 attach-resume: it continues at the offset the server acknowledged and the
 #                 stored blob is the file.
@@ -38,15 +40,43 @@ set -euo pipefail
 #                 Then the operator helpers: deploy/sql/attachment-usage.sql lists the
 #                 accounts, and deploy/sql/remove-attachment.sql removes A's step 7 file, which
 #                 B's next history fetch lists as removed and the server refuses to send.
+#  11. limits:    (F5) the second server allows 2 MiB per file and 3 MiB per account at a pace of
+#                 512 KiB/s. C's client refuses a file one byte over the size and, after C
+#                 stored 2 MiB, a 1.5 MiB file over the quota (D18); with attach-upload
+#                 --unchecked the server refuses both itself, with the same sentences.
+#  12. access:    (F5) admin D makes a Member invite, From join room and sends a file there. C,
+#                 not a member, is refused an upload to the room and the file. D adds C: the
+#                 file from before C joined is still refused (From join, D10), a file D sends
+#                 after it C saves by message and by blob.
+#  13. AttachFiles: (F5) C uploads a file to the room, then D takes AttachFiles from everyone
+#                 (room-permissions-set ROOM send,speak): C's next upload is refused at begin,
+#                 the message that names C's finished upload is refused at binding, and C's
+#                 text still posts.
+#  14. kill:      (F5, D9) K starts an upload and its client process is killed mid-file. A new
+#                 process with K's profile cannot resume it ("only an upload this process
+#                 started can be resumed": the client keeps no state about uploads on disk),
+#                 and a fresh upload of the same file succeeds as a new blob. The old blob stays
+#                 Uploading, its part file in incoming/, until the sweeper deletes it (step 15).
+#  15. sweep:     (F5, D17) D deletes the room. The proof stops the second server, backdates
+#                 rows in its throwaway database with psql (the room's two bound files, K's
+#                 stale upload, C's unbound upload in the room past the pending window, and two
+#                 controls), puts a two-hour-old orphan file in the blob directory, and starts
+#                 the server again: the startup sweep deletes exactly those four rows and their
+#                 files, the startup scan the orphan, and the controls (a bound file of a live
+#                 #general message, and an unbound upload within the pending window) stay and
+#                 the first still downloads.
 #
-# The latency lines it prints ("[attachments] latency ...") are the F1 measurement of control
-# packets during a transfer: the plan's main risk is file crypto on the router thread and
-# ENet's shared reliable window. A p95 during a transfer above ATTACHMENT_PROOF_P95_LIMIT_MS
-# (default 1000) fails the proof.
+# The latency lines it prints ("[attachments] latency ...") measure control packets during a
+# transfer: the plan's main risk is file crypto on the router thread and ENet's shared reliable
+# window. A p95 during a transfer above ATTACHMENT_PROOF_P95_LIMIT_MS (default 250; measured p95s
+# have been 11-16 ms) fails the proof.
 #
 # dev/live-proof.sh --attachments (and --all) runs it against its throwaway server, which
-# exports HAYCHAT_ATTACHMENT_DIR. It needs bash, coreutils, sha256sum and (steps 9 and 10,
-# make_admin and the deploy/sql helpers) psql through the HAYCHAT_DATABASE_* variables.
+# exports HAYCHAT_ATTACHMENT_DIR, and passes its server binary in HAYCHAT_SERVER_BIN (without it
+# the proof builds the server). It needs bash, coreutils, sha256sum and psql through the
+# HAYCHAT_DATABASE_* variables (make_admin, the deploy/sql helpers, and the second server's
+# database, which needs a role with CREATEDB). The second server listens on
+# HAYCHAT_ATTACHMENT_PROOF_PORT (default 12347).
 #
 # Usage: dev/attachment-proof.sh [HOST:PORT]   (default 127.0.0.1:12345)
 
@@ -54,24 +84,65 @@ repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
 server_address=${1:-127.0.0.1:12345}
 command_timeout_secs=60
 smoke_label=attachments
-p95_limit_ms=${ATTACHMENT_PROOF_P95_LIMIT_MS:-1000}
+p95_limit_ms=${ATTACHMENT_PROOF_P95_LIMIT_MS:-250}
 attachment_dir=${HAYCHAT_ATTACHMENT_DIR:-}
+ready_timeout_secs=${HAYCHAT_SERVER_READY_TIMEOUT_SECS:-60}
+limits_port=${HAYCHAT_ATTACHMENT_PROOF_PORT:-12347}
 
 work_dir=$(mktemp -d -t haychat-attachments.XXXXXX)
 client_bin="$work_dir/haychat-client"
 run_tag=$(date +%s%N)
 run_tag=${run_tag: -9}
 
+limits_db="haychat_attproof_$run_tag"
+limits_db_created=false
+limits_pid=""
+limits_dir="$work_dir/limits"
+limits_log="$limits_dir/server.log"
+
 declare -A client_pid=()
 declare -A client_fd=()
+
+# main_psql ARGS...: psql against the HAYCHAT_DATABASE_* server's maintenance connection (the
+# CI server's database), for creating and dropping the second server's database.
+main_psql() {
+	PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -t -A -v ON_ERROR_STOP=1 \
+		-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+		-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" "$@"
+}
+
+stop_limits_server() {
+	if [[ -z "$limits_pid" ]] || ! kill -0 "$limits_pid" 2>/dev/null; then
+		limits_pid=""
+		return 0
+	fi
+	kill -INT "$limits_pid" 2>/dev/null || true
+	for _ in $(seq 1 50); do
+		kill -0 "$limits_pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	kill -KILL "$limits_pid" 2>/dev/null || true
+	wait "$limits_pid" 2>/dev/null || true
+	limits_pid=""
+}
 
 on_exit() {
 	local status=$? client
 	for client in "${!client_pid[@]}"; do
 		kill "${client_pid[$client]}" 2>/dev/null || true
 	done
+	stop_limits_server
 	if [[ $status -ne 0 ]]; then
 		print_client_output
+		if [[ -f "$limits_log" ]]; then
+			echo "---- second server log ($limits_log) ----" >&2
+			cat "$limits_log" >&2 || true
+			echo "---- end second server log ----" >&2
+		fi
+	fi
+	if [[ "$limits_db_created" == true ]]; then
+		main_psql -c "DROP DATABASE IF EXISTS $limits_db WITH (FORCE)" >/dev/null ||
+			echo "could not drop the database $limits_db" >&2
 	fi
 	rm -rf -- "$work_dir"
 	exit "$status"
@@ -173,7 +244,7 @@ done_line=$(expect_event a '"event":"attachment_done".*"direction":"download"' "
 [[ ! -e "$out_file.part" ]] || fail "expected the part file renamed away"
 echo "[attachments] download of 25 MiB took $(json_field "$done_line" elapsedMS) ms"
 
-echo "==> [attachments] 4. refusals"
+echo "==> [attachments] 4. refusals of the unbound blob and a missing room"
 start=$(wc -l <"$work_dir/b.out")
 expect_ok b "attach-download $blob $work_dir/stolen.bin"
 expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$start" >/dev/null
@@ -442,4 +513,297 @@ expect_event b '"event":"attachment_error".*"error":"Attachment removed by an ad
 
 stop_client a
 stop_client b
+
+# ── Steps 11-15: a second server this script owns (F5) ────────────────────────────────────
+
+MIB=$((1024 * 1024))
+LIMIT_MAX_BYTES=$((2 * MIB))
+LIMIT_QUOTA_BYTES=$((3 * MIB))
+
+# limits_sql SQL: runs SQL against the second server's database and prints the result.
+limits_sql() {
+	HAYCHAT_DATABASE_NAME=$limits_db main_psql -c "$1" || fail "SQL failed: $1"
+}
+
+wait_limits_ready() {
+	local deadline=$((SECONDS + ready_timeout_secs))
+	while ((SECONDS < deadline)); do
+		grep -Fq "=== Server Running ===" "$limits_log" && return 0
+		grep -Fq "[Startup]" "$limits_log" && fail "the second server failed during startup"
+		kill -0 "$limits_pid" 2>/dev/null || fail "the second server exited before it was ready"
+		sleep 0.1
+	done
+	fail "the second server was not ready after ${ready_timeout_secs}s"
+}
+
+# start_limits_server: starts (or starts again) the second server on its own database, port,
+# state and blob directory, with small limits. The log starts empty on every start.
+start_limits_server() {
+	: >"$limits_log"
+	HAYCHAT_DATABASE_NAME=$limits_db HAYCHAT_LISTEN_PORT=$limits_port \
+		HAYCHAT_LOG_DIR="$limits_dir/logs" HAYCHAT_FILE_STORAGE_PATH="$limits_dir/storage" \
+		HAYCHAT_SERVER_IDENTITY_FILE="$limits_dir/storage/server_identity.json" \
+		HAYCHAT_ATTACHMENT_DIR="$limits_dir/attachments" \
+		HAYCHAT_ATTACHMENT_MAX_BYTES=$LIMIT_MAX_BYTES \
+		HAYCHAT_ATTACHMENT_ACCOUNT_QUOTA_BYTES=$LIMIT_QUOTA_BYTES \
+		HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND=$((512 * 1024)) \
+		HAYCHAT_ATTACHMENT_MIN_FREE_BYTES=$((64 * MIB)) \
+		"$server_bin" >"$limits_log" 2>&1 &
+	limits_pid=$!
+	wait_limits_ready
+}
+
+# blob_path BLOB: the second server's stored file of BLOB.
+blob_path() {
+	printf '%s/attachments/blobs/%s/%s\n' "$limits_dir" "${1:0:2}" "$1"
+}
+
+# expect_upload_error CLIENT TARGET FILE MESSAGE [--unchecked]: an accepted attach-upload that
+# the server refuses with MESSAGE.
+expect_upload_error() {
+	local client=$1 target=$2 file=$3 message=$4 option=${5:-} start id
+	start=$(lines "$client")
+	expect_ok "$client" "attach-upload $target $option $file"
+	id=$(json_field "$last_result" id)
+	expect_event "$client" \
+		"\"event\":\"attachment_error\",\"serverID\":[0-9]+,\"id\":$id,.*\"error\":\"$message\"" \
+		"$start" >/dev/null
+}
+
+# expect_download_error CLIENT BLOB MESSAGE: attach-download of a raw blob the server refuses.
+expect_download_error() {
+	local client=$1 blob=$2 message=$3 start id
+	start=$(lines "$client")
+	expect_ok "$client" "attach-download $blob $work_dir/refused-$blob.bin"
+	id=$(json_field "$last_result" id)
+	expect_event "$client" \
+		"\"event\":\"attachment_error\",\"serverID\":[0-9]+,\"id\":$id,.*\"error\":\"$message\"" \
+		"$start" >/dev/null
+	[[ ! -e "$work_dir/refused-$blob.bin" ]] || fail "client $client saved a refused file"
+}
+
+# same_bytes A B: whether files A and B have the same bytes (the image has no cmp).
+same_bytes() {
+	[[ "$(sha256sum <"$1")" == "$(sha256sum <"$2")" ]]
+}
+
+# expect_client_refusal CLIENT COMMAND MESSAGE: a command the client itself refuses.
+expect_client_refusal() {
+	local client=$1 command=$2 message=$3 result
+	result=$(client_command "$client" "$command") || fail "client $client: no result for $command"
+	echo "    $client> $command"
+	echo "    $client< $result"
+	[[ "$result" == '{"ok":false,'*"\"error\":\"$message\""* ]] ||
+		fail "client $client did not refuse \`$command\` with \"$message\": $result"
+}
+
+server_bin=${HAYCHAT_SERVER_BIN:-}
+if [[ -z "$server_bin" ]]; then
+	echo "==> [attachments] building the server (HAYCHAT_SERVER_BIN is not set)"
+	server_bin="$work_dir/haychat-server"
+	odin build "$repo_dir/server" -out:"$server_bin"
+fi
+
+echo "==> [attachments] 11. a second server with small limits refuses size and quota"
+main_psql -c "CREATE DATABASE $limits_db" >/dev/null ||
+	fail "could not create the database $limits_db (the role needs CREATEDB)"
+limits_db_created=true
+mkdir -p "$limits_dir/storage" "$limits_dir/logs"
+start_limits_server
+limits_address="127.0.0.1:$limits_port"
+nick_c="att-c-$run_tag"
+nick_d="att-d-$run_tag"
+nick_k="att-k-$run_tag"
+start_client_at d "$nick_d" "$limits_address"
+start_client_at c "$nick_c" "$limits_address"
+start_client_at k "$nick_k" "$limits_address"
+expect_connected d
+expect_connected c
+expect_connected k
+HAYCHAT_DATABASE_NAME=$limits_db make_admin "$nick_d"
+expect_ok d reconnect
+expect_ok d wait connected 8000
+expect_ok d wait room_list 5000
+c_id=$(user_id d "$nick_c")
+
+over_size="$work_dir/over-size.bin"
+fill_file="$work_dir/fill.bin"
+over_quota="$work_dir/over-quota.bin"
+head -c $((LIMIT_MAX_BYTES + 1)) /dev/urandom >"$over_size"
+head -c "$LIMIT_MAX_BYTES" /dev/urandom >"$fill_file"
+head -c $((3 * MIB / 2)) /dev/urandom >"$over_quota"
+expect_client_refusal c "attach-upload 1 $over_size" "Attachment is too large"
+expect_upload_error c 1 "$over_size" "Attachment is too large" --unchecked
+fill_done=$(upload c 1 "$fill_file")
+fill_blob=$(json_field "$fill_done" blobID)
+expect_client_refusal c "attach-upload 1 $over_quota" "Attachment storage quota exceeded"
+expect_upload_error c 1 "$over_quota" "Attachment storage quota exceeded" --unchecked
+rows=$(limits_sql "SELECT count(*) FROM attachments WHERE owner_user_id = $c_id")
+[[ "$rows" == 1 ]] || fail "expected only C's 2 MiB upload stored, found $rows rows"
+
+echo "==> [attachments] 12. a non-member and a From join newcomer are refused older files"
+dstart=$(lines d)
+expect_ok d room-create "text,member-invite,from-join" "join-$run_tag"
+created=$(expect_event d "\"event\":\"room_created\".*\"name\":\"join-$run_tag\"" "$dstart")
+join_room=$(json_field "$created" roomID)
+old_file="$work_dir/old.txt"
+new_file="$work_dir/new.txt"
+printf 'sent before C joined %s\n' "$run_tag" >"$old_file"
+printf 'sent after C joined %s\n' "$run_tag" >"$new_file"
+old_blob=$(json_field "$(upload d "$join_room" "$old_file")" blobID)
+dstart=$(lines d)
+expect_ok d "send $join_room --attach $old_blob before c joined"
+expect_event d "\"event\":\"room_chat\".*\"roomID\":$join_room,.*\"blobID\":\"$old_blob\"" \
+	"$dstart" >/dev/null
+expect_upload_error c "$join_room" "$new_file" "Not a room member"
+expect_download_error c "$old_blob" "Attachment not found"
+cstart=$(lines c)
+expect_ok d room-add "$join_room" "$c_id"
+pattern="^\\{\"event\":\"room_membership\",\"serverID\":[0-9]+,\"roomID\":$join_room,"
+expect_event c "$pattern\"joined\":true," "$cstart" >/dev/null
+expect_download_error c "$old_blob" "Attachment not found"
+new_blob=$(json_field "$(upload d "$join_room" "$new_file")" blobID)
+cstart=$(lines c)
+expect_ok d "send $join_room --attach $new_blob after c joined"
+pattern="\"event\":\"room_(chat|opened)\".*\"roomID\":$join_room,.*\"blobID\":\"$new_blob\""
+chat=$(expect_event c "$pattern" "$cstart")
+download c "$join_room" "$(json_field "$chat" messageID)" 0 "$work_dir/c-new.txt" >/dev/null
+same_bytes "$new_file" "$work_dir/c-new.txt" || fail "C's saved file is not D's"
+download c "$new_blob" "$work_dir/c-new-blob.txt" >/dev/null
+same_bytes "$new_file" "$work_dir/c-new-blob.txt" || fail "C's saved blob is not D's file"
+
+echo "==> [attachments] 13. AttachFiles taken away: begin and binding are refused"
+held_file="$work_dir/held.txt"
+printf 'uploaded before AttachFiles went %s\n' "$run_tag" >"$held_file"
+held_blob=$(json_field "$(upload c "$join_room" "$held_file")" blobID)
+dstart=$(lines d)
+cstart=$(lines c)
+expect_ok d room-permissions-set "$join_room" send,speak
+pattern="^\\{\"event\":\"room_permissions\",\"serverID\":[0-9]+,\"roomID\":$join_room,"
+expect_event d "$pattern\"everyone\":\\[\"send\",\"speak\"\\]," "$dstart" >/dev/null
+pattern="^\\{\"event\":\"room_list\",.*\"name\":\"join-$run_tag\","
+expect_event c "$pattern[^}]*\"myPermissions\":\\[\"send\",\"speak\"\\]" "$cstart" >/dev/null
+expect_upload_error c "$join_room" "$held_file" "You cannot attach files in this room"
+cstart=$(lines c)
+expect_ok c "send $join_room --attach $held_blob a file without AttachFiles"
+expect_event c '^\{"event":"protocol_error",.*"message":"You cannot attach files in this room"' \
+	"$cstart" >/dev/null
+cstart=$(lines c)
+expect_ok c "send $join_room text still posts"
+pattern="\"event\":\"room_chat\".*\"roomID\":$join_room,.*\"content\":\"text still posts\"}"
+expect_event c "$pattern" "$cstart" >/dev/null
+state=$(limits_sql "SELECT state FROM attachments WHERE blob_id = decode('$held_blob', 'hex')")
+[[ "$state" == 1 ]] || fail "expected C's refused upload still Ready and unbound, state $state"
+
+echo "==> [attachments] 14. the uploader's process is killed mid-file"
+kill_file="$work_dir/killed.bin"
+head -c $((5 * MIB / 4)) /dev/urandom >"$kill_file"
+kill_sha=$(sha256sum "$kill_file" | cut -d' ' -f1)
+kstart=$(lines k)
+expect_ok k "attach-upload 1 $kill_file"
+progress=$(expect_event k '"event":"attachment_progress".*"direction":"upload".*"bytes":[1-9]' \
+	"$kstart")
+killed_blob=$(json_field "$progress" blobID)
+kill -KILL "${client_pid[k]}"
+wait "${client_pid[k]}" 2>/dev/null || true
+k_fd=${client_fd[k]}
+exec {k_fd}>&-
+unset "client_pid[k]"
+rm -f -- "$work_dir/k.in"
+killed_part="$limits_dir/attachments/incoming/$killed_blob.part"
+[[ -f "$killed_part" ]] || fail "expected the killed upload's part file at $killed_part"
+part_size=$(stat -c %s "$killed_part")
+((part_size > 0 && part_size < 5 * MIB / 4)) ||
+	fail "expected a part of the file stored, found $part_size bytes"
+echo "[attachments] the killed upload stored $part_size of $((5 * MIB / 4)) bytes"
+# The same profile in a new process: same account, same identity, a new session.
+start_client_at k "$nick_k" "$limits_address"
+expect_connected k
+kstart=$(lines k)
+expect_ok k "attach-resume $killed_blob"
+unknown_upload="unknown upload: only an upload this process started can be resumed"
+expect_event k "\"event\":\"attachment_error\".*\"error\":\"$unknown_upload\"" "$kstart" \
+	>/dev/null
+fresh_done=$(upload k 1 "$kill_file")
+fresh_blob=$(json_field "$fresh_done" blobID)
+[[ "$fresh_blob" != "$killed_blob" ]] || fail "expected the upload again to be a new blob"
+[[ "$(json_field "$fresh_done" sha256)" == "$kill_sha" ]] || fail "the new upload's hash differs"
+state=$(limits_sql "SELECT state FROM attachments WHERE blob_id = decode('$killed_blob', 'hex')")
+[[ "$state" == 0 ]] || fail "expected the killed upload still Uploading, state $state"
+
+echo "==> [attachments] 15. room deletion and the startup sweep empty the blob directory"
+control_file="$work_dir/control.txt"
+printf 'a file in a message that stays %s\n' "$run_tag" >"$control_file"
+control_blob=$(json_field "$(upload d 1 "$control_file")" blobID)
+dstart=$(lines d)
+expect_ok d "send 1 --attach $control_blob this message stays"
+expect_event d "\"event\":\"room_chat\".*\"roomID\":1,.*\"blobID\":\"$control_blob\"" "$dstart" \
+	>/dev/null
+for blob in "$old_blob" "$new_blob" "$held_blob" "$control_blob" "$fill_blob"; do
+	[[ -f "$(blob_path "$blob")" ]] || fail "expected $blob stored before the sweep"
+done
+dstart=$(lines d)
+expect_ok d room-delete "$join_room"
+expect_event d "^\\{\"event\":\"room_deleted\",\"serverID\":[0-9]+,\"roomID\":$join_room\\}$" \
+	"$dstart" >/dev/null
+links=$(limits_sql "SELECT count(*) FROM attachments WHERE blob_id IN \
+	(decode('$old_blob', 'hex'), decode('$new_blob', 'hex'), decode('$held_blob', 'hex')) \
+	AND room_id IS NULL AND chat_message_id IS NULL")
+[[ "$links" == 3 ]] || fail "expected the room's three files unlinked, found $links"
+stop_client d
+stop_client c
+stop_client k
+stop_limits_server
+
+# The sweeper never deletes a row younger than an hour and runs hourly and at startup, so the
+# proof makes the rows old in its own database while the server is down. Bound files whose
+# message is gone and the stale upload need an hour; the unbound upload in the deleted room
+# needs HAYCHAT_ATTACHMENT_PENDING_HOURS (24). The controls get two hours too.
+limits_sql "UPDATE attachments SET created_at = now() - interval '2 hours', \
+	last_chunk_at = now() - interval '2 hours' WHERE blob_id IN (decode('$old_blob', 'hex'), \
+	decode('$new_blob', 'hex'), decode('$killed_blob', 'hex'), decode('$control_blob', 'hex'), \
+	decode('$fill_blob', 'hex'))" >/dev/null
+limits_sql "UPDATE attachments SET created_at = now() - interval '25 hours', \
+	last_chunk_at = now() - interval '25 hours' WHERE blob_id = decode('$held_blob', 'hex')" \
+	>/dev/null
+orphan=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+orphan_path=$(blob_path "$orphan")
+mkdir -p "$(dirname "$orphan_path")"
+printf 'a file with no row\n' >"$orphan_path"
+touch -d '2 hours ago' "$orphan_path"
+start_limits_server
+deadline=$((SECONDS + command_timeout_secs))
+until grep -Fq "[Attachments] Swept 4 attachment rows" "$limits_log" &&
+	grep -Fq "[Attachments] Deleted 1 orphan attachment files" "$limits_log"; do
+	((SECONDS < deadline)) || fail "the startup sweep and scan did not run as expected"
+	sleep 0.1
+done
+for blob in "$old_blob" "$new_blob" "$held_blob" "$orphan"; do
+	path=$(blob_path "$blob")
+	for _ in $(seq 1 50); do
+		[[ -e "$path" ]] || break
+		sleep 0.1
+	done
+	[[ ! -e "$path" ]] || fail "expected $path deleted by the startup sweep"
+done
+for _ in $(seq 1 50); do
+	[[ -e "$killed_part" ]] || break
+	sleep 0.1
+done
+[[ ! -e "$killed_part" ]] || fail "expected the stale upload's part file deleted"
+left=$(limits_sql "SELECT string_agg(encode(blob_id, 'hex'), ',' ORDER BY id) FROM attachments \
+	WHERE blob_id IN (decode('$old_blob', 'hex'), decode('$new_blob', 'hex'), \
+	decode('$held_blob', 'hex'), decode('$killed_blob', 'hex'))")
+[[ -z "$left" ]] || fail "expected the swept rows gone, found $left"
+for blob in "$control_blob" "$fill_blob" "$fresh_blob"; do
+	[[ -f "$(blob_path "$blob")" ]] || fail "expected $blob kept by the sweep"
+done
+echo "[attachments] the startup sweep deleted 4 rows and their files and 1 orphan file"
+rm -f -- "$work_dir/d.in"
+start_client_at d "$nick_d" "$limits_address"
+expect_connected d
+download d "$control_blob" "$work_dir/d-control.txt" >/dev/null
+same_bytes "$control_file" "$work_dir/d-control.txt" || fail "the kept file no longer downloads"
+stop_client d
+stop_limits_server
 echo "==> [attachments] PASS"

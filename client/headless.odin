@@ -1878,7 +1878,7 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"room-permissions-set", 2, 0, .Optional,
 		"room-permissions-set ROOM_ID EVERYONE|none [ROLE_ID=PERMISSIONS...]",
 		"replaces a room's grants; PERMISSIONS is a comma list of send, speak, " +
-		"manage-members, edit-room; answered by room_permissions",
+		"manage-members, edit-room, attach-files; answered by room_permissions",
 		headlessCommandRoomPermissionsSet},
 	{"admin-rooms", 0, 0, .None, "admin-rooms",
 		"admins: every room, joined or not; it arrives as admin_rooms",
@@ -1987,9 +1987,10 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"voice-key-rotate", 1, 0, .None, "voice-key-rotate SECONDS",
 		"rotates this client's voice key in encrypted rooms every SECONDS (default 1800)",
 		headlessCommandVoiceKeyRotate},
-	{"attach-upload", 1, 0, .Required, "attach-upload ROOM_ID|@USER_ID FILE...",
+	{"attach-upload", 1, 0, .Required, "attach-upload ROOM_ID|@USER_ID [--unchecked] FILE...",
 		"uploads a file to a room or a direct conversation; attachment_progress, then " +
-		"attachment_done with its blobID (or attachment_error)", headlessCommandAttachUpload},
+		"attachment_done with its blobID (or attachment_error); --unchecked leaves the size " +
+		"and quota checks to the server", headlessCommandAttachUpload},
 	{"attach-resume", 1, 0, .None, "attach-resume BLOB",
 		"continues an upload this process started at the offset the server acknowledged",
 		headlessCommandAttachResume},

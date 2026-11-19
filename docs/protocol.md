@@ -59,6 +59,7 @@ version below therefore needs clients and servers rebuilt together.
 | 12 | `ServerVoiceParticipants.recipientJoined`, so a client completes a voice join only on the acknowledgement of its own session, not on any list that names its account |
 | 13 | One voice session per account: every voice join carries the profile's device ID and whether it is the automatic re-join after a reconnect; a join without a device ID is refused |
 | 14 | Admin actions on accounts (role, rename with name lock, kick, ban and unban) and room types (text, voice, or both), with schema migration 3 |
+| 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 | 16 | Account encryption keys (end-to-end encryption, part 1): `ClientPublishEncryptionKey` (each profile's X25519 key, signed by its identity key, sent once per session), `ClientFetchUserKeys`/`ServerUserKeys` (at most 64 accounts per request; accounts without a key are listed as missing), `ServerUserKeyChanged` (an account stored a new key), and `UserSummary.identityPublicKey`/`hasEncryptionKey`, with schema migration 5 (`user_encryption_keys`). No message is encrypted yet |
 | 17 | Encrypted direct messages (end-to-end encryption, part 2): `ClientSealedDirectMessage`/`ServerSealedDirectMessage` (an envelope the sender sealed for itself and the recipient, carried byte for byte), the envelope, client message ID and signature fields of `StoredDirectMessage` and `DirectConversationSummary`, and the signed plaintext fallback (`ClientDirectMessage` now needs `clientMessageId` and `signature`; unsigned messages are refused), with schema migration 6 |
 | 18 | Encrypted rooms and their signed member log (end-to-end encryption, part 3a): `ClientAppendRoomLog`, `ClientFetchRoomLog`, `ServerRoomLog`, `RoomSummary.encrypted`/`logVersion`, `ClientCreateRoomPayload.encrypted` and `ClientEditRoomPayload.encrypted`, with schema migration 7 (`rooms.encrypted`, `rooms.log_version`, `room_log_entries`, `room_log_managers`). Encrypted rooms take no message and no voice yet |
@@ -66,13 +67,12 @@ version below therefore needs clients and servers rebuilt together.
 | 20 | Full history in encrypted rooms (end-to-end encryption, part 4): `RoomKeyForward` envelopes (`ClientRoomKeyEnvelopePayload.senderId` names the chain's sender, `RoomKeyEnvelope.forwarderId` the forwarding account), `ServerRoomKeyRequest.senderId`, and key requests relayed to every member of a Full history room, with schema migration 9 (`room_key_envelopes.forwarder_user_id`) |
 | 21 | Encrypted voice in encrypted rooms (end-to-end encryption, part 5): voice joins of encrypted rooms are accepted, `ClientVoiceKey`/`ServerVoiceKey` (a participant's `VoiceKey` envelope, kind 4), `ClientRequestVoiceKey`/`ServerVoiceKeyRequest`, and sealed voice payloads in the frames of encrypted rooms. No schema migration: voice keys are never stored |
 | 22 | Signed room messages (#90): `ClientChatMessagePayload`, `ServerChatMessagePayload` and `StoredChatMessage` gain `signature`, and every plaintext room message carries a random `clientMessageId` and its sender's signature (`signPlaintextRoomMessage`); the server refuses unsigned plaintext ("Invalid room message signature") and a reused client message ID, and clients show no room or direct message without its sender's valid signature (#82). Schema migration 10 deletes every unsigned message ([below](#signed-messages-protocol-22)) |
-| 15 | Room access modes (Public, Member invite, Admin invite) and history for new members (From join or Full), creating a room without joining it, `ClientLeaveRoom`, member adds by members of Member invite rooms, `ClientFetchRoomMembers`/`ServerRoomMembers`, `ClientAdminListRooms`/`ServerAdminRooms`, and `ServerRoomMembershipChanged.userId`, with schema migration 4 |
 | 23 | Roles and server permissions (#95, [below](#roles-and-server-permissions-protocol-23)): `ServerPermission`/`ServerPermissions`, `RoleSummary`, `UserSummary.roleIds`, `permissions` in `ServerAuthSuccess` and `ServerAccountUpdated`, `ClientAdminListRoles`/`ServerRoleList`, `ClientAdminSaveRole`, `ClientAdminDeleteRole`, `ClientAdminSetUserRoles`, `ServerRoleUpdated`, `ServerRoleDeleted`, the `SaveRole`, `DeleteRole` and `SetUserRoles` admin actions with `ServerAdminActionResult.roleId`, with schema migration 11. Room management and member management check the permissions instead of the admin role. The never-sent role placeholders `ClientGetRoles` … `ServerRemovedRole` are retired |
 | 24 | Room permissions and role rooms (#96, [below](#room-permissions-and-role-rooms-protocol-24)): `RoomPermission`/`RoomPermissions`, `RoomSummary.myPermissions`, `RoomAccess.Role` (4) with `accessRoleIds` on `ClientCreateRoom` and `ClientEditRoom`, `ClientAdminSetRoomPermissions`, `ClientAdminFetchRoomPermissions`/`ServerAdminRoomPermissions`, with schema migration 12. Posts, voice, member changes and edits check room permissions; role changes add and remove Role room members |
-| 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet |
-| 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), with schema migration 15. The message inserts bind the listed blobs, and whoever may read a message may download its files |
-| 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed. No schema migration |
 | 25 | Registration (#43 G1, [below](#registration-protocol-25)): the plaintext handshake answer `ServerRegistrationRequired`, `ClientAuthRequestPayload.registering`, encrypted `ClientRegister{inviteCode, reason}` and `ServerRegisterResponse{status, message, auth}` (wire values 14 and 15 kept), the registration mode, invite codes, sign-up requests, restricted accounts (`UserSummary.isRestricted`, `registrationMode` and `isRestricted` in `ServerAuthSuccess`, `isRestricted` in `ServerAccountUpdated`), with schema migration 13. Restricted accounts see and message only accounts they share a room with |
+| 26 | Attachment transfers (attachments F1, [below](#attachment-transfers-protocol-26)): the transport key schedule `"haychat transport v3"` (six keys, adding the file channel's pair), ENet channel 5 on both sides (six channels), `ClientAttachmentUploadBegin` … `ServerAttachmentRefused` (wire values 203 to 211) and the binary chunks of `common/attachment_wire.odin`, with schema migration 14 (`attachments`). The never-sent `ClientUploadFile` … `ServerDeleteFileResponse` (123 to 128) are retired. Files are not on messages yet: only a blob's owner may download it |
+| 27 | Attachments on messages (attachments F2, [below](#attachments-on-messages-protocol-27)): `AttachmentRef` on every room and direct message payload (`attachments`) and `DirectConversationSummary.lastAttachments`, the v2 plaintext signatures (`"haychat-room-plain-v2"`, `"haychat-dm-plain-v2"`) for messages with files, the sealed plaintext's `"attachments"` key and the encrypted file format (`common/attachment_e2ee.odin`), `RoomPermission.AttachFiles` (4), `ServerAuthSuccess.attachments` (`AttachmentLimits`), the refusals "Invalid message attachments", "An attachment cannot be sent with this message" and "You cannot attach files in this room", with schema migration 15 (`attachment_count` on both message tables, the `attachments.position`/`name`/`media_type` columns, and Attach files added to every room's Everyone grant). The message inserts bind the listed blobs, and whoever may read a message may download its files |
+| 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed, and a reader's download of it is refused with "Attachment removed by an admin". No schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -81,7 +81,16 @@ type". Nothing else on the wire changed, so the protocol version stayed 25.
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
 
-## Attachment transfers (protocol 26)
+## Attachments
+
+Files on room and direct messages, in three protocol versions (design and history in
+`docs/plan/2026-11-19-file-attachments.md`): transfers (26), files on messages (27) and
+moderation (28). The user-facing behaviour is in
+[rooms-and-accounts.md](rooms-and-accounts.md#attachments) and the
+[user guide](user-guide.md#files), the server variables in
+[server-configuration.md](server-configuration.md#attachments).
+
+### Attachment transfers (protocol 26)
 
 The first part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F1): a client uploads
 a file and gets a blob ID. Protocol 27 (below) attaches blobs to messages and lets the
@@ -98,8 +107,11 @@ conversation's readers download them.
   `ClientAttachmentUploadFinish{blobId, sha256}` ends one (the server compares size and hash and
   answers `ServerAttachmentUploadDone{blobId, size, sha256}`), `ClientAttachmentDownload{blobId,
   offset}` is answered by `ServerAttachmentDownloadBegin{blobId, size, offset}`, and
-  `ClientAttachmentCancel{blobId}` stops an upload (for good) or a download. Every refusal is
-  `ServerAttachmentRefused{requestId, blobId, message}`. Since protocol 27 an upload to a room
+  `ClientAttachmentCancel{blobId}` stops an upload (for good: it becomes a tombstone) or a
+  download, with no answer. Every refusal is `ServerAttachmentRefused{requestId, blobId,
+  message}` (the sentences are under [Attachment lifecycle](#attachment-lifecycle)).
+  `ServerAttachmentDownloadBegin` carries no hash: the downloading client checks the one in the
+  signed or sealed message. Since protocol 27 an upload to a room
   needs AttachFiles too ("You cannot attach files in this room"), and a download is allowed to
   whoever may read the message the blob is bound to (below), or to its owner before then.
 - **Chunks** (binary, channel 5). `kind u8 ‖ blobId 16 ‖ offset u64 LE ‖ data`, kinds
@@ -113,39 +125,10 @@ conversation's readers download them.
   uploads and 4 downloads per session, and a per-session pace for both directions together
   (`HAYCHAT_ATTACHMENT_SESSION_BYTES_PER_SECOND`), so chat packets never wait behind a file. A
   chunk outside the window or out of order ends that transfer. A session's transfers end with
-  it; an upload can then be resumed by its owner from another session.
+  it, and its upload's part file stays: the owner may resume it from another session (see
+  [Attachment lifecycle](#attachment-lifecycle) for what the client does).
 
-## Roles and server permissions (protocol 23)
-
-The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#roles-and-permissions).
-
-- **Permissions** are `common.ServerPermission` bit numbers carried as one unsigned integer, the
-  `ServerPermissions` `bit_set` (u64), and stored as `server_roles.permissions` (BIGINT). Pinned
-  values: ManageRooms 0, ManageRoomMembers 1, CreateInvites 2, ApproveRegistrations 3,
-  ManageRoles 4, ManageRegistration 5, KickUsers 6, BanUsers 7, RenameUsers 8. Only the first
-  four can be given to a role other than admin. Receivers drop unknown bits.
-- `ServerAuthSuccess.permissions` and `ServerAccountUpdated.permissions` are the account's
-  effective set (every bit for an admin). `ServerAccountUpdated` now also goes out when only the
-  set changed. `isAdmin` stays.
-- `RoleSummary{id, name, permissions, builtin, position}`: `builtin` is true only for `admin`,
-  whose permissions read as every bit; `position` orders the list and means nothing else.
-  `UserSummary.roleIds` lists every role an account holds, `admin` included.
-- `ClientAdminListRoles` (any account) is answered by `ServerRoleList`. `ClientAdminSaveRole`
-  (role ID 0 creates), `ClientAdminDeleteRole` and `ClientAdminSetUserRoles` (every role of one
-  account other than admin) are admins only and answered by `ServerAdminActionResult` (action
-  `SaveRole` 4, `DeleteRole` 5 or `SetUserRoles` 6, with `roleId`) or a `ServerProtocolError`.
-  A change sends `ServerRoleUpdated` or `ServerRoleDeleted` (no `ServerUserUpdated` follows for
-  the deleted role's holders: clients drop the ID themselves) or `ServerUserUpdated` to every
-  session, and `ServerAccountUpdated` to the sessions of each account whose set changed.
-- Room create, edit and delete need ManageRooms ("Room management permission required"); member
-  adds and removals, member lists of rooms one is not in, the admin room list and encrypted
-  room logs need ManageRoomMembers (ManageRooms for a log's Create and SetAccess).
-- Wire values: `ClientAdminListRoles` 180, `ServerRoleList` 181, `ClientAdminSaveRole` 182,
-  `ClientAdminDeleteRole` 183, `ClientAdminSetUserRoles` 184, `ServerRoleUpdated` 185,
-  `ServerRoleDeleted` 186. The retired placeholders `ClientGetRoles` … `ServerRemovedRole` keep
-  24..31 and are never sent.
-
-## Attachments on messages (protocol 27)
+### Attachments on messages (protocol 27)
 
 The second part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F2: D10-D16, D18,
 D20). A message lists up to four uploaded blobs; the text may then be empty.
@@ -200,7 +183,7 @@ D20). A message lists up to four uploaded blobs; the text may then be empty.
   (0 = none) and the account's stored bytes. Clients refuse a file early with them; the server
   checks every limit again at begin.
 
-## Attachment moderation (protocol 28)
+### Attachment moderation (protocol 28)
 
 The third part of attachments (`docs/plan/2026-11-19-file-attachments.md`, F3: D22). Admins
 only, like kick and ban: there is no assignable permission, and the server checks the admin
@@ -240,6 +223,74 @@ role in the statement that reads or changes, so a holder of every other permissi
   the files of the newest bound tombstones again (and cuts off a download of one), its startup
   scan deletes every Removed blob's file, and clients see the file as removed on their next
   history fetch. `deploy/sql/attachment-usage.sql` shows the usage. See `deploy/README.md`.
+
+### Attachment lifecycle
+
+- **States.** A blob is Uploading (0) until its finish matches, then Ready (1), Bound (2) once a
+  message names it, and Removed (3) as a tombstone. A cancelled upload and one whose finish did
+  not match ("Upload did not match") become tombstones too, so they stop counting toward the
+  quota at once but still count toward the hourly limit. A begin the storage worker refuses
+  (the free-disk reserve: "Server storage is full") leaves no row, since nothing was stored.
+- **Begin refusals**, as `ServerAttachmentRefused`: "Attachments are disabled on this server",
+  "Attachment is too large", "Attachment storage quota exceeded", "Attachment upload limit
+  reached; try again later", "Server storage is full" (the capacity or the free-disk reserve),
+  "Not a room member", "You cannot send messages in this room", "You cannot attach files in this
+  room", "Chat is disabled in this room" (voice only), "Attachment encryption does not match
+  the room" (begin
+  checks the room's encryption flag, so a plaintext blob never enters an encrypted room),
+  "Unknown direct message recipient", "You no longer share a room with this person" (a
+  restricted account's direct message rule), and "Too many uploads at once".
+- **Resume (D9).** While a blob is Uploading, its owner may resume it from any session at the
+  offset the server holds (`ClientAttachmentUploadResume`): the storage worker rebuilds the hash
+  from the part file. The client resumes only uploads its own process started, because it keeps
+  each transfer's file path, its acknowledged offset and, for an encrypted upload, the sealed
+  chunks still in flight in memory and never re-encrypts a chunk. An upload whose client process
+  ended (it quit, crashed or was killed) is therefore never resumed: attaching the file again
+  starts a new blob, and the old one is deleted by the sweeper as a stalled upload.
+  `dev/attachment-proof.sh` proves both a resume after a reconnect and a killed uploader.
+- **Sweeper (D17).** Hourly and at startup, one statement deletes the rows (then the storage
+  worker the files) of blobs at least an hour old that no message holds and that are an upload
+  without data for an hour, an upload or a Ready blob older than
+  `HAYCHAT_ATTACHMENT_PENDING_HOURS`, a Bound blob whose message is gone (`ON DELETE SET NULL`:
+  a deleted room's files), or an unbound tombstone. Rows go before files, so a blob whose row is
+  gone can no longer be bound, resumed or downloaded; a blob with a transfer in progress is
+  never swept. At startup the storage worker also lists every file older than an hour, and the
+  server deletes those without a row, or whose row is in a state that has no such file (a part
+  file of a finished blob, any file of a tombstone).
+- **Room deletion.** Deleting a room deletes its messages, which unlinks their files (and the
+  room's unsent uploads). The first sweep pass once a file's upload is an hour old deletes it,
+  so a deleted room's files leave the blob directory within two hours of their upload, or at
+  the server's next start; its unsent uploads go after `HAYCHAT_ATTACHMENT_PENDING_HOURS`.
+
+## Roles and server permissions (protocol 23)
+
+The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#roles-and-permissions).
+
+- **Permissions** are `common.ServerPermission` bit numbers carried as one unsigned integer, the
+  `ServerPermissions` `bit_set` (u64), and stored as `server_roles.permissions` (BIGINT). Pinned
+  values: ManageRooms 0, ManageRoomMembers 1, CreateInvites 2, ApproveRegistrations 3,
+  ManageRoles 4, ManageRegistration 5, KickUsers 6, BanUsers 7, RenameUsers 8. Only the first
+  four can be given to a role other than admin. Receivers drop unknown bits.
+- `ServerAuthSuccess.permissions` and `ServerAccountUpdated.permissions` are the account's
+  effective set (every bit for an admin). `ServerAccountUpdated` now also goes out when only the
+  set changed. `isAdmin` stays.
+- `RoleSummary{id, name, permissions, builtin, position}`: `builtin` is true only for `admin`,
+  whose permissions read as every bit; `position` orders the list and means nothing else.
+  `UserSummary.roleIds` lists every role an account holds, `admin` included.
+- `ClientAdminListRoles` (any account) is answered by `ServerRoleList`. `ClientAdminSaveRole`
+  (role ID 0 creates), `ClientAdminDeleteRole` and `ClientAdminSetUserRoles` (every role of one
+  account other than admin) are admins only and answered by `ServerAdminActionResult` (action
+  `SaveRole` 4, `DeleteRole` 5 or `SetUserRoles` 6, with `roleId`) or a `ServerProtocolError`.
+  A change sends `ServerRoleUpdated` or `ServerRoleDeleted` (no `ServerUserUpdated` follows for
+  the deleted role's holders: clients drop the ID themselves) or `ServerUserUpdated` to every
+  session, and `ServerAccountUpdated` to the sessions of each account whose set changed.
+- Room create, edit and delete need ManageRooms ("Room management permission required"); member
+  adds and removals, member lists of rooms one is not in, the admin room list and encrypted
+  room logs need ManageRoomMembers (ManageRooms for a log's Create and SetAccess).
+- Wire values: `ClientAdminListRoles` 180, `ServerRoleList` 181, `ClientAdminSaveRole` 182,
+  `ClientAdminDeleteRole` 183, `ClientAdminSetUserRoles` 184, `ServerRoleUpdated` 185,
+  `ServerRoleDeleted` 186. The retired placeholders `ClientGetRoles` … `ServerRemovedRole` keep
+  24..31 and are never sent.
 
 ## Room permissions and role rooms (protocol 24)
 

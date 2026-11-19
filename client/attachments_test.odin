@@ -388,6 +388,24 @@ testUploadsAreCheckedAgainstTheServersLimits :: proc(t: ^testing.T) {
 	connection.attachmentLimits = {enabled = true, maxBytes = 100, quotaBytes = 10, usedBytes = 6}
 	_, quota := State_uploadAttachment(&state, ATTACHMENT_TEST_SERVER, 1, 0, path)
 	assert(quota == common.ATTACHMENT_QUOTA_MESSAGE, "expected a file over the quota refused")
+	// attach-upload --unchecked: the size and quota checks are left to the server, so the
+	// upload gets as far as the (missing) transfer worker.
+	connection = State_serverConnection(&state, ATTACHMENT_TEST_SERVER)
+	connection.attachmentLimits = {enabled = true, maxBytes = 4, quotaBytes = 10, usedBytes = 6}
+	_, unchecked := State_uploadAttachment(
+		&state,
+		ATTACHMENT_TEST_SERVER,
+		1,
+		0,
+		path,
+		checkLimits = false,
+	)
+	assert(
+		unchecked == NOT_CONNECTED_MESSAGE,
+		fmt.tprintf("expected the limits left to the server, got %q", unchecked),
+	)
+	connection = State_serverConnection(&state, ATTACHMENT_TEST_SERVER)
+	connection.attachmentLimits = {enabled = true, maxBytes = 100, quotaBytes = 10, usedBytes = 6}
 	_, emptyError := State_uploadAttachment(&state, ATTACHMENT_TEST_SERVER, 1, 0, empty)
 	assert(emptyError == "The file is empty", "expected an empty plaintext file refused")
 	_, both := State_uploadAttachment(&state, ATTACHMENT_TEST_SERVER, 1, 2, path)

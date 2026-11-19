@@ -319,52 +319,72 @@ grant or the grant of any of their roles allows. Membership still decides who se
 
 Since protocol 27 a message, in a room or a direct conversation, can carry up to four files, with
 or without text (`docs/plan/2026-11-19-file-attachments.md`; the wire format is in
-[protocol.md](protocol.md#attachments-on-messages-protocol-27)). F4 adds the file cards and the
-composer's attach button; until then the window shows a line per file and the harness drives
-them.
+[protocol.md](protocol.md#attachments), and how to attach and save files in the
+[user guide](user-guide.md#files)). The client never opens, runs or previews a file.
 
 - **Sending.** A file is uploaded to the conversation first and then named in the message, and
   the server binds it to that message in the statement that stores it. In a room this needs
-  Send messages and Attach files; in a direct conversation, the same recipient rules as a
-  message. A file uploaded to one conversation cannot go to another, and a file goes with one
-  message only.
+  **Send messages** and **Attach files**, checked when the upload begins and again when the
+  message is stored, so taking Attach files away also stops a file that was uploaded before; in
+  a direct conversation, the same recipient rules as a message (a restricted account only to
+  people it shares a room with). A file uploaded to one conversation cannot go to another, and
+  a file goes with one message only. An encrypted room takes only encrypted files, and a
+  plaintext room only plaintext ones.
 - **Encryption.** In encrypted rooms and encrypted direct conversations the client encrypts the
   file before it uploads it, and the file's key, name and type travel inside the encrypted
-  message: the server stores only ciphertext padded to a coarse size. In plaintext conversations
-  the sender signs each file's hash, size, name and type with the message.
+  message: the server stores only ciphertext padded to a coarse size, and learns the sizes, how
+  many files a message has, and who uploads and downloads them. In plaintext conversations the
+  sender signs each file's hash, size, name and type with the message, so neither another
+  account nor the server can swap a file. The direct message **Send without encryption** switch
+  covers the files too.
 - **Who may download.** Whoever may read the message may download its files: room members (in a
   From join room, only files of messages sent after they joined) and the two sides of a direct
-  conversation. Admins have no way around that, as for history. A removed member cannot fetch
-  more files. The client checks every file against the message (hash, and for encrypted files
-  every piece and the padding) before it keeps it, and otherwise deletes it: "This attachment
-  was changed on the server".
-- **Limits.** The server announces its per-file limit and the account quota at sign-in, and the
-  client refuses a file that cannot fit before it uploads (see
-  [server-configuration.md](server-configuration.md) for the variables).
+  conversation (a restricted account keeps them after its shared rooms are gone, as it keeps
+  the history). Admins have no way around that, as for history. A removed member cannot fetch
+  more files; files already saved stay where they were saved. The uploader may download a file
+  that is not on a message yet. The client checks every file against the message (hash, and
+  for encrypted files every piece and the padding) before it keeps it, and otherwise deletes
+  it: "This attachment was changed on the server".
+- **Limits.** Per file (25 MiB by default), per account stored (1 GiB) and uploaded per hour
+  (512 MiB), optionally for the whole server, and a free-disk reserve; see
+  [server-configuration.md](server-configuration.md#attachments). The server announces the
+  per-file limit and the account quota at sign-in, and the client refuses a file that cannot
+  fit before it uploads; the server checks every limit again. An upload reserves its size
+  when it begins, so two at once cannot overshoot the quota.
+- **What is kept.** A file stays as long as its message. A file uploaded but never sent is
+  deleted after `HAYCHAT_ATTACHMENT_PENDING_HOURS` (24 by default), a stalled upload after an
+  hour without data, a cancelled one after an hour, and the files of a deleted room within
+  about two hours of their upload. An upload whose client quit or crashed is not resumed: the
+  client uploads the file again. Accounts are never deleted, so their files are not either.
 
 ### Moderation
 
 Since protocol 28 admins look after the server's storage and can remove any file
 ([protocol.md](protocol.md#attachment-moderation-protocol-28)). This is for admins only, like
-kick and ban: no role permission grants it. F4 adds the GUI (Server settings → Admin →
-**Storage**, and **Remove attachment** on a file card); until then the harness drives it.
+kick and ban: no role permission grants it, and the server checks the admin role in the
+statement that reads or changes. In the client: **Remove attachment…** in a file card's
+right-click menu, and **Storage** in Server settings after the Admin section (see the
+[user guide](user-guide.md#removing-files-and-storage)).
 
 - **Storage use.** An admin sees the bytes stored on the server, the configured capacity, the
   free space on the server's disk, and the 100 accounts that store the most, with their file
-  counts. Removed files count toward nothing.
+  counts. Removed files count toward nothing; uploads in progress count with the size they
+  reserved.
 - **Removing a file.** An admin may remove any finished file, including their own: the file is
   deleted from the server's disk, its message stays and shows "Attachment removed by an admin"
   where the file was, nobody can download it again, and it stops counting toward its owner's
   quota. A download in progress is cut off with the same sentence. The message's signature still
-  verifies, because the server keeps everything the sender signed. An optional reason is written
-  to the server's log with the file, the admin and the owner, and is shown to nobody.
+  verifies, because the server keeps everything the sender signed. An optional reason (at most
+  500 bytes) is written to the server's log with the file, the admin and the owner, and is
+  shown to nobody; nothing else records the removal.
 - **Who is told.** Everyone who may read the message hears of the removal at once: the room's
   members who may read it, or the two sides of a direct conversation, or for a file that was
   never sent, its owner.
 - **Without a client.** An operator can list usage and remove a file with SQL
   (`deploy/sql/attachment-usage.sql`, `deploy/sql/remove-attachment.sql`, see
-  [deploy/README.md](../deploy/README.md)). The file is then deleted by the server's hourly pass,
-  and clients see the removal on their next history fetch.
+  [deploy/README.md](../deploy/README.md#attachment-storage-and-removing-files)). The file is
+  then deleted by the server's hourly pass, and clients see the removal on their next history
+  fetch.
 
 ## Direct Messages
 
@@ -403,7 +423,7 @@ newest message.
 
 - Only encrypted rooms are end-to-end encrypted. For every other room, access modes decide whom
   the server lets read it, not who can technically read it (the server and its operator can
-  read every unencrypted room). Encrypted rooms take no voice yet. In a Full history encrypted
+  read every unencrypted room). In a Full history encrypted
   room a new member reads older messages only once a member who holds their keys is online.
 - Bans and account changes do not remove anyone from encrypted rooms' member lists by
   themselves; an admin removes them from each room.
@@ -421,5 +441,10 @@ newest message.
   10 minutes) and at most 64 sessions signing up at once.
 - Roles do not rank accounts, so kick, ban and rename cannot be delegated. Room permissions
   only allow, never deny: a room cannot take something from a role another grant gives.
+- Files are never previewed, and there is no download cache: each **Save…** downloads again. A
+  direct message with files is not queued while the other person's key is being fetched; it
+  stays in the draft. A file the server knows but cannot read from its disk (a database restored
+  without its blob directory) fails with "Server storage error" rather than showing as
+  unavailable.
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.
