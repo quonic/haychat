@@ -42,6 +42,9 @@ CLIENT_INVALID_IDENTITY_MESSAGE :: "client identity keys are missing or invalid"
 // which the client turns into CLIENT_KICKED_MESSAGE (and ": reason").
 SERVER_BANNED_MESSAGE :: "This account is banned from this server"
 CLIENT_KICKED_MESSAGE :: "You were kicked from this server"
+// Protocol 25 (#43): the server answered ServerRegistrationRequired; its message follows. This
+// client cannot sign up with an invite code yet (G2), so it stops without retrying.
+CLIENT_REGISTRATION_REQUIRED_MESSAGE :: "Sign-up required"
 
 ClientConnectionStatus :: enum u8 {
 	Idle, // Never asked to connect
@@ -63,6 +66,7 @@ ClientConnectFailureKind :: enum u8 {
 	InvalidIdentity, // The local identity keys are missing or corrupt
 	Kicked, // An admin ended the session (protocol 14); waits for the user to retry
 	Banned, // The account is banned on this server (protocol 14)
+	RegistrationRequired, // Protocol 25: the key has no account and must sign up first
 }
 
 ClientConnection :: struct {
@@ -124,6 +128,9 @@ classifyConnectFailure :: proc(message: string) -> ClientConnectFailureKind {
 	if strings.has_prefix(message, CLIENT_KICKED_MESSAGE) {
 		return .Kicked
 	}
+	if strings.has_prefix(message, CLIENT_REGISTRATION_REQUIRED_MESSAGE) {
+		return .RegistrationRequired
+	}
 	if strings.has_prefix(message, "timed out") ||
 	   strings.has_prefix(message, "could not reach") ||
 	   strings.has_prefix(message, "failed to resolve") {
@@ -143,7 +150,8 @@ connectFailureIsRetryable :: proc(kind: ClientConnectFailureKind) -> bool {
 	     .InvalidName,
 	     .InvalidIdentity,
 	     .Kicked,
-	     .Banned:
+	     .Banned,
+	     .RegistrationRequired:
 		// A kick is not undone by the next automatic reconnect a second later (D5): the
 		// client waits until the user asks to connect again.
 		return false

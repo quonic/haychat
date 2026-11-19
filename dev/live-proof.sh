@@ -110,6 +110,12 @@ SQL_TESTS+=,server.testRoomPermissionsMigrationUpgradesVersion11AgainstPostgreSQ
 SQL_TESTS+=,server.testRoomPermissionChecksAgainstPostgreSQL
 SQL_TESTS+=,server.testEncryptedRoomPermissionsAgainstPostgreSQL
 SQL_TESTS+=,server.testRoleRoomMembershipAgainstPostgreSQL
+SQL_TESTS+=,server.testRegistrationMigrationUpgradesVersion12AgainstPostgreSQL
+SQL_TESTS+=,server.testRegisterStatementAgainstPostgreSQL
+SQL_TESTS+=,server.testIdentityRegistrationPathsAgainstPostgreSQL
+SQL_TESTS+=,server.testInviteStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRegistrationRequestStatementsAgainstPostgreSQL
+SQL_TESTS+=,server.testRestrictedAccountsAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
@@ -361,6 +367,49 @@ if [[ "$run_sql" == true ]]; then
 	fi
 	echo "==> [live] the failed SQL test ended only itself (status $sql_failure_status):" \
 		"$(grep -F "Finished " "$sql_failure_log")"
+
+	# The operator helpers of deploy/sql (protocol 25, #43): create-invite.sql prints a grouped
+	# Crockford base32 code whose sha256 is the only thing stored, and set-registration-mode.sql
+	# switches the mode (and back, so nothing after this sees a closed server).
+	echo "==> [live] checking deploy/sql/create-invite.sql and set-registration-mode.sql"
+	invite_code=$(live_psql -v uses=2 -v days=1 -v note='live proof' \
+		-f deploy/sql/create-invite.sql | tail -n 1)
+	symbol='[0-9A-HJKMNP-TV-Z]'
+	if [[ ! "$invite_code" =~ ^($symbol{4}-){7}$symbol{4}$ ]]; then
+		echo "Expected a grouped Crockford base32 code, got '$invite_code'" >&2
+		exit 1
+	fi
+	alphabet=0123456789ABCDEFGHJKMNPQRSTVWXYZ
+	bits=""
+	for ((index = 0; index < ${#invite_code}; index++)); do
+		char=${invite_code:index:1}
+		[[ "$char" == "-" ]] && continue
+		prefix=${alphabet%%"$char"*}
+		value=${#prefix}
+		for ((bit = 4; bit >= 0; bit--)); do
+			bits+=$(((value >> bit) & 1))
+		done
+	done
+	code_hex=""
+	for ((index = 0; index < 160; index += 8)); do
+		code_hex+=$(printf '%02x' "$((2#${bits:index:8}))")
+	done
+	code_hash=$(printf "$(sed 's/../\\x&/g' <<<"$code_hex")" | sha256sum | cut -d' ' -f1)
+	stored=$(live_psql -tA -c "SELECT max_uses || ':' || note || ':' || (expires_at IS NOT NULL) \
+		FROM invites WHERE code_hash = decode('$code_hash', 'hex')")
+	if [[ "$stored" != "2:live proof:true" ]]; then
+		echo "Expected the code's sha256 stored with its limits, got '$stored'" >&2
+		exit 1
+	fi
+	live_psql -v mode=invite -f deploy/sql/set-registration-mode.sql >/dev/null
+	mode=$(live_psql -tA -c "SELECT registration_mode FROM server_settings")
+	live_psql -v mode=open -f deploy/sql/set-registration-mode.sql >/dev/null
+	if [[ "$mode" != "2" ]] || live_psql -v mode=closed -f deploy/sql/set-registration-mode.sql \
+		>/dev/null 2>&1; then
+		echo "Expected set-registration-mode.sql to set invite and refuse 'closed' (got $mode)" >&2
+		exit 1
+	fi
+	echo "==> [live] the deploy SQL helpers work (the code is stored only as its sha256)"
 fi
 
 # A server that cannot start must exit non-zero (systemd Restart=on-failure and scripts depend

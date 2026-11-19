@@ -145,7 +145,10 @@ testUserEncryptionKeyStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 
 	// The directory carries each account's identity key and whether it has a bundle.
-	list := databaseExecuteRequest(conn, common.DatabaseUserDirectoryRequest{})
+	list := databaseExecuteRequest(
+		conn,
+		common.DatabaseUserDirectoryRequest{viewerUserId = bob.userId},
+	)
 	defer IPC__database_query_response_deinit(list)
 	directory, listOK := list.result.(common.DatabaseUserDirectoryResult)
 	assert(list.success && listOK, fmt.tprintf("expected the user list: %s", list.message))

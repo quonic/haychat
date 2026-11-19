@@ -45,47 +45,102 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // a claimed keyless account's lock and ban come from the statement's snapshot, so they read
 // right too.
 //
+// Registration (protocol 25, migration 13, #43 G1): a key without an account gets one only
+// when `may_create` holds: it is HAYCHAT_ADMIN_PUBLIC_KEY ($3, D15: never restricted, never
+// pending, in every mode), it has an approved sign-up request (D14: the account takes the
+// request's code's roles, its restriction and its room, and Role rooms of those roles, and the
+// request is deleted), or the server is Open and the client did not ask to register ($4).
+// Otherwise nothing is written and the needs_registration column is true, which the router
+// answers with ServerRegistrationRequired (the key's request status and a decline's reason in
+// the last columns). Claiming a keyless account by nickname needs `may_create` too. A
+// restricted account (D11) never joins Public rooms here; the approved code's room joins only
+// while it is still an unencrypted invite room.
+//
+// The statement always returns exactly one row; the account columns are NULL when the identity
+// did not resolve. A key that owns an account resolves to it whatever the mode and $4 say.
+//
 // Columns: user ID, whether this was a rename, the nickname before the rename, whether the
 // account is an admin, its nickname after this login, whether that nickname is locked, whether
-// the account is banned, the ban reason, and (protocol 23) the account's effective server
-// permission mask (database_roles.odin).
+// the account is banned, the ban reason, (protocol 23) the account's effective server
+// permission mask (database_roles.odin; for a new account also its code's roles' bits, which
+// the subquery's snapshot does not see), and (protocol 25) needs_registration, the
+// registration mode, the key's request status (0 none), a decline's reason and whether the
+// account is restricted.
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
-	"WITH by_key AS (SELECT id, nickname, nickname_locked, banned_at IS NOT NULL AS banned " +
-	"FROM users WHERE public_key = decode($2, 'hex')), " +
+	"WITH settings AS (SELECT COALESCE((SELECT registration_mode FROM server_settings " +
+	"WHERE id = 1), 1) AS mode), " +
+	"by_key AS (SELECT id, nickname, nickname_locked, banned_at IS NOT NULL AS banned, " +
+	"restricted FROM users WHERE public_key = decode($2, 'hex')), " +
+	"admin_key AS (SELECT ($3::text <> '' AND decode($2, 'hex') = decode(NULLIF($3::text, ''), " +
+	"'hex')) AS ok), " +
+	"request AS (SELECT rr.id, rr.status, rr.decision_reason, rr.invite_id " +
+	"FROM registration_requests rr WHERE rr.public_key = decode($2, 'hex') " +
+	"AND NOT EXISTS (SELECT 1 FROM by_key)), " +
+	"approved AS (SELECT q.id, q.invite_id, i.room_id, " +
+	"(i.restricted AND NOT (SELECT ok FROM admin_key)) AS restricted " +
+	"FROM request q JOIN invites i ON i.id = q.invite_id WHERE q.status = 2), " +
+	"may_create AS (SELECT ((SELECT ok FROM admin_key) OR EXISTS (SELECT 1 FROM approved) " +
+	"OR ((SELECT mode FROM settings) = 1 AND NOT $4::boolean)) AS ok), " +
 	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
 	"renamed AS (" +
 	"UPDATE users SET nickname = $1 FROM by_key " +
 	"WHERE users.id = by_key.id AND by_key.nickname <> $1 " +
 	"AND NOT by_key.nickname_locked AND NOT by_key.banned " +
 	"AND NOT EXISTS (SELECT 1 FROM existing) " +
-	"RETURNING users.id, by_key.nickname::text AS previous_nickname), " +
+	"RETURNING users.id, by_key.nickname::text AS previous_nickname, by_key.restricted), " +
 	"inserted AS (" +
-	"INSERT INTO users (nickname, public_key) " +
-	"SELECT $1, decode($2, 'hex') WHERE NOT EXISTS (SELECT 1 FROM by_key) " +
-	"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key " +
+	"INSERT INTO users (nickname, public_key, restricted, invite_id) " +
+	"SELECT $1, decode($2, 'hex'), COALESCE((SELECT restricted FROM approved), false), " +
+	"(SELECT invite_id FROM approved) " +
+	"WHERE NOT EXISTS (SELECT 1 FROM by_key) AND (SELECT ok FROM may_create) " +
+	"ON CONFLICT (nickname) DO UPDATE SET public_key = EXCLUDED.public_key, " +
+	"restricted = users.restricted OR EXCLUDED.restricted, " +
+	"invite_id = COALESCE(users.invite_id, EXCLUDED.invite_id) " +
 	"WHERE users.public_key = EXCLUDED.public_key OR (users.public_key IS NULL AND (" +
 	"NOT EXISTS (SELECT 1 FROM user_server_roles usr WHERE usr.user_id = users.id) " +
 	"OR EXCLUDED.public_key = decode(NULLIF($3, ''), 'hex'))) " +
-	"RETURNING id), " +
+	"RETURNING id, restricted), " +
+	"granted AS (INSERT INTO user_server_roles (user_id, role_id) " +
+	"SELECT inserted.id, ir.role_id FROM inserted CROSS JOIN approved " +
+	"JOIN invite_roles ir ON ir.invite_id = approved.invite_id " +
+	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin ON CONFLICT DO NOTHING), " +
 	"joined AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT r.id, inserted.id FROM rooms r CROSS JOIN inserted " +
-	"WHERE r.access = 1 AND NOT EXISTS (SELECT 1 FROM existing) ON CONFLICT DO NOTHING), " +
+	"WHERE r.access = 1 AND NOT inserted.restricted AND NOT EXISTS (SELECT 1 FROM existing) " +
+	"OR (r.id = (SELECT room_id FROM approved) AND r.access IN (2, 3) AND NOT r.encrypted) " +
+	"OR (r.access = 4 AND EXISTS (SELECT 1 FROM room_access_roles ar " +
+	"JOIN invite_roles ir ON ir.role_id = ar.role_id " +
+	"JOIN approved a ON a.invite_id = ir.invite_id WHERE ar.room_id = r.id)) " +
+	"ON CONFLICT DO NOTHING), " +
+	"completed AS (DELETE FROM registration_requests rr USING inserted " +
+	"WHERE rr.public_key = decode($2, 'hex')), " +
 	"resolved AS (" +
-	"SELECT id, false AS is_rename, ''::text AS previous_nickname, nickname::text " +
+	"SELECT id, false AS is_rename, ''::text AS previous_nickname, nickname::text, " +
+	"restricted, 0::bigint AS granted " +
 	"FROM by_key WHERE nickname = $1 OR nickname_locked OR banned " +
-	"UNION ALL SELECT id, true, previous_nickname, $1::text FROM renamed " +
-	"UNION ALL SELECT id, false, '', $1::text FROM inserted) " +
+	"UNION ALL SELECT id, true, previous_nickname, $1::text, restricted, 0 FROM renamed " +
+	"UNION ALL SELECT id, false, '', $1::text, restricted, " +
+	"COALESCE((SELECT bit_or(sr.permissions) FROM approved a " +
+	"JOIN invite_roles ir ON ir.invite_id = a.invite_id " +
+	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin), 0)::bigint FROM inserted) " +
 	"SELECT resolved.id::text, is_rename::text, previous_nickname, EXISTS (" +
 	"SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text, resolved.nickname, " +
 	"COALESCE(u.nickname_locked, false)::text, (u.banned_at IS NOT NULL)::text, " +
-	"COALESCE(u.ban_reason, ''), " +
+	"COALESCE(u.ban_reason, ''), (" +
 	DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "resolved.id" + DATABASE_SERVER_PERMISSIONS_CLOSE_SQL +
-	"::text FROM resolved LEFT JOIN users u ON u.id = resolved.id"
+	" | resolved.granted)::text, " +
+	"(resolved.id IS NULL AND NOT EXISTS (SELECT 1 FROM by_key) " +
+	"AND NOT (SELECT ok FROM may_create))::text, (SELECT mode FROM settings)::text, " +
+	"COALESCE((SELECT status FROM request), 0)::text, " +
+	"COALESCE((SELECT decision_reason FROM request), ''), " +
+	"COALESCE(resolved.restricted, false)::text " +
+	"FROM (SELECT 1) one LEFT JOIN resolved ON true LEFT JOIN users u ON u.id = resolved.id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
-// loading a fixture. Rooms are open, so every existing account joins it. On an empty table
+// loading a fixture. Rooms are open, so every existing account joins it, except restricted
+// accounts (protocol 25, D11). On an empty table
 // the identity column hands out ID 1, which clients select first as common.GENERAL_ROOM_ID.
 // Once any room exists this does nothing, so an admin who renamed or deleted #general keeps
 // that choice. ON CONFLICT covers a second server racing the first on the same database.
@@ -97,7 +152,7 @@ DATABASE_ENSURE_DEFAULT_ROOM_SQL ::
 	"all_members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
-	"ON CONFLICT DO NOTHING) " +
+	"WHERE NOT users.restricted ON CONFLICT DO NOTHING) " +
 	"SELECT id::text FROM created_room"
 
 // Runs DATABASE_ENSURE_DEFAULT_ROOM_SQL. Returns the created room's ID, or 0 when rooms
@@ -304,10 +359,12 @@ databaseExecuteUserIdentityResolution :: proc(
 	defer if request.hasAdminPublicKey do delete(adminPublicKeyHex)
 	adminPublicKeyHexCString, _ := strings.clone_to_cstring(adminPublicKeyHex)
 	defer delete(adminPublicKeyHexCString)
+	registeringCString: cstring = request.registering ? "true" : "false"
 	params := [?][^]byte {
 		transmute([^]byte)nicknameCString,
 		transmute([^]byte)publicKeyHexCString,
 		transmute([^]byte)adminPublicKeyHexCString,
+		transmute([^]byte)registeringCString,
 	}
 	result := databaseExecParams(conn, DATABASE_RESOLVE_USER_IDENTITY_SQL, params[:])
 	if result == nil {
@@ -318,7 +375,8 @@ databaseExecuteUserIdentityResolution :: proc(
 		return databaseResultError(&result)
 	}
 
-	// No row means the nickname is bound to a different account or is not claimable.
+	// A NULL user ID means the nickname is bound to a different account, is not claimable, or
+	// (needsRegistration) the key must sign up first.
 	identity: common.DatabaseUserIdentityResult
 	if pg.n_tuples(result) == 1 {
 		identity.userId, _ = databaseGetInt(result, 0, 0)
@@ -335,6 +393,19 @@ databaseExecuteUserIdentityResolution :: proc(
 		}
 		mask, _ := databaseGetInt(result, 0, 8)
 		identity.permissions = common.serverPermissionsFromMask(i64(mask))
+		identity.needsRegistration = databaseGetBool(result, 0, 9)
+		identity.registrationMode = databaseGetRegistrationMode(result, 0, 10)
+		identity.requestStatus = databaseGetRegistrationRequestStatus(result, 0, 11)
+		if identity.requestStatus == .Declined {
+			identity.decisionReason = databaseGetText(result, 0, 12)
+		}
+		identity.isRestricted = databaseGetBool(result, 0, 13)
+		if identity.userId <= 0 {
+			// Only a resolved account's columns mean anything.
+			delete(identity.nickname)
+			identity.nickname = ""
+			identity.userId = 0
+		}
 	}
 	return databaseSuccess(identity)
 }
@@ -761,13 +832,13 @@ databaseExecuteGetRoomHistory :: proc(
 	)
 }
 
-// A new Public room ($5 = 1) includes every account, the creator among them, and stores Full
-// history whatever $6 says; an invite room includes only the creator, and only when $7
-// (creatorJoins) is true. An encrypted room ($8, protocol 18; never Public, which the router
-// and rooms_encrypted_access refuse) starts with no members: its log's Create entry adds the
-// creator. The database worker runs one statement at a time on one connection, so an account
-// created concurrently either sees this room or is seen by it. The last column says whether the
-// creator is a member.
+// A new Public room ($5 = 1) includes every account but restricted ones (protocol 25, D11), the
+// creator among them, and stores Full history whatever $6 says; an invite room includes only the
+// creator, and only when $7 (creatorJoins) is true. An encrypted room ($8, protocol 18; never
+// Public, which the router and rooms_encrypted_access refuse) starts with no members: its log's
+// Create entry adds the creator. The database worker runs one statement at a time on one
+// connection, so an account created concurrently either sees this room or is seen by it. The last
+// column says whether the creator is a member.
 //
 // Protocol 23 (#95): the creator must hold ManageRooms, checked in this statement; without it
 // nothing is created and the statement returns one row whose first column is NULL and whose
@@ -797,7 +868,7 @@ DATABASE_CREATE_ROOM_SQL ::
 	"members AS (" +
 	"INSERT INTO room_members (room_id, user_id) " +
 	"SELECT created_room.id, users.id FROM created_room CROSS JOIN users " +
-	"WHERE NOT created_room.encrypted AND (created_room.access = 1 " +
+	"WHERE NOT created_room.encrypted AND (created_room.access = 1 AND NOT users.restricted " +
 	"OR (created_room.access IN (2, 3) AND users.id = $1::bigint AND $7::boolean) " +
 	"OR (created_room.access = 4 AND EXISTS (SELECT 1 FROM user_server_roles h " +
 	"WHERE h.user_id = users.id AND h.role_id = ANY($9::bigint[])))) " +
@@ -884,12 +955,12 @@ databaseExecuteCreateRoom :: proc(
 	)
 }
 
-// Switching a room to Public ($5 = 1) adds every account in the same statement; column 8
-// lists the accounts it added. Switching away from Public keeps every member. The history
-// setting never changes. Protocol 18: the edit applies only when $6 is the room's encrypted
-// flag and, for an encrypted room, $5 its access (an encrypted room's access changes through a
-// signed SetAccess log entry). It always returns one row; columns 9 and 10 are the room's flag
-// and access before the edit (NULL for no such room), so a refusal can say why.
+// Switching a room to Public ($5 = 1) adds every account but restricted ones (protocol 25, D11) in
+// the same statement; column 8 lists the accounts it added. Switching away from Public keeps every
+// member. The history setting never changes. Protocol 18: the edit applies only when $6 is the
+// room's encrypted flag and, for an encrypted room, $5 its access (an encrypted room's access
+// changes through a signed SetAccess log entry). It always returns one row; columns 9 and 10 are
+// the room's flag and access before the edit (NULL for no such room), so a refusal can say why.
 //
 // Protocol 23 (#95): $7 is the requester, who must hold ManageRooms; column 11 says whether it
 // does, and without it nothing changes.
@@ -929,7 +1000,8 @@ DATABASE_EDIT_ROOM_SQL ::
 	"holders AS (SELECT DISTINCT h.user_id FROM user_server_roles h " +
 	"WHERE h.role_id = ANY($8::bigint[])), " +
 	"added AS (INSERT INTO room_members (room_id, user_id) " +
-	"SELECT updated.id, users.id FROM updated CROSS JOIN users WHERE updated.access = 1 " +
+	"SELECT updated.id, users.id FROM updated CROSS JOIN users " +
+	"WHERE updated.access = 1 AND NOT users.restricted " +
 	"OR (updated.access = 4 AND users.id IN (SELECT user_id FROM holders)) " +
 	"ON CONFLICT DO NOTHING RETURNING user_id), " +
 	"removed AS (DELETE FROM room_members m USING updated u WHERE m.room_id = u.id " +
@@ -1086,7 +1158,7 @@ databaseExecuteRequest :: proc(
 	case common.DatabaseDirectConversationListRequest:
 		return databaseExecuteListDirectConversations(conn, r)
 	case common.DatabaseUserDirectoryRequest:
-		return databaseExecuteListUsers(conn)
+		return databaseExecuteListUsers(conn, r)
 	case common.DatabaseMarkReadRequest:
 		return databaseExecuteMarkRead(conn, r)
 	case common.DatabaseAdminUserRequest:
@@ -1109,6 +1181,18 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteRoomPermissions(conn, r)
 	case common.DatabaseRoomKeyRequestCheckRequest:
 		return databaseExecuteRoomKeyRequestCheck(conn, r)
+	case common.DatabaseRegisterRequest:
+		return databaseExecuteRegister(conn, r)
+	case common.DatabaseInviteRequest:
+		return databaseExecuteInviteRequest(conn, r)
+	case common.DatabaseRegistrationRequestsRequest:
+		return databaseExecuteRegistrationRequests(conn, r)
+	case common.DatabaseRegistrationModeRequest:
+		return databaseExecuteRegistrationMode(conn, r)
+	case common.DatabaseSharedRoomsRequest:
+		return databaseExecuteSharedRooms(conn, r)
+	case common.DatabaseRestrictedUsersRequest:
+		return databaseExecuteRestrictedUsers(conn)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

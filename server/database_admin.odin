@@ -32,7 +32,8 @@ import "shared:pg"
 // and (protocol 16) its identity key in hex ('' without one) and whether it has published an
 // encryption key bundle. The target columns are NULL for unknown_user and not_admin of a
 // missing target. Protocol 23 (#95) adds two more: the target's role IDs after the action
-// (comma separated) and its effective permission mask after it (database_roles.odin).
+// (comma separated) and its effective permission mask after it (database_roles.odin), and
+// protocol 25 one: whether the target is restricted after it.
 
 @(private = "file")
 DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
@@ -40,7 +41,7 @@ DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
 	"JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = $1::bigint AND sr.name = 'admin') AS ok), " +
 	"target AS (SELECT u.id, u.nickname, u.nickname_locked, u.banned_at IS NOT NULL AS banned, " +
-	"COALESCE(encode(u.public_key, 'hex'), '') AS public_key_hex, " +
+	"u.restricted, COALESCE(encode(u.public_key, 'hex'), '') AS public_key_hex, " +
 	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
 	"WHERE k.user_id = u.id)) AS has_key, " +
 	"EXISTS (SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
@@ -91,7 +92,7 @@ DATABASE_ADMIN_SET_ROLE_SQL ::
 	"CASE WHEN d.outcome <> 'applied' THEN t.role_ids WHEN $3::boolean " +
 	"THEN t.role_ids_granted ELSE t.role_ids_revoked END, " +
 	"(CASE WHEN d.outcome <> 'applied' THEN t.permissions WHEN $3::boolean THEN -1::bigint " +
-	"ELSE t.permissions_revoked END)::text " +
+	"ELSE t.permissions_revoked END)::text, COALESCE(t.restricted, false)::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is the new nickname, or '' to keep it; $4 is the new lock.
@@ -114,7 +115,7 @@ DATABASE_ADMIN_RENAME_SQL ::
 	"COALESCE((SELECT nickname_locked FROM updated), t.nickname_locked)::text, " +
 	"t.is_admin::text, t.banned::text, t.nickname, " +
 	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
-	"t.role_ids, t.permissions::text " +
+	"t.role_ids, t.permissions::text, COALESCE(t.restricted, false)::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // Changes nothing: the router ends the target's sessions when the guards pass.
@@ -129,7 +130,7 @@ DATABASE_ADMIN_KICK_SQL ::
 	"SELECT d.outcome, 'false', t.id::text, t.nickname, t.nickname_locked::text, " +
 	"t.is_admin::text, t.banned::text, t.nickname, " +
 	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
-	"t.role_ids, t.permissions::text " +
+	"t.role_ids, t.permissions::text, COALESCE(t.restricted, false)::text " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 // $3 is true to ban and false to unban; $4 is the reason, kept only while banned. Banning a
@@ -153,7 +154,31 @@ DATABASE_ADMIN_BAN_SQL ::
 	"t.nickname_locked::text, t.is_admin::text, " +
 	"COALESCE((SELECT banned FROM updated), t.banned)::text, t.nickname, " +
 	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
-	"t.role_ids, t.permissions::text " +
+	"t.role_ids, t.permissions::text, COALESCE(t.restricted, false)::text " +
+	"FROM decision d LEFT JOIN target t ON true"
+
+// Protocol 25 (#43, D11): $3 is true to restrict the account and false to lift it. Admins
+// cannot be restricted (admin_target). Lifting adds the account to every Public room in the
+// same statement (column 13, the room IDs); setting it removes no membership.
+DATABASE_ADMIN_SET_RESTRICTED_SQL ::
+	DATABASE_ADMIN_ACTOR_AND_TARGET_SQL +
+	"decision AS (SELECT CASE " +
+	"WHEN NOT (SELECT ok FROM actor) THEN 'not_admin' " +
+	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'unknown_user' " +
+	"WHEN $3::boolean AND (SELECT is_admin FROM target) THEN 'admin_target' " +
+	"ELSE 'applied' END AS outcome), " +
+	"updated AS (UPDATE users SET restricted = $3::boolean FROM decision d " +
+	"WHERE users.id = $2::bigint AND d.outcome = 'applied' " +
+	"AND users.restricted <> $3::boolean RETURNING users.id), " +
+	"joined AS (INSERT INTO room_members (room_id, user_id) " +
+	"SELECT r.id, updated.id FROM rooms r CROSS JOIN updated " +
+	"WHERE r.access = 1 AND NOT $3::boolean ON CONFLICT DO NOTHING RETURNING room_id) " +
+	"SELECT d.outcome, EXISTS (SELECT 1 FROM updated)::text, t.id::text, t.nickname, " +
+	"t.nickname_locked::text, t.is_admin::text, t.banned::text, t.nickname, " +
+	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
+	"t.role_ids, t.permissions::text, " +
+	"(CASE WHEN d.outcome = 'applied' THEN $3::boolean ELSE t.restricted END)::text, " +
+	"COALESCE((SELECT string_agg(room_id::text, ',' ORDER BY room_id) FROM joined), '') " +
 	"FROM decision d LEFT JOIN target t ON true"
 
 databaseAdminOutcomeFromText :: proc(text: string) -> (common.DatabaseAdminOutcome, bool) {
@@ -204,6 +229,9 @@ databaseExecuteAdminUser :: proc(
 		query = DATABASE_ADMIN_BAN_SQL
 		flag = request.banned
 		text = request.reason
+	case .SetRestricted:
+		query = DATABASE_ADMIN_SET_RESTRICTED_SQL
+		flag = request.restricted
 	case:
 		// Role actions are DatabaseRoleRequests (database_roles.odin).
 		return databaseErrorResponse(strings.clone("not an account admin action"))
@@ -226,6 +254,8 @@ databaseExecuteAdminUser :: proc(
 	case .Kick:
 	case .Ban:
 		append(&params, transmute([^]byte)flagParam, transmute([^]byte)textParam)
+	case .SetRestricted:
+		append(&params, transmute([^]byte)flagParam)
 	}
 
 	result := databaseExecParams(conn, query, params[:])
@@ -264,8 +294,14 @@ databaseExecuteAdminUser :: proc(
 		isBanned         = databaseGetBool(result, 0, 6),
 		hasEncryptionKey = databaseGetBool(result, 0, 9),
 		roleIds          = databaseParseIDList(roleIDs),
+		isRestricted     = databaseGetBool(result, 0, 12),
 	}
 	adminResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 8)
+	if request.action == .SetRestricted {
+		added := databaseGetText(result, 0, 13)
+		defer delete(added)
+		adminResult.addedRoomIDs = databaseParseIDList(added)
+	}
 	adminResult.permissions = common.serverPermissionsFromMask(i64(mask))
 	adminResult.nicknameLocked = databaseGetBool(result, 0, 4)
 	adminResult.previousNickname = databaseGetText(result, 0, 7)

@@ -101,6 +101,20 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ClientAdminSetRoomPermissions, 187},
 	{.ClientAdminFetchRoomPermissions, 188},
 	{.ServerAdminRoomPermissions, 189},
+	// Protocol 25 (#43 G1): registration.
+	{.ServerRegistrationRequired, 190},
+	{.ClientAdminSetRegistrationMode, 191},
+	{.ServerRegistrationMode, 192},
+	{.ClientCreateInvite, 193},
+	{.ServerInviteCreated, 194},
+	{.ClientListInvites, 195},
+	{.ServerInviteList, 196},
+	{.ClientRevokeInvite, 197},
+	{.ClientListRegistrationRequests, 198},
+	{.ServerRegistrationRequests, 199},
+	{.ClientDecideRegistration, 200},
+	{.ServerRegistrationRequestUpdated, 201},
+	{.ClientAdminSetRestricted, 202},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -461,10 +475,15 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// and SetUserRoles admin actions) and retired the old role placeholders; 24 added room
 	// permissions and role rooms (#96: RoomPermission, RoomSummary.myPermissions,
 	// RoomAccess.Role, accessRoleIds on ClientCreateRoom and ClientEditRoom,
-	// ClientAdminSetRoomPermissions, ClientAdminFetchRoomPermissions, ServerAdminRoomPermissions).
+	// ClientAdminSetRoomPermissions, ClientAdminFetchRoomPermissions, ServerAdminRoomPermissions);
+	// 25 added registration (#43 G1: ServerRegistrationRequired, ClientAuthRequest.registering,
+	// encrypted ClientRegister{inviteCode, reason} and ServerRegisterResponse{status, message,
+	// auth}, invites, sign-up requests, the registration mode, restricted accounts:
+	// UserSummary.isRestricted, registrationMode and isRestricted in ServerAuthSuccess, and
+	// ClientAdminSetRegistrationMode ... ClientAdminSetRestricted).
 	assert(
-		protocolVersion == 24,
-		fmt.tprintf("expected protocol version 24 for room permissions, got %d", protocolVersion),
+		protocolVersion == 25,
+		fmt.tprintf("expected protocol version 25 for registration, got %d", protocolVersion),
 	)
 }
 

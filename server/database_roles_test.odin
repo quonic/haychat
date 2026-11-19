@@ -662,7 +662,10 @@ testRolePermissionsInOtherStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 	// The directory and the admin statements carry role IDs; granting admin reports every
 	// permission and revoking it leaves the other roles' union.
 	{
-		directory := databaseExecuteRequest(conn, common.DatabaseUserDirectoryRequest{})
+		directory := databaseExecuteRequest(
+			conn,
+			common.DatabaseUserDirectoryRequest{viewerUserId = admin},
+		)
 		defer IPC__database_query_response_deinit(directory)
 		users := directory.result.(common.DatabaseUserDirectoryResult)
 		found := false

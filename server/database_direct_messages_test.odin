@@ -287,7 +287,10 @@ testDirectMessageStatementsAgainstPostgreSQL :: proc(t: ^testing.T) {
 
 	// The user directory lists every account, with online flags left to the router.
 	{
-		response := databaseExecuteRequest(conn, common.DatabaseUserDirectoryRequest{})
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabaseUserDirectoryRequest{viewerUserId = alice},
+		)
 		defer IPC__database_query_response_deinit(response)
 		assert(response.success, response.message)
 		directory := response.result.(common.DatabaseUserDirectoryResult)

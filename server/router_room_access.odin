@@ -155,6 +155,8 @@ MainRouterState_roomMemberRefusalMessage :: proc(
 		return common.ROOM_ROLE_MEMBERSHIP_MESSAGE
 	case .LogDamaged:
 		return common.ROOM_LOG_DAMAGED_MESSAGE
+	case .RestrictedTarget:
+		return common.ROOM_MEMBER_RESTRICTED_MESSAGE
 	case .Applied:
 	}
 	return ""
@@ -192,6 +194,8 @@ MainRouterState_sendRoomMembershipChange :: proc(
 			)
 		}
 	}
+	// Protocol 25 (D17): a restricted account on either side changes who sees whom.
+	MainRouterState_noteMembershipVisibility(pm, state, userID, memberUserIDs)
 }
 
 // Accounts a room switched to Public just added: each of their sessions refreshes its room

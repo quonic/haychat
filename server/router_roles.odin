@@ -254,8 +254,10 @@ MainRouterState_sendPermissionsChanged :: proc(
 				nickname = account.nickname,
 				nicknameLocked = account.nicknameLocked,
 				permissions = account.permissions,
+				isRestricted = MainRouterState_userIsRestricted(state, account.userId),
 			},
 		)
+		MainRouterState_setUserSessionPermissions(pm, state, account.userId, account.permissions)
 	}
 }
 

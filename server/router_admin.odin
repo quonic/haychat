@@ -210,6 +210,9 @@ MainRouterState_adminRefusalMessage :: proc(
 		}
 		return "You cannot remove your own admin role"
 	case .AdminTarget:
+		if action == .SetRestricted {
+			return "Admins cannot be restricted"
+		}
 		if action == .Kick {
 			return "Remove the admin role before kicking an admin"
 		}
@@ -271,7 +274,24 @@ MainRouterState_adminSuccessMessage :: proc(
 			return fmt.aprintf("Banned %s", nickname)
 		}
 		return fmt.aprintf("Unbanned %s", nickname)
-	case .SaveRole, .DeleteRole, .SetUserRoles:
+	case .SetRestricted:
+		if !result.changed {
+			return fmt.aprintf(
+				"%s is already %s",
+				nickname,
+				request.adminFlag ? "restricted" : "unrestricted",
+			)
+		}
+		if request.adminFlag {
+			return fmt.aprintf("%s is restricted", nickname)
+		}
+		return fmt.aprintf("%s is no longer restricted", nickname)
+	case .SaveRole,
+	     .DeleteRole,
+	     .SetUserRoles,
+	     .RevokeInvite,
+	     .SetRegistrationMode,
+	     .DecideRegistration:
 	}
 	return strings.clone("Done")
 }
@@ -283,21 +303,17 @@ MainRouterState_broadcastUserUpdated :: proc(
 	state: ^MainRouterState,
 	user: common.UserSummary,
 ) {
-	payload := common.ServerUserUpdatedPayload {
-		user = user,
-	}
-	payload.user.isOnline = MainRouterState_isUserOnline(state, user.id)
-	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				recipientPeerID,
-				.ServerUserUpdated,
-				payload,
-			)
-		}
-	}
+	updated := user
+	updated.isOnline = MainRouterState_isUserOnline(state, user.id)
+	// Protocol 25 (D17): only to sessions that may see the account (router_registration.odin).
+	MainRouterState_sendAboutUser(
+		pm,
+		state,
+		user.id,
+		user.isRestricted,
+		0,
+		MainRouterVisibilityPayload{kind = .UserUpdated, user = updated},
+	)
 }
 
 // Ends every authenticated session of userID: each gets ServerSessionEnded{kind, reason}, leaves
@@ -409,8 +425,10 @@ MainRouterState_handleAdminUserResult :: proc(
 				nickname = result.user.nickname,
 				nicknameLocked = result.nicknameLocked,
 				permissions = result.permissions,
+				isRestricted = result.user.isRestricted,
 			},
 		)
+		MainRouterState_setUserSessionPermissions(pm, state, userID, result.permissions)
 		if renamed && MainRouterState_isUserOnline(state, userID) {
 			MainRouterState_broadcastPresence(pm, state, userID, result.user.nickname, true, 0)
 			MainRouterState_voiceRefreshUserRooms(pm, state, userID)
@@ -429,7 +447,38 @@ MainRouterState_handleAdminUserResult :: proc(
 		if result.changed {
 			MainRouterState_broadcastUserUpdated(pm, state, result.user)
 		}
-	case .SaveRole, .DeleteRole, .SetUserRoles:
-	// Role actions are DatabaseRoleRequests (router_roles.odin).
+	case .SetRestricted:
+		if !result.changed {
+			return
+		}
+		// Protocol 25 (D11, D17): the router's set first, so the fan-outs below filter by it.
+		MainRouterState_setUserRestricted(state, userID, result.user.isRestricted)
+		MainRouterState_sendMessageToUserID(
+			pm,
+			state,
+			userID,
+			.ServerAccountUpdated,
+			common.ServerAccountUpdatedPayload {
+				isAdmin = result.user.isAdmin,
+				nickname = result.user.nickname,
+				nicknameLocked = result.nicknameLocked,
+				permissions = result.permissions,
+				isRestricted = result.user.isRestricted,
+			},
+		)
+		for roomID in result.addedRoomIDs {
+			MainRouterState_roomMembersAdded(pm, state, roomID, []int{userID})
+		}
+		MainRouterState_broadcastUserUpdated(pm, state, result.user)
+		// Who sees the account, and whom it sees, changed for everyone.
+		MainRouterState_resendAllUserLists(pm, state)
+	case .SaveRole,
+	     .DeleteRole,
+	     .SetUserRoles,
+	     .RevokeInvite,
+	     .SetRegistrationMode,
+	     .DecideRegistration:
+	// Role actions are DatabaseRoleRequests (router_roles.odin), registration ones
+	// router_registration.odin's.
 	}
 }

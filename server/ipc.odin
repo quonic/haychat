@@ -323,6 +323,17 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseRoleRequest:
 		delete(r.name)
 		delete(r.roleIds)
+	case common.DatabaseRegisterRequest:
+		delete(r.nickname)
+		delete(r.reason)
+	case common.DatabaseInviteRequest:
+		delete(r.note)
+		delete(r.roleIds)
+	case common.DatabaseRegistrationRequestsRequest:
+		delete(r.reason)
+	case common.DatabaseSharedRoomsRequest:
+		delete(r.candidateUserIds)
+	case common.DatabaseRegistrationModeRequest, common.DatabaseRestrictedUsersRequest:
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
 	     common.DatabaseRoomHistoryRequest,
@@ -416,10 +427,35 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.previousNickname)
 		delete(r.nickname)
 		delete(r.banReason)
+		delete(r.decisionReason)
 	case common.DatabaseAdminUserResult:
 		user := r.user
 		common.UserSummary_deinit(&user)
 		delete(r.previousNickname)
+		delete(r.addedRoomIDs)
+	case common.DatabaseRegisterResult:
+		delete(r.nickname)
+		request := r.request
+		common.RegistrationRequestSummary_deinit(&request)
+	case common.DatabaseInviteResult:
+		invite := r.invite
+		common.InviteSummary_deinit(&invite)
+		for &listed in r.invites {
+			common.InviteSummary_deinit(&listed)
+		}
+		delete(r.invites)
+	case common.DatabaseRegistrationRequestsResult:
+		for &listed in r.requests {
+			common.RegistrationRequestSummary_deinit(&listed)
+		}
+		delete(r.requests)
+		request := r.request
+		common.RegistrationRequestSummary_deinit(&request)
+	case common.DatabaseSharedRoomsResult:
+		delete(r.userIds)
+	case common.DatabaseRestrictedUsersResult:
+		delete(r.userIds)
+	case common.DatabaseRegistrationModeResult:
 	case common.DatabaseRoleResult:
 		for &role in r.roles {
 			common.RoleSummary_deinit(&role)

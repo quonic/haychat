@@ -746,6 +746,110 @@ DATABASE_ROOM_PERMISSIONS_CHECKS ::
 	"AND confdeltype = 'c')), " +
 	"('room access roles role index', to_regclass('room_access_roles_by_role_id') IS NOT NULL)"
 
+// Migration 13 (protocol 25, #43 G1, plan D7-D14): registration. server_settings is one row
+// (id 1) holding the registration mode, migrated as Open (1) so an upgrade changes nothing.
+// invites keeps only sha256 of each code (32 bytes, unique), its creator (NULL for an
+// operator's code), note, expiry, use limit and count, revocation, the room a restricted code
+// joins and whether approval is skipped; invite_roles the roles a code grants.
+// registration_requests holds one sign-up request per identity key (status 1 pending, 2
+// approved, 3 declined) with the requested name, the reason (1..500 characters) and the code.
+// users gains restricted (every existing account stays unrestricted) and invite_id, the code
+// an account came in through, for auditing.
+DATABASE_MIGRATION_13_REGISTRATION_SQL ::
+	"CREATE TABLE server_settings (" +
+	"id SMALLINT PRIMARY KEY DEFAULT 1, " +
+	"registration_mode SMALLINT NOT NULL DEFAULT 1, " +
+	"CONSTRAINT server_settings_one_row CHECK (id = 1), " +
+	"CONSTRAINT server_settings_registration_mode_check " +
+	"CHECK (registration_mode IN (1, 2, 3))); " +
+	"INSERT INTO server_settings (id, registration_mode) VALUES (1, 1); " +
+	"CREATE TABLE invites (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"code_hash BYTEA NOT NULL, " +
+	"created_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"note VARCHAR(200) NOT NULL DEFAULT '', " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"expires_at TIMESTAMPTZ NULL, " +
+	"max_uses INTEGER NULL, " +
+	"uses INTEGER NOT NULL DEFAULT 0, " +
+	"revoked_at TIMESTAMPTZ NULL, " +
+	"room_id BIGINT NULL REFERENCES rooms(id) ON DELETE SET NULL, " +
+	"restricted BOOLEAN NOT NULL DEFAULT false, " +
+	"skip_approval BOOLEAN NOT NULL DEFAULT false, " +
+	"CONSTRAINT invites_code_hash_unique UNIQUE (code_hash), " +
+	"CONSTRAINT invites_code_hash_size CHECK (octet_length(code_hash) = 32), " +
+	"CONSTRAINT invites_uses_check CHECK (uses >= 0 AND (max_uses IS NULL OR " +
+	"(max_uses > 0 AND uses <= max_uses))), " +
+	"CONSTRAINT invites_room_restricted CHECK (restricted OR room_id IS NULL)); " +
+	"CREATE INDEX invites_by_created_by_user_id ON invites (created_by_user_id); " +
+	"CREATE INDEX invites_by_room_id ON invites (room_id); " +
+	"CREATE TABLE invite_roles (" +
+	"invite_id BIGINT NOT NULL REFERENCES invites(id) ON DELETE CASCADE, " +
+	"role_id BIGINT NOT NULL REFERENCES server_roles(id) ON DELETE CASCADE, " +
+	"PRIMARY KEY (invite_id, role_id)); " +
+	"CREATE INDEX invite_roles_by_role_id ON invite_roles (role_id); " +
+	"CREATE TABLE registration_requests (" +
+	"id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, " +
+	"public_key BYTEA NOT NULL, " +
+	"nickname VARCHAR(32) NOT NULL, " +
+	"reason VARCHAR(500) NOT NULL, " +
+	"invite_id BIGINT NOT NULL REFERENCES invites(id) ON DELETE CASCADE, " +
+	"status SMALLINT NOT NULL DEFAULT 1, " +
+	"decided_by_user_id BIGINT NULL REFERENCES users(id) ON DELETE SET NULL, " +
+	"decision_reason VARCHAR(500) NOT NULL DEFAULT '', " +
+	"created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, " +
+	"decided_at TIMESTAMPTZ NULL, " +
+	"CONSTRAINT registration_requests_public_key_unique UNIQUE (public_key), " +
+	"CONSTRAINT registration_requests_public_key_size CHECK (octet_length(public_key) = 32), " +
+	"CONSTRAINT registration_requests_status_check CHECK (status IN (1, 2, 3)), " +
+	"CONSTRAINT registration_requests_reason_check " +
+	"CHECK (char_length(reason) BETWEEN 1 AND 500)); " +
+	"CREATE INDEX registration_requests_by_status ON registration_requests (status, id); " +
+	"CREATE INDEX registration_requests_by_invite_id ON registration_requests (invite_id); " +
+	"ALTER TABLE users ADD COLUMN restricted BOOLEAN NOT NULL DEFAULT false, " +
+	"ADD COLUMN invite_id BIGINT NULL REFERENCES invites(id) ON DELETE SET NULL;"
+
+// What migration 13 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_REGISTRATION_CHECKS ::
+	"('server_settings table', to_regclass('server_settings') IS NOT NULL), " +
+	"('server_settings one row', (SELECT count(*) = 1 FROM server_settings)), " +
+	"('server settings registration mode check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('server_settings') AND contype = 'c' " +
+	"AND conname = 'server_settings_registration_mode_check')), " +
+	"('invites table', to_regclass('invites') IS NOT NULL), " +
+	"('invites columns', (SELECT count(*) = 12 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'invites' AND column_name IN " +
+	"('id', 'code_hash', 'created_by_user_id', 'note', 'created_at', 'expires_at', " +
+	"'max_uses', 'uses', 'revoked_at', 'room_id', 'restricted', 'skip_approval'))), " +
+	"('invites code hash unique', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('invites') AND contype = 'u' " +
+	"AND conname = 'invites_code_hash_unique')), " +
+	"('invites code hash size', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('invites') AND contype = 'c' " +
+	"AND conname = 'invites_code_hash_size')), " +
+	"('invites uses check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('invites') AND contype = 'c' " +
+	"AND conname = 'invites_uses_check')), " +
+	"('invite_roles table', to_regclass('invite_roles') IS NOT NULL), " +
+	"('invite roles cascades', (SELECT count(*) = 2 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('invite_roles') AND contype = 'f' " +
+	"AND confdeltype = 'c')), " +
+	"('registration_requests table', to_regclass('registration_requests') IS NOT NULL), " +
+	"('registration requests public key unique', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('registration_requests') AND contype = 'u' " +
+	"AND conname = 'registration_requests_public_key_unique')), " +
+	"('registration requests status check', EXISTS (SELECT 1 FROM pg_constraint " +
+	"WHERE conrelid = to_regclass('registration_requests') AND contype = 'c' " +
+	"AND conname = 'registration_requests_status_check')), " +
+	"('registration requests status index', " +
+	"to_regclass('registration_requests_by_status') IS NOT NULL), " +
+	"('users restricted', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'users' " +
+	"AND column_name = 'restricted' AND data_type = 'boolean' AND is_nullable = 'NO')), " +
+	"('users invite_id', EXISTS (SELECT 1 FROM information_schema.columns " +
+	"WHERE table_schema = current_schema() AND table_name = 'users' " +
+	"AND column_name = 'invite_id' AND data_type = 'bigint' AND is_nullable = 'YES'))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -814,6 +918,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "room permissions",
 		sql = DATABASE_MIGRATION_12_ROOM_PERMISSIONS_SQL,
 		checks = DATABASE_ROOM_PERMISSIONS_CHECKS,
+	},
+	{
+		version = 13,
+		name = "registration",
+		sql = DATABASE_MIGRATION_13_REGISTRATION_SQL,
+		checks = DATABASE_REGISTRATION_CHECKS,
 	},
 }
 
@@ -937,6 +1047,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ROLES_CHECKS +
 	", " +
 	DATABASE_ROOM_PERMISSIONS_CHECKS +
+	", " +
+	DATABASE_REGISTRATION_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

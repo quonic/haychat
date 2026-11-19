@@ -19,7 +19,9 @@ import "shared:pg"
 //   else, so non-members learn nothing about rooms they cannot see; a requester who is neither
 //   a manager nor a member is `not_member`; a Public room is `public_room` (it already
 //   includes every account); an Admin invite room needs a manager (`admin_required`); the
-//   target must exist (`unknown_user`). Adding a member again changes nothing.
+//   target must exist (`unknown_user`). Adding a member again changes nothing. Protocol 25
+//   (D11): a restricted target needs a manager (`restricted_target`), so members of a Member
+//   invite room cannot pull a restricted account into it.
 // - Remove: managers only (`admin_required`), in every mode; then `unknown_room` and
 //   `unknown_user`. Removing someone who is not a member changes nothing.
 // - Leave: the requester must be a member (`not_member`, also for a missing room), and Public
@@ -51,7 +53,7 @@ DATABASE_ROOM_MEMBER_PREFIX_SQL ::
 	"EXISTS (SELECT 1 FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id = $1::bigint) AS is_member), " +
 	"room AS (SELECT id, access, encrypted FROM rooms WHERE id = $2::bigint), " +
-	"target AS (SELECT id FROM users WHERE id = $3::bigint), "
+	"target AS (SELECT id, restricted FROM users WHERE id = $3::bigint), "
 
 // The final select. members is how the members after the action are built from the snapshot.
 @(private = "file")
@@ -80,6 +82,8 @@ DATABASE_ROOM_ADD_MEMBER_SQL ::
 	"WHEN (SELECT access FROM room) = 3 AND NOT (SELECT is_admin FROM actor) " +
 	"THEN 'admin_required' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'unknown_user' " +
+	"WHEN (SELECT restricted FROM target) AND NOT (SELECT is_admin FROM actor) " +
+	"THEN 'restricted_target' " +
 	"ELSE 'applied' END AS outcome), " +
 	"changed AS (INSERT INTO room_members (room_id, user_id) " +
 	"SELECT $2::bigint, $3::bigint FROM decision WHERE outcome = 'applied' " +
@@ -161,6 +165,8 @@ databaseRoomMemberOutcomeFromText :: proc(
 		return .EncryptedRoom, true
 	case "role_room":
 		return .RoleRoom, true
+	case "restricted_target":
+		return .RestrictedTarget, true
 	}
 	return .NotMember, false
 }

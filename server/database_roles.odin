@@ -203,11 +203,12 @@ DATABASE_DELETE_ROLE_SQL ::
 //
 // Protocol 24 (#96): the account joins every Role room one of its roles after the change gives
 // access to and leaves every other Role room (deleting its read marker there), in the same
-// statement; column 12 lists those changes (DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL).
+// statement; column 12 lists those changes (DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL). Column 13
+// (protocol 25) is whether the account is restricted.
 DATABASE_SET_USER_ROLES_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
 	"target AS (SELECT u.id, u.nickname, u.nickname_locked, u.banned_at IS NOT NULL AS banned, " +
-	"COALESCE(encode(u.public_key, 'hex'), '') AS public_key_hex, " +
+	"u.restricted, COALESCE(encode(u.public_key, 'hex'), '') AS public_key_hex, " +
 	"(u.public_key IS NOT NULL AND EXISTS (SELECT 1 FROM user_encryption_keys k " +
 	"WHERE k.user_id = u.id)) AS has_key, " +
 	DATABASE_SERVER_PERMISSIONS_OPEN_SQL + "u.id" + DATABASE_SERVER_PERMISSIONS_CLOSE_SQL +
@@ -253,7 +254,7 @@ DATABASE_SET_USER_ROLES_SQL ::
 	"COALESCE(t.public_key_hex, ''), COALESCE(t.has_key, false)::text, " +
 	"COALESCE((SELECT string_agg(role_id::text, ',' ORDER BY role_id) FROM roles_after), ''), " +
 	"t.before::text, (SELECT mask FROM after)::text, " + DATABASE_ROLE_ROOM_CHANGES_COLUMN_SQL +
-	" FROM decision d LEFT JOIN target t ON true"
+	", COALESCE(t.restricted, false)::text FROM decision d LEFT JOIN target t ON true"
 
 // Reads one role in DATABASE_ROLE_COLUMNS_SQL order starting at first. name is owned.
 databaseGetRoleSummary :: proc(
@@ -527,6 +528,7 @@ databaseExecuteSetUserRoles :: proc(
 		isBanned         = databaseGetBool(result, 0, 6),
 		hasEncryptionKey = databaseGetBool(result, 0, 8),
 		roleIds          = databaseParseIDList(roleIDs),
+		isRestricted     = databaseGetBool(result, 0, 13),
 	}
 	roleResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 7)
 	before, _ := databaseGetInt(result, 0, 10)

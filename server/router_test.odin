@@ -259,6 +259,8 @@ routerCompleteHandshake :: proc(
 	nicknameLocked := false,
 	// When set, receives the client's identity private key (tests that sign as the client).
 	identityPrivateKeyOut: ^common.IdentityPrivateKeyBytes = nil,
+	// Protocol 25: the identity statement reports a restricted account.
+	isRestricted := false,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -369,6 +371,7 @@ routerCompleteHandshake :: proc(
 				isAdmin = isAdmin,
 				nickname = strings.clone(len(accountNickname) > 0 ? accountNickname : nickname),
 				nicknameLocked = nicknameLocked,
+				isRestricted = isRestricted,
 			},
 		},
 	)

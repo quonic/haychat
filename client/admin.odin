@@ -79,6 +79,8 @@ ClientServerTransport_sendAdminRequest :: proc(
 			request.userID,
 			roleIDs[:request.roleIDCount],
 		)
+	case .RevokeInvite, .SetRegistrationMode, .DecideRegistration, .SetRestricted:
+	// Protocol 25 registration actions; the client sends them from G2 on.
 	}
 	return false
 }

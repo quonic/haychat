@@ -298,7 +298,8 @@ odin build server -o:speed -out:"$server_dir/haychat-server"
 stage_licences server "$server_dir"
 cp deploy/README.md "$server_dir/DEPLOY.md"
 cp .env.example "$server_dir/env.example"
-cp server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql "$server_dir/sql/"
+cp server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql deploy/sql/create-invite.sql \
+	deploy/sql/set-registration-mode.sql "$server_dir/sql/"
 tar -C "$work_dir" -czf "$out_dir/haychat-server-$version-linux-x86_64.tar.gz" \
 	"haychat-server-$version"
 

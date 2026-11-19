@@ -36,22 +36,17 @@ MainRouterState_broadcastPresence :: proc(
 	isOnline: bool,
 	excludePeerID: u32,
 ) {
-	payload := common.ServerUserPresencePayload {
-		userId   = userID,
-		nickname = nickname,
-		isOnline = isOnline,
-	}
-	for recipientPeerID, recipientSession in state.peerSessions {
-		if recipientSession.isAuthenticated && recipientPeerID != excludePeerID {
-			MainRouterState_sendPeerMessage(
-				pm,
-				state,
-				recipientPeerID,
-				.ServerUserPresence,
-				payload,
-			)
-		}
-	}
+	// Protocol 25 (D17): only to sessions that may see the account (router_registration.odin).
+	MainRouterState_sendAboutUser(
+		pm,
+		state,
+		userID,
+		MainRouterState_userIsRestricted(state, userID),
+		excludePeerID,
+		MainRouterVisibilityPayload {
+			presence = {userId = userID, nickname = nickname, isOnline = isOnline},
+		},
+	)
 }
 
 // Call after a session of userID stopped counting as authenticated (it was removed or failed).
@@ -373,19 +368,20 @@ MainRouterState_handleClientListUsers :: proc(
 		MainRouterState_sendProtocolError(pm, state, peerID, "Invalid ClientUserList payload")
 		return
 	}
-	if _, ok := MainRouterState_authenticatedUserID(
+	userID, ok := MainRouterState_authenticatedUserID(
 		pm,
 		state,
 		peerID,
 		"Unauthenticated user list request",
-	); !ok {
+	)
+	if !ok {
 		return
 	}
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
 		peerID,
-		common.DatabaseUserDirectoryRequest{},
+		common.DatabaseUserDirectoryRequest{viewerUserId = userID},
 		PendingDBRequest{requestType = .ListUsers},
 	)
 }
@@ -413,6 +409,8 @@ MainRouterState_handlePostDirectMessageResult :: proc(
 		refusal = common.SEALED_DIRECT_MESSAGE_INVALID_MESSAGE
 	case .Duplicate:
 		refusal = common.DIRECT_MESSAGE_DUPLICATE_MESSAGE
+	case .Restricted:
+		refusal = common.DIRECT_MESSAGE_RESTRICTED_MESSAGE
 	}
 	if len(refusal) > 0 {
 		MainRouterState_sendProtocolError(pm, state, request.peerID, refusal)
