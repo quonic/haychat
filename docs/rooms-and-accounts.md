@@ -405,6 +405,28 @@ and the [user guide](user-guide.md#encrypted-direct-messages)). A sent message i
 every connected session of both the sender and the recipient; a client shows its own message
 only when the server echoes it back with the stored ID and timestamp.
 
+## Editing and Deleting Messages
+
+Since protocol 30 (#76) the author of a room or direct message can edit and delete it, and an
+admin can delete any room message. The server checks every request in the statement that makes
+the change ([protocol.md](protocol.md#editing-and-deleting-messages-protocol-30)):
+
+- Only the author edits or deletes a message, and only one they can still read: a member of the
+  room (in a From join room, a message from after they joined) or one side of the direct
+  conversation. The recipient of a direct message cannot delete it, and admins cannot touch
+  direct messages.
+- An edit needs what a new message there needs at the time: membership, **Send messages** and a
+  room with chat (and in a direct conversation, a room shared with a restricted account). It
+  changes the text only; the message keeps its files. A message takes at most 100 edits, with no
+  time limit, and every version is kept for the history.
+- A delete leaves a tombstone with the message's ID, so history and read markers stay as they
+  were. The text, its edits and its files go (the files' downloads stop and the files are
+  deleted); an admin's delete also lists the files in the removal log. A deleted message never
+  counts as unread.
+- Every author's edit and delete is signed, so the server cannot make one up. A client shows a
+  deleted message as "Message deleted" when the author signed it, and as "Removed by the server"
+  otherwise, which is what an admin's delete looks like.
+
 ## Unread Counts
 
 The server keeps one read marker per account and room and per account and direct conversation,

@@ -172,6 +172,68 @@ carries no attachments.
   after the text, and hovering over it shows the versions with their times (fetched once). A
   tombstone reads "Message deleted" (signed by the author) or "Removed by the server".
 
+### Notes from M1 (2026-11-19)
+
+Where the code needed something the design above leaves open, M1 chose:
+
+- **The original's ID on the wire.** `ClientEditRoomMessage`, `ClientDeleteRoomMessage`,
+  `ClientEditDirectMessage` and `ClientDeleteDirectMessage` also carry
+  `originalClientMessageId`, the message's client message ID, which the signatures cover. The
+  router can then verify a plaintext edit's and a delete's signature against the session's key
+  without the database, as this design says it does, and the statement refuses the change
+  unless that ID is the stored message's ("Message not found").
+- **Notices.** `ServerRoomMessageEdited` and `ServerRoomMessageDeleted` carry `senderId`, and
+  both edited notices `editCount` (the count after the edit), so a client checks an edit against
+  the right pin and keeps the server's count without counting itself. The live new-message
+  payloads (`ServerChatMessagePayload`, `ServerDirectMessagePayload`,
+  `ServerSealedDirectMessagePayload`) do not gain the edit fields: a message is never edited or
+  deleted when it is first sent. Stored messages, history and the conversation summary do.
+- **Who may delete.** An author's delete, like an edit, needs the message to be one the author
+  can still read (membership and the From join cut). An admin's moderation delete needs only the
+  admin role, not membership, and also reaches the admin's own session when it is not a reader.
+- **Files of a deleted message (D8).** The attachments become Removed tombstones with the
+  deleter as `removed_by_user_id`. Besides ending the downloads and deleting the files, the
+  router sends every reader `ServerAttachmentRemoved` for each file before the tombstone, so
+  clients give the quota back and abandon downloads through the protocol 28/29 path. A download
+  of such a file is refused with the existing "Attachment removed by an admin", also after an
+  author's delete (a follow-up may give it its own sentence). An admin's delete logs the files
+  with the reason "Message deleted".
+- **Edits of a deleted message (D7).** The delete removes the edit rows, so their client message
+  IDs and chain indexes are no longer reserved on the server; only the tombstone's own are.
+  Clients never reuse an ID or an index, and an edit's signature cannot be read as another
+  message's (its label is its own), so nothing can be replayed with them.
+- **Schema.** `chat_message_edits` has no `epoch` column: the sealed bytes carry it, and the
+  edit statement checks it against `rooms.log_version`. A tombstone's `edit_count` goes back to 0.
+- **Refusals** reuse the new-message sentences for D10 ("Not a room member", "You cannot send
+  messages in this room", "Room key is out of date", …) and, like the new ones, name the message:
+  " (message N)" is appended (`common.messageRefusal`). A client matches them by prefix.
+- **Harness fields** are camelCase (`editCount`, `edited`, `editStatus`, `deleted`,
+  `removedByServer`), like every other harness field, rather than the snake_case names above;
+  the event names are as planned. `msg-edit`/`dm-edit` take `--forge` (a bad signature, for the
+  proof) and `--unchecked` (skip the own-message check), and `msg-delete`/`dm-delete` take
+  `unchecked`, so a proof sees the server refuse.
+- **M1 client.** A sealed edit is kept as Pending ("edited, not verified yet") and never opened,
+  and editing a sealed message is refused locally ("Editing encrypted messages is not available
+  yet"); deletes are signed in encrypted conversations too. The window shows the latest verified
+  version with " (edited)" and a tombstone's sentence as plain text until M3.
+
+### M2 hooks
+
+- Server: nothing to change. A sealed room edit (`ClientEditRoomMessage.sealed`) is checked by
+  `MainRouterState_checkSealedRoomMessage` (with the edit's client message ID in the AAD) and
+  stored in `chat_message_edits.sealed` with its chain position; a sealed DM edit
+  (`ClientEditDirectMessage.envelope`) is verified by the database worker
+  (`databaseExecuteEditDirectMessage`) and stored in `direct_message_edits.envelope`. Both come
+  back as `MessageEdit.sealed` in `lastEdit`, the edited notices and `ServerMessageEdits`.
+- Client: `State_editRoomMessage` and `State_editDirectMessage` refuse a sealed message with
+  `MESSAGE_EDIT_SEALED_UNSUPPORTED_MESSAGE`; M2 replaces that branch with sealing (the room's
+  chain through `room_chains.odin`'s queue, the DM's envelope through
+  `direct_messages_e2ee.odin`) and sends `sealed`/`envelope` with an empty content and a zero
+  signature. `messageEditCheck` returns Pending for a sealed edit; M2 opens it there (or in a
+  State procedure that has the chains and keys) and checks `"replaces"`, the original sender and
+  that it has no attachments. The harness's `msg-edit`/`dm-edit` go through those procedures, so
+  they pick sealed or plaintext by the conversation as `send`/`dm` do.
+
 ## Packages
 
 Strictly sequential, one PR each against `main`, each from fresh `main` after the previous merge.
@@ -227,3 +289,5 @@ Strictly sequential, one PR each against `main`, each from fresh `main` after th
 ## Round Status
 
 - 2026-11-19: plan written. M1 in progress.
+- 2026-11-19: M1 implemented (protocol 30, migration 17, wire values 218-227); departures are
+  under "Notes from M1" in the Design section. M2 and M3 to follow.

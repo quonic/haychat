@@ -114,6 +114,8 @@ State_roomMessagesKeysChanged :: proc(state: ^State, serverID: int) {
 	for roomID in waiting {
 		State_roomChainsReopenPending(state, serverID, roomID)
 	}
+	// Protocol 30: edits and signed tombstones that waited for an author's key.
+	State_messageEditsKeysChanged(state, serverID)
 }
 
 // Signs content for roomID as this profile (protocol 22). errorMessage (static) says why it

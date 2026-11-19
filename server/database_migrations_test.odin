@@ -755,8 +755,15 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 			strings.write_byte(&builder, ' ')
 		}
 		fmt.sbprintf(&builder, "%d:", userID)
-		forUser, _ := strings.replace_all(
+		// Without migration 17's deleted_at test (D13), which these schemas lack.
+		rule, _ := strings.replace_all(
 			DATABASE_ROOMS_WITH_UNREAD_SQL,
+			DATABASE_UNREAD_ROOM_NOT_DELETED_SQL,
+			"",
+			context.temp_allocator,
+		)
+		forUser, _ := strings.replace_all(
+			rule,
 			"$1::bigint",
 			fmt.tprintf("%d", userID),
 			context.temp_allocator,
@@ -785,7 +792,27 @@ databaseMigrationTestUnreadCounts :: proc(conn: pg.Conn, userIDs: []int) -> stri
 			"''",
 			context.temp_allocator,
 		)
-		directSQL := withoutAttachments
+		// And without migration 17's edit columns, their joins and the deleted_at test.
+		withoutEditColumns, _ := strings.replace_all(
+			withoutAttachments,
+			DATABASE_MESSAGE_EDIT_COLUMNS_SQL,
+			DATABASE_MESSAGE_NO_EDIT_COLUMNS_SQL,
+			context.temp_allocator,
+		)
+		withoutEditJoins, _ := strings.replace_all(
+			withoutEditColumns,
+			DATABASE_DIRECT_MESSAGE_EDITS_JOIN_OPEN_SQL + "c.id" +
+			DATABASE_DIRECT_MESSAGE_EDITS_JOIN_MIDDLE_SQL + "c.id" +
+			DATABASE_MESSAGE_EDITS_JOIN_CLOSE_SQL,
+			"",
+			context.temp_allocator,
+		)
+		directSQL, _ := strings.replace_all(
+			withoutEditJoins,
+			DATABASE_UNREAD_DIRECT_NOT_DELETED_SQL,
+			"",
+			context.temp_allocator,
+		)
 		parameters := []int{userID, common.DIRECT_CONVERSATIONS_MAX, common.UNREAD_COUNT_CAP}
 		for value, index in parameters {
 			directSQL, _ = strings.replace_all(
@@ -1746,5 +1773,170 @@ testAttachmentRemovalsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 	assert(
 		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "attachment_removals columns"),
 		"expected schema validation to require migration 16's checks",
+	)
+}
+
+// Migration 17 (#76) upgrades a version 16 database with rows: every message stays as it was,
+// with no edit and not deleted; tombstones and edits then pass the new checks and nothing else
+// does.
+@(test)
+testMessageEditsMigrationUpgradesVersion16AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "message_edits_v16")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:16])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 16 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	MESSAGES_SQL ::
+		"SELECT concat_ws(' | ', (SELECT string_agg(id || ':' || content || ':' || " +
+		"encode(client_message_id, 'hex'), ',' ORDER BY id) FROM chat_messages), " +
+		"(SELECT string_agg(id || ':' || content || ':' || encode(client_message_id, 'hex'), " +
+		"',' ORDER BY id) FROM direct_messages))"
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+	messages := databaseMigrationTestValue(conn, MESSAGES_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:17])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 16, version = 17},
+		fmt.tprintf("expected only migration 17 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:17])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept &&
+		databaseMigrationTestValue(conn, MESSAGES_SQL) == messages,
+		"expected every account, room and message intact",
+	)
+	fresh := databaseMigrationTestValue(
+		conn,
+		"SELECT concat_ws('/', (SELECT string_agg(edit_count || ':' || (deleted_at IS NULL), " +
+		"',' ORDER BY id) FROM chat_messages), (SELECT string_agg(edit_count || ':' || " +
+		"(deleted_at IS NULL), ',' ORDER BY id) FROM direct_messages))",
+	)
+	assert(
+		fresh == "0:true,0:true/0:true,0:true",
+		fmt.tprintf("expected no message edited or deleted, got %s", fresh),
+	)
+
+	// A tombstone keeps its client message ID and passes; an edit row of each kind passes.
+	databaseDefaultRoomTestExec(
+		conn,
+		"tombstones and edits",
+		"UPDATE chat_messages SET content = '', signature = NULL, deleted_at = now(), " +
+		"deleted_by_user_id = 1, delete_signature = decode(repeat('cd', 64), 'hex') " +
+		"WHERE id = 1; " +
+		"UPDATE direct_messages SET content = '', signature = NULL, deleted_at = now(), " +
+		"deleted_by_user_id = 1 WHERE id = 1; " +
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, content, " +
+		"signature) VALUES (2, 2, decode(repeat('11', 16), 'hex'), 'edited', " +
+		"decode(repeat('ab', 64), 'hex')); " +
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, sealed, " +
+		"chain_id, chain_index) VALUES (2, 2, decode(repeat('12', 16), 'hex'), '\\x0102', " +
+		"decode(repeat('13', 16), 'hex'), 4); " +
+		"INSERT INTO direct_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, signature) VALUES (2, 2, decode(repeat('14', 16), 'hex'), 'edited', " +
+		"decode(repeat('ab', 64), 'hex')); " +
+		"UPDATE chat_messages SET edit_count = 2, edited_at = now() WHERE id = 2",
+	)
+	probes := [?]string {
+		// A tombstone with content, with a signature, or without its client message ID.
+		"UPDATE chat_messages SET content = 'back' WHERE id = 1",
+		"UPDATE chat_messages SET signature = decode(repeat('ab', 64), 'hex') WHERE id = 1",
+		"UPDATE chat_messages SET client_message_id = NULL WHERE id = 1",
+		"UPDATE direct_messages SET client_message_id = NULL WHERE id = 1",
+		// A live message with a deleter or a delete signature, or past the edit cap.
+		"UPDATE chat_messages SET deleted_by_user_id = 1 WHERE id = 2",
+		"UPDATE direct_messages SET delete_signature = decode(repeat('cd', 64), 'hex') " +
+		"WHERE id = 2",
+		"UPDATE chat_messages SET edit_count = 101 WHERE id = 2",
+		"UPDATE chat_messages SET delete_signature = '\\x01' WHERE id = 1",
+		// An edit with both kinds, with neither, or sealed with content.
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content) VALUES (2, 2, decode(repeat('15', 16), 'hex'), 'unsigned')",
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, sealed, chain_id, chain_index) VALUES (2, 2, decode(repeat('16', 16), 'hex'), " +
+		"'x', '\\x01', decode(repeat('13', 16), 'hex'), 5)",
+		"INSERT INTO direct_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, envelope, signature) VALUES (2, 2, decode(repeat('17', 16), 'hex'), '', " +
+		"'\\x01', decode(repeat('ab', 64), 'hex'))",
+		"INSERT INTO direct_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, signature) VALUES (2, 2, decode(repeat('18', 15), 'hex'), 'x', " +
+		"decode(repeat('ab', 64), 'hex'))",
+	}
+	for probe in probes {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN check_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the checks to refuse %q", probe))
+	}
+	// One client message ID per sender in each edit table, and one chain index.
+	unique := [?]string {
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, signature) VALUES (2, 2, decode(repeat('11', 16), 'hex'), 'again', " +
+		"decode(repeat('ab', 64), 'hex'))",
+		"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, sealed, " +
+		"chain_id, chain_index) VALUES (2, 2, decode(repeat('19', 16), 'hex'), '\\x01', " +
+		"decode(repeat('13', 16), 'hex'), 4)",
+		"INSERT INTO direct_message_edits (message_id, sender_user_id, client_message_id, " +
+		"content, signature) VALUES (2, 2, decode(repeat('14', 16), 'hex'), 'again', " +
+		"decode(repeat('ab', 64), 'hex'))",
+	}
+	for probe in unique {
+		refused := databaseMigrationTestValue(
+			conn,
+			fmt.tprintf(
+				"DO $$ BEGIN %s; RAISE EXCEPTION 'accepted'; EXCEPTION WHEN unique_violation " +
+				"THEN NULL; END $$; SELECT 'refused'",
+				probe,
+			),
+		)
+		assert(refused == "refused", fmt.tprintf("expected the indexes to refuse %q", probe))
+	}
+	// Edits go with their message; a tombstone's deleter turns NULL with its account.
+	databaseDefaultRoomTestExec(
+		conn,
+		"delete the edited messages",
+		"DELETE FROM chat_messages WHERE id = 2; DELETE FROM direct_messages WHERE id = 2",
+	)
+	assert(
+		databaseMigrationTestValue(
+			conn,
+			"SELECT (SELECT count(*) FROM chat_message_edits) || '/' || " +
+			"(SELECT count(*) FROM direct_message_edits)",
+		) ==
+		"0/0",
+		"expected the edits to cascade with their messages",
+	)
+}
+
+@(test)
+testMessageEditsMigrationKeepsItsShape :: proc(t: ^testing.T) {
+	_ = t
+	migration := DATABASE_MIGRATIONS[16]
+	assert(
+		migration.version == 17 && migration.name == "message edits",
+		fmt.tprintf("expected migration 17 to be message edits, got %v", migration),
+	)
+	assert(
+		!strings.contains(migration.sql, "DROP TABLE") &&
+		!strings.contains(migration.sql, "DROP COLUMN") &&
+		!strings.contains(migration.sql, "DELETE FROM"),
+		"expected migration 17 to drop and delete nothing",
+	)
+	assert(
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "chat_message_edits columns") &&
+		strings.contains(DATABASE_SCHEMA_VALIDATION_SQL, "direct_message_edits columns"),
+		"expected schema validation to require migration 17's checks",
 	)
 }

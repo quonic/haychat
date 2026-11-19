@@ -14,7 +14,7 @@
 | --- | --- |
 | [deploy/README.md](../deploy/README.md) | Running a server for real users: the server image, quadlet units, first-time setup, firewall, backups and their restore order (database first, then attachments), attachment storage and its SQL helpers, upgrades, and release builds |
 | [server-configuration.md](server-configuration.md) | Every `HAYCHAT_*` environment variable (attachment limits included), startup exit status, schema migrations, and the `[Status]` log line |
-| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, registration (invite codes, approval, restricted accounts), roles, rooms and room permissions, attachments (Attach files, who may download, what is kept) and their moderation, admin actions, direct messages, and unread counts |
+| [rooms-and-accounts.md](rooms-and-accounts.md) | The rules the server enforces for accounts, display names, registration (invite codes, approval, restricted accounts), roles, rooms and room permissions, attachments (Attach files, who may download, what is kept) and their moderation, admin actions, direct messages, editing and deleting messages, and unread counts |
 
 ## Developing HayChat
 

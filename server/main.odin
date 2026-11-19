@@ -67,6 +67,10 @@ PendingDBRequestType :: enum {
 	// sweeper or the startup scan. It outlives its peer's disconnect: the session ID below
 	// decides whether anyone is still there to answer.
 	Attachment,
+	// Message edits and deletes (router_message_edits.odin, protocol 30): an edit, a delete or
+	// an edit fetch, whose one statement checks everything. It outlives its peer's disconnect
+	// like Attachment, so an applied delete always removes its files and tells the readers.
+	MessageChange,
 }
 
 PendingDBRequest :: struct {
@@ -122,6 +126,13 @@ PendingDBRequest :: struct {
 	attachmentOffset:      u64,
 	// Removals (protocol 29): the page's cursor, echoed in ServerAdminAttachmentRemovals.
 	attachmentBeforeID:    int,
+	// MessageChange (protocol 30): which statement, the message, a DM's peer, and whether a
+	// room delete is an admin's (no signature). sessionID and targetUserID (the requester) say
+	// who asked; roomID names the room.
+	messageChangeAction:   common.DatabaseMessageChangeAction,
+	messageID:             int,
+	messageChangePeerID:   int,
+	messageChangeAdmin:    bool,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -344,10 +355,12 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 
 	for requestID, request in state.pendingDatabaseRequests {
 		// A ClientRegister stays: its answer still tells the approvers of a new request. So does
-		// an attachment step, which must finish what the storage worker started.
+		// an attachment step, which must finish what the storage worker started, and (protocol
+		// 30) a message edit or delete, whose readers must hear of it.
 		if request.peerID == peerID &&
 		   request.requestType != .Register &&
-		   request.requestType != .Attachment {
+		   request.requestType != .Attachment &&
+		   request.requestType != .MessageChange {
 			append(&requestIDs, requestID)
 		}
 	}
@@ -771,6 +784,10 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		case .VisibleRecipients, .LoadRestrictedUsers:
 		case .Attachment:
 			MainRouterState_attachmentDatabaseFailed(pm, state, request)
+		case .MessageChange:
+			if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
+				MainRouterState_sendProtocolError(pm, state, request.peerID, message)
+			}
 		case .RoomKeyRequestCheck:
 		// Never answered (router_room_keys.odin).
 		case .JoinVoiceMemberCheck:
@@ -1549,6 +1566,16 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientAdminAttachmentUsage(pm, state, peerID, packet.payload)
 	case .ClientAdminListAttachmentRemovals:
 		MainRouterState_handleClientAdminListAttachmentRemovals(pm, state, peerID, packet.payload)
+	case .ClientEditRoomMessage:
+		MainRouterState_handleClientEditRoomMessage(pm, state, peerID, packet.payload)
+	case .ClientDeleteRoomMessage:
+		MainRouterState_handleClientDeleteRoomMessage(pm, state, peerID, packet.payload)
+	case .ClientEditDirectMessage:
+		MainRouterState_handleClientEditDirectMessage(pm, state, peerID, packet.payload)
+	case .ClientDeleteDirectMessage:
+		MainRouterState_handleClientDeleteDirectMessage(pm, state, peerID, packet.payload)
+	case .ClientFetchMessageEdits:
+		MainRouterState_handleClientFetchMessageEdits(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -2158,6 +2185,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleRegistrationModeResult(pm, state, request, response)
 	case .Attachment:
 		MainRouterState_handleAttachmentResult(pm, state, request, response)
+	case .MessageChange:
+		MainRouterState_handleMessageChangeResult(pm, state, request, response)
 	}
 }
 

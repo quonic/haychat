@@ -11,11 +11,11 @@ set -euo pipefail
 # storage, and identity key live in a throwaway directory, so every run starts from scratch.
 #
 # Usage: dev/live-proof.sh [--all | --harness | --admin | --access | --e2ee | --registration |
-#                          --attachments | --voice | --ui | --sql | test_name...]
+#                          --attachments | --edits | --voice | --ui | --sql | test_name...]
 #   (no arguments)  the startup auth proof
 #   --all           also the two-client room chat, direct message and voice proofs, the headless
 #                   harness smoke test, the admin proof, the room access proof, the encryption
-#                   key proof, the registration proof, the two-process
+#                   key proof, the registration proof, the message edit proof, the two-process
 #                   voice proof, the GUI automation smoke test, the server SQL proofs, and the
 #                   startup failure exit check (what CI and `./dev.sh ci` run)
 #   --harness       only the headless harness smoke test (dev/harness-smoke.sh)
@@ -43,6 +43,11 @@ set -euo pipefail
 #                   server with small limits, size and quota refusals, a non-member, a From
 #                   join newcomer, AttachFiles taken away, an uploader killed mid-file, and a
 #                   deleted room's files gone after the startup sweep
+#   --edits         only the message edit proof (dev/message-edit-proof.sh, protocol 30): room
+#                   and direct message edits and deletes between three headless clients, the
+#                   edit history, refusals of someone else's message and of a forged edit, an
+#                   admin's delete shown as removed by the server, a From join newcomer hearing
+#                   nothing of older messages, and a deleted message's file refused
 #   --voice         only the voice proof between two headless client processes
 #                   (dev/voice-proof.sh): a tone through the server into a file sink, checked
 #                   with dev/tools/voice-check, then the same through SDL's disk audio driver,
@@ -62,8 +67,8 @@ set -euo pipefail
 #
 # Every step runs under `timeout` (run_step below), so a hung client, proof or test binary fails
 # the run within minutes instead of using up CI's job limit. The limits are generous (several
-# times a normal run, compile included): client tests 20 minutes, the harness, admin, access and
-# registration proofs 10, the voice, GUI and attachment proofs 15, the encryption proof 20, the SQL proof
+# times a normal run, compile included): client tests 20 minutes, the harness, admin, access,
+# edit and registration proofs 10, the voice, GUI and attachment proofs 15, the encryption proof 20, the SQL proof
 # 20, its failing run 2, and the failed startup check 1. HAYCHAT_LIVE_STEP_TIMEOUT_SECS replaces every limit
 # (for a slow machine, or a short one while debugging). A step that times out prints "[live]
 # STEP timed out after N s" and the run fails; timeout signals the step's whole process group,
@@ -143,6 +148,10 @@ SQL_TESTS+=,server.testAttachmentSQLRemovalFileIsDeletedByTheHourlyPassAgainstPo
 SQL_TESTS+=,server.testAttachmentRemovalsMigrationUpgradesVersion15AgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentRemovalLogAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentRemovalLogListingAgainstPostgreSQL
+SQL_TESTS+=,server.testMessageEditsMigrationUpgradesVersion16AgainstPostgreSQL
+SQL_TESTS+=,server.testRoomMessageEditsAndDeletesAgainstPostgreSQL
+SQL_TESTS+=,server.testMessageDeleteRemovesItsFilesAgainstPostgreSQL
+SQL_TESTS+=,server.testDirectMessageEditsAndDeletesAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false
@@ -151,6 +160,7 @@ run_access=false
 run_e2ee=false
 run_registration=false
 run_attachments=false
+run_edits=false
 run_voice=false
 run_ui=false
 run_sql=false
@@ -165,6 +175,7 @@ if [[ $# -gt 0 ]]; then
 			run_e2ee=true
 			run_registration=true
 			run_attachments=true
+			run_edits=true
 			run_voice=true
 			run_ui=true
 			run_sql=true
@@ -193,6 +204,10 @@ if [[ $# -gt 0 ]]; then
 		--attachments)
 			tests=()
 			run_attachments=true
+			;;
+		--edits)
+			tests=()
+			run_edits=true
 			;;
 		--voice)
 			tests=()
@@ -389,6 +404,13 @@ if [[ "$run_attachments" == true ]]; then
 	echo "==> [live] running dev/attachment-proof.sh"
 	run_step 900 "dev/attachment-proof.sh" env HAYCHAT_SERVER_BIN="$server_bin" \
 		dev/attachment-proof.sh 127.0.0.1:12345
+fi
+
+# After the attachment proof: its admin deletes messages and files in #general, which no later
+# proof reads.
+if [[ "$run_edits" == true ]]; then
+	echo "==> [live] running dev/message-edit-proof.sh"
+	run_step 600 "dev/message-edit-proof.sh" dev/message-edit-proof.sh 127.0.0.1:12345
 fi
 
 # Runs last so its accounts (which it deletes again) never meet the client proofs. It shares

@@ -43,6 +43,8 @@ DATABASE_POST_DIRECT_MESSAGE_SQL ::
 	"decode(NULLIF($5::text, ''), 'hex'), decode(NULLIF($6::text, ''), 'hex'), " +
 	"(SELECT count(*) FROM bind_in)::smallint FROM recipient " +
 	"WHERE (SELECT ok FROM allowed) AND (SELECT ok FROM bind_ok) " +
+	"AND NOT EXISTS (SELECT 1 FROM direct_message_edits e WHERE e.sender_user_id = $1::bigint " +
+	"AND e.client_message_id = decode(NULLIF($4::text, ''), 'hex')) " +
 	"ON CONFLICT (sender_user_id, client_message_id) WHERE client_message_id IS NOT NULL " +
 	"DO NOTHING RETURNING id, created_at), " +
 	DATABASE_ATTACHMENT_BIND_UPDATE_OPEN_SQL + "direct_message_id" +
@@ -81,7 +83,7 @@ DATABASE_GET_DIRECT_HISTORY_SQL ::
 	"COALESCE(encode(d.client_message_id, 'hex'), ''), COALESCE(encode(d.envelope, 'hex'), ''), " +
 	"COALESCE(encode(d.signature, 'hex'), ''), " +
 	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "direct_message_id = d.id" +
-	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " " +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + ", " + DATABASE_MESSAGE_EDIT_COLUMNS_SQL + " " +
 	"FROM peer p LEFT JOIN LATERAL (" +
 	"SELECT dm.id, dm.sender_user_id, dm.recipient_user_id, dm.created_at, dm.content, " +
 	"dm.client_message_id, dm.envelope, dm.signature, " +
@@ -93,7 +95,10 @@ DATABASE_GET_DIRECT_HISTORY_SQL ::
 	"(dm.sender_user_id = $1::bigint AND dm.recipient_user_id = $2::bigint) OR " +
 	"(dm.sender_user_id = $2::bigint AND dm.recipient_user_id = $1::bigint)) " +
 	"AND ($3::bigint = 0 OR dm.id < $3::bigint) " +
-	"ORDER BY dm.id DESC LIMIT $4::bigint) d ON true ORDER BY d.id DESC"
+	"ORDER BY dm.id DESC LIMIT $4::bigint) d ON true " +
+	DATABASE_DIRECT_MESSAGE_EDITS_JOIN_OPEN_SQL + "d.id" +
+	DATABASE_DIRECT_MESSAGE_EDITS_JOIN_MIDDLE_SQL + "d.id" + DATABASE_MESSAGE_EDITS_JOIN_CLOSE_SQL +
+	"ORDER BY d.id DESC"
 
 // The latest message per peer with the requester's read state: DISTINCT ON keeps the highest
 // message ID of each peer, the inner query keeps the $2 newest conversations, and only those
@@ -107,7 +112,7 @@ DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"unread.n::text, COALESCE(encode(c.client_message_id, 'hex'), ''), " +
 	"COALESCE(encode(c.envelope, 'hex'), ''), COALESCE(encode(c.signature, 'hex'), ''), " +
 	DATABASE_MESSAGE_ATTACHMENTS_OPEN_SQL + "direct_message_id = c.id" +
-	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + " FROM (" +
+	DATABASE_MESSAGE_ATTACHMENTS_CLOSE_SQL + ", " + DATABASE_MESSAGE_EDIT_COLUMNS_SQL + " FROM (" +
 	"SELECT * FROM (" +
 	"SELECT DISTINCT ON (peer_id) peer_id, id, sender_user_id, created_at, content, " +
 	"client_message_id, envelope, signature FROM (" +
@@ -122,7 +127,9 @@ DATABASE_LIST_DIRECT_CONVERSATIONS_SQL ::
 	"CROSS JOIN LATERAL (SELECT count(*) AS n FROM (" +
 	"SELECT 1 FROM direct_messages d WHERE d.sender_user_id = c.peer_id " +
 	"AND d.recipient_user_id = $1::bigint " +
-	"AND d.id > COALESCE(m.last_read_message_id, 0) LIMIT $3::bigint) capped) unread " +
+	"AND d.id > COALESCE(m.last_read_message_id, 0) " + DATABASE_UNREAD_DIRECT_NOT_DELETED_SQL +
+	"LIMIT $3::bigint) capped) unread " + DATABASE_DIRECT_MESSAGE_EDITS_JOIN_OPEN_SQL + "c.id" +
+	DATABASE_DIRECT_MESSAGE_EDITS_JOIN_MIDDLE_SQL + "c.id" + DATABASE_MESSAGE_EDITS_JOIN_CLOSE_SQL +
 	"ORDER BY c.id DESC"
 
 // Every account the requester ($1) may see, the requester included. Online flags are not
@@ -429,9 +436,18 @@ databaseExecuteGetDirectHistory :: proc(
 		attachmentsText := databaseGetText(result, row, 11)
 		attachments := databaseParseAttachmentRefs(attachmentsText)
 		delete(attachmentsText)
+		// Protocol 30: a tombstone carries no attachments (its files are Removed rows).
+		editCount, lastEdit, deleted, deletion := databaseGetMessageEditColumns(result, row, 12)
+		if deleted {
+			common.AttachmentRefs_deinit(&attachments)
+		}
 		append(
 			&messages,
 			common.StoredDirectMessage {
+				editCount = editCount,
+				lastEdit = lastEdit,
+				deleted = deleted,
+				deletion = deletion,
 				id = messageID,
 				senderId = senderID,
 				senderNickname = databaseGetText(result, row, 6),
@@ -493,9 +509,17 @@ databaseExecuteListDirectConversations :: proc(
 		attachmentsText := databaseGetText(result, row, 11)
 		lastAttachments := databaseParseAttachmentRefs(attachmentsText)
 		delete(attachmentsText)
+		editCount, lastEdit, deleted, deletion := databaseGetMessageEditColumns(result, row, 12)
+		if deleted {
+			common.AttachmentRefs_deinit(&lastAttachments)
+		}
 		append(
 			&conversations,
 			common.DirectConversationSummary {
+				lastEditCount = editCount,
+				lastEdit = lastEdit,
+				lastDeleted = deleted,
+				lastDeletion = deletion,
 				peerUserId = peerUserID,
 				peerNickname = databaseGetText(result, row, 1),
 				lastMessageID = messageID,

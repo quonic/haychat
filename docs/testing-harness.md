@@ -744,6 +744,44 @@ It prints one `[attachments] latency` line per client and phase and fails when a
 transfer exceeds `ATTACHMENT_PROOF_P95_LIMIT_MS` (default 250 ms; the measured p95s have been
 11 to 16 ms).
 
+## Message Edits
+
+Protocol 30 (#76): authors edit and delete their own room and direct messages, and admins
+delete any room message. What goes out is signed by this profile; what arrives is shown only
+once the client checked it against the author's pinned key (see "Message Edits" in
+`client/AGENTS.md`). Room and direct message events (`room_chat`, `room_history`,
+`direct_message`, `direct_history`) carry, after `timestamp`, `editCount` (the server's count),
+`edited`, `editStatus` (`none`, `verified`, `pending` while the author's key is on its way or for
+a sealed edit this build does not open, `failed` for an edit that did not verify: the last good
+version stays), `deleted` and `removedByServer` (a tombstone without the author's valid
+signature: an admin's delete, D6); their `content` is the latest verified version, and empty
+for a tombstone.
+
+### Commands
+
+| Command | Meaning |
+| --- | --- |
+| `msg-edit ROOM_ID MESSAGE_ID [--forge] [--unchecked] TEXT...` | Edits your cached room message to the rest of the line (empty only for a message with files), signed. The result is `{"ok":true,"cmd":"msg-edit","serverID":1,"kind":"room","conversationID":ROOM_ID,"messageID":MESSAGE_ID}`; the stored edit arrives as `message_edited` to every reader, a refusal as a `protocol_error` naming the message (`You can only edit or delete your own messages (message N)`, `This message was deleted (message N)`, `This message cannot be edited again (message N)`, …). Refused locally: a message not loaded, someone else's (unless `--unchecked`, so the server refuses it), and (M1) a message of an encrypted room (`Editing encrypted messages is not available yet`). `--forge` flips a bit of the signature, so the server refuses it with `Invalid message edit signature (message N)`. |
+| `msg-delete ROOM_ID MESSAGE_ID [admin\|unchecked]` | Deletes your room message with your signature (encrypted rooms too), or with `admin` any room message as an admin (no signature; the server checks the role and refuses others with `Admin permission required (message N)`). `unchecked` signs a delete of someone else's message, which the server refuses. Answered by `message_deleted`. |
+| `dm-edit USER_ID MESSAGE_ID [--forge] [--unchecked] TEXT...` | Edits your direct message to USER_ID (signed plaintext; an encrypted message is refused locally in M1). Answered by `message_edited` to both sides. |
+| `dm-delete USER_ID MESSAGE_ID [unchecked]` | Deletes your direct message (always signed; only the sender may). Answered by `message_deleted` to both sides. |
+| `msg-edits room\|dm ID MESSAGE_ID` | Fetches a message's edit history (ID the room, or the peer for `dm`), oldest first: answered by `message_edits`, or a `protocol_error` (`Message not found (message N)` for a message you may not read, `Not a room member (message N)`). |
+
+### Events
+
+| Event | Example |
+| --- | --- |
+| `message_edited` | `{"event":"message_edited","serverID":1,"kind":"room","conversationID":1,"messageID":31,"senderID":4,"found":true,"editCount":1,"editID":7,"editStatus":"verified","content":"the new text"}` (`conversationID` the room, or the DM's other side from this account's view; `found` false for a message this client has not loaded, which its next history page brings; `content` the version shown, which stays the last good one when `editStatus` is `failed` or `pending`) |
+| `message_deleted` | `{"event":"message_deleted","serverID":1,"kind":"dm","conversationID":4,"messageID":40,"senderID":4,"found":true,"deleted":true,"removedByServer":false}` (`removedByServer` true unless the author's signature verified against the pin) |
+| `message_edits` | `{"event":"message_edits","serverID":1,"kind":"room","conversationID":1,"messageID":31,"found":true,"edits":[{"id":7,"timestamp":"2026-11-19 12:00:00.123456+00","status":"verified","content":"the new text"}]}` (only verified edits print their content) |
+
+`dev/message-edit-proof.sh` (`./dev.sh live --edits`, part of `--all`) drives all of it with
+three clients: a room edit seen by the other client with its history, refusals of someone
+else's message and of a forged edit, the author's and an admin's delete, a plaintext direct
+message edited and deleted (the recipient's encryption key is removed in the database so the
+fallback is used), an encrypted direct message deleted, a From join newcomer that hears nothing
+of edits of older messages, and a deleted message's file refused.
+
 ## Example: Two Agents Chatting
 
 Each agent runs its own client with its own profile. Alice's side (`>` is stdin, `<` stdout):

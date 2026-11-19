@@ -141,6 +141,15 @@ ClientTransportRuntimeEventKind :: enum {
 	AttachmentRemoved,
 	AttachmentUsageReceived,
 	AttachmentRemovalsReceived,
+	// Editing and deleting messages (protocol 30, message_edits.odin). editKind says Room
+	// (roomID) or Direct (senderID and peerUserID the message's sender and recipient; for
+	// MessageEditsReceived peerUserID is the conversation's peer). MessageEdited carries the
+	// stored edit in messageEdit (owned) and editCount; MessageDeleted the tombstone in
+	// messageDeletion (owned); MessageEditsReceived the list in messageEdits (owned). senderID
+	// is the message's sender for the first two.
+	MessageEdited,
+	MessageDeleted,
+	MessageEditsReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -252,6 +261,12 @@ ClientTransportRuntimeEvent :: struct {
 	attachmentUsage:           common.ServerAdminAttachmentUsagePayload,
 	attachmentRemovals:        common.ServerAdminAttachmentRemovalsPayload,
 	blobID:                    common.AttachmentBlobID,
+	// Protocol 30.
+	editKind:                  common.MessageEditsKind,
+	editCount:                 int,
+	messageEdit:               common.MessageEdit,
+	messageDeletion:           common.MessageDeletion,
+	messageEdits:              [dynamic]common.MessageEdit,
 }
 
 ClientServerTransport :: struct {
@@ -484,6 +499,13 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	common.AttachmentRefs_deinit(&event.attachments)
 	common.ServerAdminAttachmentUsagePayload_deinit(&event.attachmentUsage)
 	common.ServerAdminAttachmentRemovalsPayload_deinit(&event.attachmentRemovals)
+	wipeString(event.messageEdit.content)
+	common.MessageEdit_deinit(&event.messageEdit)
+	common.MessageDeletion_deinit(&event.messageDeletion)
+	for &edit in event.messageEdits {
+		wipeString(edit.content)
+	}
+	common.MessageEdits_deinit(&event.messageEdits)
 	event^ = {}
 }
 
@@ -494,6 +516,8 @@ StoredDirectMessage_deinit :: proc(message: ^common.StoredDirectMessage) {
 	delete(message.content)
 	delete(message.envelope)
 	common.AttachmentRefs_deinit(&message.attachments)
+	common.MessageEdit_deinit(&message.lastEdit)
+	common.MessageDeletion_deinit(&message.deletion)
 	message^ = {}
 }
 
@@ -528,6 +552,8 @@ DirectConversationSummary_deinit :: proc(conversation: ^common.DirectConversatio
 	delete(conversation.lastContent)
 	delete(conversation.lastEnvelope)
 	common.AttachmentRefs_deinit(&conversation.lastAttachments)
+	common.MessageEdit_deinit(&conversation.lastEdit)
+	common.MessageDeletion_deinit(&conversation.lastDeletion)
 	conversation^ = {}
 }
 
@@ -2158,6 +2184,13 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 
 	case .ServerAttachmentRemoved, .ServerAdminAttachmentUsage, .ServerAdminAttachmentRemovals:
 		return ClientServerTransport_translateAttachmentModerationPacket(transport, innerPacket)
+
+	case .ServerRoomMessageEdited,
+	     .ServerDirectMessageEdited,
+	     .ServerRoomMessageDeleted,
+	     .ServerDirectMessageDeleted,
+	     .ServerMessageEdits:
+		return ClientServerTransport_translateMessageEditPacket(transport, innerPacket)
 
 	case .ServerRoleList:
 		payload: common.ServerRoleListPayload

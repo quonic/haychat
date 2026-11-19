@@ -321,6 +321,14 @@ testE2EEConstants :: proc(t: ^testing.T) {
 		PLAINTEXT_DIRECT_MESSAGE_DOMAIN,
 		ROOM_MESSAGE_SIGNATURE_DOMAIN,
 		ROOM_LOG_SIGNATURE_DOMAIN,
+		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
+		PLAINTEXT_DIRECT_MESSAGE_V2_DOMAIN,
+		PLAINTEXT_ROOM_MESSAGE_V2_DOMAIN,
+		// Protocol 30 (#76): edits and deletes.
+		ROOM_MESSAGE_EDIT_DOMAIN,
+		DIRECT_MESSAGE_EDIT_DOMAIN,
+		ROOM_MESSAGE_DELETE_DOMAIN,
+		DIRECT_MESSAGE_DELETE_DOMAIN,
 	}
 	for domain, index in domains {
 		for other, otherIndex in domains {
@@ -350,6 +358,11 @@ testE2EEConstants :: proc(t: ^testing.T) {
 		SENDER_CHAIN_MESSAGE_INFO,
 		SENDER_CHAIN_STEP_INFO,
 		SAFETY_NUMBER_DOMAIN,
+		PLAINTEXT_ROOM_MESSAGE_DOMAIN,
+		ROOM_MESSAGE_EDIT_DOMAIN,
+		DIRECT_MESSAGE_EDIT_DOMAIN,
+		ROOM_MESSAGE_DELETE_DOMAIN,
+		DIRECT_MESSAGE_DELETE_DOMAIN,
 	}
 	for label, index in labels {
 		for other, otherIndex in labels {
@@ -3318,4 +3331,213 @@ testAttachmentRefValidation :: proc(t: ^testing.T) {
 	assert(!messageContentLengthIsValid(0, 0), "expected empty content alone to be refused")
 	assert(!messageContentLengthIsValid(1, 5), "expected five attachments to be refused")
 	assert(!messageContentLengthIsValid(CHAT_MESSAGE_MAX_BYTES + 1, 1), "expected too long")
+}
+
+// ── Signed edits and deletes (protocol 30, #76) ─────────────────────────────────────────────
+// dev/tools/e2ee-vectors.py (edit_delete_vectors).
+
+@(private = "file")
+KAT_ROOM_EDIT_SIGNATURE ::
+	"2506b4f37a7551597bc647b93ee504ee6fb737c274166afc486caa9d496e6c65445698d1e15db76f" +
+	"3ba3dc0877d4c32a9d5132e04d967b786086a1e7cd305e0c"
+@(private = "file")
+KAT_DM_EDIT_SIGNATURE ::
+	"216e1591d92a1ecfd097ade31ec76c63a8d997de1e3a173a57d6a16115ca6f2ca1f940c83aed1563" +
+	"e8ca606268be1f6a01c333b00fd0ce6d3f62dc4f51dcd803"
+@(private = "file")
+KAT_ROOM_DELETE_SIGNATURE ::
+	"53a8f7ba06470a9cddf4eefb4668e10808ae0d98ea0a739e2c91a9706c36088a711b506ff6f85e5f" +
+	"b0225f5b9fab7aa86cce4eb03964c0e8f7f7be18643c5208"
+@(private = "file")
+KAT_DM_DELETE_SIGNATURE ::
+	"81c617f39f2ffdf0e1258258d8327c1b977e86d5430a68f71eb779fd31b5568fa0532685921c4fe4" +
+	"f0d674561fe799f076cda7f3aa814c31d8e1a8da0bc8b706"
+
+// The fields of the vectors: room 42 or bob (9) as the conversation, alice (7) the sender, and
+// the original and edit IDs from their labels.
+@(private = "file")
+testMessageChangeFields :: proc(conversationID: int, originalLabel: string) -> MessageChangeFields {
+	original := testLabel(originalLabel)
+	edit := testLabel("haychat-e2ee-test-edit-client-message-id")
+	fields := MessageChangeFields {
+		serverIdentityPublicKey = testServerPublicKey(),
+		conversationID          = conversationID,
+		senderUserID            = TEST_ALICE_ID,
+	}
+	copy(fields.original[:], original[:CLIENT_MESSAGE_ID_SIZE])
+	copy(fields.edit[:], edit[:CLIENT_MESSAGE_ID_SIZE])
+	return fields
+}
+
+// Every field an edit binds: changing one makes the signature fail.
+@(private = "file")
+testMessageChangeVariants :: proc(fields: MessageChangeFields) -> [5]MessageChangeFields {
+	variants: [5]MessageChangeFields
+	for &variant in variants {
+		variant = fields
+	}
+	variants[0].serverIdentityPublicKey[3] ~= 0x01
+	variants[1].conversationID += 1
+	variants[2].senderUserID = TEST_CAROL_ID
+	variants[3].original[5] ~= 0x01
+	variants[4].edit[7] ~= 0x01
+	return variants
+}
+
+@(test)
+testRoomMessageEditSignature :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	fields := testMessageChangeFields(
+		TEST_ROOM_ID,
+		"haychat-e2ee-test-room-plain-client-message-id",
+	)
+	signature, ok := signRoomMessageEdit(fields, "room hello, edited", alice.privateKey)
+	assert(ok, "expected the room edit to sign")
+	assert(testHexEqual(signature[:], KAT_ROOM_EDIT_SIGNATURE), "expected the room edit vector")
+	assert(
+		verifyRoomMessageEdit(fields, "room hello, edited", alice.publicKey, signature),
+		"expected the room edit to verify",
+	)
+	for variant, index in testMessageChangeVariants(fields) {
+		assert(
+			!verifyRoomMessageEdit(variant, "room hello, edited", alice.publicKey, signature),
+			fmt.tprintf("expected changed field %d to fail", index),
+		)
+	}
+	assert(
+		!verifyRoomMessageEdit(fields, "room hello, edited!", alice.publicKey, signature),
+		"expected changed content to fail",
+	)
+	assert(
+		!verifyRoomMessageEdit(fields, "room hello, edited", bob.publicKey, signature),
+		"expected another sender key to fail",
+	)
+	// Not a direct message edit, a delete or a new message over the same fields.
+	assert(
+		!verifyDirectMessageEdit(fields, "room hello, edited", alice.publicKey, signature),
+		"expected a room edit not to verify as a DM edit",
+	)
+	assert(
+		!verifyRoomMessageDelete(fields, alice.publicKey, signature),
+		"expected a room edit not to verify as a delete",
+	)
+	assert(
+		!verifyPlaintextRoomMessage(
+			PlaintextRoomMessageFields {
+				serverIdentityPublicKey = fields.serverIdentityPublicKey,
+				roomID = TEST_ROOM_ID,
+				senderUserID = TEST_ALICE_ID,
+				clientMessageID = fields.edit,
+			},
+			"room hello, edited",
+			alice.publicKey,
+			signature,
+		),
+		"expected a room edit not to verify as a new message",
+	)
+	// An empty edit signs (a message with attachments may lose its text); its shape is the
+	// server's to check. Too long, a zero or repeated ID, and bad IDs never sign.
+	_, emptyOK := signRoomMessageEdit(fields, "", alice.privateKey)
+	assert(emptyOK, "expected an empty edit to sign")
+	tooLong := strings.repeat("x", CHAT_MESSAGE_MAX_BYTES + 1, context.temp_allocator)
+	_, longOK := signRoomMessageEdit(fields, tooLong, alice.privateKey)
+	assert(!longOK, "expected an edit over CHAT_MESSAGE_MAX_BYTES not to sign")
+	same := fields
+	same.edit = same.original
+	_, sameOK := signRoomMessageEdit(same, "x", alice.privateKey)
+	assert(!sameOK, "expected an edit reusing the original's ID not to sign")
+	zero := fields
+	zero.edit = {}
+	_, zeroOK := signRoomMessageEdit(zero, "x", alice.privateKey)
+	assert(!zeroOK, "expected an edit without its own ID not to sign")
+	noRoom := fields
+	noRoom.conversationID = 0
+	_, noRoomOK := signRoomMessageEdit(noRoom, "x", alice.privateKey)
+	assert(!noRoomOK, "expected an edit without a room not to sign")
+}
+
+@(test)
+testDirectMessageEditSignature :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	fields := testMessageChangeFields(TEST_BOB_ID, "haychat-e2ee-test-plain-client-message-id")
+	signature, ok := signDirectMessageEdit(fields, "plain hello, edited", alice.privateKey)
+	assert(ok, "expected the DM edit to sign")
+	assert(testHexEqual(signature[:], KAT_DM_EDIT_SIGNATURE), "expected the DM edit vector")
+	assert(
+		verifyDirectMessageEdit(fields, "plain hello, edited", alice.publicKey, signature),
+		"expected the DM edit to verify",
+	)
+	for variant, index in testMessageChangeVariants(fields) {
+		assert(
+			!verifyDirectMessageEdit(variant, "plain hello, edited", alice.publicKey, signature),
+			fmt.tprintf("expected changed field %d to fail", index),
+		)
+	}
+	assert(
+		!verifyRoomMessageEdit(fields, "plain hello, edited", alice.publicKey, signature),
+		"expected a DM edit not to verify as a room edit",
+	)
+}
+
+@(test)
+testMessageDeleteSignatures :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	room := testMessageChangeFields(TEST_ROOM_ID, "haychat-e2ee-test-room-plain-client-message-id")
+	roomSignature, roomOK := signRoomMessageDelete(room, alice.privateKey)
+	assert(roomOK, "expected the room delete to sign")
+	assert(
+		testHexEqual(roomSignature[:], KAT_ROOM_DELETE_SIGNATURE),
+		"expected the room delete vector",
+	)
+	assert(
+		verifyRoomMessageDelete(room, alice.publicKey, roomSignature),
+		"expected the room delete to verify",
+	)
+	// The edit ID is not part of a delete.
+	otherEdit := room
+	otherEdit.edit = {}
+	assert(
+		verifyRoomMessageDelete(otherEdit, alice.publicKey, roomSignature),
+		"expected a delete to ignore the edit ID",
+	)
+	variants := testMessageChangeVariants(room)
+	for variant, index in variants[:4] {
+		assert(
+			!verifyRoomMessageDelete(variant, alice.publicKey, roomSignature),
+			fmt.tprintf("expected changed field %d to fail", index),
+		)
+	}
+	assert(
+		!verifyRoomMessageDelete(room, bob.publicKey, roomSignature),
+		"expected another sender key to fail",
+	)
+	assert(
+		!verifyRoomMessageDelete(room, alice.publicKey, SignatureBytes{}),
+		"expected a zero signature (the server's delete) not to verify",
+	)
+
+	direct := testMessageChangeFields(TEST_BOB_ID, "haychat-e2ee-test-plain-client-message-id")
+	directSignature, directOK := signDirectMessageDelete(direct, alice.privateKey)
+	assert(directOK, "expected the DM delete to sign")
+	assert(
+		testHexEqual(directSignature[:], KAT_DM_DELETE_SIGNATURE),
+		"expected the DM delete vector",
+	)
+	assert(
+		verifyDirectMessageDelete(direct, alice.publicKey, directSignature),
+		"expected the DM delete to verify",
+	)
+	assert(
+		!verifyRoomMessageDelete(direct, alice.publicKey, directSignature),
+		"expected a DM delete not to verify as a room delete",
+	)
+	noOriginal := direct
+	noOriginal.original = {}
+	_, noOriginalOK := signDirectMessageDelete(noOriginal, alice.privateKey)
+	assert(!noOriginalOK, "expected a delete without the message's ID not to sign")
 }

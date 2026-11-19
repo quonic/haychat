@@ -321,6 +321,11 @@ HeadlessEventKind :: enum {
 	AttachmentUsage,
 	// Protocol 29 (#138): ServerAdminAttachmentRemovals, a page of the removal log.
 	AttachmentRemovals,
+	// Protocol 30 (#76, headless_message_edits.odin): an edit, a tombstone and an edit list,
+	// printed after State checked them.
+	MessageEdited,
+	MessageDeleted,
+	MessageEdits,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -381,6 +386,9 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.AttachmentRemoved = "attachment_removed",
 	.AttachmentUsage = "attachment_usage",
 	.AttachmentRemovals = "attachment_removals",
+	.MessageEdited  = "message_edited",
+	.MessageDeleted = "message_deleted",
+	.MessageEdits   = "message_edits",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -643,6 +651,15 @@ HeadlessRoomChatJSON :: struct {
 	senderID:           int,
 	senderNickname:     string,
 	timestamp:          string,
+	// Protocol 30 (headless_message_edits.odin): the server's edit count, whether it was
+	// edited, what the client concluded about the latest edit (none, verified, pending,
+	// failed), and a tombstone and whether it reads "Removed by the server". content is the
+	// latest verified version.
+	editCount:          int,
+	edited:             bool,
+	editStatus:         string,
+	deleted:            bool,
+	removedByServer:    bool,
 	attachments:        []HeadlessAttachmentJSON,
 	attachmentsChanged: bool,
 	encrypted:          bool,
@@ -700,6 +717,15 @@ HeadlessHistoryMessageJSON :: struct {
 	senderID:           int,
 	senderNickname:     string,
 	timestamp:          string,
+	// Protocol 30 (headless_message_edits.odin): the server's edit count, whether it was
+	// edited, what the client concluded about the latest edit (none, verified, pending,
+	// failed), and a tombstone and whether it reads "Removed by the server". content is the
+	// latest verified version.
+	editCount:          int,
+	edited:             bool,
+	editStatus:         string,
+	deleted:            bool,
+	removedByServer:    bool,
 	attachments:        []HeadlessAttachmentJSON,
 	attachmentsChanged: bool,
 	encrypted:          bool,
@@ -849,6 +875,15 @@ HeadlessDirectMessageJSON :: struct {
 	recipientID:        int,
 	recipientNickname:  string,
 	timestamp:          string,
+	// Protocol 30 (headless_message_edits.odin): the server's edit count, whether it was
+	// edited, what the client concluded about the latest edit (none, verified, pending,
+	// failed), and a tombstone and whether it reads "Removed by the server". content is the
+	// latest verified version.
+	editCount:          int,
+	edited:             bool,
+	editStatus:         string,
+	deleted:            bool,
+	removedByServer:    bool,
 	// Protocol 27, as in HeadlessRoomChatJSON.
 	attachments:        []HeadlessAttachmentJSON,
 	attachmentsChanged: bool,
@@ -866,6 +901,15 @@ HeadlessDirectHistoryMessageJSON :: struct {
 	recipientID:        int,
 	recipientNickname:  string,
 	timestamp:          string,
+	// Protocol 30 (headless_message_edits.odin): the server's edit count, whether it was
+	// edited, what the client concluded about the latest edit (none, verified, pending,
+	// failed), and a tombstone and whether it reads "Removed by the server". content is the
+	// latest verified version.
+	editCount:          int,
+	edited:             bool,
+	editStatus:         string,
+	deleted:            bool,
+	removedByServer:    bool,
 	attachments:        []HeadlessAttachmentJSON,
 	attachmentsChanged: bool,
 	encrypted:          bool,
@@ -1112,9 +1156,18 @@ headlessDirectMessageFields :: proc(
 		signed = fields.signed,
 		decryptError = fields.decryptError,
 		protection = fields.protection,
-		content = headlessDirectContent(entry.security, entry.content),
+		content = headlessDirectContent(entry.security, headlessEditedContent(
+			entry.content,
+			entry.edit,
+			entry.deleted,
+		)),
 		attachments = headlessAttachmentsJSON(entry.files[:]),
 		attachmentsChanged = entry.filesChanged,
+		editCount = entry.editCount,
+		edited = entry.editCount > 0,
+		editStatus = HEADLESS_EDIT_STATUS_NAMES[entry.edit.status],
+		deleted = entry.deleted,
+		removedByServer = entry.deleted && entry.edit.deleteStatus != .Author,
 	}
 }
 
@@ -1195,6 +1248,10 @@ headlessRenderRuntimeEvent :: proc(
 	case .RoomKeyEnvelopeReceived, .RoomKeysReceived, .RoomKeyRequested:
 		// Printed as room_key and room_key_request after State handled them.
 		return "", {}, false
+	case .MessageEdited, .MessageDeleted, .MessageEditsReceived:
+		// Printed as message_edited, message_deleted and message_edits after State checked
+		// them (headless_message_edits.odin).
+		return "", {}, false
 	case .RoleListReceived, .RoleUpdated, .RoleDeleted:
 		return headlessRenderRoleEvent(event, allocator)
 	case .RoomPermissionsReceived:
@@ -1229,6 +1286,7 @@ headlessRenderRuntimeEvent :: proc(
 				senderID = event.senderID,
 				senderNickname = event.senderNickname,
 				timestamp = event.timestamp,
+				editStatus = HEADLESS_EDIT_STATUS_NAMES[.None],
 				encrypted = fields.encrypted,
 				decryptError = fields.decryptError,
 				protection = fields.protection,
@@ -2017,6 +2075,22 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: a page of the attachment removal log, newest first (BEFORE_ID: the oldest " +
 		"id held, for the next page); answered by attachment_removals (entries, hasMore)",
 		headlessCommandAttachRemovals},
+	{"msg-edit", 2, 0, .Optional, "msg-edit ROOM_ID MESSAGE_ID [--forge] [--unchecked] TEXT...",
+		"edits your room message (signed; protocol 30); answered by message_edited, or a " +
+		"protocol_error. --forge sends a bad signature, --unchecked skips the local own-message " +
+		"check, both so a proof sees the server refuse", headlessCommandMessageEdit},
+	{"msg-delete", 2, 1, .None, "msg-delete ROOM_ID MESSAGE_ID [admin|unchecked]",
+		"deletes your room message (signed), or with admin any room message as an admin " +
+		"(unsigned moderation); answered by message_deleted", headlessCommandMessageDelete},
+	{"dm-edit", 2, 0, .Optional, "dm-edit USER_ID MESSAGE_ID [--forge] [--unchecked] TEXT...",
+		"edits your direct message to USER_ID (signed); answered by message_edited",
+		headlessCommandDirectEdit},
+	{"dm-delete", 2, 1, .None, "dm-delete USER_ID MESSAGE_ID [unchecked]",
+		"deletes your direct message to USER_ID (signed); answered by message_deleted",
+		headlessCommandDirectDelete},
+	{"msg-edits", 3, 0, .None, "msg-edits room|dm ID MESSAGE_ID",
+		"fetches a message's edit history, oldest first; answered by message_edits",
+		headlessCommandMessageEdits},
 	{"chat-latency", 2, 1, .None, "chat-latency ROOM_ID COUNT [INTERVAL_MS]",
 		"sends COUNT room messages INTERVAL_MS apart (default 50) and reports their echo " +
 		"times (p50MS, p95MS, maxMS, meanMS)", headlessCommandChatLatency},
@@ -2246,6 +2320,8 @@ headlessHandleRuntimeEvent :: proc(harness: ^HeadlessHarness, event: ^ClientTran
 		}
 	case .UserKeyChanged:
 		headlessWriteUserKeysEvent(harness, event.serverID, event.userKey.userId)
+	case .MessageEdited, .MessageDeleted, .MessageEditsReceived:
+		headlessWriteMessageEditEvent(harness, event)
 	}
 	if event.kind == .RegistrationRequired {
 		headlessAutoRegister(harness, event)
@@ -2297,6 +2373,11 @@ headlessWriteDirectMessageLine :: proc(
 			content = fields.content,
 			attachments = fields.attachments,
 			attachmentsChanged = fields.attachmentsChanged,
+			editCount = fields.editCount,
+			edited = fields.edited,
+			editStatus = fields.editStatus,
+			deleted = fields.deleted,
+			removedByServer = fields.removedByServer,
 		},
 	)
 	headlessRecordEvent(harness, kind)

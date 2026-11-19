@@ -75,7 +75,7 @@ headlessRoomSecurity :: proc(
 headlessRoomContent :: proc(entry: RoomMessageEntry) -> string {
 	#partial switch entry.security.protection {
 	case .Plain, .Encrypted:
-		return entry.content
+		return headlessEditedContent(entry.content, entry.edit, entry.deleted)
 	}
 	return ""
 }
@@ -135,6 +135,11 @@ headlessRoomMessageFields :: proc(
 		content = headlessRoomContent(entry),
 		attachments = headlessAttachmentsJSON(entry.files[:]),
 		attachmentsChanged = entry.filesChanged,
+		editCount = entry.editCount,
+		edited = entry.editCount > 0,
+		editStatus = HEADLESS_EDIT_STATUS_NAMES[entry.edit.status],
+		deleted = entry.deleted,
+		removedByServer = entry.deleted && entry.edit.deleteStatus != .Author,
 	}
 }
 
@@ -162,6 +167,11 @@ headlessWriteRoomChatLine :: proc(
 			content = fields.content,
 			attachments = fields.attachments,
 			attachmentsChanged = fields.attachmentsChanged,
+			editCount = fields.editCount,
+			edited = fields.edited,
+			editStatus = fields.editStatus,
+			deleted = fields.deleted,
+			removedByServer = fields.removedByServer,
 		},
 	)
 	headlessRecordEvent(harness, kind)
