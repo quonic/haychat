@@ -269,7 +269,11 @@ podman exec -i haychat-db psql -U haychat -d haychat -v uses=1 -v days=7 \
 It prints the code once (only its sha256 is stored). `uses` (default 1, 0 for no limit),
 `days` (default 7, 0 for never) and `note` are optional, and `-v skip_approval=true` lets the
 code sign up without approval in `approval` mode. Then run `make-admin.sql` for the name you
-signed up with. Admins and accounts with Create invites make further codes from the client.
+signed up with. Admins and accounts with Create invites make further codes from the client
+(Server settings → Admin → **Invites**), each with a `haychat://` invite link that carries the
+server's key; accounts with Approve sign-ups decide requests under **Sign-up requests**. See
+[the user guide](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/user-guide.md#signing-up)
+and [the server's rules](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/rooms-and-accounts.md#registration).
 
 `server/sql/auth_bootstrap.sql` (also in the image) is the **test fixture** the dev
 environment uses. It creates the accounts `admin` (ID 1) and `haypeer` (ID 2) and resets `#general`,

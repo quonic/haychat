@@ -145,8 +145,11 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions)
 
 ## Registration (protocol 25)
 
-Package G1 of [the roles and registration plan](plan/2026-11-18-roles-and-registration.md)
-(decisions D7-D17); G2 builds the client and G3 the proof and the user documentation.
+Packages G1 (server), G2 (client and harness) and G3 (proof and documentation) of
+[the roles and registration plan](plan/2026-11-18-roles-and-registration.md) (decisions
+D7-D19). The rules in user terms are in
+[rooms-and-accounts.md](rooms-and-accounts.md#registration), and `dev/registration-proof.sh`
+(`./dev.sh live --registration`, part of CI) proves them end to end.
 
 - **Handshake (D12, D13).** `ClientHello` → `ServerHello` + `ServerAuthChallenge` →
   `ClientAuthRequest{sessionID, signature, registering}` as before. The server activates its
@@ -164,7 +167,9 @@ Package G1 of [the roles and registration plan](plan/2026-11-18-roles-and-regist
 - **`ClientRegister{inviteCode, reason}`** (sealed; the name is the `ClientHello` nickname):
   `inviteCode` at most 64 bytes, read by `common.parseInviteCode` (spaces and dashes ignored,
   either case, O for 0, I and L for 1); empty only on an Open server, which then creates a plain
-  account. `reason` 0..500 characters, needed (1..) when the code needs approval. One at a time.
+  account. `reason` 0..500 characters, needed (1..) when the code needs approval; clients leave
+  that check to the server, since only it knows whether the code skips approval. One at a time.
+  The client wipes the sealed packet's CBOR plaintext before freeing it.
 - **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
   authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`
   and presence follow as after a sign-in, with no second handshake), `Pending` 1 (a request
@@ -210,6 +215,11 @@ Package G1 of [the roles and registration plan](plan/2026-11-18-roles-and-regist
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting
   it joins the Public rooms.
+- **Invite links (D19, client only):** `haychat://HOST:PORT/invite/CODE?key=SERVER_PUBLIC_KEY_HEX`
+  (and `haychat://HOST:PORT/join[?key=…]`), built by the client next to a new code. The client
+  pins the link's key for the address (refusing a key that differs from an existing pin),
+  connects with `registering` set and fills in the code, and signs up only when the user asks.
+  Nothing about links is on the wire.
 - Wire values: `ServerRegistrationRequired` 190, `ClientAdminSetRegistrationMode` 191,
   `ServerRegistrationMode` 192, `ClientCreateInvite` 193, `ServerInviteCreated` 194,
   `ClientListInvites` 195, `ServerInviteList` 196, `ClientRevokeInvite` 197,

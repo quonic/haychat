@@ -18,7 +18,11 @@ a server you run yourself, with a lightweight native client for Windows and Linu
 - **Unread counts** kept by the server, so they follow you to every device.
 - **Several servers** in one client, each with its own display name and settings.
 - **Administration from the client:** create, edit and delete rooms (text, voice, or both),
-  grant the admin role, rename, kick, ban and unban accounts.
+  grant the admin role, rename, kick, ban and unban accounts, and give roles with delegated
+  permissions (room management, invite codes, approving sign-ups) and per-room permissions.
+- **Open or invite-only sign-up:** anyone may join, or only with an invite code (optionally
+  approved by a person), with invite links, codes that give roles or a single room, and
+  accounts restricted to that room.
 - **Encrypted transport:** Ed25519 identities, X25519 key exchange and XChaCha20-Poly1305, with
   the server's key pinned on first connect. No passwords: your identity key is your account.
   Direct messages are end-to-end encrypted. (see
@@ -60,7 +64,7 @@ Windows and Linux are supported; macOS is planned.
 | [Client configuration](docs/client-configuration.md) | `config.json` location and keys |
 | [Deployment](deploy/README.md) | Server image, quadlet units, setup, backups, upgrades, releases |
 | [Server configuration](docs/server-configuration.md) | Environment variables, migrations, status log |
-| [Rooms and accounts](docs/rooms-and-accounts.md) | Server rules for accounts, rooms, admins, direct messages, unread counts |
+| [Rooms and accounts](docs/rooms-and-accounts.md) | Server rules for accounts, sign-up, roles, rooms, admins, direct messages, unread counts |
 | [Development](docs/development.md) | `./dev.sh`, checks, the dev pod, dependencies, CI |
 | [Protocol](docs/protocol.md) | Transport encryption and protocol versions |
 

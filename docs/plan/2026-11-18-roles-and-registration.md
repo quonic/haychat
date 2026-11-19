@@ -195,3 +195,40 @@ on, `registration-proof.sh`).
 - Invite codes for encrypted rooms: a manager's client signs the Add when the new account first
   connects.
 - A per-IP registration rate limit, if a single session's limits prove too weak.
+
+## Follow-ups After G3 (2026-11-18)
+
+Collected from the PRs of R1 (#97), R2 (#98), G1 (#99), G2 (#100) and G3, after #43 closed.
+Done in G3 and so not listed: the GUI roles step (R1), **I have an invite code** on the
+first-run and add-server form (G2), and wiping `sealPacketForSession`'s CBOR buffers (G2).
+
+- **New accounts appear as presence stubs.** A new account reaches other sessions only as
+  `ServerUserPresence`, so their directories lack its `isRestricted` and identity key until
+  their next `ServerUserList`: an admin sees no Restricted badge or Lift restriction for a new
+  room-code account until they sign in again. The server could send `ServerUserUpdated` with
+  the full `UserSummary` (through `MainRouterState_sendAboutUser`) when it creates an account.
+  Found by `dev/registration-proof.sh` (G3).
+- **D17 side channels** (G1): `ClientFetchUserKeys`, the direct conversation mark-read refusal,
+  and voice participant names in a shared room still tell a restricted account that another
+  account exists by its ID.
+- **A restricted account in a room made Public** (G1) gets no fresh `ServerUserList` when the
+  switch changes that room's members.
+- **Per-IP sign-up limit** (G1, Later): only the per-session limits (5 answers, 10 minutes) and
+  the 64 concurrent registering sessions exist.
+- **Ping has no reply** anywhere (G1).
+- **Sign-up requests in the GUI** (G2) list pending requests and those decided while the screen
+  was open; older decided ones only through the harness's `registration-list all`.
+- **An invite link's registering flag** (G2) is lost if a settings change rebuilds the transport
+  before the user signs up.
+- **The `instance` file** (G2) is overwritten by a second plain GUI start, and the first
+  window's exit removes it; the next link then opens a second window.
+- **Windows link hand-off** (G2) compiles but is untested at runtime, and
+  `registerSchemeHandler*` still builds its shell commands wrongly (older than G2).
+- **CBOR growth buffers** (G3): `sealPacketForSession` wipes the final buffers, but copies that
+  `cbor.marshal` outgrew while encoding are freed unwiped; a wiping allocator would close it.
+- **Room permissions page** (R2) is not pushed another manager's change; it refreshes when it is
+  opened again. The Admin section's room list could gain a **Permissions…** button (R2).
+- **The Admin section's room list** (R1, older) does not refresh by itself when another admin
+  changes a room the admin is not in.
+- **Later** (unchanged): a role hierarchy so kick, ban and rename can be delegated, invite codes
+  for encrypted rooms (a manager's client signs the Add), and the per-IP limit above.

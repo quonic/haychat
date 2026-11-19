@@ -12,11 +12,13 @@ The window opens at once; connecting happens in the background.
 - **First run.** When the config has no display name or no server, the client shows a setup
   screen asking for a display name (3 to 32 bytes; accented letters and emoji count as 2 to 4),
   a server host, and a port (default `12345`; `host:port` in the host field works too).
-  **Connect** saves the config and connects.
+  **Connect** saves the config and connects. Tick **I have an invite code** when you were given
+  a code: the server then shows its sign-up screen even if anyone may sign up there (see
+  [Signing up](#signing-up)).
 - **Settings.** The gear button at the bottom of the server rail opens the same screen later, to
-  change the global display name, add servers, and open a server's own settings from the server
-  list. Changing the global name reconnects every server that has no name of its own, and each
-  server renames your account (see [Display names](rooms-and-accounts.md#display-names)).
+  change the global display name, add servers (with the same **I have an invite code**
+  choice), and open a server's own settings from the server list. Changing the global name
+  reconnects every server that has no name of its own, and each server renames your account (see [Display names](rooms-and-accounts.md#display-names)).
 
 ### Server Settings
 
@@ -38,7 +40,10 @@ conversations closes them again. They apply to that server only and are kept in 
 - **Voice:** every other user of the server, those in voice first, with a volume slider (0 to
   200 %) and **Mute for me**. Only you hear the change, at once, also while in voice; the user
   and the server are not told. A muted user's voice is dropped before it is decoded.
-- **Admin** (admins only): the server's accounts and rooms. See [Administration](#administration).
+- **Signing up:** **Use an invite code** asks this server for its sign-up screen on the next
+  connection even if anyone may sign up there. It changes nothing once you have an account.
+- **Admin** (admins, and accounts whose roles allow managing rooms, invites or sign-ups): see
+  [Administration](#administration).
 
 ## Connection Status and Reconnecting
 
@@ -64,6 +69,41 @@ what to do:
 - An admin kicked or banned the account: the banner says **Kicked** or **Banned** with the
   admin's reason, and **Retry now** connects again (after a kick, or once the ban is lifted).
   Voice is not rejoined by itself afterwards.
+- A sign-up was declined, or is waiting for approval (see [Signing up](#signing-up)).
+
+## Signing Up
+
+A server that is not open to everyone (or one you asked for its sign-up screen, with **I have an
+invite code**, **Use an invite code** or an invite link) shows **Sign up on SERVER** in place of
+the room, instead of signing you in. The rules behind it are in
+[rooms-and-accounts.md](rooms-and-accounts.md#registration).
+
+- **Invite code:** type or **Paste** the code you were given; dashes, spaces and case do not
+  matter. The code goes only to this server, encrypted, and the client never saves it. On a
+  server where anyone may sign up the code is optional.
+- **Why you are signing up:** on a server where a person approves sign-ups, a few words about
+  who you are (up to 500 characters), shown to the people who approve. A code made to skip
+  approval needs none; the server says so when one is needed.
+- **Sign up** sends it. The screen says the name your account will get; change it in Server
+  settings first if you want another. A code that is not valid ("This invite code is not valid",
+  also for an expired, revoked or used-up one) stays in the field so you can fix it.
+- **Waiting for approval:** the request waits until someone approves it. Keep the client open
+  and you are signed in as soon as it is approved; otherwise **Check again** later.
+- **Sign-up declined:** shown with the reason, if one was given, like a ban: the client does not
+  try again until you press **Start again**.
+- An account made with a room code is **restricted** to that room: you see only the people you
+  share a room with (and the server's admins), and can message only them.
+
+### Invite Links
+
+An invite link (`haychat://HOST:PORT/invite/CODE?key=…`) holds the server's address, the code
+and the server's identity key. Opening one (with HayChat registered as the handler for
+`haychat://` links) hands it to the running window, which asks first: **Sign up on SERVER with
+an invite?** with the server key's fingerprint, **Continue** and **Cancel**. Continue adds the
+server if it is new, pins the link's key, switches to it and opens the sign-up screen with the
+code filled in; you still press **Sign up**. A link that names another key than the one already
+pinned for that address is refused, because it may not lead to the real server. A link for a
+server where you already have an account only says so.
 
 ## Rooms, Direct Messages and Unread Counts
 
@@ -344,8 +384,9 @@ encrypted messages reach only the people you mean.
 
 Admins are accounts holding the server's `admin` role; how to get the first one is in
 [deploy/README.md "First-Time Setup"](../deploy/README.md#first-time-setup). Admins can also
-give other accounts **roles** that let them manage rooms or room members (see
-[Roles](#roles)); such an account gets the room controls below and a smaller Admin section.
+give other accounts **roles** that let them manage rooms or room members, create invite codes or
+approve sign-ups (see [Roles](#roles)); such an account gets the matching controls below and a
+smaller Admin section.
 Every other account sees none of these controls, and the server checks the permission for every
 request. The rules the server enforces are in
 [rooms-and-accounts.md](rooms-and-accounts.md#admin-actions).
@@ -420,7 +461,9 @@ the server, you included, with an online dot, **Admin** and **Banned** badges, a
 Below the accounts, every room on the server is listed, also those you are not in (greyed, "not
 joined"), with its type, access mode and member count, **Members…**, **Edit…**, **Delete…** and
 **Create room…**. An account that is not an admin but holds a role with **Manage rooms** or
-**Manage room members** sees only this room list, with the buttons its permissions allow.
+**Manage room members** sees this room list, with the buttons its permissions allow, and one
+with **Create invites** or **Approve sign-ups** sees the parts in
+[Sign-up and Invites](#sign-up-and-invites); none of them sees the accounts.
 
 ### Roles
 
@@ -429,7 +472,7 @@ hold it, **New role…**, and **Edit…** on each.
 
 - The role form has a **Name** (3 to 32 characters) and a checkbox per permission a role can
   hold: **Manage rooms**, **Manage room members**, **Create invites** and **Approve sign-ups**
-  (the last two take effect once sign-up by invitation arrives). **Create** or **Save** sends it,
+  (see [Sign-up and Invites](#sign-up-and-invites)). **Create** or **Save** sends it,
   **Delete…** asks for a second click, and **Cancel** closes it.
 - `admin` is built in: its form shows every permission ticked and greyed, and it has no Save or
   Delete. Admins are made with **Make admin**.
@@ -437,6 +480,28 @@ hold it, **New role…**, and **Edit…** on each.
   role under it; a click gives or takes that role at once. The account's sessions get their new
   controls without reconnecting.
 - Kicking, banning and renaming cannot be given to a role.
+
+### Sign-up and Invites
+
+Between **Roles** and the room list, the Admin section has three more parts:
+
+- **Registration** (admins): **Open**, **Invite only** or **Invite + approval**, with a sentence
+  saying what the mode means. A change applies at once to new sign-ups, never to existing
+  accounts.
+- **Invites** (accounts with **Create invites**): **New invite…** opens a form with a note, an
+  expiry (1 hour to never), a number of uses (one to no limit) and, for admins, roles the new
+  account gets, one room to restrict it to (unencrypted invite rooms only), and **Skip
+  approval**. Others can only make plain codes that expire within 7 days. **Create code** shows
+  the code once, with **Copy**, **Copy link** (an [invite link](#invite-links)) and **Done**: it
+  cannot be shown again. Each code is listed with its note, who made it, its uses and expiry,
+  and **Revoke** (admins revoke any code, others their own).
+- **Sign-up requests** (accounts with **Approve sign-ups**): each waiting request with the name,
+  the reason and the code it used, **Approve** and **Decline…** (an optional reason the person is
+  shown). The number of waiting requests shows as a badge, "N pending", on this part and on the
+  Admin heading, and as "⚙ N" on the sidebar gear; there is no pop-up.
+
+An account made with a room code shows a **Restricted** badge in the account list, and admins
+get **Lift restriction**, which joins it to every Public room and lets it see everyone.
 
 A kicked or banned client says so in its banner, with the admin's reason, and neither reconnects
 nor rejoins voice by itself.
