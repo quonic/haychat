@@ -959,6 +959,35 @@ click-id admin-member-ban 1 7
 wait-text "Unbanned bob"
 ```
 
+Registration (protocol 25; IDs listed at the top of `client/view_registration.odin`, all with
+the server ID first). In the Admin section: `admin-registration-mode SERVER MODE` (1 Open,
+2 Invite only, 3 Invite + approval); under **Invites**, `admin-invite-new` ("New invite…"), the
+form's `admin-invite-note`, `admin-invite-expiry SERVER INDEX` (0 1 hour … 4 Never),
+`admin-invite-uses SERVER INDEX` (0 one … 4 no limit), `admin-invite-role SERVER ROLE`,
+`admin-invite-room SERVER ROOM`, `admin-invite-skip`, `admin-invite-create` ("Create code") and
+`admin-invite-cancel`, then the code shown once with `admin-invite-copy` ("Copy"),
+`admin-invite-copy-link` ("Copy link") and `admin-invite-done`, and `admin-invite-revoke SERVER
+INVITE` per code; under **Sign-up requests** (badge text "N pending", also on the Admin heading;
+the sidebar gear reads "⚙ N"), `admin-request-approve SERVER REQUEST`, `admin-request-decline
+SERVER REQUEST`, then `admin-request-reason`, `admin-request-decline-confirm` and
+`admin-request-decline-cancel` (server, request); on an account row "Restricted" and
+`admin-member-unrestrict SERVER USER` ("Lift restriction"). Server settings has
+`server-settings-invite-code` (Use an invite code). The sign-up screen replaces the room while
+a server asks to sign up: `signup-code`, `signup-paste`, `signup-reason` (approval mode),
+`signup-submit` ("Sign up"), `signup-check-again` ("Check again") and `signup-start-again`
+("Start again"). An invite link's confirmation has `link-confirm` ("Join" or "Continue") and
+`link-cancel`, with no integers.
+
+```text
+click-id server-settings 1
+click-id admin-invite-new 1
+click-id admin-invite-create 1
+wait-text "Copy link"
+click-id admin-invite-done 1
+wait-text "1 pending"
+click-id admin-request-approve 1 4
+```
+
 ### Output and Exit Codes
 
 stdout carries one JSON line per command and a final summary; diagnostics go to stderr.
