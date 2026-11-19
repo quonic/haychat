@@ -96,7 +96,7 @@ variables:
 | `HAYCHAT_DEV_PORT` | Host UDP port published for client connections (default `12345`) |
 | `HAYCHAT_DEV_ENV_FILE` | Server overrides file (default `.env`) |
 | `HAYCHAT_DEV_POSTGRES_IMAGE` | PostgreSQL image (default `docker.io/library/postgres:17`) |
-| `HAYCHAT_DEV_UI_SCREENSHOTS` | Host directory that keeps `live --ui` screenshots (BMP) |
+| `HAYCHAT_DEV_UI_SCREENSHOTS` | Host directory that keeps the GUI smoke test's screenshots (BMP) from `live --ui`, `live --all` and `ci` |
 | `HAYCHAT_SERVER_READY_TIMEOUT_SECS` | How long to wait for the server to report readiness. `./dev.sh up` and `restart` default to `120`; `dev/live-proof.sh` defaults to `60`, and `./dev.sh live` and `ci` pass the variable through when it is set |
 
 ## Typical Workflow

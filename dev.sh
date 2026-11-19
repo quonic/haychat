@@ -95,8 +95,9 @@ Environment:
   HAYCHAT_DEV_PORT          host UDP port for client connections (default 12345)
   HAYCHAT_DEV_ENV_FILE      server overrides file (default .env, see .env.example)
   HAYCHAT_DEV_POSTGRES_IMAGE  PostgreSQL image (default docker.io/library/postgres:17)
-  HAYCHAT_DEV_UI_SCREENSHOTS  host directory that keeps \`live --ui\` screenshots (BMP);
-                            without it they vanish with the throwaway container
+  HAYCHAT_DEV_UI_SCREENSHOTS  host directory that keeps the GUI smoke test's screenshots
+                            (BMP) from \`live --ui\`, \`live --all\` and \`ci\`; without it
+                            they vanish with the throwaway container
 EOF
 }
 
@@ -368,18 +369,22 @@ cmd_live() {
 	with_throwaway_pod run_live_proof "$@"
 }
 
+# ui_screenshot_run_args fills the caller's run_args with the options that mount
+# HAYCHAT_DEV_UI_SCREENSHOTS for the GUI smoke test's screenshots, which otherwise live in
+# the throwaway container. `live` and `ci` both run that test.
+ui_screenshot_run_args() {
+	[[ -n "${HAYCHAT_DEV_UI_SCREENSHOTS:-}" ]] || return 0
+	mkdir -p -- "$HAYCHAT_DEV_UI_SCREENSHOTS"
+	# Like `shell`, labelling is disabled rather than relabelling the user's directory
+	# with :z; without either, SELinux denies the container's writes to it.
+	run_args+=(--security-opt label=disable)
+	run_args+=(-v "$(cd -- "$HAYCHAT_DEV_UI_SCREENSHOTS" && pwd):/screenshots")
+	run_args+=(-e HAYCHAT_UI_SCREENSHOT_DIR=/screenshots)
+}
+
 run_live_proof() {
 	local run_args=()
-	# The GUI smoke test's screenshots live in the container unless a host directory is
-	# mounted for them.
-	if [[ -n "${HAYCHAT_DEV_UI_SCREENSHOTS:-}" ]]; then
-		mkdir -p -- "$HAYCHAT_DEV_UI_SCREENSHOTS"
-		# Like `shell`, labelling is disabled rather than relabelling the user's directory
-		# with :z; without either, SELinux denies the container's writes to it.
-		run_args+=(--security-opt label=disable)
-		run_args+=(-v "$(cd -- "$HAYCHAT_DEV_UI_SCREENSHOTS" && pwd):/screenshots")
-		run_args+=(-e HAYCHAT_UI_SCREENSHOT_DIR=/screenshots)
-	fi
+	ui_screenshot_run_args
 	run_snapshot_in_pod "$throwaway_pod" "${run_args[@]}" -- 'dev/live-proof.sh "$@"' "$@"
 }
 
@@ -388,8 +393,11 @@ cmd_ci() {
 }
 
 run_ci() {
+	local run_args=()
+	ui_screenshot_run_args
 	log_step "Running ./check.sh and dev/live-proof.sh --all"
-	run_snapshot_in_pod "$throwaway_pod" -- './check.sh && dev/live-proof.sh --all'
+	run_snapshot_in_pod "$throwaway_pod" "${run_args[@]}" -- \
+		'./check.sh && dev/live-proof.sh --all'
 }
 
 cmd_up() {

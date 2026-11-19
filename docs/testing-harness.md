@@ -1291,7 +1291,8 @@ lines of the GUI script it generates, deletes any files with those names before 
 opens, and at the end prints every path and fails naming each one that was not written, so a
 new shot needs no count to update and leftovers from an earlier run never count. They stay in
 `HAYCHAT_UI_SCREENSHOT_DIR` when set and otherwise in a new temporary directory, which disappears with the container under `./dev.sh`; set
-`HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` mount a host directory for them.
+`HAYCHAT_DEV_UI_SCREENSHOTS=DIR` to have `./dev.sh live` or `./dev.sh ci` mount a host
+directory for them.
 `dev/ui-smoke.sh 127.0.0.1:12345` also runs on the host against any server.
 
 ## Voice Engine Loopback
