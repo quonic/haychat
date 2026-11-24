@@ -55,7 +55,30 @@ Server settings (`servers[].display_name`, labels, `servers[].user_voice[]`,
 HayChat window that already runs through a file only the user can read: `link-handoff` in
 `$XDG_RUNTIME_DIR/haychat/` (or, without a runtime directory, the config directory; on Windows
 `%APPDATA%\haychat\`), created new with mode 0600 and deleted once read. The window records
-its process ID in `instance` there so the second process knows it runs. Neither is config.
+its process ID in `instance` there so the second process knows it runs. Only one window owns
+that file: a second window started while the first runs leaves it alone (and does not take
+links), a window removes it at exit only while it still names its own process ID, and a file
+naming a process that is gone is replaced by the next window. Neither is config.
+
+A confirmed invite link's code stays in memory until the server has used it (you signed in,
+the request is waiting for approval, or it was declined), another link replaces it, or the
+server is removed or its pinned key changes (changing the address clears the pin). Until then a
+settings change that reconnects the server, such as a new display name, still signs up with the
+code. It is never written to `config.json` or a log.
+
+`haychat-client --register-url-handler` registers this executable as the handler for
+`haychat://` links for the current user and exits:
+
+- **Linux:** writes `haychat.desktop` (`MimeType=x-scheme-handler/haychat;`,
+  `Exec="EXECUTABLE" %u`) to `$XDG_DATA_HOME/applications/` (by default
+  `~/.local/share/applications/`), runs `xdg-mime default haychat.desktop
+  x-scheme-handler/haychat`, and `update-desktop-database` on that directory where it is
+  installed.
+- **Windows:** writes `HKEY_CURRENT_USER\Software\Classes\haychat` (no administrator rights
+  needed): the default value `URL:HayChat Protocol`, an empty `URL Protocol` value, and
+  `shell\open\command` = `"EXECUTABLE" "%1"`.
+
+Run it again after moving the client to another folder.
 
 ## One Client per Profile
 

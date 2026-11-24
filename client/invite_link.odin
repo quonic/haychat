@@ -20,6 +20,13 @@ import "core:time"
 // ClientAuthRequestPayload.registering set and the code in the sign-up form. The user still
 // presses Sign up. A link's code is never logged (redactHaychatLink) or saved.
 //
+// The invite outlives the transport (#108): State keeps it (LinkInvite, in memory only), so a
+// settings change that rebuilds the server's transport (a new display name, say) connects
+// with registering set again and the code comes back into the sign-up form. It goes once the
+// server has used it (signed in, Pending, Declined), when another link replaces it, or when
+// the server is removed or its pinned key changes (an address change clears the pin, and a
+// code only ever goes to the key the link named).
+//
 // Hand-off between processes: a link opened while HayChat already runs starts a second
 // process (the scheme handler). That process writes the link to a file only the user can
 // read, in the per-user runtime directory ($XDG_RUNTIME_DIR/haychat) or, without one, the
@@ -440,6 +447,9 @@ State_confirmPendingLink :: proc(state: ^State) -> string {
 		PendingLink_deinit(pending)
 		return ""
 	}
+	if invite {
+		State_setLinkInvite(state, serverID, link.code)
+	}
 	if transportIndex := State_selectedTransportIndexForServerID(state^, serverID);
 	   transportIndex >= 0 {
 		transport := &state.serverTransports[transportIndex]
@@ -457,6 +467,105 @@ State_confirmPendingLink :: proc(state: ^State) -> string {
 	}
 	PendingLink_deinit(pending)
 	return ""
+}
+
+// ── The invite a link brought (#108) ──────────────────────────────
+
+// A confirmed invite link's code, until the server has used it (see the top of this file).
+// Owned; kept in memory only and wiped when it goes. One at a time: a new link replaces it.
+LinkInvite :: struct {
+	serverID:  int, // 0: none
+	code:      string,
+	// The server key pinned when the link was confirmed (the link's key). The code goes only
+	// to a transport that still pins it.
+	pinnedKey: string,
+}
+
+LinkInvite_deinit :: proc(invite: ^LinkInvite) {
+	common.wipeAndDeleteString(&invite.code)
+	delete(invite.pinnedKey)
+	invite^ = {}
+}
+
+// Keeps a confirmed link's code for serverID (code borrowed), replacing an earlier link's.
+State_setLinkInvite :: proc(state: ^State, serverID: int, code: string) {
+	server, ok := State_serverConfig(state, serverID)
+	if !ok || len(code) == 0 {
+		return
+	}
+	State_clearLinkInvite(state, state.signUpForm.linkInvite.serverID)
+	state.signUpForm.linkInvite = LinkInvite {
+		serverID  = serverID,
+		code      = strings.clone(code),
+		pinnedKey = strings.clone(server.pinned_server_public_key),
+	}
+}
+
+State_hasLinkInvite :: proc(state: ^State, serverID: int) -> bool {
+	return serverID != 0 && state.signUpForm.linkInvite.serverID == serverID
+}
+
+// What a transport for server sends as ClientAuthRequestPayload.registering: the saved
+// setting (Use an invite code), or a link's invite still waiting.
+State_serverRegistering :: proc(state: ^State, server: Server) -> bool {
+	return server.use_invite_code || State_hasLinkInvite(state, server.id)
+}
+
+// Sets serverID's transport's registering flag from State_serverRegistering.
+State_applyRegistering :: proc(state: ^State, serverID: int) {
+	server, ok := State_serverConfig(state, serverID)
+	if !ok {
+		return
+	}
+	transportIndex := State_selectedTransportIndexForServerID(state^, serverID)
+	if transportIndex < 0 {
+		return
+	}
+	registering := State_serverRegistering(state, server^)
+	ClientNetworkWorker_lock(state.networkWorker)
+	ClientServerTransport_setRegistering(&state.serverTransports[transportIndex], registering)
+	ClientNetworkWorker_unlock(state.networkWorker)
+}
+
+// The server used serverID's link invite (or it no longer applies): wipes the code, and the
+// transport's registering flag goes back to the saved setting.
+State_clearLinkInvite :: proc(state: ^State, serverID: int) {
+	if !State_hasLinkInvite(state, serverID) {
+		return
+	}
+	LinkInvite_deinit(&state.signUpForm.linkInvite)
+	State_applyRegistering(state, serverID)
+}
+
+// Before the transports are rebuilt (State_reconfigureNetwork, worker stopped): an invite
+// whose server was removed or no longer pins the link's key is dropped, so its code never
+// goes to another server.
+State_dropStaleLinkInvite :: proc(state: ^State) {
+	invite := &state.signUpForm.linkInvite
+	if invite.serverID == 0 {
+		return
+	}
+	server, ok := State_serverConfig(state, invite.serverID)
+	if !ok || len(invite.pinnedKey) == 0 || server.pinned_server_public_key != invite.pinnedKey {
+		LinkInvite_deinit(invite)
+	}
+}
+
+// Fills the sign-up form with serverID's link invite when that server's screen shows and the
+// field is empty: after a rebuilt transport's ServerRegistrationRequired, an ended session,
+// or switching back to the server.
+State_refillLinkInvite :: proc(state: ^State, serverID: int) {
+	if !State_hasLinkInvite(state, serverID) {
+		return
+	}
+	form := &state.signUpForm
+	if form.serverID != serverID && state.selected_server_id != serverID {
+		return
+	}
+	if form.serverID == serverID && len(form.code) > 0 {
+		return
+	}
+	State_prefillSignUpCode(state, serverID, form.linkInvite.code)
 }
 
 // ── Hand-off between processes ────────────────────────────────────
@@ -570,44 +679,22 @@ takeLinkHandoff :: proc(allocator := context.allocator) -> (url: string, ok: boo
 	return result, true
 }
 
-// The instance file: this process's ID and executable, so a second process can tell whether
-// a HayChat window is running. Written by the GUI at start, removed at exit.
-writeLinkInstanceFile :: proc() -> bool {
-	dir := linkHandoffDir()
-	defer delete(dir)
-	if len(dir) == 0 {
-		return false
-	}
-	if err := os.make_directory_all(dir, os.perm(0o700)); err != nil && !os.is_dir(dir) {
-		return false
-	}
-	path := strings.concatenate({dir, "/", LINK_INSTANCE_FILE})
-	defer delete(path)
-	text := fmt.tprintf("%d\n", os.get_pid())
-	return writePrivateFileNew(path, transmute([]u8)text)
-}
+// The instance file names the HayChat window that takes handed-over links: its process ID.
+// Only one window owns it (#109): a second window started while the owner runs leaves it
+// alone (and does not watch for links), and a window removes it at exit only while it still
+// names this process. An owner that crashed leaves a file naming a process that is gone (or
+// is not HayChat), which the next window replaces. The profile lock (#81, profile_lock.odin)
+// already stops a second window on the same profile before init; this check covers windows on
+// other profiles, which share the instance file on Linux ($XDG_RUNTIME_DIR/haychat), and
+// --ui-script runs. The file keeps the PID rather than a lock: the scheme handler process reads
+// it to find the running window.
 
-removeLinkInstanceFile :: proc() {
-	dir := linkHandoffDir(context.temp_allocator)
-	if len(dir) > 0 {
-		_ = os.remove(strings.concatenate({dir, "/", LINK_INSTANCE_FILE}, context.temp_allocator))
-	}
-}
+// Whether pid is a running HayChat process other than this one. The seam tests replace.
+LinkInstanceLiveProc :: #type proc(pid: int) -> bool
 
-// Whether another HayChat process (the one named by the instance file, running this same
-// executable) is running.
-linkOtherInstanceRunning :: proc() -> bool {
-	dir := linkHandoffDir(context.temp_allocator)
-	if len(dir) == 0 {
-		return false
-	}
-	path := strings.concatenate({dir, "/", LINK_INSTANCE_FILE}, context.temp_allocator)
-	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
-	if err != nil {
-		return false
-	}
-	pid, pidOK := strconv.parse_int(strings.trim_space(string(data)), 10)
-	if !pidOK || pid <= 0 || pid == os.get_pid() {
+// Whether pid runs this same executable (and is not this process).
+linkProcessIsHayChat :: proc(pid: int) -> bool {
+	if pid <= 0 || pid == os.get_pid() {
 		return false
 	}
 	own, ownErr := os.get_executable_path(context.temp_allocator)
@@ -617,6 +704,74 @@ linkOtherInstanceRunning :: proc() -> bool {
 	info, infoErr := os.process_info_by_pid(pid, {.Executable_Path}, context.temp_allocator)
 	defer os.free_process_info(info, context.temp_allocator)
 	return infoErr == nil && info.executable_path == own
+}
+
+// The process ID the instance file in dir names; ok false when there is none or it is not
+// a number.
+readLinkInstancePID :: proc(dir: string) -> (pid: int, ok: bool) {
+	path := strings.concatenate({dir, "/", LINK_INSTANCE_FILE}, context.temp_allocator)
+	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
+	if err != nil {
+		return 0, false
+	}
+	parsed, parsedOK := strconv.parse_int(strings.trim_space(string(data)), 10)
+	if !parsedOK || parsed <= 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// Makes ownPID the owner of dir's instance file unless it names another live HayChat
+// process (isLive). Returns whether ownPID owns it now.
+claimLinkInstanceFile :: proc(dir: string, ownPID: int, isLive: LinkInstanceLiveProc) -> bool {
+	if len(dir) == 0 {
+		return false
+	}
+	if pid, ok := readLinkInstancePID(dir); ok && pid != ownPID && isLive(pid) {
+		return false
+	}
+	if err := os.make_directory_all(dir, os.perm(0o700)); err != nil && !os.is_dir(dir) {
+		return false
+	}
+	path := strings.concatenate({dir, "/", LINK_INSTANCE_FILE}, context.temp_allocator)
+	text := fmt.tprintf("%d\n", ownPID)
+	return writePrivateFileNew(path, transmute([]u8)text)
+}
+
+// Removes dir's instance file only while it names ownPID.
+releaseLinkInstanceFile :: proc(dir: string, ownPID: int) {
+	if len(dir) == 0 {
+		return
+	}
+	if pid, ok := readLinkInstancePID(dir); ok && pid == ownPID {
+		_ = os.remove(strings.concatenate({dir, "/", LINK_INSTANCE_FILE}, context.temp_allocator))
+	}
+}
+
+// The GUI at start: whether this window owns the instance file and so takes handed-over
+// links (State.linkHandoffWatch).
+writeLinkInstanceFile :: proc() -> bool {
+	return claimLinkInstanceFile(
+		linkHandoffDir(context.temp_allocator),
+		os.get_pid(),
+		linkProcessIsHayChat,
+	)
+}
+
+// The GUI at exit, when it owns the file.
+removeLinkInstanceFile :: proc() {
+	releaseLinkInstanceFile(linkHandoffDir(context.temp_allocator), os.get_pid())
+}
+
+// Whether another HayChat process (the one named by the instance file, running this same
+// executable) is running.
+linkOtherInstanceRunning :: proc() -> bool {
+	dir := linkHandoffDir(context.temp_allocator)
+	if len(dir) == 0 {
+		return false
+	}
+	pid, ok := readLinkInstancePID(dir)
+	return ok && linkProcessIsHayChat(pid)
 }
 
 // The GUI's poll for links another process handed over (app.odin), at most every

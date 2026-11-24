@@ -26,7 +26,7 @@
 | [protocol.md](protocol.md) | Transport encryption, what each protocol version added, attachments (transfers, files on messages, the encrypted file format, moderation, lifecycle), and the end-to-end encryption primitives in `common/e2ee.odin` |
 | [server-networking.md](server-networking.md) | The server's threads, IPC queues, and network loop |
 | [testing-harness.md](testing-harness.md) | The headless client (`client --headless`), voice and attachment test commands, GUI automation (`client --ui-script`), and the live proofs (`./dev.sh live --admin`, `--registration`, `--attachments`, …) |
-| [voice-manual-test.md](voice-manual-test.md) | Measuring voice on real audio devices with PipeWire, and the Windows voice checklist |
+| [voice-manual-test.md](voice-manual-test.md) | Measuring voice on real audio devices with PipeWire, and the Windows voice, link hand-off and URL scheme checklist |
 | [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) | Third-party code, libraries and fonts in each release artifact, with their licences |
 
 ## Plans and History

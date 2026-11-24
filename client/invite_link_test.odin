@@ -1,6 +1,7 @@
 package client
 
 import "../common"
+import "core:encoding/json"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -268,4 +269,244 @@ testLinkHandoffFileIsPrivateAndReadOnce :: proc(t: ^testing.T) {
 		_, loose := readPrivateFileOnce(path, HAYCHAT_LINK_MAX_BYTES)
 		testing.expect(t, !loose && !os.exists(path), "expected a readable file refused")
 	}
+}
+
+// #108: a confirmed invite link outlives the transport. A settings change that rebuilds it
+// (here the display name) keeps registering and the code; signing in clears both, and the
+// code is never in the config.
+@(test)
+testInviteLinkSurvivesTransportRebuild :: proc(t: ^testing.T) {
+	key, _ := common.identityPublicKeyFromHex(INVITE_LINK_TEST_KEY)
+	fingerprint := common.fingerprintToHex(common.fingerprintIdentityPublicKey(key))
+	defer delete(fingerprint)
+	state := testUpdateStateForServer(
+		Server {
+			id = 1302,
+			name = "Pinned",
+			short_name = "P",
+			host = "chat.example",
+			port = 4000,
+			pinned_server_public_key = INVITE_LINK_TEST_KEY,
+			pinned_server_fingerprint = fingerprint,
+		},
+	)
+	defer State_deinit(&state)
+	code := "0123-4567-89AB-CDEF-GHJK-MNPQ-RSTV-WXYZ"
+	State_openLink(
+		&state,
+		"haychat://chat.example:4000/invite/0123456789ABCDEFGHJKMNPQRSTVWXYZ?key=" +
+		INVITE_LINK_TEST_KEY,
+	)
+	testExpectString(t, State_confirmPendingLink(&state), "", "following the link")
+	transport := &state.serverTransports[State_selectedTransportIndexForServerID(state, 1302)]
+	testing.expect(
+		t,
+		transport.registering && State_hasLinkInvite(&state, 1302),
+		"expected the link to set registering and keep its invite",
+	)
+	oldEphemeral := transport.clientEphemeralPublicKey
+
+	// A new display name rebuilds the transport (matchesConfig compares the nickname).
+	server, _ := State_serverConfig(&state, 1302)
+	delete(server.display_name)
+	server.display_name = strings.clone("Carol")
+	State_reconfigureNetwork(&state)
+	transport = &state.serverTransports[State_selectedTransportIndexForServerID(state, 1302)]
+	testing.expect(
+		t,
+		transport.clientEphemeralPublicKey != oldEphemeral,
+		"expected the display name change to rebuild the transport",
+	)
+	testing.expect(
+		t,
+		transport.registering,
+		"expected the rebuilt transport to connect with registering set",
+	)
+	testExpectString(
+		t,
+		state.signUpForm.linkInvite.code,
+		code,
+		"the invite's code after the rebuild",
+	)
+
+	// Settings applied to the kept transport (use_invite_code off) leave it on, too.
+	State_setUseInviteCode(&state, 1302, true)
+	State_setUseInviteCode(&state, 1302, false)
+	testing.expect(t, transport.registering, "expected Use an invite code off to keep it on")
+
+	// The form was wiped (another server's screen, an ended session): the server's
+	// ServerRegistrationRequired fills it again.
+	State_wipeSignUpForm(&state)
+	testApplyRegistrationRequired(&state, 1302, .InviteOnly)
+	testExpectString(
+		t,
+		string(state.signUpForm.code[:]),
+		code,
+		"the code in the sign-up form again",
+	)
+
+	// The code never reaches the config file.
+	data, marshalErr := json.marshal(state.config)
+	defer delete(data)
+	testing.expect(t, marshalErr == nil, "expected the config to marshal")
+	testing.expect(
+		t,
+		!strings.contains(string(data), code) &&
+		!strings.contains(string(data), "0123456789ABCDEFGHJKMNPQRSTVWXYZ"),
+		"expected the invite code never in config.json",
+	)
+
+	// Created (Connected with registered set) clears both.
+	created := ClientTransportRuntimeEvent {
+		kind             = .Connected,
+		serverID         = 1302,
+		userID           = 41,
+		nickname         = strings.clone("Carol"),
+		registered       = true,
+		registrationMode = .InviteOnly,
+	}
+	State_applyRuntimeEvent(&state, &created)
+	ClientTransportRuntimeEvent_deinit(&created)
+	testing.expect(
+		t,
+		!transport.registering &&
+		!State_hasLinkInvite(&state, 1302) &&
+		len(state.signUpForm.linkInvite.code) == 0 &&
+		len(state.signUpForm.code) == 0,
+		"expected Created to clear registering and the code",
+	)
+}
+
+// #108: an invite whose server no longer pins the link's key (an address change clears the
+// pin) is dropped, so its code never goes to another server; Pending and Declined clear it.
+@(test)
+testInviteLinkDroppedWhenNoLongerApplies :: proc(t: ^testing.T) {
+	key, _ := common.identityPublicKeyFromHex(INVITE_LINK_TEST_KEY)
+	fingerprint := common.fingerprintToHex(common.fingerprintIdentityPublicKey(key))
+	defer delete(fingerprint)
+	state := testUpdateStateForServer(
+		Server {
+			id = 1303,
+			name = "Pinned",
+			short_name = "P",
+			host = "chat.example",
+			port = 4000,
+			pinned_server_public_key = INVITE_LINK_TEST_KEY,
+			pinned_server_fingerprint = fingerprint,
+		},
+	)
+	defer State_deinit(&state)
+	link :=
+		"haychat://chat.example:4000/invite/0123456789ABCDEFGHJKMNPQRSTVWXYZ?key=" +
+		INVITE_LINK_TEST_KEY
+
+	State_openLink(&state, link)
+	testExpectString(t, State_confirmPendingLink(&state), "", "following the link")
+	server, _ := State_serverConfig(&state, 1303)
+	Server_setAddress(server, "other.example", 4000)
+	State_reconfigureNetwork(&state)
+	transport := &state.serverTransports[State_selectedTransportIndexForServerID(state, 1303)]
+	testing.expect(
+		t,
+		!State_hasLinkInvite(&state, 1303) && !transport.registering,
+		"expected an address change (its pin cleared) to drop the invite",
+	)
+
+	// Back at the pinned address: Pending uses the code.
+	Server_setAddress(server, "chat.example", 4000)
+	Server_setPins(server, INVITE_LINK_TEST_KEY, fingerprint)
+	State_reconfigureNetwork(&state)
+	State_openLink(&state, link)
+	testExpectString(t, State_confirmPendingLink(&state), "", "following the link again")
+	testApplyRegistrationRequired(&state, 1303, .InviteApproval)
+	testApplyRegisterResult(&state, 1303, .Pending, "")
+	transport = &state.serverTransports[State_selectedTransportIndexForServerID(state, 1303)]
+	testing.expect(
+		t,
+		!State_hasLinkInvite(&state, 1303) && !transport.registering,
+		"expected Pending to clear the invite",
+	)
+
+	// Removing the server drops it too.
+	State_openLink(&state, link)
+	testExpectString(t, State_confirmPendingLink(&state), "", "following the link a third time")
+	testing.expect(t, State_hasLinkInvite(&state, 1303), "expected the invite kept")
+	State_settingsRemoveServer(&state, 1303)
+	testing.expect(
+		t,
+		state.signUpForm.linkInvite.serverID == 0 && len(state.signUpForm.linkInvite.code) == 0,
+		"expected removing the server to drop the invite",
+	)
+}
+
+// The "other window" the instance file tests treat as a live HayChat process.
+INVITE_LINK_TEST_LIVE_PID :: 424242
+
+@(private = "file")
+testLinkInstanceLive :: proc(pid: int) -> bool {
+	return pid == INVITE_LINK_TEST_LIVE_PID
+}
+
+// #109: one window owns the instance file. A second start keeps the first PID, an exit by
+// the window that does not own it keeps the file, the owner's exit removes it, and a file
+// naming a process that is gone is replaced.
+@(test)
+testLinkInstanceFileHasOneOwner :: proc(t: ^testing.T) {
+	tempRoot, tempErr := os.temp_directory(context.temp_allocator)
+	assert(tempErr == nil, "expected a temp directory")
+	dir := fmt.tprintf("%s/haychat-instance-test-%d", tempRoot, os.get_pid())
+	_ = os.remove_all(dir)
+	defer os.remove_all(dir)
+	path := fmt.tprintf("%s/%s", dir, LINK_INSTANCE_FILE)
+	first := INVITE_LINK_TEST_LIVE_PID
+	second := INVITE_LINK_TEST_LIVE_PID + 1
+
+	testing.expect(
+		t,
+		claimLinkInstanceFile(dir, first, testLinkInstanceLive),
+		"expected the first window to own the instance file",
+	)
+	pid, ok := readLinkInstancePID(dir)
+	testing.expect(t, ok && pid == first, fmt.tprintf("expected PID %d, got %d", first, pid))
+	when ODIN_OS != .Windows {
+		info, statErr := os.lstat(path, context.temp_allocator)
+		testing.expect(
+			t,
+			statErr == nil && transmute(u32)info.mode & 0o777 == 0o600,
+			"expected the instance file to have mode 0600",
+		)
+	}
+
+	testing.expect(
+		t,
+		!claimLinkInstanceFile(dir, second, testLinkInstanceLive),
+		"expected a second start not to take the file while the first runs",
+	)
+	pid, ok = readLinkInstancePID(dir)
+	testing.expect(t, ok && pid == first, fmt.tprintf("expected PID %d kept, got %d", first, pid))
+
+	releaseLinkInstanceFile(dir, second)
+	pid, ok = readLinkInstancePID(dir)
+	testing.expect(
+		t,
+		ok && pid == first,
+		"expected the exit of a window that does not own the file to keep it",
+	)
+
+	releaseLinkInstanceFile(dir, first)
+	testing.expect(t, !os.exists(path), "expected the owner's exit to remove the file")
+
+	// A crashed owner's file (a PID that is not a running HayChat) is replaced.
+	assert(os.write_entire_file(path, "31337\n") == nil, "expected a stale instance file")
+	testing.expect(
+		t,
+		claimLinkInstanceFile(dir, second, testLinkInstanceLive),
+		"expected a stale owner replaced",
+	)
+	pid, ok = readLinkInstancePID(dir)
+	testing.expect(t, ok && pid == second, fmt.tprintf("expected PID %d, got %d", second, pid))
+
+	// The real check never counts this process as another window.
+	testing.expect(t, !linkProcessIsHayChat(os.get_pid()), "expected this process excluded")
+	testing.expect(t, !linkProcessIsHayChat(0), "expected PID 0 refused")
 }

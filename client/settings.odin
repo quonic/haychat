@@ -323,15 +323,8 @@ State_applySettings :: proc(state: ^State) -> bool {
 	State_saveConfig(state)
 	State_reconfigureNetwork(state)
 	if input.hasServer && editingExisting {
-		transportIndex := State_selectedTransportIndexForServerID(state^, form.editingServerID)
-		if transportIndex >= 0 {
-			ClientNetworkWorker_lock(state.networkWorker)
-			ClientServerTransport_setRegistering(
-				&state.serverTransports[transportIndex],
-				form.useInviteCode,
-			)
-			ClientNetworkWorker_unlock(state.networkWorker)
-		}
+		// use_invite_code, or a link's invite still waiting (#108).
+		State_applyRegistering(state, form.editingServerID)
 	}
 	state.settingsOpen = false
 	delete(form.error)
@@ -404,6 +397,8 @@ State_reconfigureNetwork :: proc(state: ^State) {
 	wasRunning := state.networkWorker != nil
 	State_stopNetwork(state)
 
+	// A link's invite whose server went or whose pinned key changed is dropped (D19).
+	State_dropStaleLinkInvite(state)
 	previous := state.serverTransports
 	rebuilt := make([dynamic]ClientServerTransport, 0, len(state.config.servers))
 	for server in state.config.servers {
@@ -422,6 +417,8 @@ State_reconfigureNetwork :: proc(state: ^State) {
 		}
 		append(&rebuilt, ClientServerTransport_initForServer(server, state.config))
 		transport := &rebuilt[len(rebuilt) - 1]
+		// The new transport starts from use_invite_code; a link's invite keeps it on (#108).
+		transport.registering = State_serverRegistering(state, server)
 		ClientServerTransport_requestConnect(transport, {})
 		State_removeServerRoomCache(state, server.id)
 		State_resetServerConnection(state, transport)
