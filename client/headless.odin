@@ -24,6 +24,8 @@ HEADLESS_FLAG :: "--headless"
 HEADLESS_EXIT_OK :: 0
 HEADLESS_EXIT_ERROR :: 1
 HEADLESS_EXIT_CONNECT_FAILED :: 2
+// Another client holds the profile's lock (#81, profile_lock.odin); a startup_failed line says so.
+HEADLESS_EXIT_PROFILE_LOCKED :: 3
 HEADLESS_DEFAULT_WAIT_MS :: 5000
 // How long startup waits for the first connection before giving up with exit code 2.
 HEADLESS_DEFAULT_CONNECT_TIMEOUT_MS :: 15000
@@ -607,6 +609,22 @@ HeadlessConnectingJSON :: struct {
 	serverID: int,
 	// Attempts since the last connected or disconnected event, starting at 1.
 	attempt:  int,
+}
+
+// Startup refused before any connection (#81: the profile is locked). failure is
+// "ProfileLocked".
+HeadlessStartupFailedJSON :: struct {
+	event:   string,
+	message: string,
+	failure: string,
+}
+
+headlessWriteStartupFailed :: proc(out: io.Writer, message, failure: string) {
+	line := headlessMarshal(
+		HeadlessStartupFailedJSON{event = "startup_failed", message = message, failure = failure},
+	)
+	defer delete(line)
+	headlessWriteLineTo(out, line)
 }
 
 // failure names the ClientConnectFailureKind, or a harness-only reason (NoServer, Timeout).
@@ -2247,6 +2265,11 @@ HeadlessHarness :: struct {
 	// What voice_status and voice_speaking last reported (headless_voice.odin).
 	voice:           HeadlessVoiceTracker,
 	running:         bool,
+	// #36 (headless_signals.odin): headlessMain sets watchSignals, so a SIGTERM or SIGINT the
+	// process gets lands in stopSignal and ends the command loop, `wait` and `sleep`. Tests
+	// leave it off (the flag is process-wide) and set stopSignal themselves.
+	watchSignals:    bool,
+	stopSignal:      int,
 	// Where the key stores go (keystore.odin); empty keeps them in memory (tests). Borrowed.
 	keyStoreDir:     string,
 	// Live direct messages (server ID, message ID) still waiting for their sender's key, to be
@@ -2279,11 +2302,15 @@ HeadlessHarness_deinit :: proc(harness: ^HeadlessHarness) {
 
 // Writes one line followed by a newline in a single write, so lines never interleave.
 headlessWriteLine :: proc(harness: ^HeadlessHarness, line: string) {
+	headlessWriteLineTo(harness.out, line)
+}
+
+headlessWriteLineTo :: proc(out: io.Writer, line: string) {
 	buffer := make([]u8, len(line) + 1)
 	defer delete(buffer)
 	copy(buffer, line)
 	buffer[len(line)] = '\n'
-	_, _ = io.write(harness.out, buffer)
+	_, _ = io.write(out, buffer)
 }
 
 headlessWriteJSON :: proc(harness: ^HeadlessHarness, value: any) {
@@ -2779,6 +2806,10 @@ headlessConnectAndWait :: proc(
 		if time.tick_since(start) >= timeout {
 			break
 		}
+		// headlessMain says why it stops.
+		if headlessHarnessStopSignal(harness) != 0 {
+			return false
+		}
 		time.sleep(HEADLESS_POLL_INTERVAL)
 	}
 
@@ -2805,7 +2836,8 @@ headlessPumpFor :: proc(harness: ^HeadlessHarness, duration: time.Duration) {
 	start := time.tick_now()
 	for {
 		headlessDrainEvents(harness)
-		if time.tick_since(start) >= duration {
+		// A signal (#36) ends the pause early; the command loop then exits.
+		if time.tick_since(start) >= duration || headlessHarnessStopSignal(harness) != 0 {
 			return
 		}
 		time.sleep(HEADLESS_POLL_INTERVAL)
@@ -3810,6 +3842,16 @@ headlessCommandWait :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedC
 			headlessWriteError(harness, command.name, message)
 			return
 		}
+		// A signal (#36) ends the wait; the command loop then exits.
+		if sig := headlessHarnessStopSignal(harness); sig != 0 {
+			message := fmt.tprintf(
+				"stopped by %s while waiting for %s",
+				headlessSignalName(sig),
+				HEADLESS_EVENT_NAMES[kind],
+			)
+			headlessWriteError(harness, command.name, message)
+			return
+		}
 		time.sleep(HEADLESS_POLL_INTERVAL)
 	}
 }
@@ -3930,6 +3972,18 @@ headlessMain :: proc(args: []string) -> int {
 	if len(options.configDir) > 0 && !headlessUseConfigDir(options.configDir) {
 		return HEADLESS_EXIT_ERROR
 	}
+	// SIGTERM and SIGINT stop the harness cleanly (#36, headless_signals.odin), also while SDL
+	// audio is open.
+	headlessSignalsSetUp()
+	// One client per profile (#81), before anything reads or writes it.
+	if profileLockTakeForProcess() == .AlreadyRunning {
+		headlessWriteStartupFailed(
+			os.to_writer(jsonOut),
+			PROFILE_LOCK_HELD_MESSAGE,
+			"ProfileLocked",
+		)
+		return HEADLESS_EXIT_PROFILE_LOCKED
+	}
 
 	config := loadConfig()
 	defer Config_deinit(&config)
@@ -3958,12 +4012,17 @@ headlessMain :: proc(args: []string) -> int {
 		commands    = HEADLESS_COMMANDS[:],
 		running     = true,
 		keyStoreDir = keyStoreDir,
+		watchSignals = true,
 		autoInviteCode = options.inviteCode,
 		autoReason  = options.reason,
 	}
 	defer HeadlessHarness_deinit(&harness)
 	connectTimeout := time.Duration(options.connectTimeoutMS) * time.Millisecond
 	if !headlessConnectAndWait(&harness, config, connectTimeout) {
+		if sig := headlessHarnessStopSignal(&harness); sig != 0 {
+			fmt.eprintfln("[Info] %s received while connecting; exiting", headlessSignalName(sig))
+			return HEADLESS_EXIT_OK
+		}
 		return HEADLESS_EXIT_CONNECT_FAILED
 	}
 
@@ -3982,6 +4041,10 @@ headlessMain :: proc(args: []string) -> int {
 
 	for harness.running {
 		headlessDrainEvents(&harness)
+		if sig := headlessHarnessStopSignal(&harness); sig != 0 {
+			fmt.eprintfln("[Info] %s received; exiting", headlessSignalName(sig))
+			break
+		}
 		line, hasLine, closed := HeadlessInput_pop(input)
 		if hasLine {
 			headlessHandleLine(&harness, line)

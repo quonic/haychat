@@ -155,9 +155,10 @@ on_exit() {
 	for pid in "${helper_pids[@]}"; do
 		kill "$pid" 2>/dev/null || true
 	done
-	# A client with SDL audio open turns SIGTERM into an SDL quit event that the headless
-	# loop never reads, so stop it the way the harness expects: EOF on stdin. SIGKILL is the
-	# fallback for one that does not exit within 5 s.
+	# Stop clients the way the harness expects: EOF on stdin. Since #36 SIGTERM would do as
+	# well, but HAYCHAT_VOICE_MANUAL_CLIENT may be an older build whose headless loop never read
+	# the SDL quit event SIGTERM became while SDL audio was open. SIGKILL is the fallback for
+	# one that does not exit within 5 s.
 	for client in "${!client_pid[@]}"; do
 		fd=${client_fd[$client]}
 		exec {fd}>&- 2>/dev/null || true
