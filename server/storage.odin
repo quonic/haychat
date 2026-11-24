@@ -117,10 +117,11 @@ StorageUploadFinished :: struct {
 }
 
 StorageReadData :: struct {
-	blobId: common.AttachmentBlobID,
-	offset: u64,
-	data:   []u8, // owned
-	ok:     bool,
+	blobId:  common.AttachmentBlobID,
+	offset:  u64,
+	data:    []u8, // owned
+	ok:      bool,
+	missing: bool, // the blob's file does not exist (ENOENT), not another read error (#132)
 }
 
 StorageBlobsDeleted :: struct {
@@ -513,6 +514,9 @@ storageRead :: proc(worker: ^StorageWorker, request: StorageRead) -> StorageResu
 	defer delete(path)
 	file, err := os.open(path, {.Read})
 	if err != nil {
+		// A row whose file is gone (a database restored without its blob directory) is told
+		// apart from a failing disk, so the reader hears "Attachment not found" (#132).
+		data.missing = err == os.General_Error.Not_Exist
 		return data
 	}
 	defer os.close(file)

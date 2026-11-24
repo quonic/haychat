@@ -475,8 +475,8 @@ newest message.
   only allow, never deny: a room cannot take something from a role another grant gives.
 - Files are never previewed, and there is no download cache: each **Save…** downloads again. A
   direct message with files is not queued while the other person's key is being fetched; it
-  stays in the draft. A file the server knows but cannot read from its disk (a database restored
-  without its blob directory) fails with "Server storage error" rather than showing as
-  unavailable.
+  stays in the draft. A file whose row the server keeps but whose file is gone from its disk (a
+  database restored without its blob directory) shows as unavailable, and the row stays until an
+  admin removes the file or its message is deleted.
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.

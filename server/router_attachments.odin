@@ -1662,6 +1662,17 @@ MainRouterState_handleStorageResponse :: proc(
 			return
 		}
 		if !r.ok || u64(len(r.data)) != pending.size {
+			// A row whose file is gone (a restore without the blob directory) is "not
+			// found", which clients show as unavailable; any other failure is the disk's
+			// (#132). The row stays as it is: the download check still passes it.
+			message := common.ATTACHMENT_STORAGE_ERROR_MESSAGE
+			if r.missing {
+				message = common.ATTACHMENT_NOT_FOUND_MESSAGE
+				fmt.printfln(
+					"[Attachments] File of attachment %s is missing from storage",
+					storageBlobHex(r.blobId, context.temp_allocator),
+				)
+			}
 			attachmentRefuse(
 				pm,
 				state,
@@ -1669,7 +1680,7 @@ MainRouterState_handleStorageResponse :: proc(
 				pending.sessionID,
 				0,
 				r.blobId,
-				common.ATTACHMENT_STORAGE_ERROR_MESSAGE,
+				message,
 			)
 			attachmentRemoveDownload(state, key)
 			return

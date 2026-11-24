@@ -192,6 +192,65 @@ testStorageWorkerStoresAndReadsABlob :: proc(t: ^testing.T) {
 		StorageRead{blobId = blobId, offset = 0, length = common.ATTACHMENT_CHUNK_BYTES + 1},
 	)
 	assert(!tooLong.(StorageReadData).ok, "expected a read longer than a chunk refused")
+	assert(!tooLong.(StorageReadData).missing, "expected a refused length not to read missing")
+}
+
+// A row whose file is gone reads as missing (ENOENT), apart from other read errors (#132).
+@(test)
+testStorageWorkerReportsAMissingBlobFile :: proc(t: ^testing.T) {
+	_ = t
+	dir := storageTestDir("haychat_storage_missing")
+	defer os.remove_all(dir)
+	worker := StorageWorker_init(dir)
+	defer StorageWorker_deinit(&worker)
+	worker.freeBytes = storageTestPlenty
+
+	blobId := storageTestBlob(9)
+	data := storageTestData(1000, 3)
+	defer delete(data)
+	opened := storageTestOpen(&worker, blobId, u64(len(data)))
+	assert(opened.ok, fmt.tprintf("expected a new upload, got %v", opened))
+	storageTestWrite(&worker, blobId, data, 0)
+	finished := storageTestFinish(&worker, blobId, u64(len(data)), storageTestHash(data))
+	assert(finished.ok, fmt.tprintf("expected a stored blob, got %v", finished))
+	stored := storageBlobPath(&worker, blobId)
+	defer delete(stored)
+
+	// The file is deleted behind the worker's back, as after a restore without the directory.
+	assert(os.remove(stored) == nil, "expected the stored blob deleted by the test")
+	result, answered := StorageWorker_handle(
+		&worker,
+		StorageRead{blobId = blobId, offset = 0, length = len(data)},
+	)
+	read, ok := result.(StorageReadData)
+	assert(
+		answered && ok && !read.ok && read.missing && len(read.data) == 0,
+		fmt.tprintf("expected the read of a deleted file to report missing, got %v", result),
+	)
+	StorageResult_deinit(result)
+
+	// Never stored at all reads missing too (no shard directory).
+	never, _ := StorageWorker_handle(
+		&worker,
+		StorageRead{blobId = storageTestBlob(200), offset = 0, length = 10},
+	)
+	assert(
+		!never.(StorageReadData).ok && never.(StorageReadData).missing,
+		fmt.tprintf("expected the read of a never stored blob to report missing, got %v", never),
+	)
+
+	// A file that exists but cannot be read (a directory in its place) is a storage error.
+	assert(os.make_directory(stored, os.perm(0o700)) == nil, "expected a directory at the path")
+	broken, _ := StorageWorker_handle(
+		&worker,
+		StorageRead{blobId = blobId, offset = 0, length = len(data)},
+	)
+	brokenRead := broken.(StorageReadData)
+	assert(
+		!brokenRead.ok && !brokenRead.missing,
+		fmt.tprintf("expected an unreadable file to be a read error, not missing, got %v", broken),
+	)
+	StorageResult_deinit(broken)
 }
 
 @(test)
