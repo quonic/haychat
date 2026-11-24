@@ -14,7 +14,8 @@ set -euo pipefail
 #                 the file's size, and no part file is left.
 #   3. download:  A downloads the blob while both measure again; its sha256 is the file's.
 #   4. refusals:  B cannot download A's unbound blob (only its owner may, D10), and B's upload
-#                 to a room that does not exist is refused.
+#                 to a room that does not exist is refused. (#132) With the blob's file moved
+#                 aside, A's own download of it is "Attachment not found", not a storage error.
 #   5. resume:    A starts a second 25 MiB upload, reconnects in the middle, and resumes it with
 #                 attach-resume: it continues at the offset the server acknowledged and the
 #                 stored blob is the file.
@@ -262,6 +263,19 @@ expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$st
 start=$(wc -l <"$work_dir/b.out")
 expect_ok b "attach-upload 999999 $big_file"
 expect_event b '"event":"attachment_error".*"error":"Not a room member"' "$start" >/dev/null
+# (#132) A row whose file is gone (a restore without the blob directory) is "Attachment not
+# found", not "Server storage error": the file is renamed aside and back within its shard, so
+# no scan or sweep can see it gone.
+if [[ -n "$attachment_dir" ]]; then
+	stored="$attachment_dir/blobs/${blob:0:2}/$blob"
+	mv "$stored" "$stored.aside"
+	start=$(wc -l <"$work_dir/a.out")
+	expect_ok a "attach-download $blob $work_dir/missing.bin"
+	expect_event a '"event":"attachment_error".*"error":"Attachment not found"' "$start" >/dev/null
+	mv "$stored.aside" "$stored"
+	[[ ! -e "$work_dir/missing.bin" && ! -e "$work_dir/missing.bin.part" ]] ||
+		fail "A saved a file whose blob is missing"
+fi
 
 echo "==> [attachments] 5. resume after a reconnect"
 start=$(wc -l <"$work_dir/a.out")

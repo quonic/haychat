@@ -296,6 +296,12 @@ Issue #138. Admins see past removals and their reasons in the client.
   `HAYCHAT_ATTACHMENT_ALLOW_ORPHAN_PURGE` lifts both for one start
   (`docs/server-configuration.md`, Attachments). The sweeper is not guarded: it deletes files
   only with their rows.
+- **Missing files (#132).** A download whose row passes the check but whose file is not in the
+  blob directory (a database restored without it) is refused with "Attachment not found", the
+  same sentence as a blob the reader may not have, so the client shows "Attachment unavailable";
+  the server logs the blob ID ("File of attachment … is missing from storage"). Any other read
+  failure (a file that exists but cannot be read) is "Server storage error". The row is left as
+  it is, so each later download is checked again and refused the same way.
 - **Room deletion.** Deleting a room deletes its messages, which unlinks their files (and the
   room's unsent uploads). The first sweep pass after the deletion deletes them, so they leave
   the blob directory within an hour of it (or at the server's next start); a file uploaded less

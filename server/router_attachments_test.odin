@@ -603,3 +603,84 @@ testRouterAttachmentSessionEndKeepsUploadsResumable :: proc(t: ^testing.T) {
 	_, channel := h.state.attachments.channels[peerID]
 	assert(!channel, "expected the session's file keys wiped")
 }
+
+// A read the storage worker answers as missing (the row's file is gone) is refused as "not
+// found", which the client shows as unavailable; any other read error is the disk's (#132).
+@(test)
+testRouterAttachmentDownloadOfAMissingFileIsNotFound :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := attachTestHarness()
+	defer routerTestHarness_deinit(&h)
+	peerID := u32(1)
+	transport := routerCompleteHandshake(&h, peerID)
+
+	cases := [?]struct {
+		missing:  bool,
+		expected: string,
+	} {
+		{true, common.ATTACHMENT_NOT_FOUND_MESSAGE},
+		{false, common.ATTACHMENT_STORAGE_ERROR_MESSAGE},
+	}
+	for c, index in cases {
+		blobId: common.AttachmentBlobID
+		blobId[0] = u8(0x70 + index)
+		attachTestSend(
+			&h,
+			&transport,
+			peerID,
+			.ClientAttachmentDownload,
+			common.ClientAttachmentDownloadPayload{blobId = blobId},
+		)
+		query := routerPollDatabaseQuery(&h)
+		IPC__database_query_request_deinit(query.request)
+		MainRouterState_handleDatabaseResult(
+			&h.pm,
+			&h.state,
+			query.request_id,
+			common.DatabaseQueryResponse {
+				success = true,
+				result = common.DatabaseAttachmentResult {
+					action = .DownloadCheck,
+					outcome = .Applied,
+					size = 2 * common.ATTACHMENT_CHUNK_BYTES,
+				},
+			},
+		)
+		begin := routerTestOpenInnerPacket(&h, &transport)
+		delete(begin.payload)
+		assert(begin.messageType == .ServerAttachmentDownloadBegin, "expected DownloadBegin")
+		first := attachTestPollStorage(&h)
+		second := attachTestPollStorage(&h)
+		_, firstOK := first.request.(StorageRead)
+		_, secondOK := second.request.(StorageRead)
+		assert(firstOK && secondOK, "expected both chunks read")
+
+		MainRouterState_handleStorageResponse(
+			&h.pm,
+			&h.state,
+			StorageResponse {
+				requestId = first.requestId,
+				result = StorageReadData{blobId = blobId, missing = c.missing},
+			},
+		)
+		refused := attachTestRefusal(&h, &transport, c.expected)
+		assert(
+			refused.blobId == blobId,
+			fmt.tprintf("expected the refusal to name the blob, got %v", refused),
+		)
+		assert(len(h.state.attachments.downloads) == 0, "expected the download ended")
+
+		// The other chunk's answer reaches nobody once the download is gone.
+		MainRouterState_handleStorageResponse(
+			&h.pm,
+			&h.state,
+			StorageResponse {
+				requestId = second.requestId,
+				result = StorageReadData{blobId = blobId, missing = c.missing},
+			},
+		)
+		routerTestExpectNoNetworkMessage(&h, "expected the second chunk's failure dropped")
+	}
+}

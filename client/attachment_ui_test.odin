@@ -387,6 +387,22 @@ testFileCardsShowTheirSaves :: proc(t: ^testing.T) {
 		cards[0].state == .Failed && cards[0].status == common.ATTACHMENT_CHANGED_MESSAGE,
 		fmt.tprintf("expected the D19 sentence, got %v", cards[0]),
 	)
+	// A file the server cannot find (its row kept, its file gone: #132) reads as unavailable.
+	save = State_attachmentSave(&state, ref)
+	save.status = .Saving
+	notFound := ClientTransferEvent {
+		kind      = .Error,
+		direction = .Download,
+		id        = 21,
+		serverID  = UI_TEST_SERVER,
+		message   = common.ATTACHMENT_NOT_FOUND_MESSAGE,
+	}
+	State_attachmentUITransferEvent(&state, &notFound)
+	cards = buildFileCardViews(&state, UI_TEST_SERVER, .Room, common.GENERAL_ROOM_ID, 40, entry.files[:])
+	assert(
+		cards[0].state == .Failed && cards[0].status == ATTACHMENT_UNAVAILABLE_TEXT,
+		fmt.tprintf("expected \"Attachment unavailable\", got %v", cards[0]),
+	)
 	save = State_attachmentSave(&state, ref)
 	save.status = .Saving
 	delete(save.path)
