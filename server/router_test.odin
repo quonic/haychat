@@ -6,6 +6,7 @@ import "core:encoding/cbor"
 import "core:fmt"
 import "core:os"
 import "core:path/filepath"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:sys/linux"
@@ -266,6 +267,9 @@ routerCompleteHandshake :: proc(
 	// where to put the limits ServerAuthSuccess announced.
 	attachmentUsedBytes := u64(0),
 	attachmentLimitsOut: ^common.AttachmentLimits = nil,
+	// #102: the identity statement reports that it created the account, holding roleIDs.
+	created := false,
+	roleIDs: []int = nil,
 ) -> common.TransportState {
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected client identity key generation to succeed")
@@ -378,6 +382,8 @@ routerCompleteHandshake :: proc(
 				nicknameLocked = nicknameLocked,
 				isRestricted = isRestricted,
 				attachmentUsedBytes = attachmentUsedBytes,
+				created = created,
+				roleIds = slice.clone_to_dynamic(roleIDs),
 			},
 		},
 	)

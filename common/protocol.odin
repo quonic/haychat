@@ -2580,6 +2580,11 @@ DatabaseUserIdentityResult :: struct {
 	// Protocol 27 (D18): the account's stored attachment bytes (rows not Removed), for
 	// ServerAuthSuccess.attachments.usedBytes.
 	attachmentUsedBytes: u64,
+	// #102: created is set when this sign-in created the account (or claimed a keyless one),
+	// with roleIds (owned) the IDs of every role it holds, ascending, so the router can send
+	// other sessions its full UserSummary.
+	created:             bool,
+	roleIds:             [dynamic]int,
 }
 
 DatabaseRoomListResult :: struct {

@@ -785,8 +785,14 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .UserUpdated:
 		// The entry carries the account's identity key and bundle flag (protocol 15).
 		summary := event.user
+		// #102: an account the directory does not have yet is one the server just created,
+		// announced before it published its key (ServerUserKeyChanged follows). Its missing
+		// bundle is not "not set up yet": a send fetches the key first, as for presence.
+		isNew := !State_directoryHasUser(state, event.serverID, summary.id)
 		State_userUpdated(state, event.serverID, &event.user)
-		State_e2eeCheckDirectoryEntry(state, event.serverID, summary)
+		if !isNew || summary.hasEncryptionKey {
+			State_e2eeCheckDirectoryEntry(state, event.serverID, summary)
+		}
 	case .AccountUpdated:
 		State_accountUpdated(state, event)
 	case .AdminActionResult:

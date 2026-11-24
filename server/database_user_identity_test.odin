@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "core:time"
@@ -20,7 +21,8 @@ databaseIdentityTestKey :: proc() -> common.IdentityPublicKeyBytes {
 }
 
 // Resolves nickname for publicKey. The caller frees the result's previousNickname; the
-// account's nickname and ban reason (protocol 14) are moved to the temp allocator.
+// account's nickname, ban reason (protocol 14) and role IDs (#102) are moved to the temp
+// allocator.
 databaseIdentityTestResolve :: proc(
 	conn: pg.Conn,
 	nickname: string,
@@ -42,6 +44,9 @@ databaseIdentityTestResolve :: proc(
 	banReason := identity.banReason
 	identity.banReason = strings.clone(banReason, context.temp_allocator)
 	delete(banReason)
+	roleIDs := identity.roleIds
+	identity.roleIds = slice.clone_to_dynamic(roleIDs[:], context.temp_allocator)
+	delete(roleIDs)
 	return identity
 }
 

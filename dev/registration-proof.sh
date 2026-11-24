@@ -25,7 +25,13 @@ set -euo pipefail
 #                 restricted: her rooms are that room only (not #general), her users only the
 #                 room's members (alice, not carol or bob), and bob does not see her. Her direct
 #                 message to carol is refused ("You no longer share a room with this person")
-#                 until alice adds carol to the room; then carol receives it.
+#                 until alice adds carol to the room; then carol receives it. alice sees erin
+#                 restricted at once, from the user_updated her sign-up sends (#102). alice
+#                 makes the room Public: erin's user list gains bob, and bob's gains erin (#104).
+#   7b. gone room: two requests through a room code (ivy, jack). ivy is approved while away,
+#                 then alice deletes the room: approving jack is refused ("The room this invite
+#                 was for is no longer available"), declining him still works, and ivy's next
+#                 sign-in is declined by the server with no account made (#115).
 #   8. bootstrap: a second server on a fresh database, in Invite only mode from the start, with
 #                 HAYCHAT_ADMIN_PUBLIC_KEY set to boss's key: zed is told to register, boss signs
 #                 in, an operator code (deploy/sql/create-invite.sql) signs zed up, and boss is
@@ -63,6 +69,8 @@ declare -A client_fd=()
 
 INVALID_CODE="This invite code is not valid"
 RESTRICTED_DM="You no longer share a room with this person"
+ROOM_UNAVAILABLE="The room this invite was for is no longer available"
+ROOM_GONE_REASON="$ROOM_UNAVAILABLE; ask for a new invite"
 
 # proof_psql DATABASE ARGS...: psql against the HAYCHAT_DATABASE_* server, on DATABASE.
 proof_psql() {
@@ -252,6 +260,9 @@ nickname_henry="reg-henry-$run_tag"
 nickname_dave="reg-dave-$run_tag"
 nickname_george="reg-george-$run_tag"
 nickname_erin="reg-erin-$run_tag"
+nickname_ivy="reg-ivy-$run_tag"
+nickname_jack="reg-jack-$run_tag"
+gone_room="reg-gone-$run_tag"
 role_name="reg-inviters-$run_tag"
 restricted_room="reg-room-$run_tag"
 decline_reason="reg proof decline $run_tag"
@@ -432,10 +443,16 @@ room_id=${BASH_REMATCH[1]}
 create_invite alice "expires=3600,uses=1,room=$room_id,skip-approval" "for erin $run_tag"
 [[ "$last_event" == *"\"roomId\":$room_id,\"restricted\":true,\"skipApproval\":true"* ]] ||
 	fail "erin's code is not a restricted room code: $last_event"
+start_a=$(lines alice)
 start_client_at erin "$nickname_erin" "$server_address" --invite-code "$invite_code"
 expect_registered erin 0
 user_erin=$registered_user
 [[ "$last_event" == *'"isRestricted":true'* ]] || fail "erin is not restricted: $last_event"
+# #102: the sign-up reaches alice as erin's full entry, before or with her presence.
+updated_pattern="^\\{\"event\":\"user_updated\",\"serverID\":1,"
+updated_pattern+="\"user\":\\{\"id\":$user_erin,.*\"isRestricted\":true"
+expect_event alice "$updated_pattern" "$start_a" \
+	"alice was not sent erin's entry with her restriction"
 expect_ok erin wait room_list 5000
 expect_ok erin rooms
 [[ "$last_result" == *"{\"id\":$room_id,\"name\":\"$restricted_room\","* ]] ||
@@ -450,12 +467,13 @@ expect_ok erin users
 expect_ok bob users
 [[ "$last_result" != *"\"nickname\":\"$nickname_erin\","* ]] ||
 	fail "bob sees erin, with whom he shares no room: $last_result"
-# Admins see every account. A new account reaches other sessions as a presence entry (no
-# isRestricted until their next user list), so the flag itself is read from the database.
+# Admins see every account, and alice's directory has erin's restriction without signing in
+# again (#102).
 user_id_of alice "$nickname_erin"
 [[ "$found_user" == "$user_erin" ]] || fail "alice lists erin under ID $found_user"
-[[ $(run_sql "SELECT restricted FROM users WHERE id = $user_erin") == t ]] ||
-	fail "erin's account is not restricted in the database"
+restricted_entry="\\{\"id\":$user_erin,\"nickname\":\"$nickname_erin\",[^}]*\"isRestricted\":true"
+[[ "$last_result" =~ $restricted_entry ]] ||
+	fail "alice's users do not show erin restricted: $last_result"
 
 start_e=$(lines erin)
 start_c=$(lines carol)
@@ -490,7 +508,68 @@ expect_event carol "$dm_pattern" "$start_c" \
 # The refused message was queued by erin's client and dropped, never sent once allowed.
 ! grep -Fq -- "$erin_refused" "$work_dir/carol.out" ||
 	fail "erin's refused direct message reached carol later"
+
+# #104: the room made Public adds bob, so erin and bob now share it and see each other.
+start_e=$(lines erin)
+start_b=$(lines bob)
+start_a=$(lines alice)
+expect_ok alice room-edit "$room_id" text,public "$restricted_room"
+expect_event alice "^\\{\"event\":\"room_edited\",\"serverID\":1,\"roomID\":$room_id," \
+	"$start_a" "alice could not make $restricted_room Public"
+expect_event erin "^\\{\"event\":\"user_list\",.*\"nickname\":\"$nickname_bob\"," "$start_e" \
+	"erin's user list did not gain bob once the room was Public"
+expect_event bob "^\\{\"event\":\"user_list\",.*\"nickname\":\"$nickname_erin\"," "$start_b" \
+	"bob's user list did not gain erin once the room was Public"
 stop_client erin
+
+echo "==> [registration] 7b. a room code whose room is deleted after approval signs nobody up"
+start_a=$(lines alice)
+expect_ok alice room-create "text,admin-invite" "$gone_room" "registration proof"
+expect_event alice "^\\{\"event\":\"room_created\",.*\"name\":\"$gone_room\"," "$start_a" \
+	"alice did not create $gone_room"
+[[ "$last_event" =~ \"roomID\":([0-9]+), ]] || fail "room_created has no roomID"
+gone_id=${BASH_REMATCH[1]}
+create_invite alice "expires=3600,uses=2,room=$gone_id" "for ivy and jack $run_tag"
+code_gone=$invite_code
+request_ids=()
+for applicant in ivy jack; do
+	nickname_var="nickname_$applicant"
+	start_a=$(lines alice)
+	start_client_at "$applicant" "${!nickname_var}" "$server_address" --invite-code "$code_gone" \
+		--reason "for $gone_room"
+	expect_result "$applicant" pending 0
+	request_pattern="^\\{\"event\":\"registration_request\",.*\"request\":\\{\"id\":([0-9]+),"
+	request_pattern+="\"nickname\":\"${!nickname_var}\","
+	expect_event alice "$request_pattern" "$start_a" "alice did not hear of $applicant's request"
+	[[ "$last_event" =~ \"request\":\{\"id\":([0-9]+), ]] || fail "the request has no ID"
+	request_ids+=("${BASH_REMATCH[1]}")
+done
+# ivy leaves before the decision, so her account would only be made at her next sign-in.
+stop_client ivy
+start_a=$(lines alice)
+expect_ok alice registration-decide "${request_ids[0]}" approve
+expect_event alice "^\\{\"event\":\"admin_result\",.*\"action\":\"registration-decide\"," \
+	"$start_a" "alice got no admin_result for ivy's approval"
+start_a=$(lines alice)
+expect_ok alice room-delete "$gone_id"
+expect_event alice "^\\{\"event\":\"room_deleted\",\"serverID\":1,\"roomID\":$gone_id\\}$" \
+	"$start_a" "alice could not delete $gone_room"
+start_a=$(lines alice)
+expect_ok alice registration-decide "${request_ids[1]}" approve
+expect_event alice \
+	"^\\{\"event\":\"protocol_error\",\"serverID\":1,\"message\":\"$ROOM_UNAVAILABLE\"\\}$" \
+	"$start_a" "approving jack's request for a deleted room was not refused"
+start_j=$(lines jack)
+expect_ok alice registration-decide "${request_ids[1]}" decline
+expect_result jack declined "$start_j"
+start_client ivy-again "$nickname_ivy" ivy
+expect_event ivy-again \
+	"^\\{\"event\":\"registration_required\",.*\"status\":\"declined\",.*$ROOM_GONE_REASON" \
+	0 "ivy's sign-in after her room was deleted was not declined by the server"
+[[ $(run_sql "SELECT count(*) FROM users WHERE nickname = '$nickname_ivy'") == 0 ]] ||
+	fail "an account was made for ivy without her room"
+stop_client ivy-again
+stop_client jack
 stop_client george
 stop_client dave
 stop_client henry

@@ -462,6 +462,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.nickname)
 		delete(r.banReason)
 		delete(r.decisionReason)
+		delete(r.roleIds)
 	case common.DatabaseAdminUserResult:
 		user := r.user
 		common.UserSummary_deinit(&user)
@@ -469,6 +470,7 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.addedRoomIDs)
 	case common.DatabaseRegisterResult:
 		delete(r.nickname)
+		delete(r.roleIds)
 		request := r.request
 		common.RegistrationRequestSummary_deinit(&request)
 	case common.DatabaseInviteResult:

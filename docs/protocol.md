@@ -541,8 +541,9 @@ D7-D19). The rules in user terms are in
   that check to the server, since only it knows whether the code skips approval. One at a time.
   The client wipes the sealed packet's CBOR plaintext before freeing it.
 - **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
-  authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`
-  and presence follow as after a sign-in, with no second handshake), `Pending` 1 (a request
+  authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`,
+  the new account's `ServerUserUpdated` and its presence follow as after a sign-in, with no
+  second handshake), `Pending` 1 (a request
   waits; the session stays registering and gets `Created` or `Declined` when an approver
   decides), `Refused` 2 (`message` says why; the session stays registering), `Declined` 3 (an
   approver declined; the session is disconnected). A session gets 5 answers and 10 minutes
@@ -573,14 +574,25 @@ D7-D19). The rules in user terms are in
   `ServerRegistrationRequestUpdated{request, pendingCount}` to every approver session. Approval
   creates nothing: the key's next sign-in (or at once, a still-registering session of it)
   creates the account with the code's roles, room and restriction and the name it signs in
-  with then.
+  with then. A room code's request cannot be approved once its room is deleted or is no longer
+  an unencrypted Member or Admin invite room (`ServerProtocolError` "The room this invite was
+  for is no longer available"; declining still works, #115). When that happens after the
+  approval, the sign-in creates no account: the server declines the request itself with the
+  reason "The room this invite was for is no longer available; ask for a new invite", so the
+  applicant gets `ServerRegistrationRequired{status Declined}` or, still registering,
+  `ServerRegisterResponse{Declined}` and is disconnected.
 - **Restricted accounts (D11, D17):** `UserSummary.isRestricted`. A restricted account never
   joins Public rooms automatically; only holders of ManageMembers in a room add it there
   ("Only a member manager can add this restricted account"). It sees, and exchanges direct
   messages with, only accounts it shares a room with and admins, and only those, admins and
   approvers see it: `ServerUserList`, `ServerUserPresence`, `ServerUserUpdated` and
   `ServerUserKeyChanged` are filtered per recipient, and a membership change involving a
-  restricted account sends the affected sessions a fresh `ServerUserList`. A refused direct
+  restricted account sends the affected sessions a fresh `ServerUserList`, one per session,
+  including a room edit to Public or to Role access that adds accounts to a room with a
+  restricted member (#104). A newly created account (any sign-up or Open sign-in, or a claimed
+  keyless account) reaches every other session allowed to see it as a full `ServerUserUpdated`
+  before its `ServerUserPresence` (#102), so clients add it with its restriction, identity key
+  and roles. A refused direct
   message is "You no longer share a room with this person"; older history stays readable.
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting

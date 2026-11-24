@@ -74,7 +74,8 @@ DATABASE_REGISTRATION_MODE_SQL ::
 //
 // One row: outcome, the new account's ID, its restriction, its permission mask (the code's
 // roles), the mode, the code's ID, then (pending) the request in DATABASE_REQUEST_COLUMNS_SQL
-// order and the pending count after it.
+// order and the pending count after it, and (#102) the code's role IDs (comma separated), which
+// a created account holds.
 DATABASE_REGISTER_SQL ::
 	"WITH settings AS (SELECT " + DATABASE_REGISTRATION_MODE_SQL + " AS mode), " +
 	"by_key AS (SELECT id FROM users WHERE public_key = decode($2::text, 'hex')), " +
@@ -137,7 +138,10 @@ DATABASE_REGISTER_SQL ::
 	"(SELECT mode FROM settings)::text, COALESCE((SELECT id FROM code), 0)::text, " +
 	DATABASE_REQUEST_COLUMNS_SQL + ", " +
 	"((SELECT count(*) FROM registration_requests WHERE status = 1) + " +
-	"(SELECT count(*) FROM requested))::text " +
+	"(SELECT count(*) FROM requested))::text, " +
+	"COALESCE((SELECT string_agg(ir.role_id::text, ',' ORDER BY ir.role_id) FROM code c " +
+	"JOIN invite_roles ir ON ir.invite_id = c.id " +
+	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin), '') " +
 	"FROM decision d LEFT JOIN requested rr ON true LEFT JOIN invites i ON i.id = rr.invite_id"
 
 // The columns of one request for databaseGetRegistrationRequest, from a registration_requests
@@ -257,14 +261,20 @@ DATABASE_LIST_REGISTRATION_REQUESTS_SQL ::
 	"ORDER BY rr.part, rr.sort_key"
 
 // $1 the requester, $2 the request, $3 approve, $4 the decision reason. Outcomes in order:
-// not_permitted (no ApproveRegistrations), unknown_request, already_decided, applied. One row:
-// outcome, the pending count after it, then the request after it (NULL unless applied).
+// not_permitted (no ApproveRegistrations), unknown_request, already_decided, room_unavailable
+// (#115: approving a room code's request whose room is gone or no longer an unencrypted Member
+// or Admin invite room; declining it still works), applied. One row: outcome, the pending
+// count after it, then the request after it (NULL unless applied).
 DATABASE_DECIDE_REGISTRATION_SQL ::
 	"WITH actor AS (SELECT " + DATABASE_ACTOR_APPROVES_REGISTRATIONS_SQL + " AS ok), " +
-	"target AS (SELECT id, status FROM registration_requests WHERE id = $2::bigint), " +
+	"target AS (SELECT q.id, q.status, i.restricted, i.room_id FROM registration_requests q " +
+	"JOIN invites i ON i.id = q.invite_id WHERE q.id = $2::bigint), " +
 	"decision AS (SELECT CASE WHEN NOT (SELECT ok FROM actor) THEN 'not_permitted' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'unknown_request' " +
 	"WHEN (SELECT status FROM target) <> 1 THEN 'already_decided' " +
+	"WHEN $3::boolean AND (SELECT restricted FROM target) AND NOT EXISTS (SELECT 1 FROM rooms r " +
+	"WHERE r.id = (SELECT room_id FROM target) AND r.access IN (2, 3) AND NOT r.encrypted) " +
+	"THEN 'room_unavailable' " +
 	"ELSE 'applied' END AS outcome), " +
 	"updated AS (UPDATE registration_requests q SET " +
 	"status = CASE WHEN $3::boolean THEN 2 ELSE 3 END, decided_by_user_id = $1::bigint, " +
@@ -462,6 +472,9 @@ databaseExecuteRegister :: proc(
 		registered.isRestricted = databaseGetBool(result, 0, 2)
 		mask, _ := databaseGetInt(result, 0, 3)
 		registered.permissions = common.serverPermissionsFromMask(i64(mask))
+		roleIDs := databaseGetText(result, 0, 7 + DATABASE_REQUEST_COLUMN_COUNT)
+		defer delete(roleIDs)
+		registered.roleIds = databaseParseIDList(roleIDs)
 	case .Pending:
 		requestSummary, requestOK := databaseGetRegistrationRequest(result, 0, 6)
 		if !requestOK {
@@ -631,6 +644,8 @@ databaseRequestsOutcomeFromText :: proc(
 		return .UnknownRequest, true
 	case "already_decided":
 		return .AlreadyDecided, true
+	case "room_unavailable":
+		return .RoomUnavailable, true
 	}
 	return .NotPermitted, false
 }

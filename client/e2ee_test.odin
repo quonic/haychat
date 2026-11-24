@@ -732,3 +732,51 @@ testE2EEFetchesInBatches :: proc(t: ^testing.T) {
 		}
 	}
 }
+
+// #102: the server announces a new account with ServerUserUpdated before the account has
+// published its key. That entry does not make it "not set up yet" (a send fetches the key
+// first); the same flag for an account the directory already lists still does.
+@(test)
+testE2EENewAccountAnnouncedBeforeItsKeyIsStillFetched :: proc(t: ^testing.T) {
+	_ = t
+	e2eeTestBridgesBegin()
+	defer e2eeTestBridgesEnd()
+	bob := e2eeTestPeer(E2EE_TEST_BOB)
+	carol := e2eeTestPeer(E2EE_TEST_CAROL)
+	dave := e2eeTestPeer(4)
+	state := e2eeTestState(bob, carol)
+	defer State_deinit(&state)
+
+	updated := ClientTransportRuntimeEvent {
+		kind     = .UserUpdated,
+		serverID = E2EE_TEST_SERVER,
+		user     = {
+			id = 4,
+			nickname = strings.clone("dave"),
+			isOnline = true,
+			identityPublicKey = dave.publicKey,
+		},
+	}
+	State_applyRuntimeEvent(&state, &updated)
+	ClientTransportRuntimeEvent_deinit(&updated)
+	assert(State_directoryHasUser(&state, E2EE_TEST_SERVER, 4), "expected dave added")
+	info := e2eeTestInfo(&state, 4)
+	assert(
+		info.state == .Unknown && info.blockReason == .Pending,
+		fmt.tprintf("expected dave's key to be fetched first, got %v", info),
+	)
+
+	known := ClientTransportRuntimeEvent {
+		kind     = .UserUpdated,
+		serverID = E2EE_TEST_SERVER,
+		user     = {
+			id = E2EE_TEST_CAROL,
+			nickname = strings.clone("carol"),
+			identityPublicKey = carol.publicKey,
+		},
+	}
+	State_applyRuntimeEvent(&state, &known)
+	ClientTransportRuntimeEvent_deinit(&known)
+	info = e2eeTestInfo(&state, E2EE_TEST_CAROL)
+	assert(info.state == .NotSetUp, fmt.tprintf("expected carol not set up, got %v", info))
+}

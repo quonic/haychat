@@ -262,7 +262,11 @@ admins change (from the client, or `deploy/sql/set-registration-mode.sql`):
   and approve or decline them, with an optional reason that the applicant is shown. Approval
   creates the account at the applicant's next sign-in, or at once while they are still waiting
   in the client, with the code's roles and room. A declined applicant sees the decision and its
-  reason, and is not retried until they ask.
+  reason, and is not retried until they ask. A room code's request cannot be approved once its
+  room is deleted, made Public or turned into a Role room ("The room this invite was for is no
+  longer available"). If that happens after the approval, the applicant's sign-in makes no
+  account: the server declines the request with the reason "The room this invite was for is no
+  longer available; ask for a new invite".
 - `HAYCHAT_ADMIN_PUBLIC_KEY` may always sign up, in every mode, unrestricted and without
   approval, so a fresh server can start closed.
 
@@ -278,7 +282,9 @@ or Admin invite room) is **restricted** to that room:
 - It sees, and exchanges direct messages with, only accounts it shares a room with and admins;
   only those accounts, admins and approvers see it. The user list, presence, account changes and
   key changes are filtered that way for each recipient, and when a membership change alters who
-  shares a room with it, the affected sessions get a fresh user list. A direct message without a
+  shares a room with it (including a room it is in made Public), the affected sessions get a
+  fresh user list. A new account appears in other clients' lists with its Restricted badge at
+  once. A direct message without a
   shared room is refused ("You no longer share a room with this person"); history from before
   stays readable.
 - An admin can lift the restriction (**Lift restriction** in the Admin section), which joins the
@@ -464,11 +470,9 @@ newest message.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account. On an Open server a banned person can come back with a new key; set the
   server to Invite only or Invite + approval to stop that.
-- A new account reaches other connected clients first as a presence notice, so their lists show
-  its Restricted badge and identity key only after their next user list (the next sign-in).
 - A few requests still tell a restricted account that another account exists by its ID (the key
   bundle fetch, a direct conversation's mark-read refusal, voice participant names in a shared
-  room). A restricted account that sits in a room when it is made Public gets no fresh user list.
+  room).
 - There is no per-address limit on sign-up attempts, only the per-session one (5 attempts,
   10 minutes) and at most 64 sessions signing up at once.
 - Roles do not rank accounts, so kick, ban and rename cannot be delegated. Room permissions
