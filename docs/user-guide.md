@@ -299,8 +299,9 @@ yourself.
   sent are not the ones the sender sent; nothing is kept. "Attachment unavailable" means the
   server has no such file for you (it answered "Attachment not found"), also when the file is
   gone from the server's disk, for example after a restore that brought back the database
-  without the blob directory. "Server storage error" means the server has the file but could
-  not read it from its disk. "Attachment removed by an
+  without the blob directory; the server then usually marks the file removed, and its card
+  changes to "Attachment removed by an admin". "Server storage error" means the server has the
+  file but could not read it from its disk. "Attachment removed by an
   admin" replaces the card's button when an admin removed the file. "This message's
   attachments were changed on the server" replaces all of a message's cards when the server's
   list of an encrypted message's files is not the one inside it. Other failures (a lost

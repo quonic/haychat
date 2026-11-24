@@ -344,6 +344,10 @@ DATABASE_ATTACHMENT_KNOWN_SQL ::
 // the scanned files, since a found row already answers it.
 DATABASE_ATTACHMENT_ANY_ROW_SQL :: "SELECT EXISTS (SELECT 1 FROM attachments)"
 
+// The removal log's reason when the server found a file missing from storage (#132 follow-up;
+// DATABASE_ATTACHMENT_MARK_MISSING_SQL), shown under Server settings -> Removed files.
+ATTACHMENT_MISSING_REMOVAL_REASON :: "File missing from storage"
+
 // Most rows one sweep pass deletes; the router runs another pass when a pass was full.
 ATTACHMENT_SWEEP_BATCH :: 500
 
@@ -367,18 +371,40 @@ ATTACHMENT_SWEEP_BATCH :: 500
 // From join cut DATABASE_HISTORY_SINCE_*, shared with history and the download check), both
 // sides of a direct message, or the owner of a blob no message holds.
 DATABASE_ATTACHMENT_REMOVE_SQL ::
-	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok), " +
+	"WITH actor AS (SELECT " + DATABASE_ACTOR_IS_ADMIN_SQL + " AS ok, " +
+	"$1::bigint AS remover), " + DATABASE_ATTACHMENT_TOMBSTONE_BODY_SQL
+
+// #132 follow-up: the server found blob $2's file missing from storage (the storage worker's
+// read answered ENOENT while the blob directory looked intact) and makes it the same Removed
+// tombstone an admin removal leaves, with the same columns, readers and removal log row, but
+// with no admin: removed_by_user_id NULL in both tables, reason $3
+// (ATTACHMENT_MISSING_REMOVAL_REASON). $1 is the requester and must be 0, the server itself, so
+// no account's request can reach it. Like a removal it applies only to a Ready or Bound blob:
+// an admin removal, a message delete or a sweep that came first makes it 'not_found' and
+// changes nothing.
+DATABASE_ATTACHMENT_MARK_MISSING_SQL ::
+	"WITH actor AS (SELECT ($1::bigint = 0) AS ok, NULL::bigint AS remover), " +
+	DATABASE_ATTACHMENT_TOMBSTONE_BODY_SQL
+
+// What a removal and a missing file's mark share: after the actor CTE (ok: may the requester
+// make the tombstone; remover: removed_by_user_id, NULL for none), the target ($2, Ready or
+// Bound), the tombstone, the removal log row (reason $3), the readers and the result row
+// DATABASE_ATTACHMENT_REMOVE_SQL describes.
+@(private = "file")
+DATABASE_ATTACHMENT_TOMBSTONE_BODY_SQL ::
 	"target AS (SELECT a.id, a.blob_id, a.owner_user_id, a.room_id, a.peer_user_id, " +
 	"a.chat_message_id, a.direct_message_id, a.encrypted, a.name FROM attachments a " +
 	"WHERE a.blob_id = decode($2::text, 'hex') AND a.state IN (1, 2)), " +
 	"decision AS (SELECT CASE WHEN NOT (SELECT ok FROM actor) THEN 'not_admin' " +
 	"WHEN NOT EXISTS (SELECT 1 FROM target) THEN 'not_found' ELSE 'applied' END AS outcome), " +
-	"removed AS (UPDATE attachments a SET state = 3, removed_by_user_id = $1::bigint, " +
-	"removed_at = now() FROM target t, decision d WHERE a.id = t.id AND d.outcome = 'applied' " +
+	"removed AS (UPDATE attachments a SET state = 3, " +
+	"removed_by_user_id = (SELECT remover FROM actor), removed_at = now() " +
+	"FROM target t, decision d WHERE a.id = t.id AND d.outcome = 'applied' " +
 	"RETURNING a.id), " +
 	"logged AS (INSERT INTO attachment_removals (blob_id, owner_user_id, removed_by_user_id, " +
 	"removed_at, reason, room_id, direct, encrypted, chat_message_id, direct_message_id, " +
-	"name) SELECT t.blob_id, t.owner_user_id, $1::bigint, now(), NULLIF($3::text, ''), " +
+	"name) SELECT t.blob_id, t.owner_user_id, (SELECT remover FROM actor), now(), " +
+	"NULLIF($3::text, ''), " +
 	"t.room_id, (t.room_id IS NULL AND (t.peer_user_id IS NOT NULL " +
 	"OR t.direct_message_id IS NOT NULL)), t.encrypted, t.chat_message_id, " +
 	"t.direct_message_id, CASE WHEN t.encrypted THEN NULL ELSE t.name END " +
@@ -635,7 +661,7 @@ databaseExecuteAttachmentRequest :: proc(
 			_ = common.decodeHexIntoBuffer(shaText, attachment.sha256[:])
 		}
 		return databaseSuccess(attachment)
-	case .Remove:
+	case .Remove, .MarkMissing:
 		return databaseExecuteAttachmentRemove(conn, request)
 	case .Usage:
 		return databaseExecuteAttachmentUsage(conn, request)
@@ -786,11 +812,18 @@ databaseExecuteAttachmentRemove :: proc(
 	request: common.DatabaseAttachmentRequest,
 ) -> common.DatabaseQueryResponse {
 	blobId := request.blobId
+	// A missing file's mark is the server's own (requester 0, no admin in either table).
+	query: cstring = DATABASE_ATTACHMENT_REMOVE_SQL
+	requester := request.userId
+	if request.action == .MarkMissing {
+		query = DATABASE_ATTACHMENT_MARK_MISSING_SQL
+		requester = 0
+	}
 	result := databaseAttachmentExec(
 		conn,
-		DATABASE_ATTACHMENT_REMOVE_SQL,
+		query,
 		{
-			databaseIntParam(request.userId),
+			databaseIntParam(requester),
 			databaseAttachmentHex(blobId[:]),
 			databaseAttachmentText(request.reason),
 		},
@@ -803,7 +836,7 @@ databaseExecuteAttachmentRemove :: proc(
 		return databaseResultError(&result)
 	}
 	attachment := common.DatabaseAttachmentResult {
-		action  = .Remove,
+		action  = request.action,
 		outcome = .NotFound,
 	}
 	outcome := databaseGetText(result, 0, 0)

@@ -124,6 +124,13 @@ never resumed (the client uploads the file again as a new blob), so its part fil
 stalled uploads. The sweeper and this pass delete only by rows, so the guards do not apply to
 them.
 
+A download that finds a file missing from the blob directory marks its row removed, as an admin
+removal would, with the reason "File missing from storage" in the removal log (#132; the server
+is not a backup of its files). No variable controls it. The server marks nothing while `blobs/`
+is missing, unreadable or empty, or the file's shard directory is missing, and at most 10 files
+an hour; each case logs an `[Attachments] WARNING: ...` line naming `HAYCHAT_ATTACHMENT_DIR`
+([protocol.md](protocol.md), Missing files).
+
 ### Retired Variables
 
 The server no longer reads these. When one is set, startup prints `[Startup] NAME is no longer

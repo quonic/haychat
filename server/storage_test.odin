@@ -253,6 +253,68 @@ testStorageWorkerReportsAMissingBlobFile :: proc(t: ^testing.T) {
 	StorageResult_deinit(broken)
 }
 
+// A missing file is blobDirectoryIntact only while blobs/ has entries and the blob's shard
+// directory exists (#132 follow-up): otherwise the volume, not the file, looks gone, and the
+// router marks nothing.
+@(test)
+testStorageWorkerChecksTheBlobDirectoryOfAMissingFile :: proc(t: ^testing.T) {
+	_ = t
+	dir := storageTestDir("haychat_storage_missing_dir")
+	defer os.remove_all(dir)
+	worker := StorageWorker_init(dir)
+	defer StorageWorker_deinit(&worker)
+	worker.freeBytes = storageTestPlenty
+
+	blobId := storageTestBlob(9)
+	data := storageTestData(500, 4)
+	defer delete(data)
+	opened := storageTestOpen(&worker, blobId, u64(len(data)))
+	assert(opened.ok, fmt.tprintf("expected a new upload, got %v", opened))
+	storageTestWrite(&worker, blobId, data, 0)
+	finished := storageTestFinish(&worker, blobId, u64(len(data)), storageTestHash(data))
+	assert(finished.ok, fmt.tprintf("expected a stored blob, got %v", finished))
+	stored := storageBlobPath(&worker, blobId)
+	defer delete(stored)
+	assert(os.remove(stored) == nil, "expected the stored blob deleted by the test")
+
+	read := proc(worker: ^StorageWorker, blobId: common.AttachmentBlobID) -> StorageReadData {
+		result, _ := StorageWorker_handle(
+			worker,
+			StorageRead{blobId = blobId, offset = 0, length = 10},
+		)
+		return result.(StorageReadData)
+	}
+
+	// The file alone is gone: its shard directory (09) is there, so is blobs/.
+	gone := read(&worker, blobId)
+	assert(
+		gone.missing && gone.blobDirectoryIntact,
+		fmt.tprintf("expected a lone missing file in an intact directory, got %v", gone),
+	)
+	// A blob whose shard directory (c8) was never made: not intact.
+	never := read(&worker, storageTestBlob(200))
+	assert(
+		never.missing && !never.blobDirectoryIntact,
+		fmt.tprintf("expected a missing shard directory to look suspect, got %v", never),
+	)
+
+	// blobs/ moved away (a volume that did not mount), then an empty blobs/: not intact.
+	blobs := fmt.tprintf("%s/%s", dir, ATTACHMENT_BLOBS_DIR_NAME)
+	aside := fmt.tprintf("%s.aside", blobs)
+	assert(os.rename(blobs, aside) == nil, "expected blobs/ moved aside")
+	unmounted := read(&worker, blobId)
+	assert(
+		unmounted.missing && !unmounted.blobDirectoryIntact,
+		fmt.tprintf("expected no blobs/ to look suspect, got %v", unmounted),
+	)
+	assert(os.make_directory(blobs, os.perm(0o700)) == nil, "expected an empty blobs/")
+	empty := read(&worker, blobId)
+	assert(
+		empty.missing && !empty.blobDirectoryIntact,
+		fmt.tprintf("expected an empty blobs/ to look suspect, got %v", empty),
+	)
+}
+
 @(test)
 testStorageWorkerRefusesBadWritesAndAMismatch :: proc(t: ^testing.T) {
 	_ = t
