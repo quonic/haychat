@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 30
+protocolVersion: ProtocolVersion = 31
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -480,6 +480,9 @@ MessageType :: enum {
 	ServerDirectMessageDeleted, // ServerDirectMessageDeletedPayload: to both sides
 	ClientFetchMessageEdits, // ClientFetchMessageEditsPayload: every edit of one message
 	ServerMessageEdits, // ServerMessageEditsPayload: the edits, oldest first
+	// Room changes for room managers (protocol 31, #73), appended so no existing wire value
+	// moves.
+	ServerAdminRoomChanged, // ServerAdminRoomChangedPayload: a room changed, to its managers
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -1063,6 +1066,28 @@ ServerAdminRoomsPayload_deinit :: proc(payload: ^ServerAdminRoomsPayload) {
 	}
 	delete(payload.rooms)
 	payload.rooms = nil
+}
+
+// What changed about a room in ServerAdminRoomChanged (protocol 31). The values are the wire
+// format, pinned in protocol_test.odin: never renumber them.
+AdminRoomChange :: enum {
+	Created     = 0, // A new room
+	Edited      = 1, // Its name, description, type or access changed
+	Deleted     = 2, // It is gone
+	Members     = 3, // Someone joined or left it
+	Permissions = 4, // Its grants changed
+}
+
+// ServerAdminRoomChanged (protocol 31, #73): a room changed. The server sends it to every
+// session whose account holds ManageRooms or ManageRoomMembers (admins hold both), whether the
+// account is in the room or not, because those accounts see every room through
+// ClientAdminListRooms; a change of grants also goes to the room's members, whose EditRoom may
+// show its Permissions page. It carries no room data: a client that keeps the admin room list
+// or the room's grants fetches them again (ClientAdminListRooms,
+// ClientAdminFetchRoomPermissions), so each recipient reads only what the server lets it read.
+ServerAdminRoomChangedPayload :: struct {
+	roomId: int,
+	change: AdminRoomChange,
 }
 
 // Encrypted rooms and their member log (protocol 18, e2ee-design.md 6.1, 6.2). A log entry is

@@ -28,6 +28,10 @@ set -euo pipefail
 #               shows send again and its message reaches A. A creates a Role room for that role:
 #               B joins it without being added, cannot leave it, and leaves it when A takes the
 #               role away.
+#   8. room managers: (protocol 31, #73) B is an admin again and lists every room. A creates an
+#               Admin invite room without joining it, renames it, changes its grants and
+#               deletes it: B, never in the room, sees admin_room_changed for each and a fresh
+#               admin_rooms without asking again.
 #
 # dev/live-proof.sh --admin (and --all) runs it against its throwaway server. It needs bash,
 # coreutils, psql (for make-admin.sql through the HAYCHAT_DATABASE_* variables), and libopus
@@ -346,6 +350,63 @@ left_pattern+="\"joined\":false,\"userID\":$user_b\\}$"
 expect_event b "$left_pattern" "$start_b" "client b did not leave the role room when the role went"
 expect_ok a roles-delete "$speakers"
 echo "==> [admin] room permissions passed"
+
+echo "==> [admin] room managers: B's admin list follows A's changes to a room B is not in"
+start_b=$(lines b)
+expect_ok a admin-role "$user_b" on
+expect_event b "^\\{\"event\":\"account_updated\",.*\"isAdmin\":true," "$start_b" \
+	"client b did not become an admin again"
+start_b=$(lines b)
+expect_ok b admin-rooms
+expect_event b '^\{"event":"admin_rooms",' "$start_b" "client b got no admin_rooms"
+hidden_room="adm-hidden-$run_tag"
+start_a=$(lines a)
+start_b=$(lines b)
+expect_ok a room-create "text,admin-invite,no-join" "$hidden_room" "not for b"
+hidden_line=$(wait_for_match a "^\\{\"event\":\"room_created\",.*\"name\":\"$hidden_room\"," \
+	"$start_a") || fail "client a did not receive room_created for $hidden_room"
+[[ "$hidden_line" =~ \"roomID\":([0-9]+), ]] || fail "room_created has no roomID"
+hidden=${BASH_REMATCH[1]}
+changed_prefix="^\\{\"event\":\"admin_room_changed\",\"serverID\":1,\"roomID\":$hidden,"
+expect_event b "$changed_prefix\"change\":\"created\"\\}$" "$start_b" \
+	"client b was not told of the room a created"
+hidden_listed="\"name\":\"$hidden_room\",[^}]*\\},\"isMember\":false,\"memberCount\":0"
+expect_event b "^\\{\"event\":\"admin_rooms\",.*$hidden_listed" "$start_b" \
+	"client b's admin list did not take the new room without being asked"
+renamed_room="adm-renamed-$run_tag"
+start_b=$(lines b)
+expect_ok a room-edit "$hidden" text "$renamed_room" "still not for b"
+expect_event b "$changed_prefix\"change\":\"edited\"\\}$" "$start_b" \
+	"client b was not told of the rename"
+expect_event b "^\\{\"event\":\"admin_rooms\",.*\"name\":\"$renamed_room\"" "$start_b" \
+	"client b's admin list did not take the new name"
+start_b=$(lines b)
+expect_ok a room-permissions-set "$hidden" send
+expect_event b "$changed_prefix\"change\":\"permissions\"\\}$" "$start_b" \
+	"client b was not told of the room's new grants"
+expect_event b '^\{"event":"admin_rooms",' "$start_b" \
+	"client b's admin list was not fetched after the new grants"
+start_b=$(lines b)
+expect_ok a room-delete "$hidden"
+expect_event b "$changed_prefix\"change\":\"deleted\"\\}$" "$start_b" \
+	"client b was not told of the deletion"
+# A list fetched before the deletion may still arrive; the proof waits for one without the room.
+removed_line=""
+deadline=$((SECONDS + command_timeout_secs))
+while [[ -z "$removed_line" ]] && ((SECONDS < deadline)); do
+	removed_line=$(tail -n "+$((start_b + 1))" "$work_dir/b.out" |
+		grep -E '^\{"event":"admin_rooms",.*\}$' | grep -vF "\"id\":$hidden," | head -n 1 ||
+		true)
+	[[ -n "$removed_line" ]] || sleep 0.1
+done
+[[ -n "$removed_line" ]] ||
+	fail "client b's admin list was not fetched without the deleted room"
+echo "    b< ${removed_line:0:120}..."
+start_b=$(lines b)
+expect_ok a admin-role "$user_b" off
+expect_event b "^\\{\"event\":\"account_updated\",.*\"isAdmin\":false," "$start_b" \
+	"client b did not stop being an admin"
+echo "==> [admin] room managers passed"
 
 stop_client b
 stop_client a

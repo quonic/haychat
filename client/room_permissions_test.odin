@@ -471,3 +471,80 @@ testHeadlessRoomPermissionCommandsAndEvents :: proc(t: ^testing.T) {
 		fmt.tprintf("expected a usage error, got %s", output),
 	)
 }
+
+// Protocol 31 (#73): someone else's change of a room's grants reaches an open Permissions page:
+// without unsaved changes the page takes the new grants, with them it keeps them and says so.
+@(test)
+testRoomPermissionsPageFollowsAnotherManagersChange :: proc(t: ^testing.T) {
+	_ = t
+	defer free_all(context.temp_allocator)
+	sync.mutex_lock(&roomPermissionsBridgeTestMutex)
+	defer sync.mutex_unlock(&roomPermissionsBridgeTestMutex)
+	roomPermissionsSendBridge = roomPermissionsBridgeTestStub
+	defer {
+		roomPermissionsSendBridge = ClientServerTransport_sendRoomPermissions
+		delete(roomPermissionsBridgeTestRequests)
+		roomPermissionsBridgeTestRequests = nil
+	}
+	changed := proc(state: ^State, change: common.AdminRoomChange) {
+		event := ClientTransportRuntimeEvent {
+			kind            = .AdminRoomChanged,
+			serverID        = 2407,
+			roomID          = 2,
+			adminRoomChange = change,
+		}
+		State_applyRuntimeEvent(state, &event)
+		ClientTransportRuntimeEvent_deinit(&event)
+	}
+
+	state := roomPermissionsTestState(2407, {.ManageRooms})
+	defer State_deinit(&state)
+	testApplyNamedRooms(&state, 2407, {id = 1, name = "general"}, {id = 2, name = "stage"})
+	State_openRoomPermissions(&state, 2407, 2)
+	roomPermissionsTestGrants(&state, 2407, 2, common.ROOM_PERMISSIONS_DEFAULT, nil, nil, {})
+	assert(
+		len(roomPermissionsBridgeTestRequests) == 1 && state.roomEditor.grantsLoaded,
+		"expected the page loaded after one fetch",
+	)
+
+	// A membership change says nothing about grants.
+	changed(&state, .Members)
+	assert(len(roomPermissionsBridgeTestRequests) == 1, "expected no fetch for a member change")
+
+	// No unsaved changes: the page fetches and takes the other manager's grants.
+	changed(&state, .Permissions)
+	assert(
+		len(roomPermissionsBridgeTestRequests) == 2 &&
+		!roomPermissionsBridgeTestRequests[1].set &&
+		roomPermissionsBridgeTestRequests[1].roomID == 2,
+		fmt.tprintf("expected a fetch of the grants, got %v", roomPermissionsBridgeTestRequests),
+	)
+	roomPermissionsTestGrants(&state, 2407, 2, {.SendMessages}, nil, nil, {})
+	assert(
+		state.roomEditor.grantsEveryone == {.SendMessages} && len(state.roomEditor.notice) == 0,
+		fmt.tprintf("expected the page to show the new grants, got %v", state.roomEditor),
+	)
+
+	// Unsaved changes stay, with a note, while the cache takes the new grants.
+	State_toggleRoomEditorGrant(&state, 0, .SpeakInVoice)
+	changed(&state, .Permissions)
+	assert(
+		state.roomEditor.notice == ROOM_PERMISSIONS_CHANGED_ELSEWHERE_NOTE,
+		fmt.tprintf("expected the note, got %q", state.roomEditor.notice),
+	)
+	roomPermissionsTestGrants(&state, 2407, 2, {.AttachFiles}, nil, nil, {})
+	assert(
+		state.roomEditor.grantsEveryone == {.SendMessages, .SpeakInVoice},
+		fmt.tprintf("expected the unsaved draft kept, got %v", state.roomEditor.grantsEveryone),
+	)
+	grants := State_findRoomGrants(&state, 2407, 2)
+	assert(
+		grants != nil && grants.everyone == {.AttachFiles},
+		"expected the cached grants replaced",
+	)
+
+	// A deletion closes the page and forgets the grants.
+	changed(&state, .Deleted)
+	assert(state.roomEditor.mode == .Closed, "expected the page closed with its room")
+	assert(State_findRoomGrants(&state, 2407, 2) == nil, "expected the grants forgotten")
+}

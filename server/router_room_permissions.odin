@@ -12,7 +12,8 @@ import "core:encoding/cbor"
 // - ServerAdminRoomPermissions (the grants after it) to the session that asked; a refusal is a
 //   ServerProtocolError sentence.
 // - A fresh ServerListRooms to every session of the room's members after a set that changed
-//   something, because their RoomSummary.myPermissions may have changed. Each ServerListRooms
+//   something, because their RoomSummary.myPermissions may have changed, and (protocol 31)
+//   ServerAdminRoomChanged{Permissions} to room managers and the members. Each ServerListRooms
 //   the router sends also moves the account's voice sessions' speak flag
 //   (MainRouterState_voiceUpdateSpeakPermissions), so the relay follows grant and role changes.
 //
@@ -152,6 +153,15 @@ MainRouterState_handleRoomPermissionsResult :: proc(
 	)
 	if request.roomPermissionsAction == .Set && result.changed {
 		MainRouterState_resendRoomLists(pm, state, result.memberUserIDs[:])
+		// Protocol 31 (#73): open Permissions pages fetch the grants again. A member holding
+		// the room's EditRoom may show one too.
+		MainRouterState_sendAdminRoomChanged(
+			pm,
+			state,
+			request.roomID,
+			.Permissions,
+			result.memberUserIDs[:],
+		)
 	}
 }
 

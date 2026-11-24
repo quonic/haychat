@@ -326,6 +326,7 @@ HeadlessEventKind :: enum {
 	MessageEdited,
 	MessageDeleted,
 	MessageEdits,
+	AdminRoomChanged,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -389,6 +390,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.MessageEdited  = "message_edited",
 	.MessageDeleted = "message_deleted",
 	.MessageEdits   = "message_edits",
+	.AdminRoomChanged = "admin_room_changed",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -829,6 +831,33 @@ HeadlessRoomMembersJSON :: struct {
 	serverID: int,
 	roomID:   int,
 	userIDs:  []int,
+}
+
+// ServerAdminRoomChanged (protocol 31, #73): roomID changed; change is created, edited,
+// deleted, members or permissions. A harness that listed admin-rooms gets a fresh admin_rooms
+// after it.
+HeadlessAdminRoomChangedJSON :: struct {
+	event:    string,
+	serverID: int,
+	roomID:   int,
+	change:   string,
+}
+
+// The harness's word for an AdminRoomChange.
+headlessAdminRoomChangeWord :: proc(change: common.AdminRoomChange) -> string {
+	switch change {
+	case .Created:
+		return "created"
+	case .Edited:
+		return "edited"
+	case .Deleted:
+		return "deleted"
+	case .Members:
+		return "members"
+	case .Permissions:
+		return "permissions"
+	}
+	return ""
 }
 
 // ServerAdminRooms: every room on the server, with the admin's membership and member count.
@@ -1390,6 +1419,17 @@ headlessRenderRuntimeEvent :: proc(
 				event = HEADLESS_EVENT_NAMES[kind],
 				serverID = event.serverID,
 				rooms = headlessAdminRooms(event.adminRooms[:]),
+			},
+			allocator,
+		)
+	case .AdminRoomChanged:
+		kind = .AdminRoomChanged
+		line = headlessMarshal(
+			HeadlessAdminRoomChangedJSON {
+				event = HEADLESS_EVENT_NAMES[kind],
+				serverID = event.serverID,
+				roomID = event.roomID,
+				change = headlessAdminRoomChangeWord(event.adminRoomChange),
 			},
 			allocator,
 		)

@@ -16,6 +16,9 @@ import "core:encoding/cbor"
 //   that asked, so open member lists refresh. A removal or leave first takes the account out
 //   of the room's voice.
 // - Fetch answers with ServerRoomMembers, the admin list with ServerAdminRooms.
+// - Protocol 31 (#73): every change to a room (create, edit, delete, a membership, its grants)
+//   also sends ServerAdminRoomChanged to the sessions of room managers
+//   (MainRouterState_sendAdminRoomChanged), who list every room whether they are in it or not.
 
 ROOM_MEMBERSHIP_INVALID_MESSAGE :: "Invalid room membership request"
 ROOM_NOT_MEMBER_MESSAGE :: "Not a room member"
@@ -196,6 +199,42 @@ MainRouterState_sendRoomMembershipChange :: proc(
 	}
 	// Protocol 25 (D17): a restricted account on either side changes who sees whom.
 	MainRouterState_noteMembershipVisibility(pm, state, userID, memberUserIDs)
+	MainRouterState_sendAdminRoomChanged(pm, state, roomID, .Members)
+}
+
+// Sends ServerAdminRoomChanged{roomID, change} (protocol 31, #73) to every session whose account
+// holds ManageRooms or ManageRoomMembers (admins hold every permission), the accounts that see
+// every room through ClientAdminListRooms, and to the sessions of alsoUserIDs. The sessions'
+// permissions follow role and admin changes (MainRouterState_setUserSessionPermissions).
+MainRouterState_sendAdminRoomChanged :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	roomID: int,
+	change: common.AdminRoomChange,
+	alsoUserIDs: []int = nil,
+) {
+	payload := common.ServerAdminRoomChangedPayload {
+		roomId = roomID,
+		change = change,
+	}
+	for recipientPeerID, recipientSession in state.peerSessions {
+		if !recipientSession.isAuthenticated {
+			continue
+		}
+		manager :=
+			.ManageRooms in recipientSession.permissions ||
+			.ManageRoomMembers in recipientSession.permissions
+		if manager ||
+		   MainRouterState_hasRecipientUserID(alsoUserIDs, recipientSession.authenticatedUserID) {
+			MainRouterState_sendPeerMessage(
+				pm,
+				state,
+				recipientPeerID,
+				.ServerAdminRoomChanged,
+				payload,
+			)
+		}
+	}
 }
 
 // Accounts a room switched to Public just added: each of their sessions refreshes its room
@@ -227,7 +266,7 @@ MainRouterState_roomMembersAdded :: proc(
 				},
 			)
 		}
-	}
+	}	MainRouterState_sendAdminRoomChanged(pm, state, roomID, .Members)
 }
 
 MainRouterState_handleRoomMemberActionResult :: proc(

@@ -663,3 +663,134 @@ testHeadlessRoomAccessOptionsAndCommands :: proc(t: ^testing.T) {
 		"the room_member_result event",
 	)
 }
+
+// Applies ServerAdminRoomChanged{roomID, change} (protocol 31).
+@(private = "file")
+testApplyAdminRoomChanged :: proc(state: ^State, roomID: int, change: common.AdminRoomChange) {
+	event := ClientTransportRuntimeEvent {
+		kind            = .AdminRoomChanged,
+		serverID        = ROOM_MEMBERS_TEST_SERVER,
+		roomID          = roomID,
+		adminRoomChange = change,
+	}
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+}
+
+@(private = "file")
+testApplyAdminRooms :: proc(state: ^State, roomIDs: ..int) {
+	event := ClientTransportRuntimeEvent {
+		kind     = .AdminRoomsReceived,
+		serverID = ROOM_MEMBERS_TEST_SERVER,
+	}
+	for roomID in roomIDs {
+		append(
+			&event.adminRooms,
+			common.AdminRoomSummary {
+				room = {
+					id = roomID,
+					name = strings.clone(fmt.tprintf("room-%d", roomID)),
+					description = strings.clone(""),
+					access = .AdminInvite,
+					historyVisibility = .FromJoin,
+				},
+				memberCount = 1,
+			},
+		)
+	}
+	State_applyRuntimeEvent(state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+}
+
+@(private = "file")
+testAdminListRequestCount :: proc() -> int {
+	count := 0
+	for request in testRoomMembersSent() {
+		if request.kind == .AdminList {
+			count += 1
+		}
+	}
+	return count
+}
+
+// Protocol 31 (#73): another manager's change to a room this admin is not in reaches the
+// admin list without reopening Server settings, and changes that arrive while a fetch is out
+// fetch once more after it.
+@(test)
+testAdminRoomChangedRefreshesTheAdminList :: proc(t: ^testing.T) {
+	_ = t
+	defer free_all(context.temp_allocator)
+	sync.mutex_lock(&roomMemberSendBridgeTestMutex)
+	defer sync.mutex_unlock(&roomMemberSendBridgeTestMutex)
+	testRoomMembersUseStub()
+	defer testRoomMembersRestore()
+	state := testRoomMembersState(true)
+	defer State_deinit(&state)
+
+	// Before the Admin section ever listed rooms nothing is fetched.
+	testApplyAdminRoomChanged(&state, 9, .Created)
+	assert(
+		testAdminListRequestCount() == 0,
+		fmt.tprintf("expected no fetch before the list was loaded, got %v", testRoomMembersSent()),
+	)
+
+	State_requestAdminRooms(&state, ROOM_MEMBERS_TEST_SERVER)
+	testApplyAdminRooms(&state, 1, 9)
+	assert(testAdminListRequestCount() == 1, "expected the first fetch only")
+
+	// Another admin creates room 10: the list is fetched again.
+	testApplyAdminRoomChanged(&state, 10, .Created)
+	assert(
+		testAdminListRequestCount() == 2,
+		fmt.tprintf("expected a fetch after the create, got %d", testAdminListRequestCount()),
+	)
+	// Two more changes while that fetch is out: one fetch after its answer, not two now.
+	testApplyAdminRoomChanged(&state, 9, .Members)
+	testApplyAdminRoomChanged(&state, 10, .Edited)
+	assert(
+		testAdminListRequestCount() == 2,
+		"expected no second fetch while one is out",
+	)
+	testApplyAdminRooms(&state, 1, 9, 10)
+	assert(
+		testAdminListRequestCount() == 3,
+		fmt.tprintf(
+			"expected one more fetch after a stale answer, got %d",
+			testAdminListRequestCount(),
+		),
+	)
+	testApplyAdminRooms(&state, 1, 9, 10)
+	assert(testAdminListRequestCount() == 3, "expected the fresh answer to end the fetches")
+	assert(
+		State_knownRoom(&state, ROOM_MEMBERS_TEST_SERVER, 10) != nil,
+		"expected the other admin's new room listed",
+	)
+
+	// A deletion takes the room off the list at once, and fetches again.
+	testApplyAdminRoomChanged(&state, 9, .Deleted)
+	assert(
+		State_knownRoom(&state, ROOM_MEMBERS_TEST_SERVER, 9) == nil,
+		"expected the deleted room gone before the next list arrives",
+	)
+	assert(testAdminListRequestCount() == 4, "expected a fetch after the delete")
+}
+
+@(test)
+testHeadlessPrintsAdminRoomChanged :: proc(t: ^testing.T) {
+	_ = t
+	event := ClientTransportRuntimeEvent {
+		kind            = .AdminRoomChanged,
+		serverID        = ROOM_MEMBERS_TEST_SERVER,
+		roomID          = 12,
+		adminRoomChange = .Permissions,
+	}
+	line, kind, rendered := headlessRenderRuntimeEvent(&event)
+	defer delete(line)
+	assert(
+		rendered &&
+		kind == .AdminRoomChanged &&
+		line ==
+			`{"event":"admin_room_changed","serverID":957,"roomID":12,"change":"permissions"}`,
+		fmt.tprintf("expected admin_room_changed for room 12, got %q", line),
+	)
+}

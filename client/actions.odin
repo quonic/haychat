@@ -859,6 +859,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 	case .AdminRoomsReceived:
 		State_receiveAdminRooms(state, event.serverID, &event.adminRooms)
 		State_roomLogsRoomsListed(state, event.serverID)
+	case .AdminRoomChanged:
+		State_adminRoomChanged(state, event.serverID, event.roomID, event.adminRoomChange)
 	case .RoomPermissionsReceived:
 		State_roomPermissionsReceived(state, event.serverID, &event.roomPermissions)
 	case .RoomLogReceived:

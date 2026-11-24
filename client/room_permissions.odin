@@ -26,6 +26,9 @@ import "core:strings"
 
 ROOM_SEND_NOT_PERMITTED_NOTE :: "You cannot send messages in this room"
 VOICE_SPEAK_NOT_PERMITTED_NOTE :: "You cannot speak in this room"
+// The Permissions page had unsaved changes when someone else changed the room's grants.
+ROOM_PERMISSIONS_CHANGED_ELSEWHERE_NOTE ::
+	"Someone else changed these permissions. Saving replaces their change with yours."
 
 // Every room permission in the order forms and the harness list them.
 ROOM_PERMISSION_ORDER := [5]common.RoomPermission {
@@ -167,6 +170,72 @@ State_findRoomGrants :: proc(state: ^State, serverID, roomID: int) -> ^RoomGrant
 		}
 	}
 	return nil
+}
+
+// Drops roomID's cached grants (the room is gone).
+State_forgetRoomGrants :: proc(state: ^State, serverID, roomID: int) {
+	index := State_serverRoomCacheIndex(state^, serverID)
+	if index < 0 {
+		return
+	}
+	list := &state.server_room_caches[index].roomGrants
+	for grantsIndex in 0 ..< len(list) {
+		if list[grantsIndex].roomID == roomID {
+			RoomGrants_deinit(&list[grantsIndex])
+			ordered_remove(list, grantsIndex)
+			return
+		}
+	}
+}
+
+// Someone changed roomID's grants or access roles (ServerAdminRoomChanged, protocol 31): the
+// grants are fetched again when this client keeps them or the editor shows the room, and this
+// account may still read them. A Permissions page without unsaved changes takes the new grants;
+// one with them keeps them and says that saving replaces the other change.
+State_roomGrantsChanged :: proc(state: ^State, serverID, roomID: int) {
+	editor := &state.roomEditor
+	shown := editor.mode != .Closed && editor.serverID == serverID && editor.roomID == roomID
+	cached := State_findRoomGrants(state, serverID, roomID)
+	if (cached == nil && !shown) || !State_canEditRoom(state, serverID, roomID) {
+		return
+	}
+	if shown && editor.mode == .Permissions && editor.grantsLoaded && editor.pending == .None {
+		if cached != nil && roomEditorGrantsMatch(editor, cached^) {
+			editor.grantsLoaded = false
+		} else {
+			delete(editor.notice)
+			editor.notice = strings.clone(ROOM_PERMISSIONS_CHANGED_ELSEWHERE_NOTE)
+		}
+	}
+	State_requestRoomPermissions(state, serverID, roomID)
+}
+
+// Whether the Permissions page shows exactly grants (a role's empty grant is no grant).
+roomEditorGrantsMatch :: proc(editor: ^RoomEditor, grants: RoomGrants) -> bool {
+	if editor.grantsEveryone != grants.everyone {
+		return false
+	}
+	for grant in editor.grantsRoles {
+		if roomGrantsRolePermissions(grants, grant.roleId) != grant.permissions {
+			return false
+		}
+	}
+	for grant in grants.roles {
+		if State_roomEditorRoleGrant(editor, grant.roleId) != grant.permissions {
+			return false
+		}
+	}
+	return true
+}
+
+@(private = "file")
+roomGrantsRolePermissions :: proc(grants: RoomGrants, roleID: int) -> common.RoomPermissions {
+	for grant in grants.roles {
+		if grant.roleId == roleID {
+			return grant.permissions
+		}
+	}
+	return {}
 }
 
 // ── Requests ──────────────────────────────────────────────────────
