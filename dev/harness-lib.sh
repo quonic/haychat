@@ -55,6 +55,38 @@ start_client() {
 	client_fd[$client]=$fd
 }
 
+# copy_profile FROM TO: copies profile-FROM to profile-TO, for a second client process with
+# the same identity (and device ID). A client locks its profile directory (#81), so two
+# processes never share one; copy only a profile no client is running on.
+copy_profile() {
+	[[ ! -e "$work_dir/profile-$2" ]] || fail "profile $2 already exists"
+	cp -r -- "$work_dir/profile-$1" "$work_dir/profile-$2" || fail "could not copy profile $1"
+}
+
+# terminate_client CLIENT [SECONDS]: sends SIGTERM to a running client, with its stdin still
+# open, and fails unless it exits with code 0 within SECONDS (default 10). #36: the harness
+# handles SIGTERM itself, also while SDL audio is open.
+terminate_client() {
+	local client=$1 limit=${2:-10} pid=${client_pid[$1]} fd=${client_fd[$1]} status=0 watchdog
+	kill -TERM "$pid" || fail "could not send SIGTERM to client $client"
+	# A zombie still answers kill -0, so wait for it, with a watchdog that kills it after
+	# SECONDS.
+	(
+		sleep "$limit"
+		kill -KILL "$pid" 2>/dev/null
+	) >/dev/null 2>&1 &
+	watchdog=$!
+	wait "$pid" || status=$?
+	kill "$watchdog" 2>/dev/null || true
+	wait "$watchdog" 2>/dev/null || true
+	exec {fd}>&-
+	unset "client_pid[$client]"
+	((status != 137)) || fail "client $client did not exit within ${limit}s of SIGTERM"
+	((status == 0)) || fail "client $client exited with status $status after SIGTERM"
+	grep -qF '[Info] SIGTERM received; exiting' "$work_dir/$client.err" ||
+		fail "client $client did not say that SIGTERM stopped it"
+}
+
 # start_client_at NAME NICKNAME ADDRESS [OPTION...]: start_client for another server address,
 # with extra harness options (for example --invite-code CODE --reason TEXT, or --register),
 # always with its own profile directory profile-NAME.

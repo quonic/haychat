@@ -100,8 +100,9 @@ source.
   HC-MT-B-Out and A's capture stream is on HC-MT-Mic, and stops if either is not.
 - It records the default sink and source first, and puts them back at once if loading a module
   changed them. It never sets them otherwise.
-- The exit trap runs on success, failure and Ctrl-C. It closes the clients' input (a client with
-  SDL audio open ignores SIGTERM, so EOF is what stops it, with SIGKILL after 5 s), stops
+- The exit trap runs on success, failure and Ctrl-C. It closes the clients' input (EOF stops a
+  client, with SIGKILL after 5 s; an older `HAYCHAT_VOICE_MANUAL_CLIENT` build with SDL audio
+  open ignores SIGTERM, #36), stops
   `pw-cat` and `pw-record`, unloads every module the kit loaded, and compares the module list
   with the one from the start. The last line says whether they match:
   `cleanup: unloaded 4 modules; module list and default devices are as before`. When another

@@ -1138,14 +1138,12 @@ UIScriptRunner_step :: proc(runner: ^UIScriptRunner, ctx: ^ui.Context, window: ^
 
 // ── Entry point ───────────────────────────────────────────────────
 
-// Prepares the profile like the headless harness does: --config-dir isolates it, and --name and
-// --server are saved to it. A profile without a name or server is allowed: the window then
-// opens the first-run screen, which a script can fill in.
+// Prepares the profile like the headless harness does: --name and --server are saved to it
+// (uiScriptMain already applied --config-dir and took the profile lock). A profile without a
+// name or server is allowed: the window then opens the first-run screen, which a script can
+// fill in.
 @(private = "file")
 uiScriptPrepareProfile :: proc(options: HeadlessOptions) -> bool {
-	if len(options.configDir) > 0 && !headlessUseConfigDir(options.configDir) {
-		return false
-	}
 	config := loadConfig()
 	defer Config_deinit(&config)
 	if len(config.private_key) == 0 || len(config.public_key) == 0 {
@@ -1194,6 +1192,17 @@ uiScriptMain :: proc(args: []string) -> int {
 				line = errLine,
 				error = parseErr,
 			},
+		)
+		return UI_SCRIPT_EXIT_USAGE
+	}
+	if len(options.profile.configDir) > 0 && !headlessUseConfigDir(options.profile.configDir) {
+		return UI_SCRIPT_EXIT_USAGE
+	}
+	// One client per profile (#81), before anything reads or writes it.
+	if profileLockTakeForProcess() == .AlreadyRunning {
+		uiScriptWriteJSON(
+			&runner,
+			UIScriptResultJSON{ok = false, cmd = "start", error = PROFILE_LOCK_HELD_MESSAGE},
 		)
 		return UI_SCRIPT_EXIT_USAGE
 	}

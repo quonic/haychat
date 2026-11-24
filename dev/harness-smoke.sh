@@ -250,14 +250,28 @@ expect_dm_unread() {
 	[[ "$last_result" =~ ${dm_unread_pattern}${expected}\} ]] ||
 		fail "[read] client $client: expected $expected unread from user $user_c $why"
 }
+# Each session is its own process on its own profile (#81: a client locks its profile
+# directory), so d2 and d3 run on copies of d's: the same identity key, the same account.
+copy_profile d d2
+copy_profile d d3
 start_client d1 "$nickname_d" d
 expect_connected d1
+# A second client on d1's profile refuses to start, before it reads or writes the profile.
+lock_status=0
+"$client_bin" --headless --server "$server_address" --config-dir "$work_dir/profile-d" \
+	</dev/null >"$work_dir/d-locked.out" 2>"$work_dir/d-locked.err" || lock_status=$?
+((lock_status == 3)) || fail "[lock] a second client on d's profile exited with $lock_status"
+lock_line='{"event":"startup_failed","message":"HayChat is already running with this profile",'
+lock_line+='"failure":"ProfileLocked"}'
+[[ "$(cat "$work_dir/d-locked.out")" == "$lock_line" ]] ||
+	fail "[lock] unexpected output from the second client: $(cat "$work_dir/d-locked.out")"
+echo "    a second client on d1's profile: exit 3, $lock_line"
 expect_ok d1 wait room_list 5000
 expect_ok d1 wait conversations 5000
 expect_room_unread d1 2 "after reconnecting"
 expect_dm_unread d1 1 "after reconnecting"
 
-start_client d2 "$nickname_d" d
+start_client d2 "$nickname_d"
 expect_connected d2
 expect_ok d2 wait room_list 5000
 expect_ok d2 wait conversations 5000
@@ -283,7 +297,7 @@ expect_room_unread d2 0 "after the other session read it"
 expect_dm_unread d2 0 "after the other session read it"
 
 # The cleared state is the server's, so a session started afterwards lists it too.
-start_client d3 "$nickname_d" d
+start_client d3 "$nickname_d"
 expect_connected d3
 expect_ok d3 wait room_list 5000
 expect_ok d3 wait conversations 5000

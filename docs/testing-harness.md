@@ -71,12 +71,25 @@ again, so an agent can `wait connected` to see it come back.
 
 | Code | When |
 | --- | --- |
-| 0 | `quit`, or EOF on stdin |
+| 0 | `quit`, EOF on stdin, or SIGTERM or SIGINT |
 | 1 | Bad arguments, the config and identity key could not be loaded or created, or the profile has no display name (pass `--name`) |
 | 2 | No server is configured, connecting failed for a reason retrying cannot fix, or `--connect-timeout` passed (a `connect_failed` event says why) |
+| 3 | Another client runs on this profile directory: `{"event":"startup_failed","message":"HayChat is already running with this profile","failure":"ProfileLocked"}` is the only line, and nothing in the profile was read or written (#81, see [One Client per Profile](client-configuration.md#one-client-per-profile)) |
 
 Closing stdin counts as `quit`. A script that wants a client to stay online between commands
 must keep its stdin open (a named pipe held open on a file descriptor, or a coprocess).
+
+SIGTERM and SIGINT stop the harness like `quit` (#36), also with voice joined and SDL audio
+open: it leaves voice, closes the session, frees everything and exits with code 0, printing
+`[Info] SIGTERM received; exiting` (or `SIGINT`) on stderr. A `wait` that is running ends with
+`{"ok":false,"cmd":"wait","error":"stopped by SIGTERM while waiting for KIND"}` first, and a
+`sleep` ends early with its usual result. `dev/harness-lib.sh` has `terminate_client CLIENT`,
+which sends SIGTERM with stdin still open and fails unless the client exits with code 0 in
+time; `dev/voice-proof.sh` uses it on a client whose SDL capture device is open.
+
+One client process per profile directory: a second one exits with code 3 (above). Two
+sessions of one account need two directories holding the same identity key; copy the profile
+while no client runs on it (`copy_profile FROM TO` in `dev/harness-lib.sh`).
 
 ## Commands
 
@@ -407,7 +420,9 @@ below half the rate.
    under `SDL_AUDIO_DRIVER=disk`. C's input file is a tone from `voice-check --write-tone`;
    D's disk output (stereo) must pass `voice-check --channels 2`, and D must receive 95 % of
    what C sent with FEC plus PLC under 2 %. The disk driver paces capture by its own clock, so
-   C's frame count is not checked against time.
+   C's frame count is not checked against time. Then C joins voice again, with its SDL capture
+   device open, and gets SIGTERM with its stdin still open (#36): it must exit with code 0
+   within 10 s, saying `SIGTERM received; exiting`, and D must see the room's voice empty.
 3. Faults: the file path again, E speaking for `HAYCHAT_VOICE_PROOF_FAULT_SECONDS` (default 8)
    to F, a client built with `-define:HAYCHAT_TEST_FAULTS=true` and started with
    `HAYCHAT_TEST_VOICE_LOSS=0.05`, `HAYCHAT_TEST_VOICE_JITTER_MS=20` and
@@ -882,10 +897,12 @@ grep -F '"cmd":"send"' alice.out
    second must print `room_deleted` and report `#general` (room 1) as its selected room.
 6. Read state: a new client D signs up and quits; a new client C sends two messages to room 1
    and a direct message to D. D comes back from its profile and must list 2 unread in room 1
-   (`rooms`) and 1 from C (`conversations`). A second session of D, from the same profile, is
-   connected when D loads both conversations and sends `read room 1` and `read dm C`; the
-   second session must print both `read_marker` events with `unreadCount` 0 and then list 0,
-   and a third session started afterwards must list 0 straight from the server.
+   (`rooms`) and 1 from C (`conversations`). While it runs, another client on D's profile
+   must exit with code 3 and print only the `startup_failed` `ProfileLocked` line (#81). A
+   second session of D, from a copy of its profile (the same identity key), is connected when
+   D loads both conversations and sends `read room 1` and `read dm C`; the second session must
+   print both `read_marker` events with `unreadCount` 0 and then list 0, and a third session
+   started afterwards (from another copy) must list 0 straight from the server.
 
 `./dev.sh live --admin` runs `dev/admin-proof.sh` (also part of `--all`) with two headless
 clients: A becomes an admin with `make-admin.sql` and makes B an admin, and B must print

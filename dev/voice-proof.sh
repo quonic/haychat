@@ -315,7 +315,19 @@ expect_ok d voice-leave
 	fail "[device] voice-check rejected D's playback"
 # The disk driver paces capture by its own clock, so only the delivery is checked.
 check_counters device false
-stop_client c
+# #36: SIGTERM stops a client whose SDL audio is open (C's capture device, in voice again)
+# within seconds and with code 0, its stdin still open. D, out of voice, sees C come and go.
+participants_out="^\\{\"event\":\"voice_participants\",\"serverID\":[0-9]+,"
+participants_out+="\"roomID\":$room_id,\"recipientJoined\":false,"
+d_start=$(wc -l <"$work_dir/d.out")
+join_voice c
+expect_event d "${participants_out}.*\"userID\":$user_c," "$d_start" \
+	"D never listed C in the room's voice again"
+d_start=$(wc -l <"$work_dir/d.out")
+terminate_client c 10
+expect_event d "${participants_out}\"participants\":(\\[\\]|null)\\}$" "$d_start" \
+	"D still lists C in the room's voice after SIGTERM"
+echo "    C exited with code 0 on SIGTERM with SDL audio open"
 stop_client d
 echo "==> [voice] SDL devices passed"
 
@@ -358,7 +370,7 @@ expect_connected g
 user_g=$(connected_user_id g)
 # loadConfig saved G's profile, device ID included, before G connected. H gets a copy of it:
 # the same identity key and, until it is changed here, the same device ID.
-cp -r -- "$work_dir/profile-g" "$work_dir/profile-h"
+copy_profile g h
 h_config="$work_dir/profile-h/haychat/config.json"
 g_device=$(grep -oE '"device_id":"[0-9a-f]{32}"' "$work_dir/profile-g/haychat/config.json") ||
 	fail "[session] G's config.json has no device_id"

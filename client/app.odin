@@ -60,9 +60,24 @@ main :: proc() {
 			os.exit(0)
 		}
 	}
+	// One client per profile (#81, profile_lock.odin), taken only after a link hand-off above,
+	// which reads and writes neither config.json nor the key store.
+	if profileLockTakeForProcess() == .AlreadyRunning {
+		appShowProfileLockedError()
+		os.exit(1)
+	}
 	if !runApp() {
 		os.exit(1)
 	}
+}
+
+// The GUI's answer to a profile another client holds: a message box (SDL shows one without
+// SDL_Init, and without a window), and the stderr line profileLockTakeForProcess printed.
+@(private = "file")
+appShowProfileLockedError :: proc() {
+	message :: PROFILE_LOCK_HELD_MESSAGE +
+		". Close the other HayChat window (or the headless client using this profile) first."
+	_ = SDL.ShowSimpleMessageBox({.ERROR}, "HayChat", message, nil)
 }
 
 AppOptions :: struct {

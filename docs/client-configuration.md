@@ -57,6 +57,32 @@ HayChat window that already runs through a file only the user can read: `link-ha
 `%APPDATA%\haychat\`), created new with mode 0600 and deleted once read. The window records
 its process ID in `instance` there so the second process knows it runs. Neither is config.
 
+## One Client per Profile
+
+Every client that uses a profile directory (the window, `--ui-script` and `--headless`) first
+takes an exclusive lock on `haychat.lock` in it (`$XDG_CONFIG_HOME/haychat/haychat.lock`,
+`%APPDATA%\haychat\haychat.lock`): `flock` on Linux, `LockFileEx` on Windows. Two clients on
+one profile would each save `config.json` and the key store from their own memory, and the
+last save would win: pins, verifications, verified room heads and the "this conversation is
+encrypted" flags could be lost (#81).
+
+A second client on a locked profile does not start and reads or writes nothing in it:
+
+- The window shows "HayChat is already running with this profile" in an error dialog (and on
+  stderr) and exits with code 1. A second start that only passes a `haychat://` link to the
+  running window (above) does so before it would take the lock, so links still work.
+- `--headless` prints `{"event":"startup_failed","message":"HayChat is already running with
+  this profile","failure":"ProfileLocked"}` and exits with code 3; `--ui-script` prints
+  `{"ok":false,"cmd":"start","error":"HayChat is already running with this profile"}` and
+  exits with code 1.
+
+The operating system releases the lock when the process ends, a crash or `kill -9` included,
+so there is no stale lock to clear and the file holds nothing (deleting it is harmless while
+no client runs). A lock that cannot be taken for another reason, such as a file system without
+locks, only logs a warning and the client starts as before. To run two clients as the same
+user, copy the profile directory while no client runs on it, and give the copy its own
+`device_id` (see the table above).
+
 ## Key Store
 
 The other accounts' keys this profile has pinned live in one key store file per server, in a
@@ -107,9 +133,8 @@ headless harness (`--config-dir`), never by tests.
 
 | `room_chains[]` | The sender chains of encrypted rooms this profile holds (protocol 19): for a room, an epoch (member log version), a sender and a chain ID, the chain key at `start_index`, from which every later message key of that chain is derived. They come from verified key distributions (this profile's own chains included) and are secret like the private keys in `config.json`. This section is a cache: the server keeps every distribution sealed to its recipients, so a lost file is rebuilt by fetching them again, and old room messages open again. The sending side of a chain is never stored: every run of the client starts new chains, so a message index is never used twice |
 
-Two clients running on the same profile directory at the same time each keep their own copy of
-the key store in memory, and the last one to save wins: a pin, a verification or a room head
-one of them recorded can be lost. Run one client per profile directory at a time.
+A client keeps the key store in memory and saves it whole, so only one client may run on a
+profile directory at a time; the [profile lock](#one-client-per-profile) makes sure of it.
 
 Pins are security state: a file that does not parse, has an entry that does not validate, or
 belongs to another server key is used read-only for the session and left exactly as it is, and
