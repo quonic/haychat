@@ -151,6 +151,8 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerDirectMessageDeleted, 225},
 	{.ClientFetchMessageEdits, 226},
 	{.ServerMessageEdits, 227},
+	// Protocol 31 (#73: room changes for room managers).
+	{.ServerAdminRoomChanged, 228},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -196,6 +198,15 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 	assert(
 		int(RoomHistoryVisibility.FromJoin) == 1 && int(RoomHistoryVisibility.Full) == 2,
 		"expected RoomHistoryVisibility to stay FromJoin 1, Full 2",
+	)
+	// Protocol 31 (#73).
+	assert(
+		int(AdminRoomChange.Created) == 0 &&
+		int(AdminRoomChange.Edited) == 1 &&
+		int(AdminRoomChange.Deleted) == 2 &&
+		int(AdminRoomChange.Members) == 3 &&
+		int(AdminRoomChange.Permissions) == 4,
+		"expected AdminRoomChange to stay Created 0, Edited 1, Deleted 2, Members 3, Permissions 4",
 	)
 }
 
@@ -536,10 +547,14 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// (#138: ClientAdminListAttachmentRemovals, ServerAdminAttachmentRemovals, and
 	// chatMessageId and directMessageId in ServerAttachmentRemoved); 30 added editing and
 	// deleting messages (#76: ClientEditRoomMessage ... ServerMessageEdits, and editCount,
-	// lastEdit, deleted and deletion on stored messages and conversation summaries).
+	// lastEdit, deleted and deletion on stored messages and conversation summaries); 31 added
+	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes.
 	assert(
-		protocolVersion == 30,
-		fmt.tprintf("expected protocol version 30 for message edits, got %d", protocolVersion),
+		protocolVersion == 31,
+		fmt.tprintf(
+			"expected protocol version 31 for admin room changes, got %d",
+			protocolVersion,
+		),
 	)
 }
 
@@ -1984,4 +1999,29 @@ testMessageEditPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		refusal == "You can only edit or delete your own messages (message 42)",
 		fmt.tprintf("expected the refusal to name the message, got %q", refusal),
 	)
+}
+
+// Protocol 31 (#73): ServerAdminRoomChanged names the room and the change, nothing else.
+@(test)
+testAdminRoomChangedPayloadRoundTrips :: proc(t: ^testing.T) {
+	_ = t
+	for change in AdminRoomChange {
+		encoded, err := cbor.marshal(ServerAdminRoomChangedPayload{roomId = 7, change = change})
+		assert(err == nil, "expected ServerAdminRoomChangedPayload encoding to succeed")
+		defer delete(encoded)
+		decoded: ServerAdminRoomChangedPayload
+		assert(
+			cbor.unmarshal(encoded, &decoded) == nil,
+			"expected ServerAdminRoomChangedPayload to decode",
+		)
+		assert(
+			decoded.roomId == 7 && decoded.change == change,
+			fmt.tprintf(
+				"expected room 7 and %v, got %d and %v",
+				change,
+				decoded.roomId,
+				decoded.change,
+			),
+		)
+	}
 }

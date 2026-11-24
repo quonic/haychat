@@ -75,6 +75,7 @@ version below therefore needs clients and servers rebuilt together.
 | 28 | Attachment moderation (attachments F3, [below](#attachment-moderation-protocol-28)): `ClientAdminAttachmentUsage`, `ServerAdminAttachmentUsage`, `ClientAdminRemoveAttachment` and `ServerAttachmentRemoved` (wire values 212 to 215), `AdminAction.RemoveAttachment` (11) and `ServerAdminActionResult.blobId`. Admins see storage use per account and remove any file; the message stays and lists it as removed, and a reader's download of it is refused with "Attachment removed by an admin". No schema migration |
 | 29 | Attachment removal log (#138, [below](#attachment-removal-log-protocol-29)): `ClientAdminListAttachmentRemovals{beforeId}` and `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}` (wire values 216 and 217, `AttachmentRemovalEntry`), and `chatMessageId`/`directMessageId` in `ServerAttachmentRemoved`, with schema migration 16 (`attachment_removals`). Every removal, by an admin or `deploy/sql/remove-attachment.sql`, keeps a row with its reason that admins list in the client |
 | 30 | Editing and deleting messages (#76, [below](#editing-and-deleting-messages-protocol-30)): `ClientEditRoomMessage` … `ServerMessageEdits` (wire values 218 to 227), `MessageEdit`, `MessageDeletion` and `MessageEditsKind`, `editCount`/`lastEdit`/`deleted`/`deletion` on `StoredChatMessage` and `StoredDirectMessage` and `lastEditCount`/`lastEdit`/`lastDeleted`/`lastDeletion` on `DirectConversationSummary`, and the signatures `"haychat-room-edit-v1"`, `"haychat-dm-edit-v1"`, `"haychat-room-delete-v1"` and `"haychat-dm-delete-v1"`, with schema migration 17 (edit and tombstone columns on both message tables, `chat_message_edits`, `direct_message_edits`). Authors edit and delete their messages, admins delete any room message, and a deleted message leaves a tombstone with its ID |
+| 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -461,6 +462,33 @@ The rules are in [rooms-and-accounts.md](rooms-and-accounts.md#room-permissions)
 - Wire values: `ClientAdminSetRoomPermissions` 187, `ClientAdminFetchRoomPermissions` 188,
   `ServerAdminRoomPermissions` 189. The older never-sent placeholders `ClientChangeRoomPermissions`,
   `ServerRoomPermissions` and `ServerRoomPermissionsChange` stay unused.
+
+## Room changes for room managers (protocol 31)
+
+Room managers (holders of ManageRooms or ManageRoomMembers; admins hold both) list every room
+with `ClientAdminListRooms`, also rooms they are not in, and so get no room events for those
+(#73). Since protocol 31 the server also sends them `ServerAdminRoomChanged{roomId, change}`:
+
+- To every session whose account holds ManageRooms or ManageRoomMembers, whether it is in the
+  room or not, after a room is created (`Created`), edited (`Edited`), deleted (`Deleted`), or
+  someone joins or leaves it (`Members`: adds, removals, leaves, a switch to Public, Role room
+  changes, the member log of an encrypted room; not a new account joining every Public room as
+  it signs up). The sessions' permissions follow role and admin
+  changes, so an account that gains or loses them hears of the next change or stops hearing.
+- After `ClientAdminSetRoomPermissions` changes a room's grants (`Permissions`), to those
+  sessions and to every session of the room's members, since a member holding the room's
+  EditRoom may show its Permissions page.
+- It carries no room data. A client that keeps the list of every room fetches it again
+  (`ClientAdminListRooms`); one that keeps the room's grants or shows its Permissions page
+  fetches them (`ClientAdminFetchRoomPermissions`), so each recipient reads only what the server
+  lets it read. A client fetches the list once more when a change arrives while a fetch is out,
+  takes a deleted room off its lists at once, and closes an Edit form open on an edited room (as
+  `ServerEditRoom` does for members). A Permissions page without unsaved changes takes the new
+  grants; one with unsaved changes keeps them and says "Someone else changed these permissions.
+  Saving replaces their change with yours."
+- The events members already get (`ServerEditRoom`, `ServerDeleteRoom`,
+  `ServerRoomMembershipChanged`, a fresh `ServerListRooms`) are unchanged; a manager who is a
+  member gets both.
 
 ## Registration (protocol 25)
 

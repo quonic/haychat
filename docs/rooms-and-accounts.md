@@ -71,7 +71,11 @@ and [Room Permissions](#room-permissions)).
 - **Creating a room without joining it.** An admin who clears **Join this room** creates an
   invite room they are not a member of: they do not see its messages, but they still add and
   remove its members, edit and delete it, through the Admin section's list of every room
-  (`ClientAdminListRooms`). A Public room always includes its creator.
+  (`ClientAdminListRooms`). A Public room always includes its creator. Since protocol 31 that
+  list (for every room manager) follows other managers' changes at once: the server tells room
+  managers of every room created, edited, deleted, joined or left and of every change of grants
+  (`ServerAdminRoomChanged`), and the client fetches the list again; an open Permissions page
+  takes the new grants unless it has unsaved changes.
 - **Changing the mode.** An admin may switch a room between any two modes. Switching to Public
   adds every account in the same statement (each is told it joined); switching away from Public
   keeps every member.
@@ -455,8 +459,8 @@ newest message.
   room a new member reads older messages only once a member who holds their keys is online.
 - Bans and account changes do not remove anyone from encrypted rooms' member lists by
   themselves; an admin removes them from each room.
-- The Admin section's room list does not refresh by itself when another admin changes a room
-  the admin is not in; reopening Server settings fetches it again.
+- The member counts in the Admin section's list of rooms leave out accounts that signed up since
+  it was last fetched, until another change to the room or reopening Server settings.
 - The Admin section lists every account of the server at once, with no search or paging.
 - Bans are per account. On an Open server a banned person can come back with a new key; set the
   server to Invite only or Invite + approval to stop that.

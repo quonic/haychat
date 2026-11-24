@@ -1,6 +1,7 @@
 package server
 
 import "../common"
+import "core:encoding/cbor"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
@@ -477,5 +478,182 @@ testRoomAccessRouterCreateWithoutJoiningNotifiesNobody :: proc(t: ^testing.T) {
 			change.roomId == 12 && change.joined && change.userId == client.userID,
 			fmt.tprintf("expected peer %d to join room 12, got %v", client.peerID, change),
 		)
+	}
+}
+
+// Sets the server permissions of every session of userID, as ServerAuthSuccess and
+// ServerAccountUpdated would have.
+@(private = "file")
+routerRoomAccessTestSetPermissions :: proc(
+	h: ^RouterTestHarness,
+	userID: int,
+	permissions: common.ServerPermissions,
+) {
+	for _, &session in h.state.peerSessions {
+		if session.isAuthenticated && session.authenticatedUserID == userID {
+			session.permissions = permissions
+		}
+	}
+}
+
+// The ServerAdminRoomChanged notices peerID got, in order.
+@(private = "file")
+routerRoomAccessTestAdminChanges :: proc(
+	drain: ^RouterVoiceTestDrain,
+	peerID: u32,
+	allocator := context.temp_allocator,
+) -> []common.ServerAdminRoomChangedPayload {
+	changes := make([dynamic]common.ServerAdminRoomChangedPayload, 0, allocator)
+	for entry in drain.packets {
+		if entry.peerID != peerID || entry.packet.messageType != .ServerAdminRoomChanged {
+			continue
+		}
+		change: common.ServerAdminRoomChangedPayload
+		assert(
+			cbor.unmarshal(entry.packet.payload, &change) == nil,
+			"expected ServerAdminRoomChanged to decode",
+		)
+		append(&changes, change)
+	}
+	return changes[:]
+}
+
+// Protocol 31 (#73): room managers hear of every change to a room, whether they are in it or
+// not; nobody else does, but for a change of grants the room's members.
+@(test)
+testRoomAccessRouterTellsRoomManagersOfEveryChange :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+	clients := routerRoomAccessTestClients()
+	routerVoiceTestConnect(&h, clients[:])
+	defer routerVoiceTestDisconnectAll(clients[:])
+	// alice is an admin, bob (both sessions) holds ManageRoomMembers, carol holds nothing.
+	routerRoomAccessTestSetPermissions(&h, 42, common.SERVER_PERMISSIONS_ALL)
+	routerRoomAccessTestSetPermissions(&h, 43, {.ManageRoomMembers})
+
+	expectChanges :: proc(
+		drain: ^RouterVoiceTestDrain,
+		peerID: u32,
+		want: []common.ServerAdminRoomChangedPayload,
+		what: string,
+	) {
+		got := routerRoomAccessTestAdminChanges(drain, peerID)
+		assert(
+			len(got) == len(want),
+			fmt.tprintf("expected peer %d %v after %s, got %v", peerID, want, what, got),
+		)
+		for change, index in want {
+			assert(
+				got[index] == change,
+				fmt.tprintf("expected peer %d %v after %s, got %v", peerID, want, what, got),
+			)
+		}
+	}
+
+	// bob adds carol to Member invite room 7; alice is not in it but manages rooms.
+	{
+		query, _ := routerRoomAccessTestSend(
+			&h,
+			&clients[1],
+			.ClientAddRoomMember,
+			common.ClientRoomMembershipPayload{roomId = 7, userId = 44},
+		)
+		defer IPC__database_query_request_deinit(query.request)
+		routerRoomAccessTestAnswer(&h, query, .Applied, changed = true, members = {43, 44})
+		drain := routerVoiceTestDrain(&h, clients[:])
+		defer RouterVoiceTestDrain_deinit(&drain)
+		members := []common.ServerAdminRoomChangedPayload{{roomId = 7, change = .Members}}
+		for peerID in ([]u32{1, 2, 3}) {
+			expectChanges(&drain, peerID, members, "carol's add")
+		}
+		expectChanges(&drain, 4, nil, "carol's add")
+	}
+
+	// alice deletes room 8, which only carol is in.
+	{
+		routerTestSendSealed(
+			&h,
+			&clients[0].transport,
+			1,
+			.ClientDeleteRoom,
+			common.ClientDeleteRoomPayload{roomId = 8},
+		)
+		query := routerPollDatabaseQuery(&h)
+		defer IPC__database_query_request_deinit(query.request)
+		_, isDelete := query.request.(common.DatabaseDeleteRoomRequest)
+		assert(isDelete, fmt.tprintf("expected a room delete statement, got %v", query))
+		memberUserIDs := make([dynamic]int)
+		append(&memberUserIDs, 44)
+		MainRouterState_handleDatabaseResult(
+			&h.pm,
+			&h.state,
+			query.request_id,
+			common.DatabaseQueryResponse {
+				success = true,
+				result = common.DatabaseRoomMutationResult {
+					changed = true,
+					memberUserIDs = memberUserIDs,
+				},
+			},
+		)
+		drain := routerVoiceTestDrain(&h, clients[:])
+		defer RouterVoiceTestDrain_deinit(&drain)
+		deleted := []common.ServerAdminRoomChangedPayload{{roomId = 8, change = .Deleted}}
+		for peerID in ([]u32{1, 2, 3}) {
+			expectChanges(&drain, peerID, deleted, "the delete")
+		}
+		expectChanges(&drain, 4, nil, "the delete")
+		assert(
+			routerAdminTestCount(&drain, 4, .ServerDeleteRoom) == 1 &&
+			routerAdminTestCount(&drain, 2, .ServerDeleteRoom) == 0,
+			"expected ServerDeleteRoom still only for the requester and the members",
+		)
+	}
+
+	// alice changes room 9's grants; carol is a member there and may show its Permissions page.
+	{
+		routerTestSendSealed(
+			&h,
+			&clients[0].transport,
+			1,
+			.ClientAdminSetRoomPermissions,
+			common.ClientAdminSetRoomPermissionsPayload {
+				roomId = 9,
+				everyone = {.SendMessages},
+			},
+		)
+		query := routerPollDatabaseQuery(&h)
+		defer IPC__database_query_request_deinit(query.request)
+		_, isSet := query.request.(common.DatabaseRoomPermissionsRequest)
+		assert(isSet, fmt.tprintf("expected a room permissions statement, got %v", query))
+		memberUserIDs := make([dynamic]int)
+		append(&memberUserIDs, 44)
+		MainRouterState_handleDatabaseResult(
+			&h.pm,
+			&h.state,
+			query.request_id,
+			common.DatabaseQueryResponse {
+				success = true,
+				result = common.DatabaseRoomPermissionsResult {
+					outcome = .Applied,
+					changed = true,
+					everyone = {.SendMessages},
+					memberUserIDs = memberUserIDs,
+				},
+			},
+		)
+		// carol's room list is resent; that statement is not answered here.
+		listQuery := routerPollDatabaseQuery(&h)
+		IPC__database_query_request_deinit(listQuery.request)
+		routerTestExpectNoDatabaseQuery(&h, "expected one room list statement, carol's")
+		drain := routerVoiceTestDrain(&h, clients[:])
+		defer RouterVoiceTestDrain_deinit(&drain)
+		granted := []common.ServerAdminRoomChangedPayload{{roomId = 9, change = .Permissions}}
+		for peerID in ([]u32{1, 2, 3, 4}) {
+			expectChanges(&drain, peerID, granted, "the grant change")
+		}
 	}
 }

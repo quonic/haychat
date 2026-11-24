@@ -155,7 +155,10 @@ State_requestAdminRooms :: proc(state: ^State, serverID: int) {
 	   !State_hasPermission(state, serverID, .ManageRoomMembers) {
 		return
 	}
-	if State_serverRoomCache(state, serverID).adminRoomsLoading {
+	cache := State_serverRoomCache(state, serverID)
+	if cache.adminRoomsLoading {
+		// The answer on its way may predate whatever asked for this one.
+		cache.adminRoomsStale = true
 		return
 	}
 	State_sendAdminRoomList(state, serverID)
@@ -190,6 +193,50 @@ State_receiveAdminRooms :: proc(
 	rooms^ = nil
 	cache.adminRoomsLoaded = true
 	cache.adminRoomsLoading = false
+	if cache.adminRoomsStale {
+		cache.adminRoomsStale = false
+		State_requestAdminRooms(state, serverID)
+	}
+}
+
+// ServerAdminRoomChanged (protocol 31, #73): roomID changed, whether this account is in it or
+// not. The notice carries no room data, so whatever this client keeps of the room is fetched
+// again: the list of every room once it was loaded (the Admin section and room management read
+// it) and, for an edit or a change of grants, the room's grants when it keeps them or shows
+// its Permissions page. An edit also closes an Edit form open on the room, as ServerEditRoom
+// does for members; a deletion closes whatever the editor shows of it at once.
+State_adminRoomChanged :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	change: common.AdminRoomChange,
+) {
+	index := State_serverRoomCacheIndex(state^, serverID)
+	if index < 0 {
+		return
+	}
+	cache := &state.server_room_caches[index]
+	switch change {
+	case .Deleted:
+		State_roomEditorRoomDeleted(state, serverID, roomID)
+		for entryIndex in 0 ..< len(cache.adminRooms) {
+			if cache.adminRooms[entryIndex].room.id == roomID {
+				delete(cache.adminRooms[entryIndex].room.name)
+				delete(cache.adminRooms[entryIndex].room.description)
+				ordered_remove(&cache.adminRooms, entryIndex)
+				break
+			}
+		}
+		State_forgetRoomGrants(state, serverID, roomID)
+	case .Edited:
+		State_roomEditorRoomChanged(state, serverID, roomID)
+		State_roomGrantsChanged(state, serverID, roomID)
+	case .Permissions:
+		State_roomGrantsChanged(state, serverID, roomID)
+	case .Created, .Members:
+	}
+	if cache.adminRoomsLoaded {
+		State_requestAdminRooms(state, serverID)
+	}
 }
 
 // Records a room the admin created without joining it, until the next admin list replaces it.
@@ -378,6 +425,7 @@ State_roomMembersProtocolError :: proc(state: ^State, serverID: int) {
 	}
 	if index := State_serverRoomCacheIndex(state^, serverID); index >= 0 {
 		state.server_room_caches[index].adminRoomsLoading = false
+		state.server_room_caches[index].adminRoomsStale = false
 	}
 }
 

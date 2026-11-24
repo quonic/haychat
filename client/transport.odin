@@ -150,6 +150,9 @@ ClientTransportRuntimeEventKind :: enum {
 	MessageEdited,
 	MessageDeleted,
 	MessageEditsReceived,
+	// Room changes for room managers (protocol 31, #73, room_members.odin). AdminRoomChanged is
+	// ServerAdminRoomChanged: roomID and what changed in adminRoomChange. Nothing owned.
+	AdminRoomChanged,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -267,6 +270,8 @@ ClientTransportRuntimeEvent :: struct {
 	messageEdit:               common.MessageEdit,
 	messageDeletion:           common.MessageDeletion,
 	messageEdits:              [dynamic]common.MessageEdit,
+	// Protocol 31.
+	adminRoomChange:           common.AdminRoomChange,
 }
 
 ClientServerTransport :: struct {
@@ -2266,6 +2271,26 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				kind = .RoleDeleted,
 				serverID = transport.serverID,
 				roleID = payload.roleId,
+			},
+			true
+
+	case .ServerAdminRoomChanged:
+		payload: common.ServerAdminRoomChangedPayload
+		if cbor.unmarshal(innerPacket.payload, &payload) != nil ||
+		   payload.roomId <= 0 ||
+		   payload.change < min(common.AdminRoomChange) ||
+		   payload.change > max(common.AdminRoomChange) {
+			return ClientServerTransport_invalidPayloadEvent(
+					transport,
+					"invalid admin room change payload",
+				),
+				true
+		}
+		return ClientTransportRuntimeEvent {
+				kind = .AdminRoomChanged,
+				serverID = transport.serverID,
+				roomID = payload.roomId,
+				adminRoomChange = payload.change,
 			},
 			true
 

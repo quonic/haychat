@@ -1974,6 +1974,8 @@ MainRouterState_handleDatabaseResult :: proc(
 				},
 			)
 		}
+		// Protocol 31 (#73): room managers list every room, joined or not.
+		MainRouterState_sendAdminRoomChanged(pm, state, mutation.room.id, .Created)
 	case .EditRoom:
 		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
 		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {
@@ -2057,6 +2059,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				targetUserID = mutation.room.logVersion,
 			},
 		)
+		MainRouterState_sendAdminRoomChanged(pm, state, request.roomID, .Edited)
 	case .ListEditRoomRecipients:
 		members, membersOK := response.result.(common.DatabaseRoomMemberListResult)
 		if MainRouterState_databaseFailed(pm, state, request.peerID, response, membersOK) {
@@ -2133,6 +2136,7 @@ MainRouterState_handleDatabaseResult :: proc(
 				)
 			}
 		}
+		MainRouterState_sendAdminRoomChanged(pm, state, request.roomID, .Deleted)
 	case .RoomMemberAction:
 		MainRouterState_handleRoomMemberActionResult(pm, state, request, response)
 	case .AdminListRooms:

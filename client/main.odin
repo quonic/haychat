@@ -41,6 +41,9 @@ ServerRoomCache :: struct {
 	adminRooms:        [dynamic]common.AdminRoomSummary,
 	adminRoomsLoaded:  bool,
 	adminRoomsLoading: bool,
+	// A room changed while the list was loading (protocol 31): the answer may predate the
+	// change, so the list is fetched once more when it arrives.
+	adminRoomsStale:   bool,
 	// Rooms' grants and access roles from ServerAdminRoomPermissions (protocol 24,
 	// room_permissions.odin), for the Permissions page and a Role room's edit form.
 	roomGrants:        [dynamic]RoomGrants,
