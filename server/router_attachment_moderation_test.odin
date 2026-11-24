@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import "core:time"
 
 // Router tests for attachment moderation (protocol 28, router_attachment_moderation.odin): what
 // the router sends once the database decided. Who may read a message is the removal statement's
@@ -126,7 +127,8 @@ modTestBlob :: proc(fill: u8) -> common.AttachmentBlobID {
 	return blobId
 }
 
-// Starts a download of blobId by peerID and answers its check, up to the first reads.
+// Starts a download of blobId by peerID and answers its check, up to the first reads, whose
+// storage request IDs it returns.
 @(private = "file")
 modTestStartDownload :: proc(
 	h: ^RouterTestHarness,
@@ -134,6 +136,8 @@ modTestStartDownload :: proc(
 	transport: ^common.TransportState,
 	peerID: u32,
 	blobId: common.AttachmentBlobID,
+) -> (
+	reads: [4]u64,
 ) {
 	routerTestSendSealed(
 		h,
@@ -165,11 +169,13 @@ modTestStartDownload :: proc(
 		modTestCount(messages[:], peerID, .ServerAttachmentDownloadBegin) == 1,
 		"expected DownloadBegin",
 	)
-	for _ in 0 ..< 4 {
+	for index in 0 ..< 4 {
 		read := modTestPollStorage(h)
 		_, ok := read.request.(StorageRead)
 		assert(ok, fmt.tprintf("expected a chunk read, got %v", read.request))
+		reads[index] = read.requestId
 	}
+	return
 }
 
 // Answers the removal statement for blobId with removal (readers cloned).
@@ -834,4 +840,273 @@ testRouterAttachmentTombstonePassAndRemovedDownloads :: proc(t: ^testing.T) {
 		again.message == common.ATTACHMENT_REMOVED_MESSAGE,
 		fmt.tprintf("expected the check refused as removed, got %q", again.message),
 	)
+}
+
+// ── Files missing from storage (#132 follow-up, router_attachment_missing.odin) ───────────
+
+// Answers one chunk read of blobId as a file the storage worker did not find.
+@(private = "file")
+modTestAnswerMissing :: proc(
+	h: ^RouterTestHarness,
+	requestID: u64,
+	blobId: common.AttachmentBlobID,
+	intact: bool,
+) {
+	MainRouterState_handleStorageResponse(
+		&h.pm,
+		&h.state,
+		StorageResponse {
+			requestId = requestID,
+			result = StorageReadData{blobId = blobId, missing = true, blobDirectoryIntact = intact},
+		},
+	)
+}
+
+@(private = "file")
+modTestDecodeRefusal :: proc(payload: []u8) -> common.ServerAttachmentRefusedPayload {
+	refusal: common.ServerAttachmentRefusedPayload
+	assert(
+		cbor.unmarshal(payload, &refusal, temp_allocator = context.allocator) == nil,
+		"expected the refusal to decode",
+	)
+	return refusal
+}
+
+// Expects the mark of blobId in the database and returns its request ID.
+@(private = "file")
+modTestExpectMark :: proc(h: ^RouterTestHarness, blobId: common.AttachmentBlobID) -> u64 {
+	query := routerPollDatabaseQuery(h)
+	request, ok := query.request.(common.DatabaseAttachmentRequest)
+	assert(
+		ok &&
+		request.action == .MarkMissing &&
+		request.userId == 0 &&
+		request.blobId == blobId &&
+		request.reason == ATTACHMENT_MISSING_REMOVAL_REASON,
+		fmt.tprintf("expected the server's mark of the missing file, got %v", query.request),
+	)
+	IPC__database_query_request_deinit(query.request)
+	return query.request_id
+}
+
+// A download that finds the file missing is refused "not found" and marks the row: one mark
+// for the blob however many downloads find it missing, and once the database applied it every
+// other download ends as removed and each reader the statement named hears
+// ServerAttachmentRemoved. No file is deleted (it is gone already).
+@(test)
+testRouterAttachmentMissingFileBecomesATombstone :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := modTestHarness()
+	defer routerTestHarness_deinit(&h)
+
+	bobPeer, carolPeer, davePeer, erinPeer := u32(1), u32(2), u32(3), u32(4)
+	for peerID in ([]u32{carolPeer, davePeer, erinPeer}) {
+		h.state.connectedPeers[peerID] = true
+	}
+	bobTransport := routerCompleteHandshake(&h, bobPeer, 43)
+	peers := [?]RouterTestPeer {
+		{bobPeer, &bobTransport},
+		{carolPeer, nil},
+		{davePeer, nil},
+		{erinPeer, nil},
+	}
+	transports: [3]common.TransportState
+	for index in 0 ..< 3 {
+		transports[index] = routerCompleteHandshake(&h, peers[index + 1].peerID, 44 + index)
+		peers[index + 1].transport = &transports[index]
+		skipped := modTestDrain(&h, peers[:])
+		modTestFree(&skipped)
+	}
+
+	blobId := modTestBlob(0x50)
+	bobReads := modTestStartDownload(&h, peers[:], &bobTransport, bobPeer, blobId)
+	_ = modTestStartDownload(&h, peers[:], &transports[0], carolPeer, blobId)
+	daveReads := modTestStartDownload(&h, peers[:], &transports[1], davePeer, blobId)
+
+	// Bob's read finds no file: Bob is refused, and the row is marked.
+	modTestAnswerMissing(&h, bobReads[0], blobId, true)
+	messages := modTestDrain(&h, peers[:])
+	refusal := modTestDecodeRefusal(modTestFind(messages[:], bobPeer, .ServerAttachmentRefused))
+	assert(
+		refusal.blobId == blobId && refusal.message == common.ATTACHMENT_NOT_FOUND_MESSAGE,
+		fmt.tprintf("expected Bob refused as not found, got %v", refusal),
+	)
+	common.ServerAttachmentRefusedPayload_deinit(&refusal)
+	modTestFree(&messages)
+	markID := modTestExpectMark(&h, blobId)
+
+	// Dave's read finds none either while the mark is in the database: no second mark.
+	modTestAnswerMissing(&h, daveReads[0], blobId, true)
+	messages = modTestDrain(&h, peers[:])
+	assert(
+		modTestCount(messages[:], davePeer, .ServerAttachmentRefused) == 1,
+		"expected Dave refused",
+	)
+	modTestFree(&messages)
+	routerTestExpectNoDatabaseQuery(&h, "expected one mark of the blob")
+	assert(h.state.attachments.missing.marks == 1, "expected one mark counted")
+
+	// Applied: Carol's download ends as removed, the readers hear it, no file is deleted.
+	readers := make([dynamic]int, 0, 3)
+	append(&readers, 43, 44, 45)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		markID,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseAttachmentResult {
+				action = .MarkMissing,
+				outcome = .Applied,
+				removal = common.DatabaseAttachmentRemoval {
+					ownerUserId = 44,
+					roomId = 1,
+					senderId = 44,
+					chatMessageId = 901,
+					readerUserIds = readers,
+				},
+			},
+		},
+	)
+	modTestExpectNoStorage(&h, "expected no file deletion for a missing file")
+	messages = modTestDrain(&h, peers[:])
+	defer modTestFree(&messages)
+	ended := modTestDecodeRefusal(modTestFind(messages[:], carolPeer, .ServerAttachmentRefused))
+	defer common.ServerAttachmentRefusedPayload_deinit(&ended)
+	assert(
+		ended.blobId == blobId && ended.message == common.ATTACHMENT_REMOVED_MESSAGE,
+		fmt.tprintf("expected Carol's download ended as removed, got %v", ended),
+	)
+	assert(len(h.state.attachments.downloads) == 0, "expected every download of the blob gone")
+	for peerID in ([]u32{bobPeer, carolPeer, davePeer}) {
+		notice: common.ServerAttachmentRemovedPayload
+		assert(
+			cbor.unmarshal(
+				modTestFind(messages[:], peerID, .ServerAttachmentRemoved),
+				&notice,
+				temp_allocator = context.allocator,
+			) ==
+			nil,
+			"expected the notice to decode",
+		)
+		assert(
+			notice.blobId == blobId &&
+			notice.roomId == 1 &&
+			notice.senderId == 44 &&
+			notice.chatMessageId == 901,
+			fmt.tprintf("expected the room notice for peer %d, got %v", peerID, notice),
+		)
+	}
+	assert(
+		modTestCount(messages[:], erinPeer, .ServerAttachmentRemoved) == 0,
+		"expected no notice for an account that is not a reader",
+	)
+	assert(len(h.state.attachments.missing.marking) == 0, "expected the mark answered")
+}
+
+// The guards: a read error that is not a missing file, and a missing file in a blob directory
+// that does not look intact, mark nothing; past the window's cap nothing is marked but the
+// reader is still refused "not found", and a new window marks again; a mark the database
+// failed is forgotten, so a later read may try again.
+@(test)
+testRouterAttachmentMissingFileGuards :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := modTestHarness()
+	defer routerTestHarness_deinit(&h)
+	peerID := u32(1)
+	transport := routerCompleteHandshake(&h, peerID, 43)
+	peers := [?]RouterTestPeer{{peerID, &transport}}
+
+	expectRefused :: proc(h: ^RouterTestHarness, peers: []RouterTestPeer, message: string) {
+		messages := modTestDrain(h, peers)
+		defer modTestFree(&messages)
+		refusal := modTestDecodeRefusal(
+			modTestFind(messages[:], peers[0].peerID, .ServerAttachmentRefused),
+		)
+		defer common.ServerAttachmentRefusedPayload_deinit(&refusal)
+		assert(
+			refusal.message == message,
+			fmt.tprintf("expected the refusal %q, got %q", message, refusal.message),
+		)
+	}
+
+	// Another read error is the disk's: no mark.
+	blobId := modTestBlob(0x60)
+	reads := modTestStartDownload(&h, peers[:], &transport, peerID, blobId)
+	MainRouterState_handleStorageResponse(
+		&h.pm,
+		&h.state,
+		StorageResponse{requestId = reads[0], result = StorageReadData{blobId = blobId}},
+	)
+	expectRefused(&h, peers[:], common.ATTACHMENT_STORAGE_ERROR_MESSAGE)
+	routerTestExpectNoDatabaseQuery(&h, "expected no mark for a read error")
+
+	// Missing, but the blob directory looks absent or incomplete: no mark.
+	reads = modTestStartDownload(&h, peers[:], &transport, peerID, blobId)
+	modTestAnswerMissing(&h, reads[0], blobId, false)
+	expectRefused(&h, peers[:], common.ATTACHMENT_NOT_FOUND_MESSAGE)
+	routerTestExpectNoDatabaseQuery(&h, "expected no mark while the blob directory is suspect")
+	assert(h.state.attachments.missing.marks == 0, "expected no mark counted")
+
+	// The window's marks are spent: refused as not found, no mark.
+	now := time.tick_now()
+	h.state.attachments.missing.windowStart = now
+	h.state.attachments.missing.marks = ATTACHMENT_MISSING_MARKS_PER_WINDOW
+	reads = modTestStartDownload(&h, peers[:], &transport, peerID, blobId)
+	modTestAnswerMissing(&h, reads[0], blobId, true)
+	expectRefused(&h, peers[:], common.ATTACHMENT_NOT_FOUND_MESSAGE)
+	routerTestExpectNoDatabaseQuery(&h, "expected no mark past the cap")
+	assert(h.state.attachments.missing.capLogged, "expected the cap logged")
+
+	// An hour later a new window marks again; a failed mark is forgotten.
+	h.state.attachments.missing.windowStart = time.tick_add(now, -2 * time.Hour)
+	reads = modTestStartDownload(&h, peers[:], &transport, peerID, blobId)
+	modTestAnswerMissing(&h, reads[0], blobId, true)
+	expectRefused(&h, peers[:], common.ATTACHMENT_NOT_FOUND_MESSAGE)
+	markID := modTestExpectMark(&h, blobId)
+	assert(
+		h.state.attachments.missing.marks == 1 && !h.state.attachments.missing.capLogged,
+		"expected a new window with one mark",
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		markID,
+		common.DatabaseQueryResponse{success = false},
+	)
+	assert(len(h.state.attachments.missing.marking) == 0, "expected the failed mark forgotten")
+	routerTestExpectNoNetworkMessage(&h, "expected nothing sent for a failed mark")
+}
+
+// attachmentMissingDecide counts marks per window: the cap stops the next one and logs once,
+// a blob being marked is not marked twice, a suspect directory never marks or counts, and the
+// window resets after an hour.
+@(test)
+testAttachmentMissingDecideCountsMarksPerWindow :: proc(t: ^testing.T) {
+	_ = t
+	guard := AttachmentMissingGuard {
+		marking = make(map[common.AttachmentBlobID]bool),
+	}
+	defer delete(guard.marking)
+	now := time.tick_now()
+	decision, logCap := attachmentMissingDecide(&guard, modTestBlob(0x70), false, now)
+	assert(decision == .StorageSuspect && !logCap && guard.marks == 0, "expected a suspect")
+	for index in 0 ..< ATTACHMENT_MISSING_MARKS_PER_WINDOW {
+		decision, _ = attachmentMissingDecide(&guard, modTestBlob(u8(index)), true, now)
+		assert(decision == .Mark, fmt.tprintf("expected mark %d allowed, got %v", index, decision))
+	}
+	decision, _ = attachmentMissingDecide(&guard, modTestBlob(0), true, now)
+	assert(decision == .AlreadyMarking, fmt.tprintf("expected a duplicate, got %v", decision))
+	delete_key(&guard.marking, modTestBlob(0))
+	decision, logCap = attachmentMissingDecide(&guard, modTestBlob(0x80), true, now)
+	assert(decision == .CapReached && logCap, "expected the cap reached and logged")
+	decision, logCap = attachmentMissingDecide(&guard, modTestBlob(0x81), true, now)
+	assert(decision == .CapReached && !logCap, "expected the cap logged once")
+	later := time.tick_add(now, ATTACHMENT_MISSING_MARK_WINDOW)
+	decision, _ = attachmentMissingDecide(&guard, modTestBlob(0x82), true, later)
+	assert(decision == .Mark && guard.marks == 1, "expected a new window")
 }

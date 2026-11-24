@@ -144,6 +144,10 @@ DatabaseAttachmentAction :: enum u8 {
 	// in the statement), newest first, before the row ID beforeId (0 for the newest), at most
 	// limit rows.
 	Removals,
+	// #132 follow-up: the server found a Ready or Bound blob's file missing from storage and
+	// makes it a Removed tombstone like Remove (no admin: removed_by_user_id NULL, userId 0),
+	// with the reason in the removal log. A blob no longer Ready or Bound is NotFound.
+	MarkMissing,
 }
 
 DatabaseAttachmentRequest :: struct {
@@ -167,7 +171,8 @@ DatabaseAttachmentRequest :: struct {
 	limit:           int,
 	// Sweep: blobs never to sweep (live transfers). Known: the blobs to look up. Owned.
 	blobIds:         [dynamic]AttachmentBlobID,
-	// Remove (protocol 29): the admin's reason, stored in the removal log ("" for none). Owned.
+	// Remove (protocol 29): the admin's reason, stored in the removal log ("" for none).
+	// MarkMissing: the server's reason (ATTACHMENT_MISSING_REMOVAL_REASON). Owned.
 	reason:          string,
 	// Removals (protocol 29): the page's cursor, a removal log row ID (0 for the newest).
 	beforeId:        int,

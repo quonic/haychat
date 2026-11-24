@@ -122,6 +122,12 @@ StorageReadData :: struct {
 	data:    []u8, // owned
 	ok:      bool,
 	missing: bool, // the blob's file does not exist (ENOENT), not another read error (#132)
+	// With missing: the blob directory looked intact when the file was not found (blobs/ is a
+	// readable directory with at least one entry, and the blob's shard directory exists), so
+	// the file itself is gone rather than the volume. Only then does the router mark the row
+	// removed (#132 follow-up); a missing or empty blobs/ or shard directory while the row
+	// exists means a mount or restore problem, and nothing is marked.
+	blobDirectoryIntact: bool,
 }
 
 StorageBlobsDeleted :: struct {
@@ -517,6 +523,9 @@ storageRead :: proc(worker: ^StorageWorker, request: StorageRead) -> StorageResu
 		// A row whose file is gone (a database restored without its blob directory) is told
 		// apart from a failing disk, so the reader hears "Attachment not found" (#132).
 		data.missing = err == os.General_Error.Not_Exist
+		if data.missing {
+			data.blobDirectoryIntact = storageBlobDirectoryIntact(worker, request.blobId)
+		}
 		return data
 	}
 	defer os.close(file)
@@ -529,6 +538,35 @@ storageRead :: proc(worker: ^StorageWorker, request: StorageRead) -> StorageResu
 	data.data = buffer[:n]
 	data.ok = true
 	return data
+}
+
+// Whether a blob whose file was not found sits in a blob directory that looks intact (#132
+// follow-up): blobs/ is a directory this worker can read and has at least one entry, and the
+// blob's shard directory blobs/<2 hex> exists. Shard directories are never deleted, so a row
+// whose file was stored here always has one. A volume that did not mount, a fresh directory
+// beside a restored database, or a partial restore fails this, and the router then marks
+// nothing.
+@(private = "file")
+storageBlobDirectoryIntact :: proc(
+	worker: ^StorageWorker,
+	blobId: common.AttachmentBlobID,
+) -> bool {
+	blobs := fmt.aprintf("%s/%s", worker.dir, ATTACHMENT_BLOBS_DIR_NAME)
+	defer delete(blobs)
+	entries, err := os.read_directory_by_path(blobs, 1, context.allocator)
+	if err != nil {
+		return false
+	}
+	found := len(entries) > 0
+	os.file_info_slice_delete(entries, context.allocator)
+	if !found {
+		return false
+	}
+	hex := storageBlobHex(blobId)
+	defer delete(hex)
+	shard := fmt.aprintf("%s/%s", blobs, hex[:2])
+	defer delete(shard)
+	return os.is_directory(shard)
 }
 
 // Whether name is 32 lowercase hex characters, and the blob ID it spells.

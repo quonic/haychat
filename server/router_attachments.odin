@@ -161,6 +161,9 @@ RouterAttachmentState :: struct {
 	// neither as files nor as orphans (a startup sweep would otherwise look like a bad restore).
 	scanPending:   bool,
 	scanSwept:     map[common.AttachmentBlobID]bool,
+	// #132 follow-up: the guard on marking files found missing from storage removed
+	// (router_attachment_missing.odin).
+	missing:       AttachmentMissingGuard,
 	stats:         AttachmentRouterStats,
 }
 
@@ -177,6 +180,7 @@ RouterAttachmentState_init :: proc() -> RouterAttachmentState {
 		plaintext = make([]u8, common.ATTACHMENT_PACKET_MAX_SIZE),
 		scanFiles = make([dynamic]StorageFile),
 		scanSwept = make(map[common.AttachmentBlobID]bool),
+		missing = AttachmentMissingGuard{marking = make(map[common.AttachmentBlobID]bool)},
 	}
 }
 
@@ -226,6 +230,7 @@ RouterAttachmentState_deinit :: proc(attachments: ^RouterAttachmentState) {
 	delete(attachments.plaintext)
 	delete(attachments.scanFiles)
 	delete(attachments.scanSwept)
+	delete(attachments.missing.marking)
 	attachments^ = {}
 }
 
@@ -1208,6 +1213,8 @@ MainRouterState_handleAttachmentResult :: proc(
 		MainRouterState_attachmentRemovalsResult(pm, state, request, result)
 	case .TombstoneFiles:
 		MainRouterState_attachmentTombstoneFilesResult(pm, state, result)
+	case .MarkMissing:
+		MainRouterState_attachmentMarkMissingResult(pm, state, request, result)
 	}
 }
 
@@ -1445,6 +1452,9 @@ MainRouterState_attachmentDatabaseFailed :: proc(
 				common.ATTACHMENT_UNAVAILABLE_MESSAGE,
 			)
 		}
+	case .MarkMissing:
+		// Not marked: the row stays as #132 left it, and the next missing read tries again.
+		delete_key(&attachments.missing.marking, request.blobID)
 	case .Progress, .Abandon, .DeleteNew, .TombstoneFiles:
 	}
 }
@@ -1664,7 +1674,9 @@ MainRouterState_handleStorageResponse :: proc(
 		if !r.ok || u64(len(r.data)) != pending.size {
 			// A row whose file is gone (a restore without the blob directory) is "not
 			// found", which clients show as unavailable; any other failure is the disk's
-			// (#132). The row stays as it is: the download check still passes it.
+			// (#132). The server is no backup of its files, so a missing file's row then
+			// becomes a Removed tombstone, unless the guard finds the blob directory
+			// suspect or too many marks this hour (router_attachment_missing.odin).
 			message := common.ATTACHMENT_STORAGE_ERROR_MESSAGE
 			if r.missing {
 				message = common.ATTACHMENT_NOT_FOUND_MESSAGE
@@ -1683,6 +1695,15 @@ MainRouterState_handleStorageResponse :: proc(
 				message,
 			)
 			attachmentRemoveDownload(state, key)
+			if r.missing {
+				MainRouterState_attachmentFileMissing(
+					pm,
+					state,
+					r.blobId,
+					r.blobDirectoryIntact,
+					time.tick_now(),
+				)
+			}
 			return
 		}
 		if !attachmentSendPacket(

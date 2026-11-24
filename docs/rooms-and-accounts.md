@@ -475,8 +475,12 @@ newest message.
   only allow, never deny: a room cannot take something from a role another grant gives.
 - Files are never previewed, and there is no download cache: each **Save…** downloads again. A
   direct message with files is not queued while the other person's key is being fetched; it
-  stays in the draft. A file whose row the server keeps but whose file is gone from its disk (a
-  database restored without its blob directory) shows as unavailable, and the row stays until an
-  admin removes the file or its message is deleted.
+  stays in the draft. The server is not a backup of its files: a file whose row the server keeps
+  but whose file is gone from its disk (a database restored without its blob directory) shows as
+  unavailable to the first reader who tries it, and the server then marks it removed, as an
+  admin removal would, so its card reads "Attachment removed by an admin" (the removal log says
+  "File missing from storage", removed by an operator). While the blob directory looks absent or
+  incomplete, or after 10 such marks in an hour, it marks nothing and the file only shows as
+  unavailable ([protocol.md](protocol.md), Missing files).
 - Room messages are end-to-end encrypted only in encrypted rooms, and direct messages only when
   both sides can (see [protocol.md](protocol.md)). The server sees who writes to whom and when.

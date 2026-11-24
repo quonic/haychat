@@ -671,6 +671,9 @@ testRouterAttachmentDownloadOfAMissingFileIsNotFound :: proc(t: ^testing.T) {
 			fmt.tprintf("expected the refusal to name the blob, got %v", refused),
 		)
 		assert(len(h.state.attachments.downloads) == 0, "expected the download ended")
+		// Neither marks the row: a read error is not a missing file, and this missing read
+		// does not say the blob directory looked intact (router_attachment_missing.odin).
+		routerTestExpectNoDatabaseQuery(&h, "expected no mark without an intact directory")
 
 		// The other chunk's answer reaches nobody once the download is gone.
 		MainRouterState_handleStorageResponse(

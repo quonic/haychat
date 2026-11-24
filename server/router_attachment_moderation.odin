@@ -228,17 +228,7 @@ MainRouterState_attachmentRemoveResult :: proc(
 		AttachmentPendingStorage{kind = .DeleteBlobs},
 	)
 
-	notice := common.ServerAttachmentRemovedPayload {
-		blobId          = blobId,
-		roomId          = removal.roomId,
-		senderId        = removal.senderId,
-		recipientId     = removal.recipientId,
-		chatMessageId   = removal.chatMessageId,
-		directMessageId = removal.directMessageId,
-	}
-	for userID in removal.readerUserIds {
-		MainRouterState_sendMessageToUserID(pm, state, userID, .ServerAttachmentRemoved, notice)
-	}
+	MainRouterState_attachmentSendRemoved(pm, state, blobId, removal)
 	if live {
 		MainRouterState_sendPeerMessage(
 			pm,
@@ -252,6 +242,28 @@ MainRouterState_attachmentRemoveResult :: proc(
 				blobId = blobId,
 			},
 		)
+	}
+}
+
+// Tells every session of each account the removal statement named as a reader that the blob
+// is a Removed tombstone now (ServerAttachmentRemoved, protocol 29: with the message's ID).
+// Shared by an admin's removal and the server's mark of a missing file (#132 follow-up).
+MainRouterState_attachmentSendRemoved :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	blobId: common.AttachmentBlobID,
+	removal: common.DatabaseAttachmentRemoval,
+) {
+	notice := common.ServerAttachmentRemovedPayload {
+		blobId          = blobId,
+		roomId          = removal.roomId,
+		senderId        = removal.senderId,
+		recipientId     = removal.recipientId,
+		chatMessageId   = removal.chatMessageId,
+		directMessageId = removal.directMessageId,
+	}
+	for userID in removal.readerUserIds {
+		MainRouterState_sendMessageToUserID(pm, state, userID, .ServerAttachmentRemoved, notice)
 	}
 }
 

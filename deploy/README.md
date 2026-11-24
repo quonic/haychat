@@ -388,10 +388,14 @@ migrated on that start, exactly like an upgrade (see below).
 What a mismatched pair does:
 
 - **A row without its file** (the blob directory is older than the dump, or was lost): the
-  message still lists the file, but a download fails with "Server storage error". Nothing
-  deletes the row early; the sweeper removes it on its usual schedule (an unsent upload after
-  `HAYCHAT_ATTACHMENT_PENDING_HOURS`, a file whose message is gone after an hour). An admin can
-  remove such a file from its card to show it as removed instead.
+  message still lists the file, but a download fails with "Attachment not found" (clients show
+  "Attachment unavailable"). The server is not a backup, so it then marks that file removed, as
+  an admin removal would: the card reads "Attachment removed by an admin", and Server settings →
+  **Removed files** lists it with the reason "File missing from storage" and no admin. It marks
+  nothing while `blobs/` is missing, unreadable or empty, or the file's shard directory
+  `blobs/<2 hex>` is missing (a volume that did not mount), and at most 10 files an hour; it
+  logs `[Attachments] WARNING: ...` in both cases. A file it did not mark stays listed and is
+  tried again on its next download. Restore the blob directory before readers try its files.
 - **A file without a row** (the blob directory is newer than the dump): the startup scan deletes
   it once the file is an hour old and logs `[Attachments] Deleted N orphan attachment files`,
   unless a guard above keeps it (an empty table, or more than 10% and more than 10 such files).

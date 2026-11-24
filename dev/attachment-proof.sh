@@ -14,8 +14,12 @@ set -euo pipefail
 #                 the file's size, and no part file is left.
 #   3. download:  A downloads the blob while both measure again; its sha256 is the file's.
 #   4. refusals:  B cannot download A's unbound blob (only its owner may, D10), and B's upload
-#                 to a room that does not exist is refused. (#132) With the blob's file moved
-#                 aside, A's own download of it is "Attachment not found", not a storage error.
+#                 to a room that does not exist is refused. (#132) A sends a small file with a
+#                 message and the proof deletes its stored file: B's download is "Attachment
+#                 not found", not a storage error, and the server makes the row a Removed
+#                 tombstone with no admin: A and B (the readers) hear attachment_removed, B's
+#                 history lists it removed, and B's next download is refused at the check
+#                 (step 10 finds it in the removal log with no admin).
 #   5. resume:    A starts a second 25 MiB upload, reconnects in the middle, and resumes it with
 #                 attach-resume: it continues at the offset the server acknowledged and the
 #                 stored blob is the file.
@@ -44,7 +48,9 @@ set -euo pipefail
 #                 (Protocol 29, #138) attachment_removed names the message
 #                 (chatMessageID), and A's attach-removals lists both removals newest first:
 #                 the helper's with no admin and its -v reason, then A's with A's reason; the
-#                 cursor pages past the first, and B, not an admin, is refused the list.
+#                 cursor pages past the first, and B, not an admin, is refused the list. (#132
+#                 follow-up) Step 4's missing file follows A's, with no admin and the reason
+#                 "File missing from storage".
 #  11. limits:    (F5) the second server allows 2 MiB per file and 3 MiB per account at a pace of
 #                 512 KiB/s. C's client refuses a file one byte over the size and, after C
 #                 stored 2 MiB, a 1.5 MiB file over the quota (D18); with attach-upload
@@ -255,66 +261,6 @@ done_line=$(expect_event a '"event":"attachment_done".*"direction":"download"' "
 [[ ! -e "$out_file.part" ]] || fail "expected the part file renamed away"
 echo "[attachments] download of 25 MiB took $(json_field "$done_line" elapsedMS) ms"
 
-echo "==> [attachments] 4. refusals of the unbound blob and a missing room"
-start=$(wc -l <"$work_dir/b.out")
-expect_ok b "attach-download $blob $work_dir/stolen.bin"
-expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$start" >/dev/null
-[[ ! -e "$work_dir/stolen.bin" && ! -e "$work_dir/stolen.bin.part" ]] || fail "B saved a file"
-start=$(wc -l <"$work_dir/b.out")
-expect_ok b "attach-upload 999999 $big_file"
-expect_event b '"event":"attachment_error".*"error":"Not a room member"' "$start" >/dev/null
-# (#132) A row whose file is gone (a restore without the blob directory) is "Attachment not
-# found", not "Server storage error": the file is renamed aside and back within its shard, so
-# no scan or sweep can see it gone.
-if [[ -n "$attachment_dir" ]]; then
-	stored="$attachment_dir/blobs/${blob:0:2}/$blob"
-	mv "$stored" "$stored.aside"
-	start=$(wc -l <"$work_dir/a.out")
-	expect_ok a "attach-download $blob $work_dir/missing.bin"
-	expect_event a '"event":"attachment_error".*"error":"Attachment not found"' "$start" >/dev/null
-	mv "$stored.aside" "$stored"
-	[[ ! -e "$work_dir/missing.bin" && ! -e "$work_dir/missing.bin.part" ]] ||
-		fail "A saved a file whose blob is missing"
-fi
-
-echo "==> [attachments] 5. resume after a reconnect"
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a "attach-upload 1 $second_file"
-progress=$(expect_event a '"event":"attachment_progress".*"direction":"upload".*"bytes":[1-9]' "$start")
-second_blob=$(json_field "$progress" blobID)
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a reconnect
-expect_event a '"event":"attachment_error".*"error":"connection lost"' "$start" >/dev/null
-expect_event a '"event":"connected"' "$start" >/dev/null
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a "attach-resume $second_blob"
-resumed=$(expect_event a '"event":"attachment_progress".*"direction":"upload"' "$start")
-resumed_at=$(json_field "$resumed" bytes)
-((resumed_at > 0)) || fail "expected the resume to continue after byte 0: $resumed"
-echo "[attachments] resumed at byte $resumed_at of $((25 * 1024 * 1024))"
-done_line=$(expect_event a '"event":"attachment_done".*"direction":"upload"' "$start")
-[[ "$(json_field "$done_line" blobID)" == "$second_blob" ]] || fail "resume made a new blob"
-[[ "$(json_field "$done_line" sha256)" == "$second_sha" ]] || fail "resumed hash: $done_line"
-
-echo "==> [attachments] 6. cancel"
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a "attach-upload 1 $second_file"
-progress=$(expect_event a '"event":"attachment_progress".*"direction":"upload"' "$start")
-cancel_blob=$(json_field "$progress" blobID)
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a "attach-cancel $cancel_blob"
-expect_event a '"event":"attachment_error".*"error":"cancelled"' "$start" >/dev/null
-if [[ -n "$attachment_dir" ]]; then
-	for _ in $(seq 1 50); do
-		[[ -e "$attachment_dir/incoming/$cancel_blob.part" ]] || break
-		sleep 0.1
-	done
-	[[ ! -e "$attachment_dir/incoming/$cancel_blob.part" ]] || fail "expected the part deleted"
-fi
-start=$(wc -l <"$work_dir/a.out")
-expect_ok a "attach-resume $cancel_blob"
-expect_event a '"event":"attachment_error"' "$start" >/dev/null
-
 lines() {
 	wc -l <"$work_dir/$1.out"
 }
@@ -356,6 +302,97 @@ same_file() {
 		fail "expected $1 to be the uploaded file"
 }
 
+echo "==> [attachments] 4. refusals of the unbound blob and a missing room"
+start=$(wc -l <"$work_dir/b.out")
+expect_ok b "attach-download $blob $work_dir/stolen.bin"
+expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$start" >/dev/null
+[[ ! -e "$work_dir/stolen.bin" && ! -e "$work_dir/stolen.bin.part" ]] || fail "B saved a file"
+start=$(wc -l <"$work_dir/b.out")
+expect_ok b "attach-upload 999999 $big_file"
+expect_event b '"event":"attachment_error".*"error":"Not a room member"' "$start" >/dev/null
+# (#132) A row whose file is gone (a restore without the blob directory) is "Attachment not
+# found", not "Server storage error", and (its follow-up) the server then makes the row a
+# Removed tombstone with no admin: its readers hear attachment_removed and later downloads are
+# refused at the check. A dedicated small file on its own message, so no later step needs it;
+# step 10 finds its row in the removal log once A is an admin.
+a_id=$(user_id b "att-a-$run_tag")
+b_id=$(user_id a "att-b-$run_tag")
+missing_blob=""
+if [[ -n "$attachment_dir" ]]; then
+	missing_file="$work_dir/missing.txt"
+	printf 'attachment proof %s: a file the server loses\n' "$run_tag" >"$missing_file"
+	missing_size=$(stat -c %s "$missing_file")
+	missing_sha=$(sha256sum "$missing_file" | cut -d' ' -f1)
+	done_line=$(upload a 1 "$missing_file")
+	missing_blob=$(json_field "$done_line" blobID)
+	bstart=$(lines b)
+	expect_ok a "send 1 --attach $missing_blob a file the server loses"
+	chat=$(expect_event b "\"event\":\"room_chat\".*\"attachments\":\[\{\"blobID\":\"$missing_blob\"" "$bstart")
+	missing_message=$(json_field "$chat" messageID)
+	rm -- "$attachment_dir/blobs/${missing_blob:0:2}/$missing_blob"
+	astart=$(lines a)
+	bstart=$(lines b)
+	expect_ok b "attach-download $missing_blob $work_dir/missing.bin"
+	expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$bstart" >/dev/null
+	[[ ! -e "$work_dir/missing.bin" && ! -e "$work_dir/missing.bin.part" ]] ||
+		fail "B saved a file whose blob is missing"
+	for client in a b; do
+		start=$astart
+		[[ $client == b ]] && start=$bstart
+		expect_event "$client" "\"event\":\"attachment_removed\",\"serverID\":[0-9]+,\"blobID\":\"$missing_blob\",\"roomID\":1,\"senderID\":$a_id,\"recipientID\":0,\"chatMessageID\":$missing_message,\"directMessageID\":0}" \
+			"$start" >/dev/null
+	done
+	# The tombstone keeps the signed fields; the next download is refused at the check.
+	hstart=$(lines b)
+	expect_ok b "history 1"
+	history=$(expect_event b '"event":"room_history","serverID":[0-9]+,"roomID":1,' "$hstart")
+	[[ "$history" == *"{\"blobID\":\"$missing_blob\",\"size\":$missing_size,\"fileSize\":$missing_size,\"sha256\":\"$missing_sha\",\"name\":\"missing.txt\",\"mediaType\":\"text/plain\",\"encrypted\":false,\"removed\":true}"* ]] ||
+		fail "expected B's history to list the missing file removed with its signed fields"
+	start=$(lines b)
+	expect_ok b "attach-download $missing_blob $work_dir/missing-again.bin"
+	expect_event b '"event":"attachment_error".*"error":"Attachment removed by an admin"' \
+		"$start" >/dev/null
+	echo "[attachments] the missing file became a tombstone its readers heard of"
+fi
+
+echo "==> [attachments] 5. resume after a reconnect"
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a "attach-upload 1 $second_file"
+progress=$(expect_event a '"event":"attachment_progress".*"direction":"upload".*"bytes":[1-9]' "$start")
+second_blob=$(json_field "$progress" blobID)
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a reconnect
+expect_event a '"event":"attachment_error".*"error":"connection lost"' "$start" >/dev/null
+expect_event a '"event":"connected"' "$start" >/dev/null
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a "attach-resume $second_blob"
+resumed=$(expect_event a '"event":"attachment_progress".*"direction":"upload"' "$start")
+resumed_at=$(json_field "$resumed" bytes)
+((resumed_at > 0)) || fail "expected the resume to continue after byte 0: $resumed"
+echo "[attachments] resumed at byte $resumed_at of $((25 * 1024 * 1024))"
+done_line=$(expect_event a '"event":"attachment_done".*"direction":"upload"' "$start")
+[[ "$(json_field "$done_line" blobID)" == "$second_blob" ]] || fail "resume made a new blob"
+[[ "$(json_field "$done_line" sha256)" == "$second_sha" ]] || fail "resumed hash: $done_line"
+
+echo "==> [attachments] 6. cancel"
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a "attach-upload 1 $second_file"
+progress=$(expect_event a '"event":"attachment_progress".*"direction":"upload"' "$start")
+cancel_blob=$(json_field "$progress" blobID)
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a "attach-cancel $cancel_blob"
+expect_event a '"event":"attachment_error".*"error":"cancelled"' "$start" >/dev/null
+if [[ -n "$attachment_dir" ]]; then
+	for _ in $(seq 1 50); do
+		[[ -e "$attachment_dir/incoming/$cancel_blob.part" ]] || break
+		sleep 0.1
+	done
+	[[ ! -e "$attachment_dir/incoming/$cancel_blob.part" ]] || fail "expected the part deleted"
+fi
+start=$(wc -l <"$work_dir/a.out")
+expect_ok a "attach-resume $cancel_blob"
+expect_event a '"event":"attachment_error"' "$start" >/dev/null
+
 echo "==> [attachments] 7. a file on a room message"
 done_line=$(upload a 1 "$small_file")
 [[ "$done_line" == *'"encrypted":false'* ]] || fail "a #general upload was sealed: $done_line"
@@ -380,8 +417,6 @@ again=$(client_command a "send 1 --attach $small_blob again") || fail "no answer
 	fail "expected a bound upload refused for a second message: $again"
 
 echo "==> [attachments] 8. an encrypted file on a direct message"
-a_id=$(user_id b "att-a-$run_tag")
-b_id=$(user_id a "att-b-$run_tag")
 bstart=$(lines b)
 expect_ok a "dm $b_id keys for the file"
 expect_event b '"event":"direct_message".*"protection":"encrypted","content":"keys for the file"}' \
@@ -568,6 +603,13 @@ older=$(removals_page a "$helper_id")
 [[ "$older" =~ \"entries\":\[\{\"id\":[0-9]+,$(removal_entry "$big_blob" "$b_id" "$a_id" \
 	"proof of a removal" "$big_message" big.bin)\} ]] ||
 	fail "expected the page before the helper's removal to start with A's: $older"
+# (#132 follow-up) Step 4's missing file follows, removed by no admin with the server's reason.
+if [[ -n "$missing_blob" ]]; then
+	[[ "$older" =~ $(removal_entry "$big_blob" "$b_id" "$a_id" "proof of a removal" \
+		"$big_message" big.bin)\},\{\"id\":[0-9]+,$(removal_entry "$missing_blob" "$a_id" 0 \
+		"File missing from storage" "$missing_message" missing.txt)\} ]] ||
+		fail "expected the missing file's removal after A's, with no admin: $older"
+fi
 echo "[attachments] the removal log lists the SQL helper's removal and A's, newest first"
 
 stop_client a

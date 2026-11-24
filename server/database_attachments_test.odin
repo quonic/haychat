@@ -2050,3 +2050,170 @@ testAttachmentRemovalLogListingAgainstPostgreSQL :: proc(t: ^testing.T) {
 		fmt.tprintf("expected the last three rows and no more, got %v", exact),
 	)
 }
+
+// ── Files missing from storage (#132 follow-up) ───────────────────────────────────────────
+
+@(private = "file")
+attachmentSQLTestMarkMissing :: proc(
+	conn: pg.Conn,
+	blob: common.AttachmentBlobID,
+) -> common.DatabaseAttachmentResult {
+	return attachmentSQLTestRun(
+		conn,
+		common.DatabaseAttachmentRequest {
+			action = .MarkMissing,
+			// The executor sends 0 whatever the request says: the mark is the server's.
+			userId = 7,
+			blobId = blob,
+			reason = strings.clone(ATTACHMENT_MISSING_REMOVAL_REASON, context.temp_allocator),
+		},
+	)
+}
+
+// The server's mark of a missing file is the tombstone an admin removal leaves, with no admin:
+// a Bound or Ready blob becomes Removed with its signed fields and message link, the statement
+// names the readers and writes one removal log row with a NULL admin and the reason, a blob
+// already removed (or still uploading) is not found and changes nothing, and the download
+// check then refuses the readers without the file.
+@(test)
+testAttachmentMissingFileMarkAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "attachment_missing_mark")
+	alice := databaseAdminTestUser(conn, "miss-alice")
+	bob := databaseAdminTestUser(conn, "miss-bob")
+	dave := databaseAdminTestUser(conn, "miss-dave")
+	admin := databaseAdminTestUser(conn, "miss-admin")
+	databaseAdminTestGrant(conn, admin)
+	room := attachmentSQLTestRoom(conn, "miss-room")
+	attachmentSQLTestJoin(conn, room, alice)
+	attachmentSQLTestJoin(conn, room, bob)
+
+	// A Bound blob of a room message: alice and bob read it, dave (no member) does not.
+	blob, sha := attachmentSQLTestReady(conn, alice, 100, roomID = room)
+	refs := [1]common.AttachmentRef{attachmentSQLTestRef(blob, 100, sha, "report.pdf")}
+	_, messageID := attachmentSQLTestPost(conn, room, alice, "the report", refs[:])
+	assert(messageID > 0, "expected the message stored")
+	bound := attachmentSQLTestBinding(conn, blob)
+
+	marked := attachmentSQLTestMarkMissing(conn, blob)
+	assert(
+		marked.action == .MarkMissing &&
+		marked.outcome == .Applied &&
+		marked.removal.ownerUserId == alice &&
+		marked.removal.roomId == room &&
+		marked.removal.senderId == alice &&
+		marked.removal.chatMessageId == messageID &&
+		marked.removal.directMessageId == 0,
+		fmt.tprintf("expected the bound blob marked, got %v", marked),
+	)
+	assert(
+		attachmentSQLTestReaders(marked) == fmt.tprintf("%d,%d", alice, bob),
+		fmt.tprintf(
+			"expected alice and bob as readers, not dave, got %s",
+			attachmentSQLTestReaders(marked),
+		),
+	)
+	after := attachmentSQLTestBinding(conn, blob)
+	assert(
+		after[1:] == bound[1:] && after[0] == '3',
+		fmt.tprintf("expected only the state to change, %s -> %s", bound, after),
+	)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT (removed_by_user_id IS NULL AND removed_at IS NOT NULL)::text " +
+				"FROM attachments WHERE blob_id = decode('%s', 'hex')",
+				attachmentSQLTestHex(blob),
+			),
+		) ==
+		"true",
+		"expected the tombstone to name no remover",
+	)
+	logged := attachmentSQLTestLogRow(conn, blob)
+	assert(
+		logged ==
+		fmt.tprintf(
+			"%d/-/%s/%d/false/false/%d/-/report.pdf",
+			alice,
+			ATTACHMENT_MISSING_REMOVAL_REASON,
+			room,
+			messageID,
+		),
+		fmt.tprintf("expected one log row with no admin and the reason, got %s", logged),
+	)
+	// Later downloads are refused at the check: a reader hears it was removed.
+	for userID in ([]int{alice, bob}) {
+		check := attachmentSQLTestAction(conn, .DownloadCheck, userID, blob)
+		assert(
+			check.outcome == .Removed,
+			fmt.tprintf("expected user %d refused as removed, got %v", userID, check),
+		)
+	}
+	assert(
+		attachmentSQLTestAction(conn, .DownloadCheck, dave, blob).outcome == .NotFound,
+		"expected the outsider still not found",
+	)
+
+	// Marked again (a second download's read): not found, no second row.
+	again := attachmentSQLTestMarkMissing(conn, blob)
+	assert(
+		again.outcome == .NotFound &&
+		len(again.removal.readerUserIds) == 0 &&
+		attachmentSQLTestLogCount(conn) == "1",
+		fmt.tprintf("expected a second mark to change nothing, got %v", again),
+	)
+
+	// The owner's Ready blob, never bound: marked, the owner its only reader.
+	ready, _ := attachmentSQLTestReady(conn, bob, 40, roomID = room)
+	readyMarked := attachmentSQLTestMarkMissing(conn, ready)
+	assert(
+		readyMarked.outcome == .Applied &&
+		attachmentSQLTestReaders(readyMarked) == fmt.tprintf("%d", bob) &&
+		readyMarked.removal.chatMessageId == 0 &&
+		attachmentSQLTestState(conn, ready) == "3",
+		fmt.tprintf("expected the ready blob marked for its owner, got %v", readyMarked),
+	)
+	assert(
+		attachmentSQLTestLogRow(conn, ready) ==
+		fmt.tprintf("%d/-/%s/%d/false/false/-/-/-", bob, ATTACHMENT_MISSING_REMOVAL_REASON, room),
+		fmt.tprintf("expected the ready blob's row, got %s", attachmentSQLTestLogRow(conn, ready)),
+	)
+
+	// An admin's removal came first: the mark changes neither the tombstone nor the log.
+	removedFirst, _ := attachmentSQLTestReady(conn, alice, 30, roomID = room)
+	assert(
+		attachmentSQLTestRemove(conn, admin, removedFirst, "spam").outcome == .Applied,
+		"expected the admin's removal",
+	)
+	late := attachmentSQLTestMarkMissing(conn, removedFirst)
+	assert(late.outcome == .NotFound, fmt.tprintf("expected the late mark refused, got %v", late))
+	assert(
+		attachmentSQLTestLogRow(conn, removedFirst) ==
+		fmt.tprintf("%d/%d/spam/%d/false/false/-/-/-", alice, admin, room),
+		fmt.tprintf(
+			"expected only the admin's row, got %s",
+			attachmentSQLTestLogRow(conn, removedFirst),
+		),
+	)
+
+	// An upload in progress and an unknown blob are not found.
+	uploading: common.AttachmentBlobID
+	assert(
+		attachmentSQLTestBegin(conn, bob, 10, roomID = room, blobOut = &uploading) == .Applied,
+		"expected an upload",
+	)
+	assert(
+		attachmentSQLTestMarkMissing(conn, uploading).outcome == .NotFound &&
+		attachmentSQLTestState(conn, uploading) == "0",
+		"expected an upload in progress left alone",
+	)
+	assert(
+		attachmentSQLTestMarkMissing(conn, attachmentSQLTestBlob()).outcome == .NotFound,
+		"expected an unknown blob not found",
+	)
+	assert(attachmentSQLTestLogCount(conn) == "3", "expected three log rows in all")
+}

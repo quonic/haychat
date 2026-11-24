@@ -300,8 +300,25 @@ Issue #138. Admins see past removals and their reasons in the client.
   blob directory (a database restored without it) is refused with "Attachment not found", the
   same sentence as a blob the reader may not have, so the client shows "Attachment unavailable";
   the server logs the blob ID ("File of attachment … is missing from storage"). Any other read
-  failure (a file that exists but cannot be read) is "Server storage error". The row is left as
-  it is, so each later download is checked again and refused the same way.
+  failure (a file that exists but cannot be read) is "Server storage error" and changes nothing.
+  The server is not a backup of its files, so it then makes the row the same Removed tombstone
+  an admin removal leaves (one statement, only while the row is still Ready or Bound: a removal,
+  a message delete or a sweep that came first wins): the signed fields and the message link
+  stay, so history lists the file as removed; every reader the statement names gets
+  `ServerAttachmentRemoved` (with the message's ID); the removal log gets a row with no admin
+  and the reason "File missing from storage", which admins see under Server settings → Removed
+  files (removed by "an operator"); and later downloads are refused at the check without a disk
+  read. No message or field is new: clients show the card as "Attachment removed by an admin",
+  as for every removal. Two guards keep a volume that did not mount from turning many rows into
+  tombstones at once; when one holds, nothing is marked, the download is still "Attachment not
+  found", and the row stays as it is for the next download to try again:
+  - **The blob directory looks absent or incomplete:** `blobs/` is missing, unreadable or
+    empty, or the blob's shard directory `blobs/<2 hex>` is missing (the server never deletes
+    shard directories, so a row's file always had one). The server logs a warning naming
+    `HAYCHAT_ATTACHMENT_DIR` each time.
+  - **Too many marks:** at most 10 marks in an hour (a window that starts with the first mark
+    and is kept in memory, so a restart starts a new one). Past it the server logs one warning
+    for the hour and marks nothing more until the hour ends.
 - **Room deletion.** Deleting a room deletes its messages, which unlinks their files (and the
   room's unsent uploads). The first sweep pass after the deletion deletes them, so they leave
   the blob directory within an hour of it (or at the server's next start); a file uploaded less
