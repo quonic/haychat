@@ -811,6 +811,12 @@ State_userPresenceChanged :: proc(state: ^State, serverID: int, user: ^common.Us
 	user^ = {}
 }
 
+// Whether the directory of serverID lists userID.
+State_directoryHasUser :: proc(state: ^State, serverID, userID: int) -> bool {
+	index := State_serverDirectCacheIndex(state^, serverID)
+	return index >= 0 && ServerDirectCache_userIndex(state.serverDirectCaches[index], userID) >= 0
+}
+
 // ServerUserUpdated (protocol 14): an admin changed an account's role, ban, or name. The
 // directory entry is replaced in place (added when unknown), and a new name also reaches the
 // account's conversation summary, like a rename announced as presence. Takes ownership of

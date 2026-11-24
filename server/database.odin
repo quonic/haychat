@@ -56,6 +56,13 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // restricted account (D11) never joins Public rooms here; the approved code's room joins only
 // while it is still an unencrypted invite room.
 //
+// #115: an approved request whose code is restricted to a room that is gone or no longer an
+// unencrypted Member or Admin invite room does not count (outside HAYCHAT_ADMIN_PUBLIC_KEY), so
+// no restricted account without rooms is created. When nothing else lets the key in, `stale`
+// declines that request with the server's reason ($5, common.REGISTRATION_ROOM_GONE_REASON) and
+// the status and reason columns report the decline, which the router answers like an
+// approver's (D16).
+//
 // The statement always returns exactly one row; the account columns are NULL when the identity
 // did not resolve. A key that owns an account resolves to it whatever the mode and $4 say.
 //
@@ -65,7 +72,9 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // permission mask (database_roles.odin; for a new account also its code's roles' bits, which
 // the subquery's snapshot does not see), and (protocol 25) needs_registration, the
 // registration mode, the key's request status (0 none), a decline's reason and whether the
-// account is restricted, and (protocol 27, D18) the account's stored attachment bytes.
+// account is restricted, (protocol 27, D18) the account's stored attachment bytes, and (#102)
+// whether this sign-in created (or claimed) the account and then its role IDs (comma
+// separated, empty unless created).
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WITH settings AS (SELECT COALESCE((SELECT registration_mode FROM server_settings " +
 	"WHERE id = 1), 1) AS mode), " +
@@ -78,9 +87,18 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"AND NOT EXISTS (SELECT 1 FROM by_key)), " +
 	"approved AS (SELECT q.id, q.invite_id, i.room_id, " +
 	"(i.restricted AND NOT (SELECT ok FROM admin_key)) AS restricted " +
-	"FROM request q JOIN invites i ON i.id = q.invite_id WHERE q.status = 2), " +
+	"FROM request q JOIN invites i ON i.id = q.invite_id WHERE q.status = 2 " +
+	// #115: a room code's request counts only while its room is still an unencrypted invite
+	// room (the admin key's account is never restricted, so its room does not matter).
+	"AND (NOT i.restricted OR (SELECT ok FROM admin_key) OR EXISTS (SELECT 1 FROM rooms r " +
+	"WHERE r.id = i.room_id AND r.access IN (2, 3) AND NOT r.encrypted))), " +
 	"may_create AS (SELECT ((SELECT ok FROM admin_key) OR EXISTS (SELECT 1 FROM approved) " +
 	"OR ((SELECT mode FROM settings) = 1 AND NOT $4::boolean)) AS ok), " +
+	// #115: otherwise the approved request is declined by the server with reason $5.
+	"stale AS (UPDATE registration_requests rr SET status = 3, decided_by_user_id = NULL, " +
+	"decision_reason = $5::text, decided_at = CURRENT_TIMESTAMP FROM request q " +
+	"WHERE rr.id = q.id AND q.status = 2 AND NOT EXISTS (SELECT 1 FROM approved) " +
+	"AND NOT (SELECT ok FROM may_create) RETURNING rr.id), " +
 	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
 	"renamed AS (" +
 	"UPDATE users SET nickname = $1 FROM by_key " +
@@ -117,13 +135,14 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WHERE rr.public_key = decode($2, 'hex')), " +
 	"resolved AS (" +
 	"SELECT id, false AS is_rename, ''::text AS previous_nickname, nickname::text, " +
-	"restricted, 0::bigint AS granted " +
+	"restricted, 0::bigint AS granted, false AS is_new " +
 	"FROM by_key WHERE nickname = $1 OR nickname_locked OR banned " +
-	"UNION ALL SELECT id, true, previous_nickname, $1::text, restricted, 0 FROM renamed " +
+	"UNION ALL SELECT id, true, previous_nickname, $1::text, restricted, 0, false FROM renamed " +
 	"UNION ALL SELECT id, false, '', $1::text, restricted, " +
 	"COALESCE((SELECT bit_or(sr.permissions) FROM approved a " +
 	"JOIN invite_roles ir ON ir.invite_id = a.invite_id " +
-	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin), 0)::bigint FROM inserted) " +
+	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin), 0)::bigint, true " +
+	"FROM inserted) " +
 	"SELECT resolved.id::text, is_rename::text, previous_nickname, EXISTS (" +
 	"SELECT 1 FROM user_server_roles usr JOIN server_roles sr ON sr.id = usr.role_id " +
 	"WHERE usr.user_id = resolved.id AND sr.name = 'admin')::text, resolved.nickname, " +
@@ -133,11 +152,19 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	" | resolved.granted)::text, " +
 	"(resolved.id IS NULL AND NOT EXISTS (SELECT 1 FROM by_key) " +
 	"AND NOT (SELECT ok FROM may_create))::text, (SELECT mode FROM settings)::text, " +
-	"COALESCE((SELECT status FROM request), 0)::text, " +
-	"COALESCE((SELECT decision_reason FROM request), ''), " +
+	"(CASE WHEN EXISTS (SELECT 1 FROM stale) THEN 3 " +
+	"ELSE COALESCE((SELECT status FROM request), 0) END)::text, " +
+	"(CASE WHEN EXISTS (SELECT 1 FROM stale) THEN $5::text " +
+	"ELSE COALESCE((SELECT decision_reason FROM request), '') END), " +
 	"COALESCE(resolved.restricted, false)::text, " +
 	"COALESCE((SELECT sum(ua.size) FROM attachments ua WHERE ua.owner_user_id = resolved.id " +
-	"AND ua.state <> 3), 0)::text " +
+	"AND ua.state <> 3), 0)::text, COALESCE(resolved.is_new, false)::text, " +
+	// #102: a new account's roles: a claimed account's own (the snapshot) and its code's.
+	"COALESCE((SELECT string_agg(x.role_id::text, ',' ORDER BY x.role_id) FROM (" +
+	"SELECT usr.role_id FROM user_server_roles usr WHERE usr.user_id = resolved.id " +
+	"UNION SELECT ir.role_id FROM approved a JOIN invite_roles ir ON ir.invite_id = a.invite_id " +
+	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin) x WHERE resolved.is_new), " +
+	"'') " +
 	"FROM (SELECT 1) one LEFT JOIN resolved ON true LEFT JOIN users u ON u.id = resolved.id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
@@ -362,11 +389,13 @@ databaseExecuteUserIdentityResolution :: proc(
 	adminPublicKeyHexCString, _ := strings.clone_to_cstring(adminPublicKeyHex)
 	defer delete(adminPublicKeyHexCString)
 	registeringCString: cstring = request.registering ? "true" : "false"
+	staleReasonCString: cstring = common.REGISTRATION_ROOM_GONE_REASON
 	params := [?][^]byte {
 		transmute([^]byte)nicknameCString,
 		transmute([^]byte)publicKeyHexCString,
 		transmute([^]byte)adminPublicKeyHexCString,
 		transmute([^]byte)registeringCString,
+		transmute([^]byte)staleReasonCString,
 	}
 	result := databaseExecParams(conn, DATABASE_RESOLVE_USER_IDENTITY_SQL, params[:])
 	if result == nil {
@@ -404,6 +433,12 @@ databaseExecuteUserIdentityResolution :: proc(
 		identity.isRestricted = databaseGetBool(result, 0, 13)
 		if used, usedOK := databaseGetInt(result, 0, 14); usedOK && used > 0 {
 			identity.attachmentUsedBytes = u64(used)
+		}
+		identity.created = identity.userId > 0 && databaseGetBool(result, 0, 15)
+		if identity.created {
+			roleIDs := databaseGetText(result, 0, 16)
+			defer delete(roleIDs)
+			identity.roleIds = databaseParseIDList(roleIDs)
 		}
 		if identity.userId <= 0 {
 			// Only a resolved account's columns mean anything.

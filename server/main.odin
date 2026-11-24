@@ -546,6 +546,11 @@ MainRouterState_sendAuthSuccess :: proc(
 // the session's requested nickname when an admin locked the name; the session takes the
 // account's name then, so presence, voice lists, and ServerAuthSuccess carry it. Empty keeps
 // the requested one.
+//
+// created (#102) means this sign-in created the account (or claimed a keyless one), which holds
+// roleIDs (borrowed): other sessions get its full UserSummary before its presence
+// (MainRouterState_announceNewAccount), so no directory holds a stub without its restriction,
+// identity key or roles.
 MainRouterState_completeAuthentication :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -559,6 +564,8 @@ MainRouterState_completeAuthentication :: proc(
 	registrationMode := common.RegistrationMode.Open,
 	isRestricted := false,
 	attachmentUsedBytes := u64(0),
+	created := false,
+	roleIDs: []int = nil,
 	sendAuthSuccess: MainRouterAuthSuccessSender = MainRouterState_sendAuthSuccess,
 ) {
 	if session, sessionOK := &state.peerSessions[peerID]; !sessionOK || session.isAuthenticated {
@@ -611,6 +618,19 @@ MainRouterState_completeAuthentication :: proc(
 	)
 	if renamed {
 		MainRouterState_renameUserSessions(state, userID, session.clientNickname)
+	}
+	if created {
+		MainRouterState_announceNewAccount(
+			pm,
+			state,
+			peerID,
+			userID,
+			session.clientNickname,
+			isAdmin,
+			isRestricted,
+			session.clientIdentityPublicKey,
+			roleIDs,
+		)
 	}
 	if !wasOnline || renamed {
 		MainRouterState_broadcastPresence(
@@ -1789,6 +1809,8 @@ MainRouterState_handleDatabaseResult :: proc(
 			identity.registrationMode,
 			identity.isRestricted,
 			identity.attachmentUsedBytes,
+			identity.created,
+			identity.roleIds[:],
 		)
 	case .ListRooms:
 		roomList, roomListOK := response.result.(common.DatabaseRoomListResult)
@@ -2057,6 +2079,8 @@ MainRouterState_handleDatabaseResult :: proc(
 				roomEncrypted = mutation.room.encrypted,
 				// The room's log version travels in targetUserID's place.
 				targetUserID = mutation.room.logVersion,
+				// #104: the accounts the edit added, for the user lists (D17).
+				recipientUserIDs = slice.clone_to_dynamic(mutation.addedUserIDs[:]),
 			},
 		)
 		MainRouterState_sendAdminRoomChanged(pm, state, request.roomID, .Edited)
@@ -2095,6 +2119,14 @@ MainRouterState_handleDatabaseResult :: proc(
 				)
 			}
 		}
+		// #104 (D17): a switch to Public (or a Role room's new holders) may make a restricted
+		// member share a room with accounts it did not see.
+		MainRouterState_noteMembersAddedVisibility(
+			pm,
+			state,
+			request.recipientUserIDs[:],
+			members.userIDs[:],
+		)
 	case .DeleteRoom:
 		mutation, mutationOK := response.result.(common.DatabaseRoomMutationResult)
 		if MainRouterState_databaseFailed(pm, state, request.peerID, response, mutationOK) {

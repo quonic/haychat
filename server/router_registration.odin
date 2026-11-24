@@ -204,6 +204,46 @@ MainRouterState_handleVisibleRecipientsResult :: proc(
 	}
 }
 
+// #102: a sign-in or sign-up created userID (or claimed a keyless account). Every other session
+// allowed to see it (D17) gets its full UserSummary as ServerUserUpdated, sent before its
+// presence so no directory holds an online account it cannot describe (its restriction,
+// identity key and roles). A new account has published no encryption key yet. roleIDs is
+// borrowed.
+MainRouterState_announceNewAccount :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	userID: int,
+	nickname: string,
+	isAdmin: bool,
+	isRestricted: bool,
+	identityPublicKey: common.IdentityPublicKeyBytes,
+	roleIDs: []int,
+) {
+	roles := make([dynamic]int, 0, len(roleIDs))
+	defer delete(roles)
+	append(&roles, ..roleIDs)
+	MainRouterState_sendAboutUser(
+		pm,
+		state,
+		userID,
+		isRestricted,
+		peerID,
+		MainRouterVisibilityPayload {
+			kind = .UserUpdated,
+			user = common.UserSummary {
+				id = userID,
+				nickname = nickname,
+				isOnline = MainRouterState_isUserOnline(state, userID),
+				isAdmin = isAdmin,
+				identityPublicKey = identityPublicKey,
+				roleIds = roles,
+				isRestricted = isRestricted,
+			},
+		},
+	)
+}
+
 // Sends every authenticated session of userIDs a fresh ServerUserList (their view changed).
 MainRouterState_resendUserLists :: proc(
 	pm: ^ProcessManager,
@@ -274,6 +314,42 @@ MainRouterState_noteMembershipVisibility :: proc(
 	if anyRestricted {
 		append(&affected, userID)
 	}
+	MainRouterState_resendUserLists(pm, state, affected[:])
+}
+
+// D17 (#104): a room edit added addedUserIDs to a room whose members after it are
+// memberUserIDs (a switch to Public, or a Role room's new holders). When a restricted account
+// is among them, the accounts whose view changed get a fresh ServerUserList, one per session:
+// every member when an added account is restricted, otherwise the restricted members and the
+// added accounts. Without restricted accounts, or without additions, this does nothing.
+MainRouterState_noteMembersAddedVisibility :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	addedUserIDs: []int,
+	memberUserIDs: []int,
+) {
+	if len(state.restrictedUserIDs) == 0 || len(addedUserIDs) == 0 {
+		return
+	}
+	addedRestricted := false
+	for userID in addedUserIDs {
+		addedRestricted ||= MainRouterState_userIsRestricted(state, userID)
+	}
+	if addedRestricted {
+		MainRouterState_resendUserLists(pm, state, memberUserIDs)
+		return
+	}
+	affected := make([dynamic]int)
+	defer delete(affected)
+	for memberUserID in memberUserIDs {
+		if MainRouterState_userIsRestricted(state, memberUserID) {
+			append(&affected, memberUserID)
+		}
+	}
+	if len(affected) == 0 {
+		return
+	}
+	append(&affected, ..addedUserIDs)
 	MainRouterState_resendUserLists(pm, state, affected[:])
 }
 
@@ -603,6 +679,8 @@ MainRouterState_completeRegistration :: proc(
 	permissions: common.ServerPermissions,
 	registrationMode: common.RegistrationMode,
 	isRestricted: bool,
+	created: bool,
+	roleIDs: []int,
 ) {
 	MainRouterState_setUserRestricted(state, userID, isRestricted)
 	MainRouterState_completeAuthentication(
@@ -616,6 +694,8 @@ MainRouterState_completeRegistration :: proc(
 		permissions = permissions,
 		registrationMode = registrationMode,
 		isRestricted = isRestricted,
+		created = created,
+		roleIDs = roleIDs,
 		sendAuthSuccess = MainRouterState_sendRegisterCreated,
 	)
 	if session, ok := &state.peerSessions[peerID]; ok {
@@ -704,6 +784,8 @@ MainRouterState_handleRegisterResult :: proc(
 			registered.permissions,
 			registered.registrationMode,
 			registered.isRestricted,
+			true,
+			registered.roleIds[:],
 		)
 	case .Pending, .AlreadyPending:
 		MainRouterState_sendRegisterResponse(
@@ -774,7 +856,17 @@ MainRouterState_handleRegisteringIdentityResult :: proc(
 			identity.permissions,
 			identity.registrationMode,
 			identity.isRestricted,
+			identity.created,
+			identity.roleIds[:],
 		)
+		return
+	}
+	// #115: the approved request's room went away before the account was made, and the
+	// identity statement declined the request instead (D16: like an approver's decline).
+	if identity.needsRegistration && identity.requestStatus == .Declined {
+		message := MainRouterState_declinedMessage(identity.decisionReason)
+		defer delete(message)
+		MainRouterState_endRegistration(pm, state, peerID, .Declined, message)
 		return
 	}
 	if identity.userId <= 0 && !identity.needsRegistration {
@@ -1160,6 +1252,8 @@ MainRouterState_registrationRequestsRefusalMessage :: proc(
 		return common.REGISTRATION_UNKNOWN_REQUEST_MESSAGE
 	case .AlreadyDecided:
 		return common.REGISTRATION_ALREADY_DECIDED_MESSAGE
+	case .RoomUnavailable:
+		return common.REGISTRATION_ROOM_UNAVAILABLE_MESSAGE
 	case .Applied:
 	}
 	return ""

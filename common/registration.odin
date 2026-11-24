@@ -108,6 +108,12 @@ INVITE_UNKNOWN_MESSAGE :: "Unknown invite code"
 REGISTRATION_APPROVER_REQUIRED_MESSAGE :: "Approve registrations permission required"
 REGISTRATION_UNKNOWN_REQUEST_MESSAGE :: "Unknown sign-up request"
 REGISTRATION_ALREADY_DECIDED_MESSAGE :: "This sign-up request was already decided"
+// #115: an approver cannot approve a room code's request whose room is gone or no longer an
+// unencrypted invite room; a request approved before that is declined by the server at the
+// applicant's sign-in with REGISTRATION_ROOM_GONE_REASON as its reason.
+REGISTRATION_ROOM_UNAVAILABLE_MESSAGE :: "The room this invite was for is no longer available"
+REGISTRATION_ROOM_GONE_REASON ::
+	"The room this invite was for is no longer available; ask for a new invite"
 REGISTRATION_DECISION_INVALID_MESSAGE :: "Invalid sign-up decision"
 REGISTRATION_MODE_INVALID_MESSAGE :: "Invalid registration mode"
 RESTRICTED_INVALID_MESSAGE :: "Invalid restriction request"
@@ -504,14 +510,15 @@ DatabaseRegisterOutcome :: enum u8 {
 	HasAccount, // The key already owns an account (it should have signed in)
 }
 
-// Created fills the identity fields (nickname owned), Pending request (owned) and
-// pendingCount; the code's ID is inviteId for both.
+// Created fills the identity fields (nickname and roleIds owned; roleIds the code's roles,
+// #102), Pending request (owned) and pendingCount; the code's ID is inviteId for both.
 DatabaseRegisterResult :: struct {
 	outcome:          DatabaseRegisterOutcome,
 	userId:           int,
 	nickname:         string,
 	permissions:      ServerPermissions,
 	isRestricted:     bool,
+	roleIds:          [dynamic]int,
 	registrationMode: RegistrationMode,
 	inviteId:         int,
 	request:          RegistrationRequestSummary,
@@ -578,6 +585,7 @@ DatabaseRegistrationRequestsOutcome :: enum u8 {
 	NotPermitted, // No ApproveRegistrations
 	UnknownRequest,
 	AlreadyDecided,
+	RoomUnavailable, // #115: approving a room code's request whose room is no longer usable
 }
 
 // Applied: List fills requests (owned), Decide request (owned); both pendingCount.

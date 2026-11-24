@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "shared:pg"
@@ -108,6 +109,8 @@ registrationTestRegister :: proc(
 	delete(response.message)
 	result.nickname = strings.clone(result.nickname, context.temp_allocator)
 	delete(response.result.(common.DatabaseRegisterResult).nickname)
+	result.roleIds = slice.clone_to_dynamic(result.roleIds[:], context.temp_allocator)
+	delete(response.result.(common.DatabaseRegisterResult).roleIds)
 	request := result.request
 	result.request = common.RegistrationRequestSummary_clone(request, context.temp_allocator)
 	common.RegistrationRequestSummary_deinit(&request)
@@ -154,6 +157,8 @@ registrationTestIdentity :: proc(
 	result.previousNickname = strings.clone(identity.previousNickname, context.temp_allocator)
 	result.banReason = strings.clone(identity.banReason, context.temp_allocator)
 	result.decisionReason = strings.clone(identity.decisionReason, context.temp_allocator)
+	result.roleIds = slice.clone_to_dynamic(identity.roleIds[:], context.temp_allocator)
+	delete(identity.roleIds)
 	delete(identity.nickname)
 	delete(identity.previousNickname)
 	delete(identity.banReason)
@@ -935,4 +940,196 @@ testRestrictedAccountsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		strings.contains(registrationTestRooms(conn, erin), "rst-new-public"),
 		"expected setting it to keep the memberships",
 	)
+}
+
+// #115: a room code's request whose room is deleted or made Public cannot be approved, and an
+// approved one whose room changed before the applicant signs in is declined by the server
+// instead of making a restricted account with no rooms. #102: the identity and register
+// statements say when they created an account, with its roles.
+@(test)
+testRoomCodeRequestWhoseRoomChangedAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "registration_room_changed")
+	approver := databaseAdminTestUser(conn, "rc-approver")
+	approverRole := registrationTestRole(conn, "rc-approvers", {.ApproveRegistrations})
+	registrationTestHold(conn, approver, approverRole)
+	registrationTestMode(conn, .InviteApproval)
+
+	decide :: proc(
+		conn: pg.Conn,
+		actor: int,
+		requestID: int,
+		approve: bool,
+	) -> common.DatabaseRegistrationRequestsOutcome {
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabaseRegistrationRequestsRequest {
+				action = .Decide,
+				actorUserId = actor,
+				requestId = requestID,
+				approve = approve,
+			},
+		)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, response.message)
+		return response.result.(common.DatabaseRegistrationRequestsResult).outcome
+	}
+	// A pending request of a new key through a code for a new invite room.
+	apply :: proc(
+		conn: pg.Conn,
+		name: string,
+	) -> (
+		key: common.IdentityPublicKeyBytes,
+		requestID: int,
+		roomID: int,
+	) {
+		roomID = registrationTestRoom(conn, fmt.tprintf("%s-room", name), 2)
+		code, _ := registrationTestCode(
+			conn,
+			"room_id, restricted",
+			fmt.tprintf("%d, true", roomID),
+		)
+		key = databaseIdentityTestKey()
+		registered := registrationTestRegister(conn, key, name, code, reason = "hi")
+		assert(registered.outcome == .Pending, fmt.tprintf("expected %s pending", name))
+		return key, registered.request.id, roomID
+	}
+	accounts :: proc(conn: pg.Conn, name: string) -> string {
+		return databaseAdminTestValue(
+			conn,
+			fmt.tprintf("SELECT count(*)::text FROM users WHERE nickname = '%s'", name),
+		)
+	}
+
+	// Approval refused once the room is gone or Public; declining still works.
+	{
+		_, requestID, roomID := apply(conn, "rc-deleted")
+		databaseDefaultRoomTestExec(
+			conn,
+			"delete the room",
+			fmt.tprintf("DELETE FROM rooms WHERE id = %d", roomID),
+		)
+		outcome := decide(conn, approver, requestID, true)
+		assert(
+			outcome == .RoomUnavailable,
+			fmt.tprintf("expected room_unavailable, got %v", outcome),
+		)
+		outcome = decide(conn, approver, requestID, false)
+		assert(outcome == .Applied, fmt.tprintf("expected the decline to apply, got %v", outcome))
+	}
+	{
+		_, requestID, roomID := apply(conn, "rc-public")
+		databaseDefaultRoomTestExec(
+			conn,
+			"make the room Public",
+			fmt.tprintf("UPDATE rooms SET access = 1 WHERE id = %d", roomID),
+		)
+		outcome := decide(conn, approver, requestID, true)
+		assert(
+			outcome == .RoomUnavailable,
+			fmt.tprintf("expected room_unavailable, got %v", outcome),
+		)
+		status := databaseAdminTestValue(
+			conn,
+			fmt.tprintf("SELECT status::text FROM registration_requests WHERE id = %d", requestID),
+		)
+		assert(status == "1", "expected the refused approval to change nothing")
+	}
+
+	// Approved, then the room goes (deleted, or made Public): the sign-in is declined, no
+	// account is made, and the request reads declined with the server's reason.
+	roomChanges := []string {
+		"DELETE FROM rooms WHERE id = %d",
+		"UPDATE rooms SET access = 1 WHERE id = %d",
+	}
+	for change in roomChanges {
+		name := change[0] == 'D' ? "rc-late-deleted" : "rc-late-public"
+		key, requestID, roomID := apply(conn, name)
+		outcome := decide(conn, approver, requestID, true)
+		assert(outcome == .Applied, fmt.tprintf("expected %s approved, got %v", name, outcome))
+		databaseDefaultRoomTestExec(conn, "change the room", fmt.tprintf(change, roomID))
+		for registering in ([]bool{true, false}) {
+			identity := registrationTestIdentity(conn, name, key, registering = registering)
+			assert(
+				identity.userId == 0 &&
+				identity.needsRegistration &&
+				identity.requestStatus == .Declined &&
+				identity.decisionReason == common.REGISTRATION_ROOM_GONE_REASON &&
+				!identity.created,
+				fmt.tprintf("expected %s declined by the server, got %v", name, identity),
+			)
+		}
+		assert(accounts(conn, name) == "0", fmt.tprintf("expected no account for %s", name))
+		stored := databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"SELECT status::text || ',' || decision_reason || ',' || " +
+				"(decided_by_user_id IS NULL)::text FROM registration_requests WHERE id = %d",
+				requestID,
+			),
+		)
+		expected := fmt.tprintf("3,%s,true", common.REGISTRATION_ROOM_GONE_REASON)
+		assert(stored == expected, fmt.tprintf("expected the stored decline, got %q", stored))
+	}
+
+	// #102: an approved account reports created with its code's roles, once.
+	{
+		roomID := registrationTestRoom(conn, "rc-roles-room", 2)
+		role := registrationTestRole(conn, "rc-helpers", {.CreateInvites})
+		code, codeID := registrationTestCode(
+			conn,
+			"room_id, restricted",
+			fmt.tprintf("%d, true", roomID),
+		)
+		databaseDefaultRoomTestExec(
+			conn,
+			"give the code a role",
+			fmt.tprintf("INSERT INTO invite_roles VALUES (%d, %d)", codeID, role),
+		)
+		key := databaseIdentityTestKey()
+		registered := registrationTestRegister(conn, key, "rc-roles", code, reason = "hi")
+		assert(registered.outcome == .Pending, "expected rc-roles pending")
+		assert(decide(conn, approver, registered.request.id, true) == .Applied, "expected approval")
+		created := registrationTestIdentity(conn, "rc-roles", key, registering = true)
+		assert(
+			created.userId > 0 &&
+			created.created &&
+			created.isRestricted &&
+			len(created.roleIds) == 1 &&
+			created.roleIds[0] == role,
+			fmt.tprintf("expected rc-roles created with its code's role, got %v", created),
+		)
+		rooms := registrationTestRooms(conn, created.userId)
+		assert(rooms == "rc-roles-room", fmt.tprintf("expected the code's room, got %q", rooms))
+		again := registrationTestIdentity(conn, "rc-roles", key)
+		assert(
+			again.userId == created.userId && !again.created && len(again.roleIds) == 0,
+			fmt.tprintf("expected a returning sign-in not created, got %v", again),
+		)
+
+		// A sign-up the register statement completes carries the code's roles too.
+		registrationTestMode(conn, .InviteOnly)
+		direct, directID := registrationTestCode(conn)
+		databaseDefaultRoomTestExec(
+			conn,
+			"give the plain code a role",
+			fmt.tprintf("INSERT INTO invite_roles VALUES (%d, %d)", directID, role),
+		)
+		signedUp := registrationTestRegister(conn, databaseIdentityTestKey(), "rc-direct", direct)
+		assert(
+			signedUp.outcome == .Created &&
+			len(signedUp.roleIds) == 1 &&
+			signedUp.roleIds[0] == role,
+			fmt.tprintf("expected the sign-up created with its code's role, got %v", signedUp),
+		)
+		registrationTestMode(conn, .Open)
+		open := registrationTestIdentity(conn, "rc-open", databaseIdentityTestKey())
+		assert(
+			open.userId > 0 && open.created && len(open.roleIds) == 0,
+			fmt.tprintf("expected an Open account created without roles, got %v", open),
+		)
+	}
 }
