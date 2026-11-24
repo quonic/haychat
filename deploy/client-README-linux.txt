@@ -35,6 +35,11 @@ To keep a log for a bug report, run it like this instead and attach haychat.log:
 On the first start, enter a display name and the server host and port the server's
 maintainer gave you, then press Connect.
 
+To open haychat:// invite links with HayChat, run this once (and again after moving the
+folder). It adds haychat.desktop to ~/.local/share/applications for your user only:
+
+  ./haychat-client --register-url-handler
+
 Your settings and your identity key are stored in ~/.config/haychat/config.json (or
 $XDG_CONFIG_HOME/haychat/config.json). The identity key is what lets the server recognise
 you: keep that file private, and do not copy it to another person.

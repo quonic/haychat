@@ -254,6 +254,8 @@ State_switchToServer :: proc(state: ^State, serverID: int) {
 	state.selected_server_id = serverID
 	state.selected_transport_index = State_selectedTransportIndexForServerID(state^, serverID)
 	state.selected_channel_id = 0
+	// Coming back to it: a link's invite still waiting fills its form again (#108).
+	State_refillLinkInvite(state, serverID)
 	State_requestRoomList(state, serverID)
 	State_clearChatStatus(state)
 }

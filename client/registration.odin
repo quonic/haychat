@@ -44,7 +44,10 @@ SignUpForm :: struct {
 	code:     [dynamic]u8,
 	reason:   [dynamic]u8,
 	// A local check that kept the request from going out. Owned.
-	error:    string,
+	error:      string,
+	// The invite a confirmed link brought (#108, invite_link.odin). Not part of the fields:
+	// wiping the form (another server's screen) keeps it, so it can fill the form again.
+	linkInvite: LinkInvite,
 }
 
 // Zeroes a buffer's bytes and empties it.
@@ -60,6 +63,7 @@ SignUpForm_deinit :: proc(form: ^SignUpForm) {
 	delete(form.code)
 	delete(form.reason)
 	delete(form.error)
+	LinkInvite_deinit(&form.linkInvite)
 	form^ = {}
 }
 
@@ -336,6 +340,10 @@ State_registrationRequired :: proc(state: ^State, event: ^ClientTransportRuntime
 	if phase == .Pending {
 		// The code went out with an earlier session; it is not needed again.
 		State_wipeSignUpFormFor(state, event.serverID)
+		State_clearLinkInvite(state, event.serverID)
+	} else {
+		// A link's invite fills the form again after a rebuilt transport or an ended session.
+		State_refillLinkInvite(state, event.serverID)
 	}
 	// The worker pinned the server's key on first use; remember it, as Connected does.
 	if len(event.serverPublicKey) > 0 {
@@ -355,6 +363,7 @@ State_registrationResult :: proc(state: ^State, event: ^ClientTransportRuntimeEv
 		ServerConnection_setSignUp(connection, .Pending, message)
 		connection.signUpRequestStatus = .Pending
 		State_wipeSignUpFormFor(state, event.serverID)
+		State_clearLinkInvite(state, event.serverID)
 	case .Refused:
 		// The code stays, so the user can fix it. A pending request stays pending: the
 		// refusal is then the server ending the session ("Sign-up took too long").
@@ -369,6 +378,7 @@ State_registrationResult :: proc(state: ^State, event: ^ClientTransportRuntimeEv
 		ServerConnection_setSignUp(connection, .Declined, message)
 		connection.signUpRequestStatus = .Declined
 		State_wipeSignUpFormFor(state, event.serverID)
+		State_clearLinkInvite(state, event.serverID)
 	case .Created:
 	// Created arrives as Connected (registered set).
 	}
@@ -386,6 +396,8 @@ State_registrationConnectionChanged :: proc(state: ^State, event: ^ClientTranspo
 		connection.signUpRequestStatus = .None
 		ServerConnection_setSignUp(connection, .None, "")
 		State_wipeSignUpFormFor(state, event.serverID)
+		// Signed in (Created, or an account that already existed): a link's invite is done.
+		State_clearLinkInvite(state, event.serverID)
 		if event.registered {
 			State_setChatStatus(state, "Welcome! Your account on this server was created.")
 		}
@@ -399,6 +411,7 @@ State_registrationConnectionChanged :: proc(state: ^State, event: ^ClientTranspo
 		case .RegistrationDeclined:
 			ServerConnection_setSignUp(connection, .Declined, connection.detail)
 			State_wipeSignUpFormFor(state, event.serverID)
+			State_clearLinkInvite(state, event.serverID)
 		case:
 		// Check again or Start again could not reach the server: the screen stays, with
 		// the reason (buildSignUpView), and the banner's retry still runs.
@@ -1131,10 +1144,6 @@ State_setUseInviteCode :: proc(state: ^State, serverID: int, on: bool) {
 	}
 	server.use_invite_code = on
 	State_saveConfig(state)
-	if transportIndex := State_selectedTransportIndexForServerID(state^, serverID);
-	   transportIndex >= 0 {
-		ClientNetworkWorker_lock(state.networkWorker)
-		ClientServerTransport_setRegistering(&state.serverTransports[transportIndex], on)
-		ClientNetworkWorker_unlock(state.networkWorker)
-	}
+	// A link's invite still waiting keeps registering on (#108).
+	State_applyRegistering(state, serverID)
 }

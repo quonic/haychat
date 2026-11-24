@@ -334,6 +334,32 @@ the DLLs copied as the README says.
 11. **Reconnect:** disconnect the network for a few seconds. The voice bar says "Rejoining
     voice…", and voice comes back without a click.
 
+### Links and the URL Scheme on Windows
+
+The `haychat://` registration and the link hand-off between processes (#110, #109) ran once on
+Windows Server 2025 (Desktop Experience) in a VM: steps 1 to 5 below, with links opened by
+`Start-Process 'haychat://…'` and the handler started from another session, against no server.
+Run them on a desktop Windows (10 or 11) before a release that changes them, with links clicked
+in a browser and a server that has an invite code to give:
+
+1. **Registration:** in PowerShell in the client's folder, run
+   `.\haychat-client.exe --register-url-handler`. It prints that HayChat now opens
+   `haychat://` links. `reg query HKCU\Software\Classes\haychat /s` shows the default value
+   `URL:HayChat Protocol`, an empty `URL Protocol` value, and `shell\open\command` =
+   `"C:\…\haychat-client.exe" "%1"` with the real path. Nothing is written under
+   `HKEY_CLASSES_ROOT` directly, and no administrator prompt appears.
+2. **A link with no window open:** paste an invite link into the Run dialog (Win+R) or a
+   browser's address bar. HayChat starts and asks **Sign up on SERVER with an invite?**;
+   **Continue** opens the sign-up screen with the code filled in.
+3. **A link with a window open:** with HayChat running, open another invite link. No second
+   window opens; the running one shows the confirmation within about a second, and
+   `%APPDATA%\haychat\link-handoff` is gone afterwards.
+4. **Two windows:** start HayChat twice by hand, then open a link: the first window takes it.
+   Close the second window and open another link: the first still takes it. Close the first,
+   start a new one, open a link: the new window takes it.
+5. **A path with spaces:** move the folder to one whose name has a space, run the
+   registration again, and repeat step 2.
+
 Report anything that differs, with the Windows version and the device names.
 
 ## Global Push-To-Talk On Linux

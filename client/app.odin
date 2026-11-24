@@ -53,6 +53,10 @@ main :: proc() {
 	if uiScriptRequested(os.args[1:]) {
 		os.exit(uiScriptMain(os.args[1:]))
 	}
+	// Registers this executable as the haychat:// handler for this user (#110), then exits.
+	if schemeRegistrationRequested(os.args[1:]) {
+		os.exit(registerSchemeHandler() ? 0 : 1)
+	}
 	// A haychat:// link (plan D19) goes to a HayChat window that already runs, if any.
 	if link := schemeLinkArgument(os.args[1:]); len(link) > 0 {
 		initConfigHome()
