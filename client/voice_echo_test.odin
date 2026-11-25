@@ -325,7 +325,8 @@ voiceTestEchoErleAtDelay :: proc(delayMS: int) -> f64 {
 }
 
 // With both on, WebRTC owns noise suppression (never RNNoise on top) and RNNoise only gives the
-// gate its speech probability, without changing the frame.
+// gate its speech probability, without changing the frame. Echo cancellation going off and on
+// mid-call switches the suppressor with it.
 @(test)
 testVoiceCaptureStageLetsWebRTCOwnNoiseSuppression :: proc(t: ^testing.T) {
 	if !voiceTestWebRTCAPMAvailable(t) {
@@ -341,7 +342,7 @@ testVoiceCaptureStageLetsWebRTCOwnNoiseSuppression :: proc(t: ^testing.T) {
 	}
 	assert(
 		VoiceCaptureStage_noiseBackend(&stage, options) == .WebRTC,
-		"expected WebRTC's suppressor when the library loads",
+		"expected WebRTC's suppressor while echo cancellation runs",
 	)
 	result := VoiceCaptureStage_process(&stage, frame[:], options)
 	assert(
@@ -352,10 +353,27 @@ testVoiceCaptureStageLetsWebRTCOwnNoiseSuppression :: proc(t: ^testing.T) {
 		result.hasSpeechProbability == VoiceCaptureStage_hasVAD(&stage),
 		"expected RNNoise's speech probability whenever RNNoise loads",
 	)
-	options.noisePreference = .RNNoise
 	if VoiceCaptureStage_hasVAD(&stage) {
+		// Echo cancellation off (a headset): RNNoise suppresses, AEC3 does not run.
+		headset := VoiceCaptureOptions {
+			noiseSuppression = true,
+		}
+		result = VoiceCaptureStage_process(&stage, frame[:], headset)
 		assert(
-			VoiceCaptureStage_noiseBackend(&stage, options) == .RNNoise,
+			result.denoised && result.noiseBackend == .RNNoise && !result.echoCancelled,
+			fmt.tprintf("expected RNNoise with echo cancellation off, got %v", result),
+		)
+		assert(!stage.renderActive, "expected no reference fed while AEC3 is off")
+		// And back on: WebRTC again, its state reset first.
+		result = VoiceCaptureStage_process(&stage, frame[:], options)
+		assert(
+			result.noiseBackend == .WebRTC && result.echoCancelled && stage.renderActive,
+			fmt.tprintf("expected AEC3 and WebRTC's suppressor again, got %v", result),
+		)
+		preferred := options
+		preferred.noisePreference = .RNNoise
+		assert(
+			VoiceCaptureStage_noiseBackend(&stage, preferred) == .RNNoise,
 			"expected the RNNoise preference to keep RNNoise",
 		)
 	}

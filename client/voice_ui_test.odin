@@ -1164,15 +1164,15 @@ testVoiceSettingsViewOffersTheGlobalToggle :: proc(t: ^testing.T) {
 // says why and how to get it.
 @(test)
 testVoiceSettingsViewOffersNoiseSuppressionOnlyWithRNNoise :: proc(t: ^testing.T) {
-	offered, text, note := voiceNoiseSuppressionView(true, true, false, "")
+	offered, text, note := voiceNoiseSuppressionView(true, true, false, false, "")
 	assert(
 		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_NOTE,
 		fmt.tprintf("expected the toggle on, got %v %q %q", offered, text, note),
 	)
-	offered, text, _ = voiceNoiseSuppressionView(false, true, false, "")
+	offered, text, _ = voiceNoiseSuppressionView(false, true, false, false, "")
 	assert(offered && text == VOICE_NOISE_OFF_TEXT, fmt.tprintf("expected off, got %q", text))
 	reason := "RNNoise not found (librnnoise.so.0: cannot open shared object file)"
-	offered, text, note = voiceNoiseSuppressionView(true, false, false, reason)
+	offered, text, note = voiceNoiseSuppressionView(true, false, false, false, reason)
 	assert(
 		!offered &&
 		text == VOICE_NOISE_UNAVAILABLE_TEXT &&
@@ -1181,12 +1181,18 @@ testVoiceSettingsViewOffersNoiseSuppressionOnlyWithRNNoise :: proc(t: ^testing.T
 		fmt.tprintf("expected the reason and the hint, got %v %q %q", offered, text, note),
 	)
 	// #171: WebRTC audio processing alone offers it too, and the note names its suppressor.
-	offered, text, note = voiceNoiseSuppressionView(true, false, true, reason)
+	offered, text, note = voiceNoiseSuppressionView(true, false, true, false, reason)
 	assert(
-		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_WEBRTC_NOTE,
+		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_WEBRTC_ONLY_NOTE,
 		fmt.tprintf("expected WebRTC's suppressor, got %v %q %q", offered, text, note),
 	)
-	offered, _, note = voiceNoiseSuppressionView(true, true, true, "")
+	// With both, RNNoise suppresses while echo cancellation is off, WebRTC while it is on.
+	offered, _, note = voiceNoiseSuppressionView(true, true, true, false, "")
+	assert(
+		offered && note == VOICE_NOISE_NOTE,
+		fmt.tprintf("expected RNNoise with echo cancellation off, got %q", note),
+	)
+	offered, _, note = voiceNoiseSuppressionView(true, true, true, true, "")
 	assert(
 		offered && note == VOICE_NOISE_WEBRTC_VAD_NOTE,
 		fmt.tprintf("expected WebRTC's suppressor with RNNoise's VAD, got %q", note),

@@ -40,7 +40,7 @@ voiceTestRNNoiseAvailable :: proc(t: ^testing.T, loc := #caller_location) -> boo
 	return false
 }
 
-// #170's suppressor, kept even where WebRTC audio processing loads (which would take over).
+// #170's suppressor, kept even behind the echo canceller (where WebRTC's would take over).
 VOICE_TEST_RNNOISE_OPTIONS :: VoiceCaptureOptions {
 	noiseSuppression = true,
 	noisePreference  = .RNNoise,
@@ -245,6 +245,7 @@ voiceTestNoisyEngine :: proc(
 	path: string,
 	noiseSuppression: bool,
 	preference := VoiceNoisePreference.RNNoise,
+	echoCancellation := false,
 ) -> VoiceEngineSnapshot {
 	engine := VoiceEngine_create(
 		{
@@ -254,6 +255,7 @@ voiceTestNoisyEngine :: proc(
 			unpaced = true,
 			noiseSuppression = noiseSuppression,
 			noisePreference = preference,
+			echoCancellation = echoCancellation,
 		},
 	)
 	defer VoiceEngine_destroy(engine)
@@ -408,9 +410,10 @@ testVoiceGateNeedsSpeechWhenNoiseSuppressionRuns :: proc(t: ^testing.T) {
 	assert(opened, "expected loud speech to open the gate")
 }
 
-// #171: where WebRTC audio processing loads, its suppressor takes the noise out of the gaps
+// #171: while echo cancellation runs, WebRTC's suppressor takes the noise out of the gaps
 // instead of RNNoise, and RNNoise (listening only) still tells the gate which frames are
-// speech. Its numbers are logged for the pull request.
+// speech. Nothing is played, so AEC3 has no echo to remove here. Its numbers are logged for
+// the pull request.
 @(test)
 testVoiceCaptureStageWebRTCRemovesNoiseBetweenTheBursts :: proc(t: ^testing.T) {
 	if !voiceTestWebRTCAPMAvailable(t) || !voiceTestRNNoiseAvailable(t) {
@@ -429,7 +432,11 @@ testVoiceCaptureStageWebRTCRemovesNoiseBetweenTheBursts :: proc(t: ^testing.T) {
 	speechInBursts, speechInGaps, burstFrames, gapFrames := 0, 0, 0, 0
 	for frame in 0 ..< VOICE_TEST_NOISY_FRAMES {
 		samples := output[frame * common.VOICE_FRAME_SAMPLES:][:common.VOICE_FRAME_SAMPLES]
-		result := VoiceCaptureStage_process(&stage, samples, {noiseSuppression = true})
+		result := VoiceCaptureStage_process(
+			&stage,
+			samples,
+			{noiseSuppression = true, echoCancellation = true},
+		)
 		assert(
 			result.denoised && result.noiseBackend == .WebRTC && result.hasSpeechProbability,
 			"expected WebRTC's suppressor with RNNoise's speech probability",
@@ -481,8 +488,9 @@ testVoiceCaptureStageWebRTCRemovesNoiseBetweenTheBursts :: proc(t: ^testing.T) {
 	)
 }
 
-// The engine with the client's rule (Auto): WebRTC suppresses, RNNoise's speech probability
-// still gates the gaps.
+// The engine with the client's rule (Auto) and echo cancellation on: WebRTC suppresses,
+// RNNoise's speech probability still gates the gaps. With echo cancellation off, RNNoise
+// suppresses again, as in #170.
 @(test)
 testVoiceEngineWebRTCNoiseSuppressionGatesTheNoise :: proc(t: ^testing.T) {
 	if !voiceTestOpusAvailable(t) ||
@@ -497,15 +505,51 @@ testVoiceEngineWebRTCNoiseSuppressionGatesTheNoise :: proc(t: ^testing.T) {
 	writeErr := os.write_entire_file(path, mem.slice_to_bytes(input))
 	delete(input)
 	assert(writeErr == nil, fmt.tprintf("expected to write the fixture: %v", writeErr))
-	on := voiceTestNoisyEngine(path, true, .Auto)
+	on := voiceTestNoisyEngine(path, true, .Auto, echoCancellation = true)
+	headset := voiceTestNoisyEngine(path, true, .Auto)
 	gapFrames := 100 - 2 * VOICE_VAD_HANGOVER_FRAMES
 	assert(
-		on.noiseSuppression == .Active && on.noiseBackend == .WebRTC,
-		fmt.tprintf("expected WebRTC noise suppression, got %v", on.noiseBackend),
+		on.noiseSuppression == .Active &&
+		on.noiseBackend == .WebRTC &&
+		on.stats.framesEchoCancelled == VOICE_TEST_NOISY_FRAMES,
+		fmt.tprintf("expected AEC3 and WebRTC noise suppression, got %v", on.noiseBackend),
+	)
+	assert(
+		headset.noiseSuppression == .Active &&
+		headset.noiseBackend == .RNNoise &&
+		headset.stats.framesEchoCancelled == 0 &&
+		int(headset.stats.framesGated) >= gapFrames - 10,
+		fmt.tprintf("expected RNNoise with echo cancellation off, got %v", headset.noiseBackend),
 	)
 	assert(
 		int(on.stats.framesGated) >= gapFrames - 10 &&
 		on.stats.framesSent >= 200 - 2 * VOICE_VAD_ATTACK_FRAMES,
 		fmt.tprintf("expected the gaps gated and the bursts sent, got %v", on.stats),
 	)
+}
+
+// #171's rule: WebRTC's suppressor only while echo cancellation runs (or without RNNoise),
+// RNNoise otherwise; the RNNoise preference keeps it whenever it loads.
+@(test)
+testVoiceNoiseBackendFollowsEchoCancellation :: proc(t: ^testing.T) {
+	Case :: struct {
+		rnnoise, webrtc, echo: bool,
+		preference:            VoiceNoisePreference,
+		expected:              VoiceNoiseBackend,
+	}
+	cases := [?]Case {
+		{true, true, true, .Auto, .WebRTC},
+		{true, true, false, .Auto, .RNNoise},
+		{true, false, true, .Auto, .RNNoise},
+		{false, true, false, .Auto, .WebRTC},
+		{false, true, true, .Auto, .WebRTC},
+		{false, false, true, .Auto, .None},
+		{true, true, true, .RNNoise, .RNNoise},
+		{false, true, true, .RNNoise, .WebRTC},
+	}
+	for c in cases {
+		got := voiceNoiseBackendFor(c.rnnoise, c.webrtc, c.echo, c.preference)
+		assert(got == c.expected, fmt.tprintf("expected %v for %v, got %v", c.expected, c, got))
+	}
+	_ = t
 }

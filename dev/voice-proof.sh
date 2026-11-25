@@ -17,13 +17,15 @@ set -euo pipefail
 #   1b. noise suppression (#170, #171): N sends tone bursts over white noise (voice-check
 #                   --write-noisy-tone: 440 Hz at 0.5 amplitude, 1.5 s on and 1 s off, over
 #                   -34 dBFS of noise) from a file with an open gate, with `voice-noise off`,
-#                   `voice-noise rnnoise` and `voice-noise on` (WebRTC's suppressor, since the
-#                   wrapper is next to the client), and M records each. voice-check must find
-#                   the tone in every recording; the noise floor between the bursts must stay at
-#                   or above -50 dBFS without suppression (the noise really travels; Opus leaves
-#                   about -42 dBFS of it), fall to -60 dBFS or below with RNNoise and to -48 dBFS
-#                   or below with WebRTC's suppressor, and N's voice-stats must report what ran
-#                   (noiseSuppression, noiseBackend), with its time per 20 ms frame.
+#                   with `voice-noise on` (RNNoise, the client's rule while echo cancellation is
+#                   off) and with `voice-noise on` plus `voice-echo on` (WebRTC's suppressor
+#                   behind AEC3, since the wrapper is next to the client), and M records each.
+#                   voice-check must find the tone in every recording; the noise floor between
+#                   the bursts must stay at or above -50 dBFS without suppression (the noise
+#                   really travels; Opus leaves about -42 dBFS of it), fall to -60 dBFS or below
+#                   with RNNoise and to -48 dBFS or below with WebRTC's suppressor, and N's
+#                   voice-stats must report what ran (noiseSuppression, noiseBackend), with its
+#                   time per 20 ms frame.
 #   1c. echo cancellation (#171): X sends a 440 Hz tone; Y plays it into a null sink that
 #                   `voice-echo-sim 120 0.5` returns into Y's capture 120 ms later at -6 dB, like
 #                   a loudspeaker next to the microphone, and Y sends with an open gate; X
@@ -321,13 +323,16 @@ echo "==> [voice] file path passed"
 
 if [[ "$run_noise" == 1 ]]; then
 	echo "==> [voice] noise suppression: N sends tone bursts over noise, without suppression," \
-		"with RNNoise and with WebRTC's suppressor"
+		"with RNNoise (echo cancellation off) and with WebRTC's suppressor (echo cancellation on)"
 	noisy_file="$work_dir/noisy.f32"
 	"$check_bin" --write-noisy-tone "$noisy_file" --freq "$tone_hz" \
 		--seconds "$((noise_talk_seconds + 30))" --amplitude "$tone_amplitude" >/dev/null
 	saved_talk_seconds=$talk_seconds
 	talk_seconds=$noise_talk_seconds
-	for noise_mode in off rnnoise on; do
+	# off: no suppression; on: the client's rule with echo cancellation off, RNNoise; echo: the
+	# same with echo cancellation on, WebRTC's suppressor behind AEC3 (nothing is played, so
+	# AEC3 has nothing to cancel).
+	for noise_mode in off on echo; do
 		# Client names cannot repeat within a run (their pipes stay), so each mode has its own.
 		speaker="n$noise_mode"
 		listener="m$noise_mode"
@@ -341,16 +346,23 @@ if [[ "$run_noise" == 1 ]]; then
 		noise_sink="$work_dir/m-$noise_mode.f32"
 		expect_ok "$speaker" voice-source "file:$noisy_file"
 		expect_ok "$speaker" voice-gate open
-		expect_ok "$speaker" voice-noise "$noise_mode"
+		if [[ "$noise_mode" == off ]]; then
+			expect_ok "$speaker" voice-noise off
+		else
+			expect_ok "$speaker" voice-noise on
+		fi
+		if [[ "$noise_mode" == echo ]]; then
+			expect_ok "$speaker" voice-echo on
+		fi
 		expect_ok "$listener" voice-sink "file:$noise_sink"
 		talk "$speaker" "$listener" "$user_n" "$user_m"
 		expect_ok "$listener" voice-flush
 		if [[ "$noise_mode" != off ]]; then
-			backend=webrtc
-			floor_limit=(--max-floor -48)
-			if [[ "$noise_mode" == rnnoise ]]; then
-				backend=rnnoise
-				floor_limit=(--max-floor -60)
+			backend=rnnoise
+			floor_limit=(--max-floor -60)
+			if [[ "$noise_mode" == echo ]]; then
+				backend=webrtc
+				floor_limit=(--max-floor -48)
 			fi
 			[[ "$speaker_stats" == *'"noiseSuppression":"active"'* ]] \
 				|| fail "[noise] N does not report noise suppression active: $speaker_stats"

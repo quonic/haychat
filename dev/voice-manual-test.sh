@@ -49,10 +49,10 @@ set -euo pipefail
 #   HAYCHAT_VOICE_MANUAL_NOISE_DB       pink noise floor under the speech, RMS dBFS (default -60)
 #   HAYCHAT_VOICE_MANUAL_THRESHOLD_DB   A's voice activity threshold (default: the client's)
 #   HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION=1  noise suppression on A's microphone (voice-noise
-#                                       on, #170: WebRTC's suppressor where WebRTC audio
-#                                       processing loads, else RNNoise; `rnnoise` keeps
-#                                       RNNoise, as #170's measurements had it; default 0, the
-#                                       harness's default, so runs compare)
+#                                       on, #170): the client's rule, RNNoise, or WebRTC's
+#                                       suppressor together with ..._ECHO_CANCELLATION=1
+#                                       (#171); default 0, the harness's default, so runs
+#                                       compare
 #   HAYCHAT_VOICE_MANUAL_ECHO_CANCELLATION=1  AEC3 on A's microphone (voice-echo on, #171;
 #                                       default 0). A plays into a null sink, so there is no
 #                                       echo to cancel: this measures what the canceller costs
@@ -681,9 +681,6 @@ expect_ok b voice-sink "device:$b_out_name"
 if [[ "$noise_suppression" == 1 ]]; then
 	expect_ok a voice-noise on
 	note "noise suppression: on (A's microphone)"
-elif [[ "$noise_suppression" == rnnoise ]]; then
-	expect_ok a voice-noise rnnoise
-	note "noise suppression: RNNoise (A's microphone)"
 else
 	expect_ok a voice-noise off
 fi
@@ -706,7 +703,6 @@ fi
 # Summary lines in phase order.
 noise_state=off
 [[ "$noise_suppression" == 1 ]] && noise_state=on
-[[ "$noise_suppression" == rnnoise ]] && noise_state=rnnoise
 echo_state=off
 [[ "$echo_cancellation" == 1 ]] && echo_state=on
 summary=("noise suppression on A: $noise_state" "echo cancellation on A: $echo_state")

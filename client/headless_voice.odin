@@ -537,14 +537,13 @@ headlessVoiceStatsJSON :: proc(
 		echo = snapshot.echoCancellation
 	} else {
 		if template.noiseSuppression {
-			switch {
-			case webrtcapm.isLoaded() && template.noisePreference == .Auto:
-				status, backend = .Active, .WebRTC
-			case rnnoise.isLoaded():
-				status, backend = .Active, .RNNoise
-			case:
-				status = .Unavailable
-			}
+			backend = voiceNoiseBackendFor(
+				rnnoise.isLoaded(),
+				webrtcapm.isLoaded(),
+				template.echoCancellation,
+				template.noisePreference,
+			)
+			status = backend == .None ? .Unavailable : .Active
 		}
 		if template.echoCancellation {
 			echo = webrtcapm.isLoaded() ? .Active : .Unavailable
@@ -852,7 +851,10 @@ headlessCommandVoiceEchoSim :: proc(
 	template := state.voice.engineTemplate
 	template.echoSimulation = simulation
 	State_setVoiceEngineTemplate(state, template)
-	value := simulation.gain == 0 ? "off" : fmt.tprintf("%d %g", simulation.delayMS, simulation.gain)
+	value := "off"
+	if simulation.gain != 0 {
+		value = fmt.tprintf("%d %g", simulation.delayMS, simulation.gain)
+	}
 	headlessVoiceWriteSetting(harness, command, value, state.voice.engine != nil)
 }
 

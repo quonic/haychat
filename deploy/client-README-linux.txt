@@ -29,8 +29,9 @@ Debian 13 and Ubuntu do not package RNNoise 0.2 yet; voice works there without i
 
 Optional: webrtc-audio-processing 2.x (libwebrtc-audio-processing-2.so.1) cancels the echo of
 the voices HayChat plays, so others do not hear themselves through your speakers (Settings ->
-Voice -> Echo cancellation), and then also takes over noise suppression. The client reaches it
-through libhaychat-webrtc-apm.so, which is in this folder: keep it next to haychat-client.
+Voice -> Echo cancellation), and while it runs also does the noise suppression. The client
+reaches it through libhaychat-webrtc-apm.so, which is in this folder: keep it next to
+haychat-client.
 Without the library voice works, and the setting says that echo cancellation is unavailable;
 with headphones you do not need it.
 

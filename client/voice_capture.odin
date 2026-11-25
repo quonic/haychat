@@ -7,16 +7,21 @@ package client
 //
 //   - WebRTC audio processing (client/webrtcapm, #171): AEC3 echo cancellation and WebRTC noise
 //     suppression in one module, fed what the engine plays (VoiceCaptureStage_render) as the
-//     echo reference. When it loads it owns noise suppression too: AEC3 cancels worse behind
-//     another stage's nonlinear suppression, and two suppressors in a row remove speech
-//     (docs/plan/2026-11-25-wasapi-communications-capture.md, "No Double Processing").
-//   - RNNoise (client/rnnoise, #170): noise suppression when WebRTC audio processing is missing
-//     (or a test asks for it), and in every case the speech probability for the voice activity
+//     echo reference. While AEC3 runs it owns noise suppression too: AEC3 cancels worse behind
+//     another stage's nonlinear suppression, two suppressors in a row remove speech
+//     (docs/plan/2026-11-25-wasapi-communications-capture.md, "No Double Processing"), and
+//     RNNoise after AEC3 removed a double-talk tone (voice_echo_test.odin). Without AEC3 it
+//     suppresses noise only when RNNoise is missing: RNNoise removes far more steady noise.
+//   - RNNoise (client/rnnoise, #170): noise suppression while echo cancellation is off (or a
+//     test asks for it), and in every case the speech probability for the voice activity
 //     gate. Behind WebRTC's noise suppression it only analyses a copy of the processed frame
 //     (VAD only, about 120 µs per 20 ms frame) and changes nothing, so there is still one
 //     suppressor; WebRTC 2.x has no voice activity detector of its own, and RNNoise's speech
 //     gate keeps background noise out where the level gate alone would send it
 //     (docs/voice-manual-test.md, "Noise Suppression").
+//
+// Switching echo cancellation on or off mid-call switches the suppressor with it, from the next
+// frame; the processor that comes back is reset first.
 //
 // The stage belongs to the voice thread: VoiceEngine_open opens it, VoiceEngine_close closes
 // it, and nothing in it allocates on HayChat's heap per frame (RNNoise's and WebRTC's states
@@ -42,10 +47,11 @@ VOICE_CAPTURE_SUBFRAMES :: common.VOICE_FRAME_SAMPLES / rnnoise.FRAME_SIZE
 // measured with dev/voice-manual-test.sh (docs/voice-manual-test.md).
 VOICE_VAD_SPEECH_PROBABILITY :: f32(0.5)
 
-// WebRTC's noise suppression level when it owns noise suppression. High is what browsers use
-// for calls. On the #170 fixture (−34 dBFS white noise) it lowers the gaps to −52 dBFS
-// (VeryHigh: −54), far less than RNNoise's −98, but the gate's speech probability still
-// closes them; behind AEC3 it keeps a double-talk tone that RNNoise there would remove
+// WebRTC's noise suppression level while it owns noise suppression (with AEC3, or without
+// RNNoise). High is what browsers use for calls. On the #170 fixture (−34 dBFS white noise) it
+// lowers the gaps to −52 dBFS (VeryHigh: −54), far less than RNNoise's −98, which is why it
+// suppresses only while AEC3 runs; the gate's speech probability still closes the gaps, and
+// behind AEC3 it keeps a double-talk tone that RNNoise there would remove
 // (voice_capture_test.odin, voice_echo_test.odin).
 VOICE_WEBRTC_NOISE_LEVEL :: webrtcapm.NoiseLevel.High
 
@@ -79,8 +85,9 @@ VoiceEchoCancellationStatus :: enum u8 {
 	Unavailable,
 }
 
-// Which noise suppressor a stage may use. Auto is the client's rule (WebRTC when it loads,
-// else RNNoise); RNNoise keeps #170's suppressor for tests and its proof.
+// Which noise suppressor a stage may use. Auto is the client's rule: WebRTC's while AEC3 runs on
+// the frame (or when RNNoise is missing), else RNNoise. RNNoise keeps RNNoise suppressing even
+// behind AEC3, for tests and comparisons (the harness's `voice-noise rnnoise`).
 VoiceNoisePreference :: enum u8 {
 	Auto,
 	RNNoise,
@@ -169,7 +176,7 @@ VoiceCaptureStage_hasVAD :: proc(stage: ^VoiceCaptureStage) -> bool {
 	return stage.denoiser != nil
 }
 
-// The suppressor options would use.
+// The suppressor options would use (see VoiceNoisePreference).
 VoiceCaptureStage_noiseBackend :: proc(
 	stage: ^VoiceCaptureStage,
 	options: VoiceCaptureOptions,
@@ -177,11 +184,30 @@ VoiceCaptureStage_noiseBackend :: proc(
 	if !options.noiseSuppression {
 		return .None
 	}
-	if stage.apm != nil && options.noisePreference == .Auto {
+	return voiceNoiseBackendFor(
+		stage.denoiser != nil,
+		stage.apm != nil,
+		options.echoCancellation,
+		options.noisePreference,
+	)
+}
+
+// The noise suppression rule (#171), pure so the settings screen and voice-stats say what the
+// stage does: with noise suppression on, WebRTC's suppressor while echo cancellation runs (it
+// needs WebRTC audio processing, so echo asked for without it does not count) or when RNNoise
+// is missing, else RNNoise; RNNoise preferred keeps RNNoise whenever it loads.
+voiceNoiseBackendFor :: proc(
+	rnnoiseLoaded, webrtcLoaded, echoCancellation: bool,
+	preference: VoiceNoisePreference,
+) -> VoiceNoiseBackend {
+	if webrtcLoaded && preference == .Auto && (echoCancellation || !rnnoiseLoaded) {
 		return .WebRTC
 	}
-	if stage.denoiser != nil {
+	if rnnoiseLoaded {
 		return .RNNoise
+	}
+	if webrtcLoaded {
+		return .WebRTC
 	}
 	return .None
 }

@@ -394,9 +394,12 @@ named device when it is plugged back in.
 
 **Noise suppression** (Settings → Voice, `voice_noise_suppression`, on by default) removes
 steady background noise such as fans, hum and traffic from your microphone before it is
-encoded, mostly between words. Where WebRTC audio processing loads (see
-[Echo cancellation](#echo-cancellation)), its noise suppressor does it, right after the echo
-canceller; otherwise RNNoise 0.2 does. Never both: two suppressors in a row take speech away.
+encoded, mostly between words. RNNoise 0.2 does it, except while
+[Echo cancellation](#echo-cancellation) runs: then WebRTC's noise suppressor does it, right
+after the echo canceller, because RNNoise behind an echo canceller takes speech away when you
+and the others talk at once. Never both: two suppressors in a row take speech away. Turning
+echo cancellation on or off (for example for a headset) switches between them at once.
+Without RNNoise installed, WebRTC's suppressor does it in every case.
 In voice activity mode RNNoise also says whether a frame is speech (with WebRTC's suppressor it
 only listens), and only speech that is louder than the threshold opens the microphone, so loud
 noise that is not speech does not. The level meter and **Test microphone** show the signal
@@ -421,7 +424,7 @@ voices HayChat plays from your microphone, so with speakers the others do not he
 It is WebRTC's echo canceller (AEC3, from webrtc-audio-processing 2), the one web browsers use
 for calls. It compares your microphone with what HayChat plays and finds the delay between them
 itself, so it works with any speakers and microphone and keeps up when the delay changes; it
-needs a few seconds after you join to settle. With it on, WebRTC's noise suppressor takes over
+needs a few seconds after you join to settle. While it runs, WebRTC's noise suppressor does the
 noise suppression too (see above). It adds no delay and costs about 0.5 % of one CPU core
 (about 100 µs per 20 ms; 200 µs with noise suppression). Nothing on the network changes.
 

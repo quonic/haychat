@@ -147,7 +147,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `voice-ptt down\|up` | Presses or releases push-to-talk (local only). |
 | `voice-volume USER_ID PERCENT` | How loud this client plays that user on the selected server, 0 to 200 (percent), through the same action as the Server settings slider: stored in the server's config entry for this run (the harness does not write `config.json` back) and applied at once to a running engine, otherwise from the next join. Local only: the server and the user are not told. The result is the user's setting: `serverID`, `userID`, `volumePercent`, `muted`, and what the engine applies (`engineRunning`, `engineVolumePercent`, `engineMuted`; 100 and false without an engine on that server). 100 with mute off removes the entry. |
 | `voice-mute-user USER_ID on\|off` | Mute for me: this client stops playing that user's voice (frames are dropped before decoding and counted in `engine.inboundLocallyMuted`) and keeps its volume. Same result as `voice-volume`. |
-| `voice-noise on\|off\|rnnoise` | Noise suppression on the microphone (#170, #171): `on` is the client's rule (WebRTC's suppressor when WebRTC audio processing loads, else RNNoise), `rnnoise` keeps RNNoise even then. Off in the harness until a script turns it on (the GUI follows `voice_noise_suppression`, on by default). Applies at once and to the next join; `voice-stats` says what runs. See [Noise Suppression](#noise-suppression). |
+| `voice-noise on\|off\|rnnoise` | Noise suppression on the microphone (#170, #171): `on` is the client's rule (RNNoise, or WebRTC's suppressor while `voice-echo on` runs or without RNNoise), `rnnoise` keeps RNNoise even behind the echo canceller. Off in the harness until a script turns it on (the GUI follows `voice_noise_suppression`, on by default). Applies at once and to the next join; `voice-stats` says what runs. See [Noise Suppression](#noise-suppression). |
 | `voice-echo on\|off` | AEC3 echo cancellation of what this client plays (#171). Off in the harness until a script turns it on (the GUI follows `voice_echo_cancellation`, on by default). Applies at once and to the next join; `voice-stats` says whether it runs. See [Echo Cancellation](#echo-cancellation). |
 | `voice-echo-sim DELAY_MS GAIN\|off` | From the next join, a file or null sink's playback returns into this client's capture `DELAY_MS` (20 to 400) later, times `GAIN` (above 0, at most 2), added before the input gain, like a loudspeaker next to the microphone. For echo cancellation proofs without audio devices; a device sink ignores it. The reply's `pendingRejoin` is set while an engine runs. |
 | `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
@@ -401,10 +401,11 @@ it, send `voice-check --write-noisy-tone` (below) as a file source. Without RNNo
 (`librnnoise.so.0`, or `rnnoise.dll` next to the executable) the command still succeeds, frames
 pass through, and `voice-stats` reports `"noiseSuppression":"unavailable"` with the reason.
 
-`voice-noise on` uses WebRTC's suppressor instead when WebRTC audio processing loads (below);
-RNNoise then still gives the gate its speech probability from a copy of the processed frame,
-without changing it, so there is one suppressor. `voice-noise rnnoise` keeps RNNoise as the
-suppressor, which is what #170's proof measures.
+While echo cancellation runs (`voice-echo on`, below), `voice-noise on` uses WebRTC's
+suppressor behind AEC3 instead (also without RNNoise); RNNoise then still gives the gate its
+speech probability from a copy of the processed frame, without changing it, so there is one
+suppressor. Turning `voice-echo` off or on mid-call switches the suppressor from the next
+frame. `voice-noise rnnoise` keeps RNNoise suppressing even behind AEC3, for comparisons.
 
 ### Echo Cancellation
 
@@ -481,9 +482,10 @@ dBFS. `--max-level DB` and `--min-level DB` make it fail above or below a level.
    `voice-noise on`. `voice-check` must find at least 1 s of tone in both recordings, with a
    noise floor of at least −50 dBFS without RNNoise (`--min-floor`; Opus leaves about −42 dBFS
    of the −34 dBFS noise) and at most −60 dBFS with it (`--max-floor`); N's `voice-stats` must say `off` and then `active`, and the script prints
-   RNNoise's time per frame. A third run uses `voice-noise on`, which with the wrapper next to
-   the client is WebRTC's suppressor (`noiseBackend` `webrtc`, floor at most −48 dBFS); the
-   second uses `voice-noise rnnoise`. The counters are checked as in the file path.
+   RNNoise's time per frame (`noiseBackend` `rnnoise`: echo cancellation is off). A third run
+   adds `voice-echo on`, which with the wrapper next to the client makes it WebRTC's
+   suppressor behind AEC3 (`noiseBackend` `webrtc`, floor at most −48 dBFS). The counters are
+   checked as in the file path.
    `HAYCHAT_VOICE_PROOF_NOISE=0` skips it.
    Then echo cancellation (#171): X sends `tone:440:0.5` and records Y; Y plays it into a null
    sink with `voice-echo-sim 120 0.5` and `voice-gate open`. `voice-check --tone-level` over the
@@ -1505,8 +1507,8 @@ odin build client -out:haychat-client
 | `--loss PCT` | Drop this share of loopback frames (0 to 90) |
 | `--threshold DB` | Voice activity threshold in dBFS (default -45) |
 | `--always-on` | Send every frame (push-to-talk held) instead of gating on voice activity |
-| `--noise-suppression` | Suppress noise on the microphone first (#170), as the GUI does by default: WebRTC's suppressor when WebRTC audio processing loads, else RNNoise; without either it warns and runs without |
-| `--rnnoise` | With `--noise-suppression`, use RNNoise even where WebRTC's suppressor would take over |
+| `--noise-suppression` | Suppress noise on the microphone first (#170), as the GUI does by default: RNNoise, or WebRTC's suppressor with `--echo-cancellation` (or without RNNoise); without either it warns and runs without |
+| `--rnnoise` | With `--noise-suppression`, keep RNNoise even behind the echo canceller |
 | `--echo-cancellation` | Cancel what is played from the microphone with AEC3 (#171), as the GUI does by default; without WebRTC audio processing it warns and runs without |
 | `--echo-sim MS:GAIN` | A file or null sink's playback returns into the capture `MS` (20 to 400) later, times `GAIN` (0 to 2), like `voice-echo-sim` |
 

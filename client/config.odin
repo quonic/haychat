@@ -33,9 +33,9 @@ Config :: struct {
 	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
 	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
 	voice_bitrate:          Maybe(int) `json:"voice_bitrate,omitempty"`,
-	// Noise suppression on the microphone (#170, #171): WebRTC's suppressor when WebRTC audio
-	// processing loads (client/webrtcapm), else RNNoise (client/rnnoise); on when unset. It
-	// only works when one of them loads; the voice settings say why when neither does.
+	// Noise suppression on the microphone (#170, #171): RNNoise (client/rnnoise), or WebRTC's
+	// suppressor (client/webrtcapm) while echo cancellation runs or without RNNoise; on when
+	// unset. It only works when one of them loads; the voice settings say why when neither does.
 	voice_noise_suppression: Maybe(bool) `json:"voice_noise_suppression,omitempty"`,
 	// Echo cancellation of what HayChat plays (#171, AEC3 in client/webrtcapm); on when unset.
 	// It only works when WebRTC audio processing loads; the voice settings say why otherwise.

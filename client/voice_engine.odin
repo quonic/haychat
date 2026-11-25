@@ -286,7 +286,8 @@ VoiceEngineConfig :: struct {
 	// Protocol 21: set for an encrypted room's voice. Implies fixed-size (padded) packets.
 	encryption:       VoiceEngineEncryption,
 	// #170: suppress noise in captured frames (VoiceEngine_setNoiseSuppression changes it
-	// while the engine runs): WebRTC's suppressor when that library loads, else RNNoise. The
+	// while the engine runs): WebRTC's suppressor while echo cancellation runs, else RNNoise
+	// (voiceNoiseBackendFor). The
 	// zero value is off, so tests and the harness keep their tones untouched unless they ask;
 	// the user's setting defaults to on.
 	noiseSuppression: bool,
@@ -2286,6 +2287,7 @@ VoiceEngine_publish :: proc(engine: ^VoiceEngine) {
 			&engine.captureStage,
 			{
 				noiseSuppression = true,
+				echoCancellation = sync.atomic_load(&engine.echoCancellation),
 				noisePreference = sync.atomic_load(&engine.noisePreference),
 			},
 		)

@@ -610,6 +610,7 @@ buildVoiceSettingsView :: proc(
 		view.settings.noiseSuppression,
 		voiceNoiseSuppressionLoad(),
 		echoLoaded,
+		view.settings.echoCancellation,
 		rnnoise.loadError(),
 		allocator,
 	)
@@ -652,10 +653,13 @@ VOICE_NOISE_UNAVAILABLE_TEXT :: "Noise suppression: unavailable"
 VOICE_NOISE_NOTE ::
 	"RNNoise removes steady background noise (fans, hum, traffic) from your microphone before " +
 	"it is sent, and only speech opens voice activity. Loud typing can still get through."
-// #171: with WebRTC audio processing, its suppressor (after the echo canceller) does the work.
+// #171: while echo cancellation runs (or without RNNoise), WebRTC's suppressor does the work.
 VOICE_NOISE_WEBRTC_NOTE ::
+	"With echo cancellation on, WebRTC's noise suppression removes steady background noise " +
+	"(fans, hum, traffic) from your microphone together with the echo canceller."
+VOICE_NOISE_WEBRTC_ONLY_NOTE ::
 	"WebRTC's noise suppression removes steady background noise (fans, hum, traffic) from " +
-	"your microphone before it is sent, together with the echo canceller."
+	"your microphone before it is sent."
 VOICE_NOISE_WEBRTC_VAD_NOTE :: VOICE_NOISE_WEBRTC_NOTE + " Only speech opens voice activity."
 when ODIN_OS == .Windows {
 	VOICE_NOISE_INSTALL_HINT :: "rnnoise.dll belongs next to haychat-client.exe."
@@ -680,11 +684,12 @@ voiceNoiseSuppressionLoad: proc() -> bool = rnnoise.load
 // The same for WebRTC audio processing (#171).
 voiceEchoCancellationLoad: proc() -> bool = webrtcapm.load
 
-// The noise suppression toggle: offered when WebRTC audio processing or RNNoise loads (WebRTC
-// suppresses when it loads, with RNNoise's speech probability for the gate), else a note
-// with RNNoise's loadError. Strings are allocated with allocator.
+// The noise suppression toggle: offered when WebRTC audio processing or RNNoise loads, else a
+// note with RNNoise's loadError. The note names the suppressor voiceNoiseBackendFor picks with
+// echoCancellation (the setting): WebRTC's, with RNNoise's speech probability for the gate,
+// while echo cancellation runs, else RNNoise. Strings are allocated with allocator.
 voiceNoiseSuppressionView :: proc(
-	enabled, rnnoiseAvailable, webrtcAvailable: bool,
+	enabled, rnnoiseAvailable, webrtcAvailable, echoCancellation: bool,
 	loadError: string,
 	allocator := context.temp_allocator,
 ) -> (
@@ -703,8 +708,9 @@ voiceNoiseSuppressionView :: proc(
 		return false, VOICE_NOISE_UNAVAILABLE_TEXT, note
 	}
 	note = VOICE_NOISE_NOTE
-	if webrtcAvailable {
-		note = rnnoiseAvailable ? VOICE_NOISE_WEBRTC_VAD_NOTE : VOICE_NOISE_WEBRTC_NOTE
+	backend := voiceNoiseBackendFor(rnnoiseAvailable, webrtcAvailable, echoCancellation, .Auto)
+	if backend == .WebRTC {
+		note = rnnoiseAvailable ? VOICE_NOISE_WEBRTC_VAD_NOTE : VOICE_NOISE_WEBRTC_ONLY_NOTE
 	}
 	return true, enabled ? VOICE_NOISE_ON_TEXT : VOICE_NOISE_OFF_TEXT, note
 }

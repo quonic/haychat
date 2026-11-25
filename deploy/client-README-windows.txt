@@ -14,7 +14,7 @@ Run it
    noise from your microphone (Settings -> Voice -> Noise suppression); without it voice
    works without noise suppression. haychat-webrtc-apm.dll cancels the echo of the voices
    HayChat plays, so others do not hear themselves through your speakers (Settings -> Voice
-   -> Echo cancellation), and then also takes over noise suppression; without it voice works
+   -> Echo cancellation), and while it runs also does the noise suppression; without it voice works
    without echo cancellation. While either is on, HayChat asks Windows for the microphone's
    raw signal, without Windows' own processing, so a laptop's built-in microphones can sound
    quieter: raise Input gain if they do.

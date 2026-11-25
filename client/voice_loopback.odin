@@ -26,9 +26,9 @@ VOICE_LOOPBACK_USAGE ::
 	"  --loss PCT       drop this share of loopback frames (0-90) to hear FEC and PLC\n" +
 	"  --threshold DB   voice activity threshold in dBFS (default -45)\n" +
 	"  --always-on      send every frame (push-to-talk held) instead of voice activity\n" +
-	"  --noise-suppression  suppress noise on the microphone before the gate: WebRTC's\n" +
-	"                   suppressor when WebRTC audio processing loads, else RNNoise\n" +
-	"  --rnnoise        with --noise-suppression, use RNNoise even where WebRTC would\n" +
+	"  --noise-suppression  suppress noise on the microphone before the gate: RNNoise, or\n" +
+	"                   WebRTC's suppressor with --echo-cancellation (or without RNNoise)\n" +
+	"  --rnnoise        with --noise-suppression, keep RNNoise even behind the echo canceller\n" +
 	"  --echo-cancellation  cancel what is played from the microphone with AEC3\n" +
 	"                   (libhaychat-webrtc-apm.so or haychat-webrtc-apm.dll)\n" +
 	"  --echo-sim MS:GAIN  a file or null sink's playback returns into the capture MS\n" +

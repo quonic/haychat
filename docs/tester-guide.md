@@ -188,9 +188,9 @@ one server, and keep chatting anywhere while you are.
   not both.
 - **Noise suppression:** on by default (Settings → Voice). It removes fans, hum and other
   steady background noise from your microphone, and in voice activity mode only speech opens
-  it. Loud typing can still get through. With echo cancellation available, WebRTC's noise
-  suppressor does it; otherwise RNNoise, which on Linux needs the `rnnoise` package (Fedora,
-  Arch; `librnnoise0` on Debian testing). Without either the setting says "unavailable" and
+  it. Loud typing can still get through. RNNoise does it, which on Linux needs the `rnnoise`
+  package (Fedora, Arch; `librnnoise0` on Debian testing); while echo cancellation runs,
+  WebRTC's noise suppressor does it instead. Without either the setting says "unavailable" and
   voice works as before.
 - **Windows:** while echo cancellation or noise suppression is on, HayChat takes the
   microphone's raw signal, without Windows' own processing. A laptop's built-in microphones
