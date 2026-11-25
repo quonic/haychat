@@ -1,5 +1,6 @@
 package client
 
+import "base:runtime"
 import "../common"
 import "core:fmt"
 import "core:log"
@@ -787,6 +788,26 @@ testVoiceEngineStopsWhileRunningFlatOut :: proc(t: ^testing.T) {
 
 // ── SDL device path (disk driver) ─────────────────────────────────
 
+// SDL's backends spell the voice role differently (voiceSDLStreamRole): PipeWire takes
+// "Communication" as media.role, and WASAPI matches "Communications" case-insensitively.
+@(test)
+testVoiceSDLStreamRolePerPlatform :: proc(t: ^testing.T) {
+	windowsRole := voiceSDLStreamRole(.Windows)
+	linuxRole := voiceSDLStreamRole(.Linux)
+	assert(
+		windowsRole == "Communications",
+		fmt.tprintf("expected \"Communications\" on Windows, got %q", windowsRole),
+	)
+	assert(
+		linuxRole == "Communication",
+		fmt.tprintf("expected \"Communication\" on Linux, got %q", linuxRole),
+	)
+	assert(
+		voiceSDLStreamRole(.Darwin) == linuxRole,
+		"expected other platforms to keep the PipeWire spelling",
+	)
+}
+
 // Only this test initialises SDL audio, and it resets every hint it sets, so SDL is never
 // left initialised or configured for other tests.
 @(private = "file")
@@ -839,6 +860,11 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 		{source = {kind = .Device}, sink = {kind = .Device}, loopback = true},
 	)
 	started := VoiceEngine_start(engine)
+	role := SDL.GetHint(SDL.HINT_AUDIO_DEVICE_STREAM_ROLE)
+	assert(
+		role == voiceSDLStreamRole(ODIN_OS),
+		fmt.tprintf("expected the stream role %q, got %q", voiceSDLStreamRole(ODIN_OS), role),
+	)
 	// Wait until audio has really flowed through both devices instead of sleeping a fixed
 	// time, so a loaded CI runner gets as long as it needs, up to the deadline. The checks
 	// below need over 1 s of stereo F32 from the disk driver with a steady tone in its last

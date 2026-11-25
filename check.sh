@@ -60,6 +60,14 @@ odin test client/toneanalysis "${test_flags[@]}"
 echo "==> odin test dev/tools/voice-check"
 odin test dev/tools/voice-check "${test_flags[@]}"
 
+# The #172 WASAPI capture probe: Windows only, so it is checked for Windows (checking does not
+# link) and its platform-neutral parts are tested here.
+echo "==> odin check dev/tools/wasapi-probe (windows_amd64)"
+odin check dev/tools/wasapi-probe -target:windows_amd64 -vet -strict-style
+
+echo "==> odin test dev/tools/wasapi-probe"
+odin test dev/tools/wasapi-probe "${test_flags[@]}" -vet -strict-style
+
 # Router and database tests share process-wide state, so the server suite runs serially.
 echo "==> odin test server"
 odin test server "${test_flags[@]}" -define:ODIN_TEST_THREADS=1

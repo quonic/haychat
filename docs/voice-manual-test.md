@@ -334,6 +334,15 @@ the DLLs copied as the README says.
 11. **Reconnect:** disconnect the network for a few seconds. The voice bar says "Rejoining
     voice…", and voice comes back without a click.
 
+### Windows Voice Processing (Spike)
+
+Whether Windows' own echo cancellation and noise suppression (the communications category,
+Voice Clarity) can replace or must stay out of the way of HayChat's is measured with
+`dev/tools/wasapi-probe`, not with the client: SDL 3.4.18 does not pass the category on
+(#172). The steps are the Desktop Checklist in
+[plan/2026-11-25-wasapi-communications-capture.md](plan/2026-11-25-wasapi-communications-capture.md#desktop-checklist);
+run them on desktop Windows 10 or 11 with a real microphone and speakers, and report on #172.
+
 ### Links and the URL Scheme on Windows
 
 The `haychat://` registration and the link hand-off between processes (#110, #109) ran once on
