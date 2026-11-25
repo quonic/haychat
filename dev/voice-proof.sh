@@ -362,7 +362,10 @@ if [[ "$run_noise" == 1 ]]; then
 			floor_limit=(--max-floor -60)
 			if [[ "$noise_mode" == echo ]]; then
 				backend=webrtc
-				floor_limit=(--max-floor -48)
+				# WebRTC's noise estimator starts on the fixture's first burst, which the
+				# speaker sends from its first frame, and takes about 9 dB off it; the later
+				# bursts keep their level, which the --tone-level check below holds it to.
+				floor_limit=(--max-floor -48 --level-tolerance 12)
 			fi
 			[[ "$speaker_stats" == *'"noiseSuppression":"active"'* ]] \
 				|| fail "[noise] N does not report noise suppression active: $speaker_stats"
@@ -379,6 +382,12 @@ if [[ "$run_noise" == 1 ]]; then
 		"$check_bin" "$noise_sink" --freq "$tone_hz" --tolerance 5 --min-seconds 1 \
 			--amplitude "$tone_amplitude" "${floor_limit[@]}" \
 			|| fail "[noise] voice-check rejected M's recording with voice-noise $noise_mode"
+		if [[ "$noise_mode" == echo ]]; then
+			# The last 4 s hold most of two bursts at about 0.65 duty: -9 dBFS of tone
+			# averages to about -11 dBFS there.
+			"$check_bin" "$noise_sink" --freq "$tone_hz" --tone-level 4 --min-level -15 \
+				|| fail "[noise] the later bursts lost their level behind WebRTC's suppressor"
+		fi
 		check_counters "noise $noise_mode"
 		expect_ok "$listener" voice-leave
 		stop_client "$speaker"

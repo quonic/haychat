@@ -52,7 +52,9 @@ VOICE_VAD_SPEECH_PROBABILITY :: f32(0.5)
 // lowers the gaps to −52 dBFS (VeryHigh: −54), far less than RNNoise's −98, which is why it
 // suppresses only while AEC3 runs; the gate's speech probability still closes the gaps, and
 // behind AEC3 it keeps a double-talk tone that RNNoise there would remove
-// (voice_capture_test.odin, voice_echo_test.odin).
+// (voice_capture_test.odin, voice_echo_test.odin). Its noise estimator starts on whatever the
+// first frames hold: a tone from the very first frame (after a join, or echo cancellation
+// coming back on, which resets it) loses about 9 dB for its first 1.5 s.
 VOICE_WEBRTC_NOISE_LEVEL :: webrtcapm.NoiseLevel.High
 
 // How often (in 20 ms frames) the stage reads AEC3's statistics: once a second.

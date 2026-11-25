@@ -484,8 +484,10 @@ dBFS. `--max-level DB` and `--min-level DB` make it fail above or below a level.
    of the −34 dBFS noise) and at most −60 dBFS with it (`--max-floor`); N's `voice-stats` must say `off` and then `active`, and the script prints
    RNNoise's time per frame (`noiseBackend` `rnnoise`: echo cancellation is off). A third run
    adds `voice-echo on`, which with the wrapper next to the client makes it WebRTC's
-   suppressor behind AEC3 (`noiseBackend` `webrtc`, floor at most −48 dBFS). The counters are
-   checked as in the file path.
+   suppressor behind AEC3 (`noiseBackend` `webrtc`, floor at most −48 dBFS; its noise
+   estimator starts on the first burst and takes about 9 dB off it, so that run allows 12 dB
+   on the level and checks with `--tone-level 4 --min-level -15` that the later bursts keep
+   theirs). The counters are checked as in the file path.
    `HAYCHAT_VOICE_PROOF_NOISE=0` skips it.
    Then echo cancellation (#171): X sends `tone:440:0.5` and records Y; Y plays it into a null
    sink with `voice-echo-sim 120 0.5` and `voice-gate open`. `voice-check --tone-level` over the
