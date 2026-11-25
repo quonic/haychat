@@ -333,7 +333,11 @@ if [[ -n "$attachment_dir" ]]; then
 	astart=$(lines a)
 	bstart=$(lines b)
 	expect_ok b "attach-download $missing_blob $work_dir/missing.bin"
-	expect_event b '"event":"attachment_error".*"error":"Attachment not found"' "$bstart" >/dev/null
+	# The server refuses this download "not found" and then marks the blob removed. The
+	# refusal reaches B's transfer worker while the removal notice reaches its state, which
+	# ends the same download "removed by an admin", so whichever B handles first names it.
+	expect_event b '"event":"attachment_error".*"error":"Attachment (not found|removed by an admin)"' \
+		"$bstart" >/dev/null
 	[[ ! -e "$work_dir/missing.bin" && ! -e "$work_dir/missing.bin.part" ]] ||
 		fail "B saved a file whose blob is missing"
 	for client in a b; do
