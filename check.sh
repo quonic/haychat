@@ -14,6 +14,9 @@ test_flags=(-define:ODIN_TEST_FAIL_ON_BAD_MEMORY=true -define:ODIN_TEST_FANCY=fa
 # The Opus and voice engine tests skip when libopus cannot be loaded. CI must not skip them
 # silently, so a missing libopus fails the suite here. HAYCHAT_REQUIRE_OPUS=0 allows the skip.
 export HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1}
+# The same for RNNoise (librnnoise.so.0, #170): the noise suppression tests skip without it.
+# HAYCHAT_REQUIRE_RNNOISE=0 allows the skip.
+export HAYCHAT_REQUIRE_RNNOISE=${HAYCHAT_REQUIRE_RNNOISE:-1}
 
 # Release archives and the server image must carry every licence their contents need. This
 # needs only the Odin root, so a pin bump that drops or moves a licence file fails here.
@@ -52,6 +55,9 @@ odin test client/ui "${test_flags[@]}"
 echo "==> odin test client/hotkey"
 HAYCHAT_REQUIRE_HOTKEY_TESTS=${HAYCHAT_REQUIRE_HOTKEY_TESTS:-1} \
 	odin test client/hotkey "${test_flags[@]}" -vet -strict-style
+
+echo "==> odin test client/rnnoise"
+odin test client/rnnoise "${test_flags[@]}" -vet -strict-style
 
 echo "==> odin test client/toneanalysis"
 odin test client/toneanalysis "${test_flags[@]}"

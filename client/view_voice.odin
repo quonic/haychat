@@ -331,6 +331,27 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	)
 	_ = ui.cutTop(&column, sectionGap)
 
+	// #170: RNNoise on the microphone, offered only when the library loads.
+	voiceSettingsLabel(ctx, &column, "Noise suppression")
+	noiseRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+	noiseOn := view.noiseAvailable && settings.noiseSuppression
+	noiseOptions := ui.ButtonOptions {
+		selected = noiseOn,
+		color    = noiseOn ? ctx.theme.fg : ctx.theme.fgMuted,
+	}
+	noiseClicked := ui.button(
+		ctx,
+		ui.idOf("voice-noise-suppression"),
+		noiseRow,
+		view.noiseText,
+		noiseOptions,
+	)
+	noiseClicked &&= view.noiseAvailable
+	_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	noiseNoteColor := view.noiseAvailable ? ctx.theme.fgMuted : ctx.theme.warning
+	voiceSettingsWrapped(ctx, &column, view.noiseNote, noiseNoteColor)
+	_ = ui.cutTop(&column, sectionGap)
+
 	voiceSettingsLabel(ctx, &column, "Mode")
 	modeRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
 	modeW := (modeRow.w - gap) / 2
@@ -524,6 +545,9 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 		changed = next.mode != settings.mode
 	case globalClicked:
 		next.pttGlobal = !settings.pttGlobal
+		changed = true
+	case noiseClicked:
+		next.noiseSuppression = !settings.noiseSuppression
 		changed = true
 	}
 	for result, index in ([4]ui.SliderResult{threshold, gain, volume, bitrate}) {

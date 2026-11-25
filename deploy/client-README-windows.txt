@@ -10,7 +10,9 @@ Run it
 
 1. Extract the whole zip into a folder. haychat-client.exe needs SDL3.dll and SDL3_ttf.dll
    next to it. libopus-0.dll, also in the folder, is the voice codec; without it text chat
-   still works and voice reports that libopus was not found.
+   still works and voice reports that libopus was not found. rnnoise.dll removes background
+   noise from your microphone (Settings -> Voice -> Noise suppression); without it voice
+   works without noise suppression.
 2. Double-click haychat-client.exe. Windows SmartScreen may warn that the app is from an
    unknown publisher, because test builds are not signed: choose "More info", then
    "Run anyway".
@@ -43,8 +45,9 @@ https://git.spyingwind.com/quonic/haychat (this build is tag @VERSION@).
 THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
 licences, and their copyright lines; the licence texts are in licenses\. They cover SDL3 and
 SDL3_ttf (zlib licence), the HIDAPI, yuv2rgb and fdlibm code inside SDL3.dll, the FreeType,
-HarfBuzz, PlutoSVG and PlutoVG code inside SDL3_ttf.dll, libopus (BSD licence), the ENet
-library, the Odin core library, and the embedded Inter and Twemoji fonts.
+HarfBuzz, PlutoSVG and PlutoVG code inside SDL3_ttf.dll, libopus (BSD licence), RNNoise in
+rnnoise.dll (BSD licence), the ENet library, the Odin core library, and the embedded Inter and
+Twemoji fonts.
 
 This software is based in part on the work of the FreeType Team.
 Portions of this software are copyright © 2023 The FreeType Project (www.freetype.org).

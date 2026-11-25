@@ -14,15 +14,16 @@ set -euo pipefail
 #   haychat-server-VERSION-linux-x86_64.tar.gz    server binary, SQL helpers, deploy docs,
 #                                                 notices, licences
 #   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, README.txt, notices, licences
-#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3 and libopus DLLs, README.txt,
-#                                                 notices, licences
+#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3, libopus and RNNoise DLLs,
+#                                                 README.txt, notices, licences
 #   SHA256SUMS
 #
 # Every archive carries THIRD_PARTY_NOTICES.txt and the licence texts its contents need (the
 # *_LICENCES tables below). --check-licences verifies, without building anything or needing
 # the Windows SDK, that every licence source exists in the repository and the pinned Odin
 # toolchain, that SDL3.dll and SDL3_ttf.dll are still the builds THIRD_PARTY_NOTICES.md
-# describes, and that the required credits are present; ./check.sh runs it, and every build
+# describes, that rnnoise.dll (built from source by deploy/build-windows-rnnoise.sh) is named
+# where it ships, and that the required credits are present; ./check.sh runs it, and every build
 # runs it first. --stage-licences copies one artifact's notices and
 # licences into DIR, which is what the builds below and deploy/Containerfile use.
 #
@@ -35,6 +36,8 @@ set -euo pipefail
 #     (https://github.com/Jake-Shadle/xwin), which accepts Microsoft's licence terms for the
 #     Visual Studio build tools and Windows SDK on your behalf. The download is about 1 GB
 #     and is cached in HAYCHAT_XWIN_CACHE (default ~/.cache/haychat-xwin).
+# It also downloads the pinned RNNoise source release (deploy/build-windows-rnnoise.sh, cached in
+# HAYCHAT_RNNOISE_CACHE) and builds rnnoise.dll with the same sysroot.
 
 XWIN_VERSION=0.10.0
 XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
@@ -86,6 +89,7 @@ WINDOWS_CLIENT_LICENCES=(
 	odin:vendor/sdl3/mixer/LICENSE.opus.txt:licenses/opus-LICENSE.txt
 	repo:deploy/licenses/hidapi-LICENSE-bsd.txt:licenses/hidapi-LICENSE-bsd.txt
 	repo:deploy/licenses/yuv2rgb-LICENSE.txt:licenses/yuv2rgb-LICENSE.txt
+	repo:deploy/licenses/rnnoise-COPYING.txt:licenses/rnnoise-LICENSE.txt
 )
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -206,6 +210,10 @@ check_licences() {
 	for file in THIRD_PARTY_NOTICES.md deploy/client-README-windows.txt; do
 		grep -qF "$FREETYPE_CREDIT" "$repo_dir/$file" \
 			|| problems+=("$file lacks the FreeType credit: $FREETYPE_CREDIT")
+		# The Windows zip carries rnnoise.dll (built from source, so no hash pin above); both
+		# documents must name it with its licence.
+		grep -qF "rnnoise.dll" "$repo_dir/$file" \
+			|| problems+=("$file does not name rnnoise.dll (RNNoise, BSD-3-Clause)")
 	done
 	for file in THIRD_PARTY_NOTICES.md deploy/client-README-windows.txt \
 		deploy/client-README-linux.txt; do
@@ -382,6 +390,9 @@ if $build_windows; then
 	# voice, looking next to haychat-client.exe first (client/opus).
 	cp "$odin_root/vendor/sdl3/SDL3.dll" "$odin_root/vendor/sdl3/ttf/SDL3_ttf.dll" \
 		"$odin_root/vendor/sdl3/mixer/libopus-0.dll" "$windows_dir/"
+	# rnnoise.dll (noise suppression, #170) is built from the pinned RNNoise source release
+	# with the same sysroot. The client loads it at runtime, next to haychat-client.exe first.
+	"$repo_dir/deploy/build-windows-rnnoise.sh" "$sysroot" "$windows_dir"
 	stage_licences windows "$windows_dir"
 	sed "s/@VERSION@/$version/g" deploy/client-README-windows.txt \
 		| sed 's/$/\r/' >"$windows_dir/README.txt"

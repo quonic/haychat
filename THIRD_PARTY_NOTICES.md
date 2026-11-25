@@ -43,6 +43,7 @@ the copy installed on the machine, which comes with its own licence from the dis
 | HarfBuzz 8.5.0                        | Old MIT               | -              | -              | system             | in `SDL3_ttf.dll` |
 | PlutoSVG, PlutoVG                     | MIT                   | -              | -              | system             | in `SDL3_ttf.dll` |
 | Opus (libopus)                        | BSD-3-Clause          | -              | -              | system, at runtime | `libopus-0.dll`   |
+| RNNoise 0.2 (with its model)          | BSD-3-Clause          | -              | -              | system, at runtime | `rnnoise.dll`     |
 | Inter fonts                           | SIL OFL 1.1           | -              | -              | embedded           | embedded          |
 | Twemoji-Mozilla font                  | CC BY 4.0             | -              | -              | embedded           | embedded          |
 | Microsoft C runtime                   | Visual Studio licence | -              | -              | -                  | compiled in       |
@@ -163,6 +164,19 @@ Windows build does not compile.
 - `libopus-0.dll` is the copy Odin ships for SDL3_mixer. The Linux client loads the system
   `libopus.so.0` at runtime instead.
 
+### RNNoise (Windows client: `rnnoise.dll`)
+
+- Licence: BSD-3-Clause (`licenses/rnnoise-LICENSE.txt`)
+- Copyright (c) 2007-2017, 2024 Jean-Marc Valin; Copyright (c) 2023 Amazon; Copyright (c)
+  2017, Mozilla; Copyright (c) 2005-2017, Xiph.Org Foundation; Copyright (c) 2003-2004, Mark
+  Borgerding
+- Required in binaries: the copyright notice, conditions and disclaimer.
+- `rnnoise.dll` is built from the RNNoise 0.2 source release (pinned by its SHA-256) by
+  `deploy/build-windows-rnnoise.sh`, with the default model that release carries compiled in.
+  The release's model is trained on public datasets; Fedora packages RNNoise as
+  `BSD-3-Clause AND CC0-1.0`, the CC0 part asking for no notice. The Linux client loads the
+  system `librnnoise.so.0` at runtime instead, when it is installed.
+
 ### Inter (both clients, embedded)
 
 - Licence: SIL Open Font License 1.1 (`licenses/InterVariable-OFL.txt`), for both
@@ -187,8 +201,8 @@ distributing it inside an application. They ask for no notice.
 
 The server, the server archive, and the Linux client link these at runtime and do not
 include them: glibc, libpq (PostgreSQL licence), libenet (MIT), SDL3 and SDL3_ttf (zlib)
-with the FreeType, HarfBuzz and PlutoSVG they use, and libopus (BSD-3-Clause). The
-distribution's packages carry their licences.
+with the FreeType, HarfBuzz and PlutoSVG they use, libopus (BSD-3-Clause), and RNNoise
+(BSD-3-Clause) when it is installed. The distribution's packages carry their licences.
 
 ## Notice Texts
 

@@ -26,6 +26,12 @@ package client
 //   - SDL's audio subsystem is initialised only when a device source or sink is opened, so a
 //     headless client never touches SDL unless asked to.
 //
+// Noise suppression (#170): between the input gain and the level meter, every captured frame
+// goes through the capture-processing stage (voice_capture.odin), RNNoise when it loads and
+// config.noiseSuppression (or VoiceEngine_setNoiseSuppression) asks for it. Its speech
+// probability joins the level in the voice activity gate. Without RNNoise frames pass through
+// unchanged and the level gate decides alone; nothing on the wire changes.
+//
 // Encrypted rooms (protocol 21, e2ee-voice-design.md 5 and 7.1): an engine created with
 // config.encryption.enabled seals every encoded frame (common/voice_e2ee.odin) before
 // onOutbound and opens every inbound frame before its jitter buffer, so a frame that does not
@@ -260,6 +266,10 @@ VoiceEngineConfig :: struct {
 	timingUserdata:   rawptr,
 	// Protocol 21: set for an encrypted room's voice. Implies fixed-size (padded) packets.
 	encryption:       VoiceEngineEncryption,
+	// #170: run captured frames through RNNoise when it loads (VoiceEngine_setNoiseSuppression
+	// changes it while the engine runs). The zero value is off, so tests and the harness keep
+	// their tones untouched unless they ask; the user's setting defaults to on.
+	noiseSuppression: bool,
 }
 
 VoiceEngineStats :: struct {
@@ -294,6 +304,11 @@ VoiceEngineStats :: struct {
 	faultDelayed:        u64,
 	// Protocol 21: sealing and opening in an encrypted room.
 	e2ee:                VoiceEngineE2EEStats,
+	// #170: captured frames RNNoise processed, and the time it took per 20 ms frame (two
+	// RNNoise frames), in microseconds.
+	framesDenoised:      u64,
+	denoiseTotalUS:      f64,
+	denoiseMaxUS:        f64,
 }
 
 VoiceSpeakerSnapshot :: struct {
@@ -317,6 +332,10 @@ VoiceEngineSnapshot :: struct {
 	encrypted:         bool,
 	hasSendKey:        bool,
 	sendKeyGeneration: u32,
+	// #170: what the capture stage does (Off, Active, Unavailable) and the last denoised
+	// frame's speech probability (0 when none was denoised).
+	noiseSuppression:  VoiceNoiseSuppressionStatus,
+	speechProbability: f32,
 	// Totals over every speaker, including expired ones.
 	jitter:        JitterStats,
 	speakerCount:  int,
@@ -354,6 +373,7 @@ VoiceEngine :: struct {
 	deafened:            bool,
 	pttHeld:             bool,
 	gateMode:            VoiceGateMode,
+	noiseSuppression:    bool,
 	thresholdBits:       u32,
 	inputGainBits:       u32,
 	outputVolumeBits:    u32,
@@ -382,6 +402,10 @@ VoiceEngine :: struct {
 	// The output volume last applied to the playback device or mix.
 	appliedOutputVolume: f32,
 	gate:                VoiceGate,
+	// The capture-processing stage (noise suppression), and the last denoised frame's speech
+	// probability.
+	captureStage:        VoiceCaptureStage,
+	speechProbability:   f32,
 	frameSequence:       u32,
 	captureFrame:        [common.VOICE_FRAME_SAMPLES]f32,
 	decodeFrame:         [common.VOICE_FRAME_SAMPLES]f32,
@@ -483,6 +507,7 @@ VoiceEngine_create :: proc(
 		threshold = VOICE_VAD_DEFAULT_THRESHOLD_DB
 	}
 	engine.gateMode = config.gateMode
+	engine.noiseSuppression = config.noiseSuppression
 	engine.thresholdBits = transmute(u32)threshold
 	engine.inputGainBits = transmute(u32)engine.config.inputGain
 	engine.outputVolumeBits = transmute(u32)engine.config.outputVolume
@@ -637,6 +662,9 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	}
 
 	engine.gate = {}
+	// Optional: without RNNoise the stage passes frames through and the snapshot says so.
+	_ = VoiceCaptureStage_open(&engine.captureStage)
+	engine.speechProbability = 0
 	if sink.kind != .Device {
 		engine.appliedOutputVolume = transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
 	}
@@ -698,6 +726,7 @@ VoiceEngine_close :: proc(engine: ^VoiceEngine) {
 		opus.destroyEncoder(engine.encoder)
 		engine.encoder = nil
 	}
+	VoiceCaptureStage_close(&engine.captureStage)
 	if engine.sinkFile != nil {
 		_ = os.close(engine.sinkFile)
 		engine.sinkFile = nil
@@ -845,6 +874,12 @@ VoiceEngine_setGateMode :: proc(engine: ^VoiceEngine, mode: VoiceGateMode) {
 
 VoiceEngine_setVADThreshold :: proc(engine: ^VoiceEngine, thresholdDB: f32) {
 	sync.atomic_store(&engine.thresholdBits, transmute(u32)thresholdDB)
+}
+
+// VoiceEngine_setNoiseSuppression turns RNNoise on or off from the next captured frame on.
+// Without RNNoise it changes only what the snapshot reports (Unavailable instead of Off).
+VoiceEngine_setNoiseSuppression :: proc(engine: ^VoiceEngine, enabled: bool) {
+	sync.atomic_store(&engine.noiseSuppression, enabled)
 }
 
 // VoiceEngine_setInputGain sets the linear gain applied to every captured frame before the
@@ -1440,6 +1475,20 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 		}
 	}
 	engine.stats.framesCaptured += 1
+	// The capture-processing stage runs before the meter and the gate, so both see the frame
+	// that is sent.
+	capture := VoiceCaptureStage_process(
+		&engine.captureStage,
+		frame,
+		sync.atomic_load(&engine.noiseSuppression),
+	)
+	if capture.denoised {
+		elapsedUS := time.duration_microseconds(capture.elapsed)
+		engine.stats.framesDenoised += 1
+		engine.stats.denoiseTotalUS += elapsedUS
+		engine.stats.denoiseMaxUS = max(engine.stats.denoiseMaxUS, elapsedUS)
+	}
+	engine.speechProbability = capture.speechProbability
 	level := voiceFrameLevelDB(frame)
 	sync.atomic_store(&engine.inputLevelBits, transmute(u32)level)
 
@@ -1451,6 +1500,8 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 			thresholdDB = transmute(f32)sync.atomic_load(&engine.thresholdBits),
 			muted = sync.atomic_load(&engine.muted),
 			pttHeld = sync.atomic_load(&engine.pttHeld),
+			hasSpeechProbability = capture.denoised,
+			speechProbability = capture.speechProbability,
 		},
 	)
 	// The media clock advances on every tick, gated or not, so receivers can tell silence
@@ -1905,6 +1956,12 @@ VoiceEngine_publish :: proc(engine: ^VoiceEngine) {
 	snapshot.encrypted = engine.config.encryption.enabled
 	snapshot.hasSendKey = engine.appliedSendKey.set
 	snapshot.sendKeyGeneration = engine.appliedSendKey.generation
+	snapshot.noiseSuppression = .Off
+	if snapshot.running && sync.atomic_load(&engine.noiseSuppression) {
+		snapshot.noiseSuppression =
+			VoiceCaptureStage_available(&engine.captureStage) ? .Active : .Unavailable
+	}
+	snapshot.speechProbability = engine.speechProbability
 	snapshot.jitter = engine.retiredJitter
 	snapshot.speakerCount = 0
 	for &speaker in engine.speakers {

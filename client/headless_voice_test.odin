@@ -7,6 +7,7 @@ import "core:os"
 import "core:strings"
 import "core:testing"
 import "core:time"
+import "rnnoise"
 
 @(private = "file")
 testHeadlessVoiceRun :: proc(
@@ -27,6 +28,7 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-sink file:/tmp/b.f32",
 		"voice-gate vad -40",
 		"voice-gate open",
+		"voice-noise on",
 		"voice-mute on",
 		"voice-deafen off",
 		"voice-ptt down",
@@ -49,6 +51,8 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-sink",
 		"voice-gate",
 		"voice-gate vad -40 fast",
+		"voice-noise",
+		"voice-noise on off",
 		"voice-mute",
 		"voice-deafen on off",
 		"voice-ptt",
@@ -88,6 +92,7 @@ testHeadlessVoiceCommandsRejectBadValues :: proc(t: ^testing.T) {
 		{"voice-gate ptt -40", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
 		{"voice-gate vad 5", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
 		{"voice-gate vad quiet", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
+		{"voice-noise yes", "voice-noise on|off"},
 		{"voice-mute yes", "voice-mute on|off"},
 		{"voice-deafen 1", "voice-deafen on|off"},
 		{"voice-ptt sideways", "voice-ptt down|up"},
@@ -218,6 +223,44 @@ testHeadlessVoiceCommandsSetTheTemplateAndControls :: proc(t: ^testing.T) {
 	testing.expect(t, state.voice.muted && state.voice.deafened, "expected muted and deafened")
 	testHeadlessVoiceRun(&harness, &builder, "voice-mute off")
 	testing.expect(t, !state.voice.muted, "expected unmuted")
+
+	// #170: the harness starts with it off (headlessConnectAndWait's template); this test harness
+	// starts from the GUI's template, so it is switched off here first.
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-noise off"),
+		`{"ok":true,"cmd":"voice-noise","value":"off","pendingRejoin":false}` + "\n",
+		"noise suppression off",
+	)
+	testing.expect(t, !state.voice.engineTemplate.noiseSuppression, "expected it off")
+	noiseOff := testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	testing.expectf(
+		t,
+		strings.contains(noiseOff, `"noiseSuppression":"off","noiseError":""`),
+		"expected noise suppression off in the stats, got %s",
+		noiseOff,
+	)
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-noise on"),
+		`{"ok":true,"cmd":"voice-noise","value":"on","pendingRejoin":false}` + "\n",
+		"noise suppression on",
+	)
+	testing.expect(t, state.voice.engineTemplate.noiseSuppression, "expected it in the template")
+	noiseOn := testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	expectedNoise := `"noiseSuppression":"active","noiseError":""`
+	if !rnnoise.isLoaded() {
+		expectedNoise = `"noiseSuppression":"unavailable","noiseError":"RNNoise not found`
+	}
+	testing.expectf(
+		t,
+		strings.contains(noiseOn, expectedNoise),
+		"expected %s in the stats, got %s",
+		expectedNoise,
+		noiseOn,
+	)
+	testHeadlessVoiceRun(&harness, &builder, "voice-noise off")
+	testing.expect(t, !state.voice.engineTemplate.noiseSuppression, "expected it off again")
 
 	testExpectString(
 		t,

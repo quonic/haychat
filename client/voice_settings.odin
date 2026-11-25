@@ -31,26 +31,29 @@ VOICE_PTT_KEY_MAX_BYTES :: 64
 
 // The user's voice settings, validated. Strings borrow from wherever they were read.
 VoiceSettings :: struct {
-	inputDevice:    string, // "" is the system default
-	outputDevice:   string, // "" is the system default
-	mode:           VoiceGateMode,
-	pttKey:         string,
+	inputDevice:      string, // "" is the system default
+	outputDevice:     string, // "" is the system default
+	mode:             VoiceGateMode,
+	pttKey:           string,
 	// Push-to-talk also follows the key while another window has focus (client/hotkey).
-	pttGlobal:      bool,
-	vadThresholdDB: f32,
-	inputGain:      f32,
-	outputVolume:   f32,
-	bitrate:        int,
+	pttGlobal:        bool,
+	vadThresholdDB:   f32,
+	inputGain:        f32,
+	outputVolume:     f32,
+	bitrate:          int,
+	// RNNoise on the microphone (#170). Works only when the library loads.
+	noiseSuppression: bool,
 }
 
 VOICE_DEFAULT_SETTINGS :: VoiceSettings {
-	mode           = .VoiceActivity,
-	pttKey         = VOICE_DEFAULT_PTT_KEY,
-	pttGlobal      = true,
-	vadThresholdDB = VOICE_VAD_DEFAULT_THRESHOLD_DB,
-	inputGain      = 1,
-	outputVolume   = 1,
-	bitrate        = VOICE_BITRATE_DEFAULT,
+	mode             = .VoiceActivity,
+	pttKey           = VOICE_DEFAULT_PTT_KEY,
+	pttGlobal        = true,
+	vadThresholdDB   = VOICE_VAD_DEFAULT_THRESHOLD_DB,
+	inputGain        = 1,
+	outputVolume     = 1,
+	bitrate          = VOICE_BITRATE_DEFAULT,
+	noiseSuppression = true,
 }
 
 @(private = "file")
@@ -138,6 +141,9 @@ Config_voiceSettings :: proc(config: Config) -> VoiceSettings {
 	if value, ok := config.voice_bitrate.?; ok {
 		settings.bitrate = value
 	}
+	if value, ok := config.voice_noise_suppression.?; ok {
+		settings.noiseSuppression = value
+	}
 	return voiceSettingsValidate(settings)
 }
 
@@ -185,9 +191,14 @@ Config_setVoiceSettings :: proc(config: ^Config, settings: VoiceSettings) {
 	if valid.bitrate != defaults.bitrate {
 		config.voice_bitrate = valid.bitrate
 	}
+	config.voice_noise_suppression = nil
+	if valid.noiseSuppression != defaults.noiseSuppression {
+		config.voice_noise_suppression = valid.noiseSuppression
+	}
 }
 
-// Returns base with the user's settings applied: device names, gate mode, levels and bitrate.
+// Returns base with the user's settings applied: device names, gate mode, levels, bitrate and
+// noise suppression.
 // The source and sink kinds stay as they are, so a test or the harness that runs on tones,
 // files or null sinks keeps them; device names only matter to device sources and sinks.
 // Strings are borrowed; State_setVoiceEngineTemplate clones them.
@@ -203,6 +214,7 @@ voiceEngineConfigWithSettings :: proc(
 	config.inputGain = settings.inputGain
 	config.outputVolume = settings.outputVolume
 	config.explicitLevels = true
+	config.noiseSuppression = settings.noiseSuppression
 	if config.encoder == {} {
 		config.encoder = opus.VOICE_ENCODER_SETTINGS
 	}
@@ -223,6 +235,7 @@ VoiceEngine_applySettings :: proc(engine: ^VoiceEngine, settings: VoiceSettings)
 	VoiceEngine_setInputGain(engine, settings.inputGain)
 	VoiceEngine_setOutputVolume(engine, settings.outputVolume)
 	VoiceEngine_setBitrate(engine, i32(settings.bitrate))
+	VoiceEngine_setNoiseSuppression(engine, settings.noiseSuppression)
 }
 
 State_voiceSettings :: proc(state: ^State) -> VoiceSettings {
