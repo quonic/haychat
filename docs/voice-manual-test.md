@@ -303,6 +303,31 @@ clip), background sent beyond the hangover.
 - **Delay:** clicks (gate held open) took 166.5 ms against 142.5 ms. RNNoise adds 10 ms; the
   rest is within the run-to-run spread of the quantum alignment (up to 19 ms, above).
 
+## Echo Cancellation (AEC3, #171)
+
+Measured on 2026-11-25 on the same host and setup as above, `main` with #171. A plays into a
+null sink, so there is no echo: these runs show what AEC3 and WebRTC's noise suppressor cost
+speech, the gate and the delay. Each cell as above: speech heard, word starts clipped (mean
+clip), background sent beyond the hangover (0 ms in every run).
+
+| Settings on A | Tone (−9 dBFS sent) | Speech −24 dBFS | Speech −36 dBFS | Speech −47 dBFS | Taps | Clicks p50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Noise suppression on, echo off (RNNoise) | −9.95 dBFS | 99.3 %, 1/9 (9 ms) | 97.8 %, 4/9 (27 ms) | 64.5 %, 9/10 | 0 of 20 | 163.9 ms |
+| Both on (WebRTC behind AEC3, the GUI default) | **−28.15 dBFS** (voice-check FAIL) | 99.4 %, 0/9 (8 ms) | 97.1 %, 6/9 (36 ms) | 70.0 %, 8/10 | 0 of 20 | 147.6 ms |
+| Echo cancellation alone | −9.42 dBFS | 99.8 %, 0/9 (2 ms) | 97.7 %, 4/9 (28 ms) | 66.8 %, 9/10 | 7 of 20 | 147.6 ms |
+
+- **Speech** is unharmed by AEC3 and by WebRTC's suppressor: every speech cell is within the
+  run-to-run spread of the RNNoise and plain runs.
+- **The tone phase fails with both on, by design of the suppressor:** WebRTC's noise
+  suppression treats a steady tone from the first frame as noise and takes 19 dB off it for
+  the whole 6 s (the unit and live proofs saw 9 dB for the first 1.5 s). Speech is not steady,
+  so the speech phases pass. Run the tone phase with noise suppression off, or RNNoise. Whether
+  a user's first words after joining are quieter is a follow-up (#180).
+- **AEC3 alone** costs nothing measurable: the gate behaves as without processing (7 of 20 taps,
+  as the level gate does), and the delay is the plain client's.
+- `bursts` heard only 2 of 10 with noise suppression on (either backend), as before; it needs
+  noise suppression off.
+
 ## Listening Yourself
 
 The kit never plays anything you can hear. To listen to what B receives, connect HC-MT-B-Out to
