@@ -102,3 +102,44 @@ testAnalyzeFindsTheToneAndItsLevel :: proc(t: ^testing.T) {
 	)
 	testing.expect(t, math.abs(rmsDB(nil) - LEVEL_FLOOR_DB) < 1e-9, "expected the level floor")
 }
+
+@(test)
+testNoisyToneHasItsNoiseLevelInTheGaps :: proc(t: ^testing.T) {
+	fixture := NoisyTone {
+		hz           = 440,
+		amplitude    = 0.5,
+		noiseRMSDB   = -34,
+		burstSeconds = 1.5,
+		gapSeconds   = 1,
+		seed         = 7,
+	}
+	samples := make([]f32, int(6 * TEST_RATE))
+	defer delete(samples)
+	writeNoisyTone(samples, TEST_RATE, fixture)
+	gap := samples[int(1.7 * TEST_RATE):int(2.3 * TEST_RATE)]
+	assert(abs(rmsDB(gap) - -34) < 0.5, fmt.tprintf("expected -34 dBFS gaps, got %.2f", rmsDB(gap)))
+	again := make([]f32, len(samples))
+	defer delete(again)
+	writeNoisyTone(again, TEST_RATE, fixture)
+	for sample, index in samples {
+		assert(sample == again[index], "expected the same fixture from the same seed")
+	}
+	check := checkRecording(
+		samples,
+		TEST_RATE,
+		{targetHz = 440, expectedRMSDB = sineRMSDB(0.5)},
+		1,
+	)
+	assert(check.passed, fmt.tprintf("expected the bursts to pass as tone, got %v", check))
+
+	// The floor is the gaps' noise, with silence around the recording left out.
+	padded := make([]f32, len(samples) + int(2 * TEST_RATE))
+	defer delete(padded)
+	copy(padded[int(TEST_RATE):], samples)
+	floor, blocks := noiseFloorDB(padded, TEST_RATE, sineRMSDB(0.5) - ACTIVE_BELOW_EXPECTED_DB)
+	free_all(context.temp_allocator)
+	assert(abs(floor - -34) < 1, fmt.tprintf("expected a -34 dBFS floor, got %.2f", floor))
+	assert(blocks >= 250 && blocks <= 300, fmt.tprintf("expected about 5.5 s, got %d", blocks))
+	silent, none := noiseFloorDB(padded[:int(TEST_RATE)], TEST_RATE, -29)
+	assert(none == 0 && silent == LEVEL_FLOOR_DB, "expected no floor without a loud block")
+}

@@ -6,6 +6,13 @@ package voice_check
 //
 //   odin run dev/tools/voice-check -- FILE --freq 440 --tolerance 5 --min-seconds 3
 //   odin run dev/tools/voice-check -- --write-tone FILE --freq 440 --seconds 8
+//   odin run dev/tools/voice-check -- --write-noisy-tone FILE --freq 440 --seconds 30
+//   odin run dev/tools/voice-check -- FILE --freq 440 --min-seconds 1 --max-floor -60
+//
+// The noisy tone (#170, noise suppression) is tone bursts (--burst seconds on, --gap seconds
+// off) over white noise at --noise-db dBFS RMS, from a fixed seed (toneanalysis.NoisyTone).
+// --max-floor and --min-floor check the recording's noise floor: the 25th percentile of its
+// 20 ms block levels between the first and last tone-loud block, which lies in the gaps.
 //
 // Files are raw F32LE samples at 48 kHz, the format of the client's file sink and source
 // (mono) and of SDL's disk audio driver (interleaved, so pass --channels 2 for a playback
@@ -32,8 +39,11 @@ FREQ_RANGE_ERROR :: "--freq must be inside the analyser's scan range (50 to 4050
 USAGE ::
 	"usage: voice-check FILE --freq HZ [--tolerance HZ] [--min-seconds S] [--amplitude A]\n" +
 	"                   [--level-tolerance DB] [--min-snr DB] [--channels N] [--rate HZ]\n" +
+	"                   [--max-floor DB] [--min-floor DB]\n" +
 	"       voice-check --write-tone FILE --freq HZ --seconds S [--amplitude A]\n" +
 	"                   [--channels N] [--rate HZ]\n" +
+	"       voice-check --write-noisy-tone FILE --freq HZ --seconds S [--amplitude A]\n" +
+	"                   [--noise-db DB] [--burst S] [--gap S]\n" +
 	"  FILE                raw F32LE samples (the client's file sink: mono, 48 kHz)\n" +
 	"  --freq HZ           the expected tone, 50 to 4050 Hz (the analyser's scan range)\n" +
 	"  --tolerance HZ      how far the dominant frequency may be off (default 5)\n" +
@@ -44,7 +54,12 @@ USAGE ::
 	"  --min-snr DB        the tone bin over the median bin (default 20)\n" +
 	"  --channels N        interleaved channels in FILE (default 1; the first is used)\n" +
 	"  --rate HZ           sample rate (default 48000)\n" +
-	"  --write-tone FILE   write a tone instead (for SDL_AUDIO_DISK_INPUT_FILE)"
+	"  --write-tone FILE   write a tone instead (for SDL_AUDIO_DISK_INPUT_FILE)\n" +
+	"  --write-noisy-tone FILE  write tone bursts over white noise instead (mono)\n" +
+	"  --noise-db DB       the noise's RMS level (default -34 dBFS)\n" +
+	"  --burst S, --gap S  seconds of tone, then of noise alone (default 1.5 and 1)\n" +
+	"  --max-floor DB      fail when the noise floor between the bursts is above DB\n" +
+	"  --min-floor DB      fail when it is below DB (the noise must be there)"
 
 Options :: struct {
 	path:           string,
@@ -58,7 +73,19 @@ Options :: struct {
 	channels:       int,
 	rate:           f64,
 	seconds:        f64,
+	writeNoisyTone: bool,
+	noiseDB:        f64,
+	burstSeconds:   f64,
+	gapSeconds:     f64,
+	maxFloor:       Maybe(f64),
+	minFloor:       Maybe(f64),
 }
+
+DEFAULT_NOISE_DB :: -34.0
+DEFAULT_BURST_SECONDS :: 1.5
+DEFAULT_GAP_SECONDS :: 1.0
+// The noisy tone's seed; any fixed value works, this one names the issue.
+NOISY_TONE_SEED :: 170
 
 // Parses the arguments after the program name. Returns a static error message on failure.
 parseOptions :: proc(args: []string) -> (options: Options, err: string) {
@@ -70,6 +97,9 @@ parseOptions :: proc(args: []string) -> (options: Options, err: string) {
 		minSNR         = toneanalysis.MIN_SNR_DB,
 		channels       = 1,
 		rate           = DEFAULT_RATE,
+		noiseDB        = DEFAULT_NOISE_DB,
+		burstSeconds   = DEFAULT_BURST_SECONDS,
+		gapSeconds     = DEFAULT_GAP_SECONDS,
 	}
 	for index := 0; index < len(args); index += 1 {
 		arg := args[index]
@@ -85,12 +115,13 @@ parseOptions :: proc(args: []string) -> (options: Options, err: string) {
 		}
 		index += 1
 		value := args[index]
-		if arg == "--write-tone" {
+		if arg == "--write-tone" || arg == "--write-noisy-tone" {
 			if len(options.path) > 0 {
 				return {}, "more than one FILE"
 			}
 			options.path = value
 			options.writeTone = true
+			options.writeNoisyTone = arg == "--write-noisy-tone"
 			continue
 		}
 		number, ok := strconv.parse_f64(value)
@@ -125,6 +156,21 @@ parseOptions :: proc(args: []string) -> (options: Options, err: string) {
 		case "--seconds":
 			ok = number > 0 && number <= MAX_TONE_SECONDS
 			options.seconds = number
+		case "--noise-db":
+			ok = number >= -120 && number < 0
+			options.noiseDB = number
+		case "--burst":
+			ok = number > 0 && number <= MAX_TONE_SECONDS
+			options.burstSeconds = number
+		case "--gap":
+			ok = number >= 0 && number <= MAX_TONE_SECONDS
+			options.gapSeconds = number
+		case "--max-floor":
+			ok = number <= 0
+			options.maxFloor = number
+		case "--min-floor":
+			ok = number <= 0
+			options.minFloor = number
 		case:
 			return {}, "unknown option"
 		}
@@ -154,7 +200,22 @@ writeToneFile :: proc(options: Options) -> int {
 	frames := int(options.seconds * options.rate)
 	mono := make([]f32, frames)
 	defer delete(mono)
-	toneanalysis.writeTone(mono, options.rate, options.freq, options.amplitude)
+	if options.writeNoisyTone {
+		toneanalysis.writeNoisyTone(
+			mono,
+			options.rate,
+			{
+				hz = options.freq,
+				amplitude = options.amplitude,
+				noiseRMSDB = options.noiseDB,
+				burstSeconds = options.burstSeconds,
+				gapSeconds = options.gapSeconds,
+				seed = NOISY_TONE_SEED,
+			},
+		)
+	} else {
+		toneanalysis.writeTone(mono, options.rate, options.freq, options.amplitude)
+	}
 	samples := make([]f32, frames * options.channels)
 	defer delete(samples)
 	for sample, index in mono {
@@ -207,7 +268,20 @@ checkFile :: proc(options: Options) -> int {
 		},
 		options.minSeconds,
 	)
+	activeLevel := expectedRMSDB - toneanalysis.ACTIVE_BELOW_EXPECTED_DB
+	floorDB, floorBlocks := toneanalysis.noiseFloorDB(samples, options.rate, activeLevel)
 	free_all(context.temp_allocator)
+	floorFailure := ""
+	if maxFloor, has := options.maxFloor.?; has && floorDB > maxFloor {
+		floorFailure = "the noise floor between the bursts is above --max-floor"
+	}
+	if minFloor, has := options.minFloor.?; has && floorDB < minFloor {
+		floorFailure = "the noise floor between the bursts is below --min-floor"
+	}
+	if check.passed && len(floorFailure) > 0 {
+		check.passed = false
+		check.failure = floorFailure
+	}
 	verdict := check.passed ? "PASS" : "FAIL"
 	fmt.printfln(
 		"voice-check: %s %s: %.2f s recorded, %.2f s of tone from %.2f s (%d run(s), " +
@@ -231,6 +305,15 @@ checkFile :: proc(options: Options) -> int {
 		check.worstSNRDB,
 		options.minSNR,
 	)
+	if options.maxFloor != nil || options.minFloor != nil {
+		fmt.printfln(
+			"voice-check: noise floor %.2f dBFS over %d block(s) (max %v, min %v)",
+			floorDB,
+			floorBlocks,
+			options.maxFloor,
+			options.minFloor,
+		)
+	}
 	if !check.passed {
 		fmt.printfln("voice-check: %s (needs %.2f s of tone)", check.failure, options.minSeconds)
 		return EXIT_FAIL

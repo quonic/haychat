@@ -14,6 +14,15 @@ set -euo pipefail
 #                   tone in B's file, and the counters must show nothing lost on loopback:
 #                   A sent at least 95 % of the frames its time in voice calls for, B received
 #                   at least 95 % of what A sent, and FEC plus PLC stayed under 2 % of that.
+#   1b. noise suppression (#170): N sends tone bursts over white noise (voice-check
+#                   --write-noisy-tone: 440 Hz at 0.5 amplitude, 1.5 s on and 1 s off, over
+#                   -34 dBFS of noise) from a file with an open gate, once with `voice-noise off`
+#                   and once with `voice-noise on`, and M records each. voice-check must find the
+#                   tone in both recordings; the noise floor between the bursts must stay at or
+#                   above -50 dBFS without RNNoise (the noise really travels; Opus leaves about
+#                   -42 dBFS of it) and fall to -60 dBFS or below with it, and N's voice-stats
+#                   must report noise suppression off and then active, with RNNoise's time per
+#                   20 ms frame.
 #   2. SDL devices: the same through SDL's audio devices on its disk driver, which needs no
 #                   audio server: C captures a 440 Hz file through `voice-source device`
 #                   (SDL_AUDIO_DISK_INPUT_FILE) and D plays through `voice-sink device`
@@ -50,7 +59,9 @@ set -euo pipefail
 # HAYCHAT_VOICE_PROOF_SECONDS sets how long A talks while both are joined (default 4), and
 # HAYCHAT_VOICE_PROOF_FAULT_SECONDS how long E talks (default 8, so 5 % is about 20 frames).
 # HAYCHAT_VOICE_PROOF_FAULTS=0 skips the faults stage; HAYCHAT_TEST_VOICE_SEED changes its
-# loss pattern (default 1). HAYCHAT_VOICE_PROOF_ENCRYPTED=0 skips the encrypted stage, which
+# loss pattern (default 1). HAYCHAT_VOICE_PROOF_NOISE=0 skips the noise suppression stage, and
+# HAYCHAT_VOICE_PROOF_NOISE_SECONDS sets how long N talks in it (default 6, over two bursts).
+# HAYCHAT_VOICE_PROOF_ENCRYPTED=0 skips the encrypted stage, which
 # needs psql (through the HAYCHAT_DATABASE_* variables) to make EA an admin.
 #
 # Usage: dev/voice-proof.sh [HOST:PORT]   (default 127.0.0.1:12345)
@@ -63,6 +74,8 @@ talk_seconds=${HAYCHAT_VOICE_PROOF_SECONDS:-4}
 fault_talk_seconds=${HAYCHAT_VOICE_PROOF_FAULT_SECONDS:-8}
 run_faults=${HAYCHAT_VOICE_PROOF_FAULTS:-1}
 run_encrypted=${HAYCHAT_VOICE_PROOF_ENCRYPTED:-1}
+run_noise=${HAYCHAT_VOICE_PROOF_NOISE:-1}
+noise_talk_seconds=${HAYCHAT_VOICE_PROOF_NOISE_SECONDS:-6}
 fault_loss=0.05
 fault_jitter_ms=20
 fault_seed=${HAYCHAT_TEST_VOICE_SEED:-1}
@@ -286,6 +299,54 @@ expect_ok b voice-leave
 stop_client a
 stop_client b
 echo "==> [voice] file path passed"
+
+if [[ "$run_noise" == 1 ]]; then
+	echo "==> [voice] noise suppression: N sends tone bursts over noise, without and with RNNoise"
+	noisy_file="$work_dir/noisy.f32"
+	"$check_bin" --write-noisy-tone "$noisy_file" --freq "$tone_hz" \
+		--seconds "$((noise_talk_seconds + 30))" --amplitude "$tone_amplitude" >/dev/null
+	saved_talk_seconds=$talk_seconds
+	talk_seconds=$noise_talk_seconds
+	for noise_mode in off on; do
+		# Client names cannot repeat within a run (their pipes stay), so each mode has its own.
+		speaker="n$noise_mode"
+		listener="m$noise_mode"
+		start_client "$speaker" "voice-n-$noise_mode-$run_tag"
+		start_client "$listener" "voice-m-$noise_mode-$run_tag"
+		expect_connected "$speaker"
+		expect_connected "$listener"
+		user_n=$(connected_user_id "$speaker")
+		user_m=$(connected_user_id "$listener")
+		noise_sink="$work_dir/m-$noise_mode.f32"
+		expect_ok "$speaker" voice-source "file:$noisy_file"
+		expect_ok "$speaker" voice-gate open
+		expect_ok "$speaker" voice-noise "$noise_mode"
+		expect_ok "$listener" voice-sink "file:$noise_sink"
+		talk "$speaker" "$listener" "$user_n" "$user_m"
+		expect_ok "$listener" voice-flush
+		if [[ "$noise_mode" == on ]]; then
+			[[ "$speaker_stats" == *'"noiseSuppression":"active"'* ]] \
+				|| fail "[noise] N does not report RNNoise active: $speaker_stats"
+			floor_limit=(--max-floor -60)
+			echo "    [noise] RNNoise on N: $(json_number "$speaker_stats" denoisedFrames)" \
+				"frames, $(json_number "$speaker_stats" denoiseMeanUS) us per 20 ms frame" \
+				"(max $(json_number "$speaker_stats" denoiseMaxUS) us)"
+		else
+			[[ "$speaker_stats" == *'"noiseSuppression":"off"'* ]] \
+				|| fail "[noise] N does not report noise suppression off: $speaker_stats"
+			floor_limit=(--min-floor -50)
+		fi
+		"$check_bin" "$noise_sink" --freq "$tone_hz" --tolerance 5 --min-seconds 1 \
+			--amplitude "$tone_amplitude" "${floor_limit[@]}" \
+			|| fail "[noise] voice-check rejected M's recording with RNNoise $noise_mode"
+		check_counters "noise $noise_mode"
+		expect_ok "$listener" voice-leave
+		stop_client "$speaker"
+		stop_client "$listener"
+	done
+	talk_seconds=$saved_talk_seconds
+	echo "==> [voice] noise suppression passed"
+fi
 
 echo "==> [voice] SDL devices: C captures through the disk driver, D plays through it"
 mic_file="$work_dir/mic.f32"

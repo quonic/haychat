@@ -79,3 +79,41 @@ testParseOptionsLimitsACheckToTheScanRange :: proc(t: ^testing.T) {
 		err,
 	)
 }
+
+// #170: the noisy tone writer and the noise floor limits.
+@(test)
+testParseOptionsReadsTheNoiseOptions :: proc(t: ^testing.T) {
+	options, err := parseOptions(
+		{"--write-noisy-tone", "n.f32", "--freq", "440", "--seconds", "30", "--noise-db", "-40"},
+	)
+	testing.expectf(
+		t,
+		err == "" &&
+		options.writeTone &&
+		options.writeNoisyTone &&
+		options.noiseDB == -40 &&
+		options.burstSeconds == DEFAULT_BURST_SECONDS &&
+		options.gapSeconds == DEFAULT_GAP_SECONDS,
+		"%v: %q",
+		options,
+		err,
+	)
+	options, err = parseOptions(
+		{"b.f32", "--freq", "440", "--max-floor", "-60", "--min-floor", "-90"},
+	)
+	maxFloor, hasMax := options.maxFloor.?
+	minFloor, hasMin := options.minFloor.?
+	testing.expectf(
+		t,
+		err == "" && hasMax && maxFloor == -60 && hasMin && minFloor == -90,
+		"%v: %q",
+		options,
+		err,
+	)
+	plain, _ := parseOptions({"b.f32", "--freq", "440"})
+	testing.expect(t, plain.maxFloor == nil && plain.minFloor == nil, "expected no floor limits")
+	_, err = parseOptions({"b.f32", "--freq", "440", "--max-floor", "3"})
+	testing.expect(t, err != "", "expected a floor above 0 dBFS to be rejected")
+	_, err = parseOptions({"--write-noisy-tone", "n.f32", "--freq", "440", "--noise-db", "-40"})
+	testing.expect(t, err != "", "expected --write-noisy-tone without --seconds to be rejected")
+}

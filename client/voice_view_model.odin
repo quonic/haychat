@@ -9,6 +9,7 @@ import "../common"
 import "core:fmt"
 import "core:math"
 import "hotkey"
+import "rnnoise"
 
 // One user in a room's voice. The server keeps one voice session per user (Q2, protocol 13),
 // so each user is listed once.
@@ -392,6 +393,10 @@ VoiceSettingsView :: struct {
 	inputGainText:     string,
 	outputVolumeText:  string,
 	bitrateText:       string,
+	// #170: whether RNNoise loads, the toggle's text, and what it does or why it is missing.
+	noiseAvailable:    bool,
+	noiseText:         string,
+	noiseNote:         string,
 	meter:             VoiceMeterSource,
 	levelDB:           f32,
 	transmitting:      bool,
@@ -588,6 +593,12 @@ buildVoiceSettingsView :: proc(
 	view.inputGainText = voicePercentText(view.settings.inputGain, allocator)
 	view.outputVolumeText = voicePercentText(view.settings.outputVolume, allocator)
 	view.bitrateText = fmt.aprintf("%d kbit/s", view.settings.bitrate / 1000, allocator = allocator)
+	view.noiseAvailable, view.noiseText, view.noiseNote = voiceNoiseSuppressionView(
+		view.settings.noiseSuppression,
+		voiceNoiseSuppressionLoad(),
+		rnnoise.loadError(),
+		allocator,
+	)
 
 	view.levelDB = VOICE_LEVEL_FLOOR_DB
 	switch {
@@ -612,6 +623,46 @@ buildVoiceSettingsView :: proc(
 	view.testButtonText = view.testRunning ? VOICE_TEST_STOP_TEXT : VOICE_TEST_START_TEXT
 	view.testError = panel.testError
 	return
+}
+
+VOICE_NOISE_ON_TEXT :: "Noise suppression: on"
+VOICE_NOISE_OFF_TEXT :: "Noise suppression: off"
+VOICE_NOISE_UNAVAILABLE_TEXT :: "Noise suppression: unavailable"
+VOICE_NOISE_NOTE ::
+	"RNNoise removes steady background noise (fans, hum, traffic) from your microphone before " +
+	"it is sent, and only speech opens voice activity. Loud typing can still get through."
+when ODIN_OS == .Windows {
+	VOICE_NOISE_INSTALL_HINT :: "rnnoise.dll belongs next to haychat-client.exe."
+} else {
+	VOICE_NOISE_INSTALL_HINT :: "Install your distribution's rnnoise package to use it."
+}
+
+// Loads RNNoise for the settings screen (process-wide and idempotent: only the first call
+// touches the disk). Tests swap it to see the screen without the library.
+voiceNoiseSuppressionLoad: proc() -> bool = rnnoise.load
+
+// The noise suppression toggle: offered only when RNNoise loads, else a note with loadError.
+// Strings are allocated with allocator.
+voiceNoiseSuppressionView :: proc(
+	enabled, available: bool,
+	loadError: string,
+	allocator := context.temp_allocator,
+) -> (
+	offered: bool,
+	text: string,
+	note: string,
+) {
+	if !available {
+		reason := len(loadError) > 0 ? loadError : "RNNoise could not be loaded"
+		note = fmt.aprintf(
+			"Noise suppression is unavailable: %s. %s",
+			reason,
+			VOICE_NOISE_INSTALL_HINT,
+			allocator = allocator,
+		)
+		return false, VOICE_NOISE_UNAVAILABLE_TEXT, note
+	}
+	return true, enabled ? VOICE_NOISE_ON_TEXT : VOICE_NOISE_OFF_TEXT, VOICE_NOISE_NOTE
 }
 
 // The level meter's range in dBFS, which is also the threshold slider's range.

@@ -36,11 +36,17 @@ VoiceGate :: struct {
 }
 
 VoiceGateInput :: struct {
-	mode:        VoiceGateMode,
-	levelDB:     f32,
-	thresholdDB: f32,
-	muted:       bool,
-	pttHeld:     bool,
+	mode:                 VoiceGateMode,
+	levelDB:              f32,
+	thresholdDB:          f32,
+	muted:                bool,
+	pttHeld:              bool,
+	// Set while noise suppression runs (voice_capture.odin): RNNoise's speech probability for
+	// the frame. Voice activity then needs both the level and a probability of at least
+	// VOICE_VAD_SPEECH_PROBABILITY, so loud noise RNNoise did not fully remove (a fan, typing)
+	// does not open the gate. Without it the level alone decides, as before.
+	hasSpeechProbability: bool,
+	speechProbability:    f32,
 }
 
 VoiceGateResult :: struct {
@@ -80,6 +86,9 @@ VoiceGate_update :: proc(gate: ^VoiceGate, input: VoiceGateInput) -> VoiceGateRe
 	case .VoiceActivity:
 		gate.tailCount = 0
 		loud := input.levelDB >= input.thresholdDB
+		if input.hasSpeechProbability {
+			loud &&= input.speechProbability >= VOICE_VAD_SPEECH_PROBABILITY
+		}
 		if !gate.open {
 			gate.aboveCount = loud ? gate.aboveCount + 1 : 0
 			if gate.aboveCount >= VOICE_VAD_ATTACK_FRAMES {

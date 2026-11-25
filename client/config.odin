@@ -33,6 +33,9 @@ Config :: struct {
 	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
 	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
 	voice_bitrate:          Maybe(int) `json:"voice_bitrate,omitempty"`,
+	// RNNoise noise suppression on the microphone (#170, client/rnnoise); on when unset. It
+	// only works when the library loads; the voice settings say why when it does not.
+	voice_noise_suppression: Maybe(bool) `json:"voice_noise_suppression,omitempty"`,
 	// This profile's voice device ID (protocol 13, common/voice_device.odin): 32 lowercase hex
 	// characters, random, generated on first use and sent with every voice join so the server
 	// can tell this device's stale voice session from another device's. loadConfig replaces a
@@ -617,6 +620,7 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_input_gain = config.voice_input_gain,
 		voice_output_volume = config.voice_output_volume,
 		voice_bitrate = config.voice_bitrate,
+		voice_noise_suppression = config.voice_noise_suppression,
 		device_id = strings.clone(config.device_id),
 		encryption_private_key = strings.clone(config.encryption_private_key),
 		encryption_public_key = strings.clone(config.encryption_public_key),

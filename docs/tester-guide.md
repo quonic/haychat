@@ -181,6 +181,11 @@ one server, and keep chatting anywhere while you are.
 - **Headphones:** HayChat has **no echo cancellation** yet. With speakers, your microphone
   picks up the others and they hear themselves. Use headphones. On Linux, PipeWire can cancel
   echo and noise: see [Voice on Linux](voice-linux-audio.md).
+- **Noise suppression:** on by default (Settings → Voice). It removes fans, hum and other
+  steady background noise from your microphone, and in voice activity mode only speech opens
+  it. Loud typing can still get through. On Linux it needs the `rnnoise` package (Fedora,
+  Arch; `librnnoise0` on Debian testing); without it the setting says "unavailable" and voice
+  works as before.
 - **Settings → Voice:** choose the microphone and speakers (or "System default"), the mode,
   and the levels. **Test microphone** plays your microphone back to you through the same
   codec, so you can set the **voice activity threshold** against the live level meter (the
@@ -217,8 +222,9 @@ one server, and keep chatting anywhere while you are.
     threshold** to the left (lower) or raise the **input gain**.
 - **The start of your words is cut off:** your microphone is quiet. Raise the input gain or
   lower the threshold until normal speech is well past the line, or use push-to-talk.
-- **Others hear your room (a fan, typing) all the time:** the threshold is too low. Move it to
-  the right until the meter stays under the line while you are silent.
+- **Others hear your room (a fan, typing) all the time:** check that **Noise suppression** is
+  on in Settings → Voice. If they still do, the threshold is too low: move it to the right
+  until the meter stays under the line while you are silent.
 - **Choppy or robotic sound:** usually the network. Tell us your connection (Wi-Fi or cable,
   how far from the server) and whether it happens to everyone in the room or one person.
 - **Others hear an echo of themselves:** somebody is using speakers. HayChat has no echo

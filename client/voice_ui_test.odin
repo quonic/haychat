@@ -374,7 +374,8 @@ testVoiceSettingsBuildTheEngineTemplate :: proc(t: ^testing.T) {
 		template.outputVolume == 0.5 &&
 		template.explicitLevels &&
 		template.encoder.bitrate == 32000 &&
-		template.encoder.inbandFEC,
+		template.encoder.inbandFEC &&
+		template.noiseSuppression,
 		fmt.tprintf("expected the GUI template from the config, got %v", template),
 	)
 
@@ -386,11 +387,13 @@ testVoiceSettingsBuildTheEngineTemplate :: proc(t: ^testing.T) {
 	settings.outputDevice = "Headset"
 	settings.mode = .VoiceActivity
 	settings.bitrate = 48000
+	settings.noiseSuppression = false
 	State_applyVoiceSettings(&state, settings)
 	assert(
 		state.config.voice_output_device == "Headset" &&
 		state.config.voice_mode == "" &&
 		state.config.voice_bitrate == 48000 &&
+		state.config.voice_noise_suppression == false &&
 		state.config.voice_input_device == "USB Mic",
 		"expected the config to hold the new settings (voice activity stored as the default)",
 	)
@@ -401,7 +404,8 @@ testVoiceSettingsBuildTheEngineTemplate :: proc(t: ^testing.T) {
 		template.sink.kind == .Null &&
 		template.sink.deviceName == "Headset" &&
 		template.gateMode == .VoiceActivity &&
-		template.encoder.bitrate == 48000,
+		template.encoder.bitrate == 48000 &&
+		!template.noiseSuppression,
 		fmt.tprintf("expected the settings applied with the kinds kept, got %v", template),
 	)
 	_ = t
@@ -438,8 +442,14 @@ testVoiceSettingsReapplyToTheJoinedEngine :: proc(t: ^testing.T) {
 	settings.outputVolume = 0.25
 	settings.bitrate = 40000
 	settings.mode = .PushToTalk
+	settings.noiseSuppression = !sync.atomic_load(&engine.noiseSuppression)
 	State_applyVoiceSettings(&state, settings)
 	testing.expect(t, state.voice.engine == engine, "expected levels to keep the same engine")
+	testing.expect(
+		t,
+		sync.atomic_load(&engine.noiseSuppression) == settings.noiseSuppression,
+		"expected noise suppression switched on the running engine",
+	)
 	testing.expect(
 		t,
 		transmute(f32)sync.atomic_load(&engine.thresholdBits) == -30 &&
@@ -1148,4 +1158,28 @@ testVoiceSettingsViewOffersTheGlobalToggle :: proc(t: ^testing.T) {
 	state.voice.globalReport = testHotkeyReport(.X11, .Active)
 	view = buildVoiceSettingsView(&state, context.temp_allocator)
 	testing.expect(t, view.pttGlobalOffered && !view.pttCanConfigure, "X11: toggle only")
+}
+
+// #170: the noise suppression toggle is offered only when RNNoise loads; without it the note
+// says why and how to get it.
+@(test)
+testVoiceSettingsViewOffersNoiseSuppressionOnlyWithRNNoise :: proc(t: ^testing.T) {
+	offered, text, note := voiceNoiseSuppressionView(true, true, "")
+	assert(
+		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_NOTE,
+		fmt.tprintf("expected the toggle on, got %v %q %q", offered, text, note),
+	)
+	offered, text, _ = voiceNoiseSuppressionView(false, true, "")
+	assert(offered && text == VOICE_NOISE_OFF_TEXT, fmt.tprintf("expected off, got %q", text))
+	reason := "RNNoise not found (librnnoise.so.0: cannot open shared object file)"
+	offered, text, note = voiceNoiseSuppressionView(true, false, reason)
+	assert(
+		!offered &&
+		text == VOICE_NOISE_UNAVAILABLE_TEXT &&
+		strings.contains(note, reason) &&
+		strings.contains(note, VOICE_NOISE_INSTALL_HINT),
+		fmt.tprintf("expected the reason and the hint, got %v %q %q", offered, text, note),
+	)
+	free_all(context.temp_allocator)
+	_ = t
 }

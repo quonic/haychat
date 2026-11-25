@@ -43,6 +43,7 @@ to the right place.
 | `voice_input_gain` | Linear microphone gain, 0 to 4. Default 1 |
 | `voice_output_volume` | Linear output volume, 0 to 2. Default 1 |
 | `voice_bitrate` | Opus bitrate in bit/s, 12000 to 64000. Default 24000 |
+| `voice_noise_suppression` | `true` (default: RNNoise removes background noise from the microphone, and in voice activity mode only speech opens it; see [Noise suppression](user-guide.md#noise-suppression)) or `false`. It takes effect only when RNNoise loads (`librnnoise.so.0` on Linux, `rnnoise.dll` next to the executable on Windows); otherwise voice works without it |
 
 Settings → Voice writes the voice keys only when they differ from the default, so a later change
 of a default reaches everyone who did not choose otherwise. When the config is read,

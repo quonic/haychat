@@ -272,3 +272,94 @@ writeTone :: proc(samples: []f32, sampleRate, hz, amplitude: f64) {
 		sample = f32(amplitude * math.sin(step * f64(index)))
 	}
 }
+
+// ── Noise suppression checks (#170) ───────────────────────────────
+
+// The share of 20 ms blocks, from the quietest up, whose level noiseFloorDB reports: within a
+// recording of tone bursts and gaps of about equal length, the 25th percentile lies well inside
+// the gaps, away from the edges of the bursts.
+NOISE_FLOOR_PERCENTILE :: 0.25
+
+// NoisyTone is the fixture of the noise suppression checks: tone bursts of burstSeconds with
+// gaps of gapSeconds between them (starting with a burst), all over white noise at noiseRMSDB
+// dBFS RMS. The noise is uniform from a fixed seed, so a fixture is the same on every run and
+// platform.
+NoisyTone :: struct {
+	hz:           f64,
+	amplitude:    f64,
+	noiseRMSDB:   f64,
+	burstSeconds: f64,
+	gapSeconds:   f64,
+	seed:         u64,
+}
+
+// splitmix64: tiny, seedable, the same on every platform.
+@(private)
+nextRandom :: proc(state: ^u64) -> u64 {
+	state^ += 0x9E37_79B9_7F4A_7C15
+	z := state^
+	z = (z ~ (z >> 30)) * 0xBF58_476D_1CE4_E5B9
+	z = (z ~ (z >> 27)) * 0x94D0_49BB_1331_11EB
+	return z ~ (z >> 31)
+}
+
+// noisyToneBurstAt says whether sample index lies in a burst of fixture.
+noisyToneBurstAt :: proc(fixture: NoisyTone, sampleRate: f64, index: int) -> bool {
+	period := fixture.burstSeconds + fixture.gapSeconds
+	if period <= 0 {
+		return true
+	}
+	return math.mod(f64(index) / sampleRate, period) < fixture.burstSeconds
+}
+
+// writeNoisyTone fills samples with fixture.
+writeNoisyTone :: proc(samples: []f32, sampleRate: f64, fixture: NoisyTone) {
+	step := 2 * math.PI * fixture.hz / sampleRate
+	// Uniform noise in ±a has an RMS of a / √3.
+	noisePeak := math.pow(10, fixture.noiseRMSDB / 20) * math.sqrt(f64(3))
+	state := fixture.seed
+	for &sample, index in samples {
+		uniform := f64(nextRandom(&state) >> 11) / f64(u64(1) << 53)
+		value := (uniform * 2 - 1) * noisePeak
+		if noisyToneBurstAt(fixture, sampleRate, index) {
+			value += fixture.amplitude * math.sin(step * f64(index))
+		}
+		sample = f32(value)
+	}
+}
+
+// noiseFloorDB is the level of the quiet part of a recording of tone bursts: the
+// NOISE_FLOOR_PERCENTILE of its 20 ms block levels between the first and the last block at
+// activeLevelDB or above, so silence before the speaker joined or after it left does not count.
+// blocks is how many blocks that span has (0 when no block is that loud, and floorDB is then
+// LEVEL_FLOOR_DB). Allocates only temporary memory.
+noiseFloorDB :: proc(
+	samples: []f32,
+	sampleRate: f64,
+	activeLevelDB: f64,
+) -> (
+	floorDB: f64,
+	blocks: int,
+) {
+	block := max(int(sampleRate * BLOCK_SECONDS), 1)
+	count := len(samples) / block
+	first, last := -1, -1
+	for index in 0 ..< count {
+		if rmsDB(samples[index * block:][:block]) >= activeLevelDB {
+			if first < 0 {
+				first = index
+			}
+			last = index
+		}
+	}
+	if first < 0 {
+		return LEVEL_FLOOR_DB, 0
+	}
+	blocks = last - first + 1
+	levels := make([]f64, blocks, context.temp_allocator)
+	for &level, offset in levels {
+		level = rmsDB(samples[(first + offset) * block:][:block])
+	}
+	slice.sort(levels)
+	return levels[int(f64(blocks - 1) * NOISE_FLOOR_PERCENTILE)], blocks
+}

@@ -17,6 +17,7 @@ import "core:os"
 import "core:strconv"
 import "core:sync"
 import "core:time"
+import "rnnoise"
 
 // How long voice-flush waits for the voice thread to serve the flush.
 HEADLESS_VOICE_FLUSH_TIMEOUT :: 2 * time.Second
@@ -25,6 +26,12 @@ HEADLESS_VOICE_STATUS_NAMES := [VoiceSessionStatus]string {
 	.Idle        = "idle",
 	.Joining     = "joining",
 	.Joined      = "joined",
+	.Unavailable = "unavailable",
+}
+
+HEADLESS_NOISE_SUPPRESSION_NAMES := [VoiceNoiseSuppressionStatus]string {
+	.Off         = "off",
+	.Active      = "active",
 	.Unavailable = "unavailable",
 }
 
@@ -355,6 +362,15 @@ HeadlessVoiceStatsJSON :: struct {
 	inputLevelDB:      f32,
 	transmitting:      bool,
 	frameSequence:     u32,
+	// #170: noise suppression ("off", "active" or "unavailable", from the running engine or
+	// else the template and the library), why RNNoise did not load, the last denoised frame's
+	// speech probability, and RNNoise's time per 20 ms frame in microseconds.
+	noiseSuppression:  string,
+	noiseError:        string,
+	speechProbability: f32,
+	denoisedFrames:    u64,
+	denoiseMeanUS:     f64,
+	denoiseMaxUS:      f64,
 	engine:            VoiceEngineStats,
 	jitter:            JitterStats,
 	speakers:          []HeadlessVoiceSpeakerJSON,
@@ -481,9 +497,25 @@ headlessVoiceStatsJSON :: proc(
 		joinedMS = joinedMS,
 		network  = network,
 	}
+	status := VoiceNoiseSuppressionStatus.Off
+	if snapshot != nil && snapshot.running {
+		status = snapshot.noiseSuppression
+	} else if voice.engineTemplate.noiseSuppression {
+		status = rnnoise.isLoaded() ? .Active : .Unavailable
+	}
+	result.noiseSuppression = HEADLESS_NOISE_SUPPRESSION_NAMES[status]
+	if status == .Unavailable {
+		result.noiseError = rnnoise.loadError()
+	}
 	if snapshot == nil {
 		return result
 	}
+	result.speechProbability = snapshot.speechProbability
+	result.denoisedFrames = snapshot.stats.framesDenoised
+	if snapshot.stats.framesDenoised > 0 {
+		result.denoiseMeanUS = snapshot.stats.denoiseTotalUS / f64(snapshot.stats.framesDenoised)
+	}
+	result.denoiseMaxUS = snapshot.stats.denoiseMaxUS
 	jitter := snapshot.jitter
 	result.running = snapshot.running
 	result.sent = snapshot.stats.framesSent
@@ -667,6 +699,30 @@ headlessCommandVoiceSink :: proc(harness: ^HeadlessHarness, command: ^HeadlessPa
 	template.sink = sink
 	State_setVoiceEngineTemplate(state, template)
 	headlessVoiceWriteSetting(harness, command, command.args[0], state.voice.engine != nil)
+}
+
+// voice-noise on|off: RNNoise noise suppression for the next join and the running engine (#170).
+// The harness starts with it off, so tones stay exactly as sent unless a script asks; the GUI
+// follows the voice_noise_suppression setting (on by default). The reply's value is the
+// switch; voice-stats says whether RNNoise runs ("active") or could not be loaded.
+headlessCommandVoiceNoise :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	enabled, ok := headlessParseSwitch(command.args[0])
+	if !ok {
+		headlessVoiceUsage(harness, command)
+		return
+	}
+	state := &harness.state
+	if enabled {
+		// Loaded here, so voice-stats can report it before the next join.
+		_ = rnnoise.load()
+	}
+	template := state.voice.engineTemplate
+	template.noiseSuppression = enabled
+	State_setVoiceEngineTemplate(state, template)
+	if engine := state.voice.engine; engine != nil {
+		VoiceEngine_setNoiseSuppression(engine, enabled)
+	}
+	headlessVoiceWriteSetting(harness, command, command.args[0])
 }
 
 // voice-gate vad [THRESHOLD_DB] | ptt | open. open is push-to-talk with the key held for the

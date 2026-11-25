@@ -147,6 +147,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `voice-ptt down\|up` | Presses or releases push-to-talk (local only). |
 | `voice-volume USER_ID PERCENT` | How loud this client plays that user on the selected server, 0 to 200 (percent), through the same action as the Server settings slider: stored in the server's config entry for this run (the harness does not write `config.json` back) and applied at once to a running engine, otherwise from the next join. Local only: the server and the user are not told. The result is the user's setting: `serverID`, `userID`, `volumePercent`, `muted`, and what the engine applies (`engineRunning`, `engineVolumePercent`, `engineMuted`; 100 and false without an engine on that server). 100 with mute off removes the entry. |
 | `voice-mute-user USER_ID on\|off` | Mute for me: this client stops playing that user's voice (frames are dropped before decoding and counted in `engine.inboundLocallyMuted`) and keeps its volume. Same result as `voice-volume`. |
+| `voice-noise on\|off` | RNNoise noise suppression on the microphone (#170). Off in the harness until a script turns it on (the GUI follows `voice_noise_suppression`, on by default). Applies at once and to the next join; `voice-stats` says whether RNNoise runs. See [Noise Suppression](#noise-suppression). |
 | `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
 | `voice-flush` | With a file sink: replies once every frame played so far is in the file (`path`, `bytes`, `seconds`, `running`), so a script can analyse it without leaving. Without a running engine it reports the file as the engine closed it. |
 | `voice-key-rotate SECONDS` | Encrypted voice (protocol 21): this process makes a new voice key every `SECONDS` (1 to 1800) instead of every 30 minutes, so a proof can see a timed rotation (`voice_key` `sent` with `"rotation":"timer"`). The GUI has no way to change it. See [Encrypted Voice](#encrypted-voice). |
@@ -263,7 +264,8 @@ the source and sink it opened with (the result says `"pendingRejoin":true`), so 
 before joining, or `voice-leave` and `voice-join` again. The gate mode, mute, deafen and
 push-to-talk also reach a running engine at once.
 
-A harness client starts with `silence`, `null` and voice activity, so voice never opens an
+A harness client starts with `silence`, `null`, voice activity and noise suppression off, so
+tones reach the encoder exactly as written and voice never opens an
 audio device, and SDL audio is never initialised, unless a script asks for `device`. Under
 `SDL_AUDIO_DRIVER=disk`, `device` reads `SDL_AUDIO_DISK_INPUT_FILE` and writes
 `SDL_AUDIO_DISK_OUTPUT_FILE` instead of real hardware.
@@ -371,13 +373,25 @@ members of the room's verified member log and sends it before any frame under it
 | `maxGapRun` | The longest run of frames inside a talk spurt that were heard as neither decoded nor rebuilt by FEC (concealed, or silent after the PLC limit; pre-roll does not count). A maximum over every speaker, not a sum |
 | `playoutDelayMS`, `playoutDelayMaxMS` | The mean and largest time a received frame waited between arriving and being decoded for playout: the jitter buffer's share of the latency. A device sink adds SDL's stream queue (up to 40 ms) on top |
 | `injectedLoss` | Frames the test-only fault hook dropped ([Loss and Jitter Injection](#loss-and-jitter-injection)); always 0 in a normal build |
-| `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level, whether the gate sent it, and the capture sequence |
+| `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level (after noise suppression), whether the gate sent it, and the capture sequence |
+| `noiseSuppression`, `noiseError` | `"off"`, `"active"` (RNNoise processes every captured frame) or `"unavailable"` (asked for, but RNNoise did not load: `noiseError` says why). From the running engine, or else from the template and the library |
+| `speechProbability`, `denoisedFrames`, `denoiseMeanUS`, `denoiseMaxUS` | RNNoise's speech probability for the last captured frame (0 when off), the frames it processed, and its mean and largest time per 20 ms frame in microseconds (`engine.framesDenoised`, `engine.denoiseTotalUS`, `engine.denoiseMaxUS`) |
 | `engine` | `VoiceEngineStats` (`client/voice_engine.odin`): capture, gate, encode, inbound, decode and sink counters |
 | `jitter` | `JitterStats` (`client/voice_jitter.odin`) summed over every speaker |
 | `speakers` | Each current remote speaker: `userID`, `volumePercent` (the per-user volume the engine applies), `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
 | `network` | The transport's `ClientVoiceNetworkStats` for the voice server, read under the network worker's lock: datagrams received and delivered, frames sent, and every drop by reason |
 | `userVoice` | Every per-user volume and mute stored for that server (`voice-volume`, `voice-mute-user`, Server settings), each as in the `voice-volume` result: `userID`, `volumePercent`, `muted`, `engineRunning`, `engineVolumePercent`, `engineMuted` |
 | `e2ee` | Encrypted voice (protocol 21): `encrypted`, `sendGeneration` (-1 for none), `framesSealed` and `framesOpened`, `sendNoKey` (encoded frames held back because no key had gone out yet), `sequenceRefused`, the inbound drops `dropNoKey`, `dropUnknownKeyID` (a key ID neither held key matches, typically a few frames right after a rotation), `dropBadTag`, `dropNotSealed` and `dropBadDuration`, then `keysSent`, `keysAccepted`, `keysRefused` (by reason, only the reasons that happened), `requestsSent` and `requestsReceived` |
+
+### Noise Suppression
+
+`voice-noise on` runs every captured frame through RNNoise (`client/voice_capture.odin`)
+between the input gain and the level meter, and in `voice-gate vad` the gate then needs both
+the level and RNNoise's speech probability (at least 0.5). A steady tone counts as speech and
+passes almost unchanged (about −0.3 dB); white noise between tone bursts is removed. To test
+it, send `voice-check --write-noisy-tone` (below) as a file source. Without RNNoise
+(`librnnoise.so.0`, or `rnnoise.dll` next to the executable) the command still succeeds, frames
+pass through, and `voice-stats` reports `"noiseSuppression":"unavailable"` with the reason.
 
 A speaker's frames stop without an end-of-spurt flag when it leaves, so the listener conceals
 a few (`plc`, then `silent`) before its spurt times out. Take stats while the speaker still
@@ -405,6 +419,15 @@ sample rate. `--freq` must lie inside the analyser's scan range, 50 to 4050 Hz; 
 is a usage error (exit 2), since the check could only fail. `--write-tone` takes any frequency
 below half the rate.
 
+For noise suppression (#170), `--write-noisy-tone FILE --freq HZ --seconds S` writes tone
+bursts over white noise (mono): `--burst` seconds of tone (default 1.5), then `--gap` seconds of
+noise alone (default 1), the noise at `--noise-db` dBFS RMS (default −34, above the default gate
+threshold) from a fixed seed. `--max-floor DB` and `--min-floor DB` then check a recording's
+noise floor, the 25th percentile of its 20 ms block levels between the first and the last block
+within 20 dB of the expected tone level (silence before the join and after the leave does not
+count), which lies in the gaps: the check fails when it is above `--max-floor` or below
+`--min-floor`, and prints the floor.
+
 `./dev.sh live --voice` runs `dev/voice-proof.sh` against a throwaway server (`--all`, and so
 `./dev.sh ci` and Forgejo CI, run it too):
 
@@ -416,6 +439,14 @@ below half the rate.
    itself, then `voice-flush`. `voice-check` must pass on B's file with at least 3 s of tone,
    A must have sent at least 95 % of `joinedMS / 20` frames, B must have received at least
    95 % of what A sent, and FEC plus PLC must stay under 2 % of what B received.
+   Then noise suppression (#170): N sends a `voice-check --write-noisy-tone` file (440 Hz at
+   0.5, 1.5 s on and 1 s off, over −34 dBFS of noise) with `voice-gate open` to M for
+   `HAYCHAT_VOICE_PROOF_NOISE_SECONDS` (default 6), once with `voice-noise off` and once with
+   `voice-noise on`. `voice-check` must find at least 1 s of tone in both recordings, with a
+   noise floor of at least −50 dBFS without RNNoise (`--min-floor`; Opus leaves about −42 dBFS
+   of the −34 dBFS noise) and at most −60 dBFS with it (`--max-floor`); N's `voice-stats` must say `off` and then `active`, and the script prints
+   RNNoise's time per frame. The counters are checked as in the file path.
+   `HAYCHAT_VOICE_PROOF_NOISE=0` skips it.
 2. SDL devices: the same with C on `voice-source device` and D on `voice-sink device`, both
    under `SDL_AUDIO_DRIVER=disk`. C's input file is a tone from `voice-check --write-tone`;
    D's disk output (stereo) must pass `voice-check --channels 2`, and D must receive 95 % of
@@ -1429,6 +1460,7 @@ odin build client -out:haychat-client
 | `--loss PCT` | Drop this share of loopback frames (0 to 90) |
 | `--threshold DB` | Voice activity threshold in dBFS (default -45) |
 | `--always-on` | Send every frame (push-to-talk held) instead of gating on voice activity |
+| `--noise-suppression` | Run the microphone through RNNoise first (#170), as the GUI does by default; without the library it warns and runs without |
 
 Device names are SDL's, which on PipeWire are the device descriptions (`pactl list sinks`
 shows them as `Description`); an unknown name falls back to the default device with a
@@ -1436,7 +1468,7 @@ warning. The input level and whether the gate is sending print every second on s
 the engine counters print as one JSON line on stdout when it ends:
 
 ```json
-{"result":"voice-loopback","captured":200,"sent":199,"gated":1,"captureDropped":0,"loopbackDropped":0,"decoded":198,"fec":0,"plc":0,"late":0,"decodeErrors":0}
+{"result":"voice-loopback","captured":200,"sent":199,"gated":1,"captureDropped":0,"loopbackDropped":0,"decoded":198,"fec":0,"plc":0,"late":0,"decodeErrors":0,"noiseSuppression":"off","denoised":0,"denoiseMeanUS":0.0,"denoiseMaxUS":0.0}
 ```
 
 Raw files are what SDL's `disk` driver reads and writes, so the device path also runs with no

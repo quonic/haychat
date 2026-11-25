@@ -17,6 +17,16 @@ The client needs SDL3, SDL3_ttf, ENet and libopus from your distribution:
 libopus (libopus.so.0) is the voice codec. The client loads it only when voice is used, so
 text chat works without it; voice then reports that libopus was not found.
 
+Optional: RNNoise (librnnoise.so.0, version 0.2) removes background noise from your
+microphone (Settings -> Voice -> Noise suppression). Without it voice works, and the setting
+says that noise suppression is unavailable.
+
+  Fedora 44:                      sudo dnf install rnnoise
+  Debian testing / unstable:      sudo apt install librnnoise0
+  Arch Linux:                     sudo pacman -S rnnoise
+
+Debian 13 and Ubuntu do not package RNNoise 0.2 yet; voice works there without it.
+
 Push-to-talk in other windows loads libX11 (on X11) or libdbus-1 (on Wayland, for the
 desktop's GlobalShortcuts portal) when you first use it in voice; every desktop has them.
 
@@ -53,6 +63,6 @@ https://git.spyingwind.com/quonic/haychat (this build is tag @VERSION@).
 THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, their
 licences, and their copyright lines; the licence texts are in licenses/. They cover the
 Odin core library, the ENet library, and the embedded Inter and Twemoji fonts. SDL3,
-SDL3_ttf, ENet and libopus themselves come from your distribution, with its licences.
+SDL3_ttf, ENet, libopus and RNNoise themselves come from your distribution, with its licences.
 
 Emoji: Twemoji by Twitter, Inc. and contributors — CC-BY 4.0 — https://twemoji.twitter.com

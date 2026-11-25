@@ -324,7 +324,8 @@ it is refused with "voice is active on another device", and that device stays in
 
 Voice needs libopus (see [Client Dependencies](development.md#client-dependencies)); without it,
 or without a working audio device, voice reports why and chat keeps working. There is no echo
-cancellation or noise suppression: use headphones.
+cancellation: use headphones. Background noise is removed by RNNoise when it is available (see
+[Noise suppression](#noise-suppression)).
 
 - **Room header:** **Join voice**, or **Leave voice** while in (or joining, or re-joining) that
   room's voice. A text-only room has no **Join voice**.
@@ -374,6 +375,7 @@ unencrypted room is not: the server can hear it as it relays it.
 - Input and output device lists ("System default" first; a chosen device that is unplugged stays
   listed as "(not connected)", and the default plays meanwhile).
 - Voice activity or push-to-talk, and the push-to-talk key (click it, press a key; Esc cancels).
+- **Noise suppression** on or off (see below).
 - The voice activity threshold over a live input level meter, input gain, output volume, and the
   Opus bitrate.
 - **Test microphone** runs a loopback (microphone → Opus → your own speakers) while the section
@@ -384,6 +386,25 @@ new device by reopening the audio devices while the session stays joined (listen
 what follows). Devices are listed only while the section is open, and refreshed on hotplug; a
 session on a named device that is unplugged reopens on the system default, and returns to the
 named device when it is plugged back in.
+
+### Noise suppression
+
+**Noise suppression** (Settings → Voice, `voice_noise_suppression`, on by default) runs your
+microphone through RNNoise 0.2 before it is encoded: steady background noise such as fans, hum
+and traffic is removed, mostly between words. In voice activity mode RNNoise also says whether
+a frame is speech, and only speech that is louder than the threshold opens the microphone, so
+loud noise that is not speech does not. The level meter and **Test microphone** show the
+signal after noise suppression. It adds 10 ms of delay and costs about 0.6 % of one CPU core.
+It changes nothing in what is sent over the network: it works the same in encrypted and
+unencrypted rooms, and listeners need nothing.
+
+- RNNoise 0.2 removes loud typing less well than older versions did; key clicks can still get
+  through.
+- RNNoise is loaded when it is needed: `librnnoise.so.0` from the distribution on Linux (the
+  `rnnoise` package on Fedora and Arch, `librnnoise0` on Debian testing), `rnnoise.dll` next to
+  `haychat-client.exe` on Windows (the release zip has it). Without it voice works, the toggle
+  reads **Noise suppression: unavailable**, and the note under it says why; the threshold alone
+  then decides when you are speaking.
 
 ### Push-to-talk
 
