@@ -7,6 +7,7 @@
 | [tester-guide.md](tester-guide.md) | Testers: getting the client, connecting, what to try, and reporting problems |
 | [user-guide.md](user-guide.md) | Every screen and control of the client: settings, server settings, connection status, context menus, files (attaching, saving, encryption), voice, and administration (removing files, storage) |
 | [client-configuration.md](client-configuration.md) | The client's `config.json`: where it lives and every key |
+| [voice-linux-audio.md](voice-linux-audio.md) | Linux: echo cancellation and noise suppression for voice through PipeWire (WebRTC echo canceller, WirePlumber smart filters, RNNoise, DeepFilterNet, EasyEffects) |
 
 ## Running a Server
 

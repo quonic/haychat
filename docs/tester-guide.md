@@ -179,8 +179,8 @@ one server, and keep chatting anywhere while you are.
   **Deafen** stops playing the others at once (and mutes you). The others see "muted" or
   "deafened" next to your name. **Leave** (or **Leave voice** in the room's header) leaves.
 - **Headphones:** HayChat has **no echo cancellation** yet. With speakers, your microphone
-  picks up the others and they hear themselves. Use headphones. On Linux,
-  `pactl load-module module-echo-cancel` can help if you must use speakers.
+  picks up the others and they hear themselves. Use headphones. On Linux, PipeWire can cancel
+  echo and noise: see [Voice on Linux](voice-linux-audio.md).
 - **Settings → Voice:** choose the microphone and speakers (or "System default"), the mode,
   and the levels. **Test microphone** plays your microphone back to you through the same
   codec, so you can set the **voice activity threshold** against the live level meter (the
@@ -222,7 +222,8 @@ one server, and keep chatting anywhere while you are.
 - **Choppy or robotic sound:** usually the network. Tell us your connection (Wi-Fi or cable,
   how far from the server) and whether it happens to everyone in the room or one person.
 - **Others hear an echo of themselves:** somebody is using speakers. HayChat has no echo
-  cancellation; that person should use headphones.
+  cancellation; that person should use headphones or, on Linux,
+  [PipeWire's echo cancellation](voice-linux-audio.md#echo-cancellation).
 
 When you report a voice problem, include a screenshot of **Settings → Voice** (devices, mode,
 threshold and the meter while you talk), the text of the voice bar, and the client log. If you

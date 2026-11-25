@@ -338,6 +338,8 @@ cancellation or noise suppression: use headphones.
   "Microphone not available: …", or the server's refusal) with **Dismiss** when voice failed.
 - **Per-user volume and mute:** Server settings → Voice, or a voice participant's right-click
   menu. Only you hear the change.
+- **Echo and noise on Linux:** PipeWire can cancel echo and suppress background noise before
+  HayChat hears your microphone; see [Voice on Linux](voice-linux-audio.md).
 
 ### Encrypted voice
 

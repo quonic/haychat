@@ -55,6 +55,9 @@ The harness and GUI automation are documented in [testing-harness.md](testing-ha
 on real audio devices is a manual check outside CI: `dev/voice-manual-test.sh [HOST:PORT]` on a
 Linux host with PipeWire, using virtual devices only; see
 [voice-manual-test.md](voice-manual-test.md), which also has the Windows voice checklist.
+`dev/pipewire-docs-check.sh` (manual too, needs only podman) loads every PipeWire configuration
+block in [voice-linux-audio.md](voice-linux-audio.md) into a private PipeWire in a container and
+checks the devices and links; run it after changing that page.
 
 While editing, component-scoped tests are faster. Inside `./dev.sh shell`, or on a host with
 `odin`: `odin test common`, `odin test client`, or `odin test server

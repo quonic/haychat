@@ -65,6 +65,7 @@ Windows and Linux are supported; macOS is planned.
 | [Deployment](deploy/README.md) | Server image, quadlet units, setup, backups, upgrades, releases |
 | [Server configuration](docs/server-configuration.md) | Environment variables, migrations, status log |
 | [Rooms and accounts](docs/rooms-and-accounts.md) | Server rules for accounts, sign-up, roles, rooms, admins, direct messages, unread counts |
+| [Voice on Linux](docs/voice-linux-audio.md) | Echo cancellation and noise suppression through PipeWire |
 | [Development](docs/development.md) | `./dev.sh`, checks, the dev pod, dependencies, CI |
 | [Protocol](docs/protocol.md) | Transport encryption and protocol versions |
 
