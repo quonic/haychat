@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:math"
 import "hotkey"
 import "rnnoise"
+import "webrtcapm"
 
 // One user in a room's voice. The server keeps one voice session per user (Q2, protocol 13),
 // so each user is listed once.
@@ -393,10 +394,17 @@ VoiceSettingsView :: struct {
 	inputGainText:     string,
 	outputVolumeText:  string,
 	bitrateText:       string,
-	// #170: whether RNNoise loads, the toggle's text, and what it does or why it is missing.
+	// #170: whether a suppressor loads, the toggle's text, and what it does or why it is
+	// missing.
 	noiseAvailable:    bool,
 	noiseText:         string,
 	noiseNote:         string,
+	// #171: the same for echo cancellation, and the notice at the top of the section while it
+	// does not run ("" while it does).
+	echoAvailable:     bool,
+	echoText:          string,
+	echoNote:          string,
+	echoNotice:        string,
 	meter:             VoiceMeterSource,
 	levelDB:           f32,
 	transmitting:      bool,
@@ -407,9 +415,13 @@ VoiceSettingsView :: struct {
 	testError:         string,
 }
 
-VOICE_ECHO_NOTICE ::
-	"HayChat has no echo cancellation: use headphones, or others hear themselves through " +
+// The notice at the top of Settings → Voice while echo cancellation does not run.
+VOICE_ECHO_UNAVAILABLE_NOTICE ::
+	"Echo cancellation is unavailable here: use headphones, or others hear themselves through " +
 	"your microphone."
+VOICE_ECHO_OFF_NOTICE ::
+	"Echo cancellation is off: use headphones, or others hear themselves through your " +
+	"microphone."
 VOICE_PTT_FOCUS_NOTICE :: "Push-to-talk works only while the HayChat window has focus."
 VOICE_PTT_TYPING_ADDENDUM ::
 	" This key types, so it does nothing while you are typing in a text field; a key such as " +
@@ -593,12 +605,22 @@ buildVoiceSettingsView :: proc(
 	view.inputGainText = voicePercentText(view.settings.inputGain, allocator)
 	view.outputVolumeText = voicePercentText(view.settings.outputVolume, allocator)
 	view.bitrateText = fmt.aprintf("%d kbit/s", view.settings.bitrate / 1000, allocator = allocator)
+	echoLoaded := voiceEchoCancellationLoad()
 	view.noiseAvailable, view.noiseText, view.noiseNote = voiceNoiseSuppressionView(
 		view.settings.noiseSuppression,
 		voiceNoiseSuppressionLoad(),
+		echoLoaded,
+		view.settings.echoCancellation,
 		rnnoise.loadError(),
 		allocator,
 	)
+	view.echoAvailable, view.echoText, view.echoNote, view.echoNotice =
+		voiceEchoCancellationView(
+			view.settings.echoCancellation,
+			echoLoaded,
+			webrtcapm.loadError(),
+			allocator,
+		)
 
 	view.levelDB = VOICE_LEVEL_FLOOR_DB
 	switch {
@@ -631,20 +653,43 @@ VOICE_NOISE_UNAVAILABLE_TEXT :: "Noise suppression: unavailable"
 VOICE_NOISE_NOTE ::
 	"RNNoise removes steady background noise (fans, hum, traffic) from your microphone before " +
 	"it is sent, and only speech opens voice activity. Loud typing can still get through."
+// #171: while echo cancellation runs (or without RNNoise), WebRTC's suppressor does the work.
+VOICE_NOISE_WEBRTC_NOTE ::
+	"With echo cancellation on, WebRTC's noise suppression removes steady background noise " +
+	"(fans, hum, traffic) from your microphone together with the echo canceller."
+VOICE_NOISE_WEBRTC_ONLY_NOTE ::
+	"WebRTC's noise suppression removes steady background noise (fans, hum, traffic) from " +
+	"your microphone before it is sent."
+VOICE_NOISE_WEBRTC_VAD_NOTE :: VOICE_NOISE_WEBRTC_NOTE + " Only speech opens voice activity."
 when ODIN_OS == .Windows {
 	VOICE_NOISE_INSTALL_HINT :: "rnnoise.dll belongs next to haychat-client.exe."
+	VOICE_ECHO_INSTALL_HINT :: "haychat-webrtc-apm.dll belongs next to haychat-client.exe."
 } else {
 	VOICE_NOISE_INSTALL_HINT :: "Install your distribution's rnnoise package to use it."
+	VOICE_ECHO_INSTALL_HINT ::
+		"Install your distribution's webrtc-audio-processing package (version 2) and keep " +
+		"libhaychat-webrtc-apm.so next to haychat-client to use it."
 }
+
+VOICE_ECHO_ON_TEXT :: "Echo cancellation: on"
+VOICE_ECHO_OFF_TEXT :: "Echo cancellation: off"
+VOICE_ECHO_UNAVAILABLE_TEXT :: "Echo cancellation: unavailable"
+VOICE_ECHO_NOTE ::
+	"Removes the voices HayChat plays from your microphone, so others do not hear themselves " +
+	"through your speakers. With headphones it is not needed."
 
 // Loads RNNoise for the settings screen (process-wide and idempotent: only the first call
 // touches the disk). Tests swap it to see the screen without the library.
 voiceNoiseSuppressionLoad: proc() -> bool = rnnoise.load
+// The same for WebRTC audio processing (#171).
+voiceEchoCancellationLoad: proc() -> bool = webrtcapm.load
 
-// The noise suppression toggle: offered only when RNNoise loads, else a note with loadError.
-// Strings are allocated with allocator.
+// The noise suppression toggle: offered when WebRTC audio processing or RNNoise loads, else a
+// note with RNNoise's loadError. The note names the suppressor voiceNoiseBackendFor picks with
+// echoCancellation (the setting): WebRTC's, with RNNoise's speech probability for the gate,
+// while echo cancellation runs, else RNNoise. Strings are allocated with allocator.
 voiceNoiseSuppressionView :: proc(
-	enabled, available: bool,
+	enabled, rnnoiseAvailable, webrtcAvailable, echoCancellation: bool,
 	loadError: string,
 	allocator := context.temp_allocator,
 ) -> (
@@ -652,7 +697,7 @@ voiceNoiseSuppressionView :: proc(
 	text: string,
 	note: string,
 ) {
-	if !available {
+	if !rnnoiseAvailable && !webrtcAvailable {
 		reason := len(loadError) > 0 ? loadError : "RNNoise could not be loaded"
 		note = fmt.aprintf(
 			"Noise suppression is unavailable: %s. %s",
@@ -662,7 +707,41 @@ voiceNoiseSuppressionView :: proc(
 		)
 		return false, VOICE_NOISE_UNAVAILABLE_TEXT, note
 	}
-	return true, enabled ? VOICE_NOISE_ON_TEXT : VOICE_NOISE_OFF_TEXT, VOICE_NOISE_NOTE
+	note = VOICE_NOISE_NOTE
+	backend := voiceNoiseBackendFor(rnnoiseAvailable, webrtcAvailable, echoCancellation, .Auto)
+	if backend == .WebRTC {
+		note = rnnoiseAvailable ? VOICE_NOISE_WEBRTC_VAD_NOTE : VOICE_NOISE_WEBRTC_ONLY_NOTE
+	}
+	return true, enabled ? VOICE_NOISE_ON_TEXT : VOICE_NOISE_OFF_TEXT, note
+}
+
+// The echo cancellation toggle (#171): offered only when WebRTC audio processing loads, else a
+// note with loadError. notice is the warning at the top of the section, empty while echo
+// cancellation runs. Strings are allocated with allocator.
+voiceEchoCancellationView :: proc(
+	enabled, available: bool,
+	loadError: string,
+	allocator := context.temp_allocator,
+) -> (
+	offered: bool,
+	text: string,
+	note: string,
+	notice: string,
+) {
+	if !available {
+		reason := len(loadError) > 0 ? loadError : "WebRTC audio processing could not be loaded"
+		note = fmt.aprintf(
+			"Echo cancellation is unavailable: %s. %s",
+			reason,
+			VOICE_ECHO_INSTALL_HINT,
+			allocator = allocator,
+		)
+		return false, VOICE_ECHO_UNAVAILABLE_TEXT, note, VOICE_ECHO_UNAVAILABLE_NOTICE
+	}
+	if !enabled {
+		return true, VOICE_ECHO_OFF_TEXT, VOICE_ECHO_NOTE, VOICE_ECHO_OFF_NOTICE
+	}
+	return true, VOICE_ECHO_ON_TEXT, VOICE_ECHO_NOTE, ""
 }
 
 // The level meter's range in dBFS, which is also the threshold slider's range.

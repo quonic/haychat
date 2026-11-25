@@ -1,9 +1,12 @@
 # Voice on Linux: Echo Cancellation and Noise Suppression
 
-HayChat sends your microphone as it hears it: it applies your input gain and the voice activity
-threshold, and nothing else. On Linux, PipeWire can remove echo and background noise before
-HayChat gets the sound. You do not need anything from HayChat for this: you add a small
-configuration file to PipeWire, restart it, and pick the new devices in HayChat.
+HayChat has its own echo cancellation and noise suppression (Settings → Voice; see
+[Echo cancellation](user-guide.md#echo-cancellation) and
+[Noise suppression](user-guide.md#noise-suppression)), when its libraries are installed. On
+Linux, PipeWire can do the same before HayChat gets the sound, for every app, or where
+HayChat's echo canceller is unavailable (Debian 13 and Ubuntu ship only webrtc-audio-processing
+1.3, which HayChat cannot use). For that you add a small configuration file to PipeWire,
+restart it, pick the new devices in HayChat, and turn HayChat's own switches off.
 
 This page is for Linux with PipeWire, the default sound server on current Fedora, Ubuntu,
 Debian and Arch desktops. The files here were checked with PipeWire 1.6.11 and WirePlumber
@@ -15,12 +18,14 @@ Debian and Arch desktops. The files here were checked with PipeWire 1.6.11 and W
 | --- | --- |
 | Headphones or a headset in a quiet room | Nothing. Headphones are still the best fix for echo. |
 | Headphones or a headset in a noisy room (a fan, typing, a street) | [Noise suppression](#noise-suppression): RNNoise, or DeepFilterNet for stronger suppression |
-| Speakers (the others hear themselves) | [Echo cancellation](#echo-cancellation). It also removes some noise. |
+| Speakers (the others hear themselves) | HayChat's **Echo cancellation** (on by default), or else PipeWire's [echo cancellation](#echo-cancellation), which also removes some noise. |
 | Speakers sometimes, a headset other times | [Echo cancellation that switches itself on](#automatic-echo-cancellation-smart-filters) |
 | You prefer a window with switches to configuration files | [EasyEffects](#easyeffects) |
 
-Use **one** noise suppressor at a time, and one echo canceller. Two in a row do not clean the
-sound more; they make your voice sound worse. See [HayChat's Own Settings](#haychats-own-settings).
+Use **one** noise suppressor at a time, and **one echo canceller**: HayChat's or PipeWire's.
+Two in a row do not clean the sound more; they make your voice sound worse, and a second echo
+canceller behind the first has nothing left to learn from. See
+[HayChat's Own Settings](#haychats-own-settings).
 
 ## Before You Start
 
@@ -359,13 +364,14 @@ not part of the checks on this page.
   call and plays it back, so you hear what the others will hear. After you add a filter, set the
   **voice activity threshold** again against the meter: noise suppression makes silence quieter,
   so a lower threshold usually works.
-- **One noise suppressor:** if your HayChat version has a **Noise suppression** switch in
-  **Settings → Voice**, turn it off while you use RNNoise, DeepFilterNet or EasyEffects' noise
-  reduction. With the echo canceller's own noise suppression on
-  (`webrtc.noise_suppression = true`), also turn HayChat's off, or set that option to `false` and
-  keep HayChat's.
-- **One echo canceller:** in the same way, if a later HayChat version has its own echo
-  cancellation, use either it or PipeWire's, not both.
+- **One noise suppressor:** turn **Noise suppression** in **Settings → Voice** off while you use
+  RNNoise, DeepFilterNet or EasyEffects' noise reduction. With PipeWire's echo canceller's own
+  noise suppression on (`webrtc.noise_suppression = true`), also turn HayChat's off, or set that
+  option to `false` and keep HayChat's.
+- **One echo canceller:** HayChat has its own (**Echo cancellation** in **Settings → Voice**,
+  on by default, the same WebRTC canceller). While you use PipeWire's echo-cancelled devices,
+  turn HayChat's off; or keep HayChat's and use your ordinary devices. HayChat's cancels only
+  what HayChat plays; PipeWire's cancels every app played through the echo-cancelled speakers.
 - **Gain:** leave `webrtc.gain_control` off. Automatic gain changes your level while you talk,
   which moves it against HayChat's voice activity threshold; use HayChat's **input gain**
   instead.

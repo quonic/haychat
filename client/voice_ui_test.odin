@@ -1164,15 +1164,15 @@ testVoiceSettingsViewOffersTheGlobalToggle :: proc(t: ^testing.T) {
 // says why and how to get it.
 @(test)
 testVoiceSettingsViewOffersNoiseSuppressionOnlyWithRNNoise :: proc(t: ^testing.T) {
-	offered, text, note := voiceNoiseSuppressionView(true, true, "")
+	offered, text, note := voiceNoiseSuppressionView(true, true, false, false, "")
 	assert(
 		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_NOTE,
 		fmt.tprintf("expected the toggle on, got %v %q %q", offered, text, note),
 	)
-	offered, text, _ = voiceNoiseSuppressionView(false, true, "")
+	offered, text, _ = voiceNoiseSuppressionView(false, true, false, false, "")
 	assert(offered && text == VOICE_NOISE_OFF_TEXT, fmt.tprintf("expected off, got %q", text))
 	reason := "RNNoise not found (librnnoise.so.0: cannot open shared object file)"
-	offered, text, note = voiceNoiseSuppressionView(true, false, reason)
+	offered, text, note = voiceNoiseSuppressionView(true, false, false, false, reason)
 	assert(
 		!offered &&
 		text == VOICE_NOISE_UNAVAILABLE_TEXT &&
@@ -1180,6 +1180,79 @@ testVoiceSettingsViewOffersNoiseSuppressionOnlyWithRNNoise :: proc(t: ^testing.T
 		strings.contains(note, VOICE_NOISE_INSTALL_HINT),
 		fmt.tprintf("expected the reason and the hint, got %v %q %q", offered, text, note),
 	)
+	// #171: WebRTC audio processing alone offers it too, and the note names its suppressor.
+	offered, text, note = voiceNoiseSuppressionView(true, false, true, false, reason)
+	assert(
+		offered && text == VOICE_NOISE_ON_TEXT && note == VOICE_NOISE_WEBRTC_ONLY_NOTE,
+		fmt.tprintf("expected WebRTC's suppressor, got %v %q %q", offered, text, note),
+	)
+	// With both, RNNoise suppresses while echo cancellation is off, WebRTC while it is on.
+	offered, _, note = voiceNoiseSuppressionView(true, true, true, false, "")
+	assert(
+		offered && note == VOICE_NOISE_NOTE,
+		fmt.tprintf("expected RNNoise with echo cancellation off, got %q", note),
+	)
+	offered, _, note = voiceNoiseSuppressionView(true, true, true, true, "")
+	assert(
+		offered && note == VOICE_NOISE_WEBRTC_VAD_NOTE,
+		fmt.tprintf("expected WebRTC's suppressor with RNNoise's VAD, got %q", note),
+	)
 	free_all(context.temp_allocator)
+	_ = t
+}
+
+// #171: the echo cancellation toggle is offered only when WebRTC audio processing loads; the
+// notice at the top of the section warns while it does not run.
+@(test)
+testVoiceSettingsViewOffersEchoCancellationOnlyWithWebRTC :: proc(t: ^testing.T) {
+	offered, text, note, notice := voiceEchoCancellationView(true, true, "")
+	assert(
+		offered && text == VOICE_ECHO_ON_TEXT && note == VOICE_ECHO_NOTE && notice == "",
+		fmt.tprintf("expected the toggle on and no notice, got %v %q %q", offered, text, notice),
+	)
+	offered, text, _, notice = voiceEchoCancellationView(false, true, "")
+	assert(
+		offered && text == VOICE_ECHO_OFF_TEXT && notice == VOICE_ECHO_OFF_NOTICE,
+		fmt.tprintf("expected off with its notice, got %q %q", text, notice),
+	)
+	reason := "WebRTC audio processing not found (libhaychat-webrtc-apm.so: cannot open)"
+	offered, text, note, notice = voiceEchoCancellationView(true, false, reason)
+	assert(
+		!offered &&
+		text == VOICE_ECHO_UNAVAILABLE_TEXT &&
+		strings.contains(note, reason) &&
+		strings.contains(note, VOICE_ECHO_INSTALL_HINT) &&
+		notice == VOICE_ECHO_UNAVAILABLE_NOTICE,
+		fmt.tprintf("expected the reason, the hint and the notice, got %q %q", note, notice),
+	)
+	free_all(context.temp_allocator)
+	_ = t
+}
+
+// #171: a device change reopens the engine everywhere; a processing change only on Windows,
+// where SDL reads the raw stream hint when it opens a device.
+@(test)
+testVoiceSettingsReopenForTheWindowsRawStream :: proc(t: ^testing.T) {
+	base := VOICE_DEFAULT_SETTINGS
+	device := base
+	device.inputDevice = "USB microphone"
+	assert(voiceSettingsNeedReopen(base, device, .Linux), "expected a device change to reopen")
+	echoOff := base
+	echoOff.echoCancellation = false
+	assert(!voiceSettingsNeedReopen(base, echoOff, .Linux), "expected Linux to apply in place")
+	assert(
+		!voiceSettingsNeedReopen(base, echoOff, .Windows),
+		"expected no reopen while noise suppression still asks for raw mode",
+	)
+	bothOff := echoOff
+	bothOff.noiseSuppression = false
+	assert(voiceSettingsNeedReopen(echoOff, bothOff, .Windows), "expected raw mode to end")
+	assert(voiceSettingsNeedReopen(bothOff, base, .Windows), "expected raw mode to start")
+	assert(
+		voiceSDLRawStream(.Windows, true, false) == "1" &&
+		voiceSDLRawStream(.Windows, false, false) == "0" &&
+		voiceSDLRawStream(.Linux, true, true) == "0",
+		"expected raw mode only on Windows while HayChat processes the microphone",
+	)
 	_ = t
 }

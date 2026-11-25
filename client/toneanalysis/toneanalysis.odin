@@ -363,3 +363,28 @@ noiseFloorDB :: proc(
 	slice.sort(levels)
 	return levels[int(f64(blocks - 1) * NOISE_FLOOR_PERCENTILE)], blocks
 }
+
+// TONE_LEVEL_BLOCK_SECONDS is the block toneLevelDB measures in.
+TONE_LEVEL_BLOCK_SECONDS :: 0.5
+
+// toneLevelDB is the RMS level in dBFS of the hz component of samples alone, from the mean
+// Goertzel power of Hann-windowed TONE_LEVEL_BLOCK_SECONDS blocks: a sine of peak amplitude A
+// at hz reads sineRMSDB(A) whatever else is in the recording at other frequencies (#171's
+// proof measures an echo's residual next to a near-end tone with it). blocks is how many
+// blocks were measured; with none the level is LEVEL_FLOOR_DB. Allocates only temporary
+// memory.
+toneLevelDB :: proc(samples: []f32, sampleRate: f64, hz: f64) -> (levelDB: f64, blocks: int) {
+	block := max(int(sampleRate * TONE_LEVEL_BLOCK_SECONDS), 1)
+	sum: f64
+	for start := 0; start + block <= len(samples); start += block {
+		window := hannWindow(samples[start:][:block])
+		sum += goertzelPower(window, sampleRate, hz)
+		blocks += 1
+	}
+	if blocks == 0 {
+		return LEVEL_FLOOR_DB, 0
+	}
+	// A Hann window's coherent gain of 1/2 makes a sine of amplitude A read (A / 4)^2 per
+	// block, an eighth of its mean square A^2 / 2.
+	return powerDB(8 * sum / f64(blocks)), blocks
+}

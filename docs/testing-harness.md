@@ -147,7 +147,9 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `voice-ptt down\|up` | Presses or releases push-to-talk (local only). |
 | `voice-volume USER_ID PERCENT` | How loud this client plays that user on the selected server, 0 to 200 (percent), through the same action as the Server settings slider: stored in the server's config entry for this run (the harness does not write `config.json` back) and applied at once to a running engine, otherwise from the next join. Local only: the server and the user are not told. The result is the user's setting: `serverID`, `userID`, `volumePercent`, `muted`, and what the engine applies (`engineRunning`, `engineVolumePercent`, `engineMuted`; 100 and false without an engine on that server). 100 with mute off removes the entry. |
 | `voice-mute-user USER_ID on\|off` | Mute for me: this client stops playing that user's voice (frames are dropped before decoding and counted in `engine.inboundLocallyMuted`) and keeps its volume. Same result as `voice-volume`. |
-| `voice-noise on\|off` | RNNoise noise suppression on the microphone (#170). Off in the harness until a script turns it on (the GUI follows `voice_noise_suppression`, on by default). Applies at once and to the next join; `voice-stats` says whether RNNoise runs. See [Noise Suppression](#noise-suppression). |
+| `voice-noise on\|off\|rnnoise` | Noise suppression on the microphone (#170, #171): `on` is the client's rule (RNNoise, or WebRTC's suppressor while `voice-echo on` runs or without RNNoise), `rnnoise` keeps RNNoise even behind the echo canceller. Off in the harness until a script turns it on (the GUI follows `voice_noise_suppression`, on by default). Applies at once and to the next join; `voice-stats` says what runs. See [Noise Suppression](#noise-suppression). |
+| `voice-echo on\|off` | AEC3 echo cancellation of what this client plays (#171). Off in the harness until a script turns it on (the GUI follows `voice_echo_cancellation`, on by default). Applies at once and to the next join; `voice-stats` says whether it runs. See [Echo Cancellation](#echo-cancellation). |
+| `voice-echo-sim DELAY_MS GAIN\|off` | From the next join, a file or null sink's playback returns into this client's capture `DELAY_MS` (20 to 400) later, times `GAIN` (above 0, at most 2), added before the input gain, like a loudspeaker next to the microphone. For echo cancellation proofs without audio devices; a device sink ignores it. The reply's `pendingRejoin` is set while an engine runs. |
 | `voice-stats` | The engine's counters and the transport's voice counters; see [Voice](#voice). |
 | `voice-flush` | With a file sink: replies once every frame played so far is in the file (`path`, `bytes`, `seconds`, `running`), so a script can analyse it without leaving. Without a running engine it reports the file as the engine closed it. |
 | `voice-key-rotate SECONDS` | Encrypted voice (protocol 21): this process makes a new voice key every `SECONDS` (1 to 1800) instead of every 30 minutes, so a proof can see a timed rotation (`voice_key` `sent` with `"rotation":"timer"`). The GUI has no way to change it. See [Encrypted Voice](#encrypted-voice). |
@@ -264,7 +266,8 @@ the source and sink it opened with (the result says `"pendingRejoin":true`), so 
 before joining, or `voice-leave` and `voice-join` again. The gate mode, mute, deafen and
 push-to-talk also reach a running engine at once.
 
-A harness client starts with `silence`, `null`, voice activity and noise suppression off, so
+A harness client starts with `silence`, `null`, voice activity, and noise suppression and echo
+cancellation off, so
 tones reach the encoder exactly as written and voice never opens an
 audio device, and SDL audio is never initialised, unless a script asks for `device`. Under
 `SDL_AUDIO_DRIVER=disk`, `device` reads `SDL_AUDIO_DISK_INPUT_FILE` and writes
@@ -374,8 +377,13 @@ members of the room's verified member log and sends it before any frame under it
 | `playoutDelayMS`, `playoutDelayMaxMS` | The mean and largest time a received frame waited between arriving and being decoded for playout: the jitter buffer's share of the latency. A device sink adds SDL's stream queue (up to 40 ms) on top |
 | `injectedLoss` | Frames the test-only fault hook dropped ([Loss and Jitter Injection](#loss-and-jitter-injection)); always 0 in a normal build |
 | `inputLevelDB`, `transmitting`, `frameSequence` | The last captured frame's level (after noise suppression), whether the gate sent it, and the capture sequence |
-| `noiseSuppression`, `noiseError` | `"off"`, `"active"` (RNNoise processes every captured frame) or `"unavailable"` (asked for, but RNNoise did not load: `noiseError` says why). From the running engine, or else from the template and the library |
-| `speechProbability`, `denoisedFrames`, `denoiseMeanUS`, `denoiseMaxUS` | RNNoise's speech probability for the last captured frame (0 when off), the frames it processed, and its mean and largest time per 20 ms frame in microseconds (`engine.framesDenoised`, `engine.denoiseTotalUS`, `engine.denoiseMaxUS`) |
+| `noiseSuppression`, `noiseError` | `"off"`, `"active"` (a suppressor processes every captured frame) or `"unavailable"` (asked for, but neither library loaded: `noiseError` says why RNNoise did not). From the running engine, or else from the template and the libraries |
+| `speechProbability`, `denoisedFrames`, `denoiseMeanUS`, `denoiseMaxUS` | RNNoise's speech probability for the last captured frame (0 when off, also behind WebRTC's suppressor, where RNNoise only listens), the frames noise suppression processed, and the capture stage's mean and largest time per 20 ms frame on them in microseconds (`engine.framesDenoised`, `engine.denoiseTotalUS`, `engine.denoiseMaxUS`; with echo cancellation on too, AEC3's time is included) |
+| `noiseBackend` | Which suppressor runs: `"none"`, `"rnnoise"` or `"webrtc"` (#171) |
+| `echoCancellation`, `echoError` | `"off"`, `"active"` (AEC3 processes every captured frame against what the engine plays) or `"unavailable"` (asked for, but WebRTC audio processing did not load: `echoError` says why) |
+| `echoFrames`, `echoMeanUS`, `echoMaxUS` | Captured frames AEC3 processed and the capture stage's mean and largest time per 20 ms frame on them (`engine.framesEchoCancelled`, `engine.echoTotalUS`, `engine.echoMaxUS`) |
+| `renderFrames`, `renderMeanUS` | 10 ms frames of what the engine played fed to AEC3 as its reference, and their mean time |
+| `hasEchoStats`, `erleDB`, `erlDB`, `echoDelayMS` | AEC3's own statistics, read once a second while it runs: its echo return loss enhancement and echo return loss in dB, and its estimate of the echo's delay in ms (`hasEchoStats` false until it has some) |
 | `engine` | `VoiceEngineStats` (`client/voice_engine.odin`): capture, gate, encode, inbound, decode and sink counters |
 | `jitter` | `JitterStats` (`client/voice_jitter.odin`) summed over every speaker |
 | `speakers` | Each current remote speaker: `userID`, `volumePercent` (the per-user volume the engine applies), `speaking`, `levelDB`, `bufferedFrames`, `targetDepth`, `jitterMS` |
@@ -392,6 +400,30 @@ passes almost unchanged (about −0.3 dB); white noise between tone bursts is re
 it, send `voice-check --write-noisy-tone` (below) as a file source. Without RNNoise
 (`librnnoise.so.0`, or `rnnoise.dll` next to the executable) the command still succeeds, frames
 pass through, and `voice-stats` reports `"noiseSuppression":"unavailable"` with the reason.
+
+While echo cancellation runs (`voice-echo on`, below), `voice-noise on` uses WebRTC's
+suppressor behind AEC3 instead (also without RNNoise); RNNoise then still gives the gate its
+speech probability from a copy of the processed frame, without changing it, so there is one
+suppressor. Turning `voice-echo` off or on mid-call switches the suppressor from the next
+frame. `voice-noise rnnoise` keeps RNNoise suppressing even behind AEC3, for comparisons.
+
+### Echo Cancellation
+
+`voice-echo on` runs every captured frame through AEC3 (WebRTC audio processing, through
+HayChat's wrapper `client/webrtcapm`) with what the engine plays as its reference: a file or
+null sink's mixed frame, or for a device sink the decoded frames summed with their gains where
+SDL will play them. AEC3 estimates the echo's delay itself. With `voice-echo-sim DELAY_MS GAIN`
+a file or null sink's playback comes back into the capture, so two harness clients can prove
+it: X sends a tone, Y (with the simulation, `voice-sink null` and `voice-gate open`) plays it
+back into its microphone and sends what it captures to X, and `voice-check --tone-level`
+measures the tone in X's recording with Y's `voice-echo off` and `on`. The client loads the
+wrapper from `HAYCHAT_WEBRTC_APM_LIBRARY` (a path; `check.sh` sets it), then next to the
+executable (`libhaychat-webrtc-apm.so`, which `deploy/build-linux-webrtc-apm.sh OUT_DIR` builds
+against the system's `webrtc-audio-processing-devel`; `haychat-webrtc-apm.dll` on Windows),
+then by name. Without it the command still succeeds, frames pass through, and `voice-stats`
+reports `"echoCancellation":"unavailable"` with the reason. The unit tests
+(`client/voice_echo_test.odin`) skip without it unless `HAYCHAT_REQUIRE_WEBRTC_APM=1`, which
+`check.sh` sets.
 
 A speaker's frames stop without an end-of-spurt flag when it leaves, so the listener conceals
 a few (`plc`, then `silent`) before its spurt times out. Take stats while the speaker still
@@ -428,6 +460,11 @@ within 20 dB of the expected tone level (silence before the join and after the l
 count), which lies in the gaps: the check fails when it is above `--max-floor` or below
 `--min-floor`, and prints the floor.
 
+For echo cancellation (#171), `FILE --freq HZ --tone-level S` measures instead of checking: the
+RMS level of `--freq` alone (the mean Goertzel power of half-second Hann-windowed blocks, so
+another tone or noise next to it does not count) over the last `S` seconds of the file, in
+dBFS. `--max-level DB` and `--min-level DB` make it fail above or below a level.
+
 `./dev.sh live --voice` runs `dev/voice-proof.sh` against a throwaway server (`--all`, and so
 `./dev.sh ci` and Forgejo CI, run it too):
 
@@ -445,8 +482,20 @@ count), which lies in the gaps: the check fails when it is above `--max-floor` o
    `voice-noise on`. `voice-check` must find at least 1 s of tone in both recordings, with a
    noise floor of at least −50 dBFS without RNNoise (`--min-floor`; Opus leaves about −42 dBFS
    of the −34 dBFS noise) and at most −60 dBFS with it (`--max-floor`); N's `voice-stats` must say `off` and then `active`, and the script prints
-   RNNoise's time per frame. The counters are checked as in the file path.
+   RNNoise's time per frame (`noiseBackend` `rnnoise`: echo cancellation is off). A third run
+   adds `voice-echo on`, which with the wrapper next to the client makes it WebRTC's
+   suppressor behind AEC3 (`noiseBackend` `webrtc`, floor at most −48 dBFS; its noise
+   estimator starts on the first burst and takes about 9 dB off it, so that run allows 12 dB
+   on the level and checks with `--tone-level 4 --min-level -15` that the later bursts keep
+   theirs). The counters are checked as in the file path.
    `HAYCHAT_VOICE_PROOF_NOISE=0` skips it.
+   Then echo cancellation (#171): X sends `tone:440:0.5` and records Y; Y plays it into a null
+   sink with `voice-echo-sim 120 0.5` and `voice-gate open`. `voice-check --tone-level` over the
+   last half of `HAYCHAT_VOICE_PROOF_ECHO_SECONDS` (default 8) must read the echo at −21 dBFS
+   or louder with `voice-echo off` and at least 20 dB lower with `voice-echo on` (the printed
+   ERLE). With double talk (Y also sends `tone:1000:0.1`), Y's tone must reach X within 6 dB and
+   the echo stay 15 dB below its uncancelled level. The script prints AEC3's time per frame and
+   its own ERLE and delay estimate from Y's `voice-stats`. `HAYCHAT_VOICE_PROOF_ECHO=0` skips it.
 2. SDL devices: the same with C on `voice-source device` and D on `voice-sink device`, both
    under `SDL_AUDIO_DRIVER=disk`. C's input file is a tone from `voice-check --write-tone`;
    D's disk output (stereo) must pass `voice-check --channels 2`, and D must receive 95 % of
@@ -1460,7 +1509,10 @@ odin build client -out:haychat-client
 | `--loss PCT` | Drop this share of loopback frames (0 to 90) |
 | `--threshold DB` | Voice activity threshold in dBFS (default -45) |
 | `--always-on` | Send every frame (push-to-talk held) instead of gating on voice activity |
-| `--noise-suppression` | Run the microphone through RNNoise first (#170), as the GUI does by default; without the library it warns and runs without |
+| `--noise-suppression` | Suppress noise on the microphone first (#170), as the GUI does by default: RNNoise, or WebRTC's suppressor with `--echo-cancellation` (or without RNNoise); without either it warns and runs without |
+| `--rnnoise` | With `--noise-suppression`, keep RNNoise even behind the echo canceller |
+| `--echo-cancellation` | Cancel what is played from the microphone with AEC3 (#171), as the GUI does by default; without WebRTC audio processing it warns and runs without |
+| `--echo-sim MS:GAIN` | A file or null sink's playback returns into the capture `MS` (20 to 400) later, times `GAIN` (0 to 2), like `voice-echo-sim` |
 
 Device names are SDL's, which on PipeWire are the device descriptions (`pactl list sinks`
 shows them as `Description`); an unknown name falls back to the default device with a
@@ -1468,7 +1520,7 @@ warning. The input level and whether the gate is sending print every second on s
 the engine counters print as one JSON line on stdout when it ends:
 
 ```json
-{"result":"voice-loopback","captured":200,"sent":199,"gated":1,"captureDropped":0,"loopbackDropped":0,"decoded":198,"fec":0,"plc":0,"late":0,"decodeErrors":0,"noiseSuppression":"off","denoised":0,"denoiseMeanUS":0.0,"denoiseMaxUS":0.0}
+{"result":"voice-loopback","captured":200,"sent":199,"gated":1,"captureDropped":0,"loopbackDropped":0,"decoded":198,"fec":0,"plc":0,"late":0,"decodeErrors":0,"noiseSuppression":"off","noiseBackend":"none","denoised":0,"denoiseMeanUS":0.0,"denoiseMaxUS":0.0,"echoCancellation":"off","echoFrames":0,"echoMeanUS":0.0,"echoMaxUS":0.0,"renderFrames":0,"renderMeanUS":0.0,"erleDB":0.0,"echoDelayMS":0}
 ```
 
 Raw files are what SDL's `disk` driver reads and writes, so the device path also runs with no

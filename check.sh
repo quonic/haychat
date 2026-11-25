@@ -17,6 +17,18 @@ export HAYCHAT_REQUIRE_OPUS=${HAYCHAT_REQUIRE_OPUS:-1}
 # The same for RNNoise (librnnoise.so.0, #170): the noise suppression tests skip without it.
 # HAYCHAT_REQUIRE_RNNOISE=0 allows the skip.
 export HAYCHAT_REQUIRE_RNNOISE=${HAYCHAT_REQUIRE_RNNOISE:-1}
+# The same for echo cancellation (#171): the wrapper around the system's webrtc-audio-processing
+# 2.x is built here, and the tests load it from HAYCHAT_WEBRTC_APM_LIBRARY.
+# HAYCHAT_REQUIRE_WEBRTC_APM=0 allows the skip (and the build to fail).
+export HAYCHAT_REQUIRE_WEBRTC_APM=${HAYCHAT_REQUIRE_WEBRTC_APM:-1}
+apm_dir=$(mktemp -d -t haychat-webrtc-apm.XXXXXX)
+trap 'rm -rf "$apm_dir"' EXIT
+echo "==> deploy/build-linux-webrtc-apm.sh"
+if deploy/build-linux-webrtc-apm.sh "$apm_dir"; then
+	export HAYCHAT_WEBRTC_APM_LIBRARY="$apm_dir/libhaychat-webrtc-apm.so"
+elif [[ "$HAYCHAT_REQUIRE_WEBRTC_APM" == "1" ]]; then
+	exit 1
+fi
 
 # Release archives and the server image must carry every licence their contents need. This
 # needs only the Odin root, so a pin bump that drops or moves a licence file fails here.
@@ -58,6 +70,9 @@ HAYCHAT_REQUIRE_HOTKEY_TESTS=${HAYCHAT_REQUIRE_HOTKEY_TESTS:-1} \
 
 echo "==> odin test client/rnnoise"
 odin test client/rnnoise "${test_flags[@]}" -vet -strict-style
+
+echo "==> odin test client/webrtcapm"
+odin test client/webrtcapm "${test_flags[@]}" -vet -strict-style
 
 echo "==> odin test client/toneanalysis"
 odin test client/toneanalysis "${test_flags[@]}"

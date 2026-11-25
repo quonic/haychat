@@ -29,24 +29,28 @@ tag of that repository.
 "Linked from the system" means the artifact does not contain that library: the binary loads
 the copy installed on the machine, which comes with its own licence from the distribution.
 
-| Component                             | Licence               | Server archive | Server image   | Linux client       | Windows client    |
-| ------------------------------------- | --------------------- | -------------- | -------------- | ------------------ | ----------------- |
-| Odin core and base library            | zlib (Odin)           | compiled in    | compiled in    | compiled in        | compiled in       |
-| Third-party code in Odin core (below) | various               | compiled in    | compiled in    | compiled in        | compiled in       |
-| odin-postgresql (`pg`)                | MIT                   | compiled in    | compiled in    | -                  | -                 |
-| ENet                                  | MIT                   | system         | Fedora `enet`  | system             | compiled in       |
-| libpq (PostgreSQL client)             | PostgreSQL            | system         | Fedora `libpq` | -                  | -                 |
-| SDL3                                  | zlib                  | -              | -              | system             | `SDL3.dll`        |
-| Third-party code in SDL3 (below)      | various               | -              | -              | system             | in `SDL3.dll`     |
-| SDL3_ttf                              | zlib                  | -              | -              | system             | `SDL3_ttf.dll`    |
-| FreeType 2.13.2                       | FreeType License      | -              | -              | system             | in `SDL3_ttf.dll` |
-| HarfBuzz 8.5.0                        | Old MIT               | -              | -              | system             | in `SDL3_ttf.dll` |
-| PlutoSVG, PlutoVG                     | MIT                   | -              | -              | system             | in `SDL3_ttf.dll` |
-| Opus (libopus)                        | BSD-3-Clause          | -              | -              | system, at runtime | `libopus-0.dll`   |
-| RNNoise 0.2 (with its model)          | BSD-3-Clause          | -              | -              | system, at runtime | `rnnoise.dll`     |
-| Inter fonts                           | SIL OFL 1.1           | -              | -              | embedded           | embedded          |
-| Twemoji-Mozilla font                  | CC BY 4.0             | -              | -              | embedded           | embedded          |
-| Microsoft C runtime                   | Visual Studio licence | -              | -              | -                  | compiled in       |
+| Component                             | Licence                     | Server archive | Server image   | Linux client               | Windows client              |
+| ------------------------------------- | --------------------------- | -------------- | -------------- | -------------------------- | --------------------------- |
+| Odin core and base library            | zlib (Odin)                 | compiled in    | compiled in    | compiled in                | compiled in                 |
+| Third-party code in Odin core (below) | various                     | compiled in    | compiled in    | compiled in                | compiled in                 |
+| odin-postgresql (`pg`)                | MIT                         | compiled in    | compiled in    | -                          | -                           |
+| ENet                                  | MIT                         | system         | Fedora `enet`  | system                     | compiled in                 |
+| libpq (PostgreSQL client)             | PostgreSQL                  | system         | Fedora `libpq` | -                          | -                           |
+| SDL3                                  | zlib                        | -              | -              | system                     | `SDL3.dll`                  |
+| Third-party code in SDL3 (below)      | various                     | -              | -              | system                     | in `SDL3.dll`               |
+| SDL3_ttf                              | zlib                        | -              | -              | system                     | `SDL3_ttf.dll`              |
+| FreeType 2.13.2                       | FreeType License            | -              | -              | system                     | in `SDL3_ttf.dll`           |
+| HarfBuzz 8.5.0                        | Old MIT                     | -              | -              | system                     | in `SDL3_ttf.dll`           |
+| PlutoSVG, PlutoVG                     | MIT                         | -              | -              | system                     | in `SDL3_ttf.dll`           |
+| Opus (libopus)                        | BSD-3-Clause                | -              | -              | system, at runtime         | `libopus-0.dll`             |
+| RNNoise 0.2 (with its model)          | BSD-3-Clause                | -              | -              | system, at runtime         | `rnnoise.dll`               |
+| HayChat's WebRTC wrapper (#171)       | AGPL-3.0 (HayChat)          | -              | -              | `libhaychat-webrtc-apm.so` | in `haychat-webrtc-apm.dll` |
+| webrtc-audio-processing 2.1 (WebRTC)  | BSD-3-Clause + patent grant | -              | -              | system, at runtime         | in `haychat-webrtc-apm.dll` |
+| Third-party code in WebRTC (below)    | various                     | -              | -              | system, at runtime         | in `haychat-webrtc-apm.dll` |
+| Abseil 20240722.0                     | Apache-2.0                  | -              | -              | system, at runtime         | in `haychat-webrtc-apm.dll` |
+| Inter fonts                           | SIL OFL 1.1                 | -              | -              | embedded                   | embedded                    |
+| Twemoji-Mozilla font                  | CC BY 4.0                   | -              | -              | embedded                   | embedded                    |
+| Microsoft C runtime                   | Visual Studio licence       | -              | -              | -                          | compiled in                 |
 
 The server image is Fedora (`fedora-minimal:44`); every Fedora package in it, including
 `libpq`, `enet` and their dependencies, has its licence under `/usr/share/licenses/<package>`.
@@ -177,6 +181,42 @@ Windows build does not compile.
   `BSD-3-Clause AND CC0-1.0`, the CC0 part asking for no notice. The Linux client loads the
   system `librnnoise.so.0` at runtime instead, when it is installed.
 
+### WebRTC Audio Processing (Windows client: `haychat-webrtc-apm.dll`; Linux client: `libhaychat-webrtc-apm.so`)
+
+Echo cancellation (AEC3) and noise suppression (#171) come from webrtc-audio-processing, the
+freedesktop.org copy of WebRTC's audio processing module, behind HayChat's own small C wrapper
+(`client/webrtcapm/native`, under HayChat's licence).
+
+- Licence: BSD-3-Clause (`licenses/webrtc-LICENSE.txt`), with Google's additional patent grant
+  (`licenses/webrtc-PATENTS.txt`)
+- Copyright (c) 2011, The WebRTC project authors
+- Required in binaries: the copyright notice, conditions and disclaimer; the patent grant
+  travels with it.
+- `haychat-webrtc-apm.dll` is built from the webrtc-audio-processing 2.1 source release and
+  the Abseil release its Meson wrap names (both pinned by their SHA-256) by
+  `deploy/build-windows-webrtc-apm.sh`, and contains both, linked statically.
+- The Linux archive's `libhaychat-webrtc-apm.so` is only the wrapper, built against the
+  distribution's webrtc-audio-processing 2.x headers; it compiles in WebRTC's header code (so
+  the Linux archive carries the two files above) and loads the system's
+  `libwebrtc-audio-processing-2.so.1` at runtime, when it is installed.
+
+Third-party code inside WebRTC's audio processing module, in `haychat-webrtc-apm.dll`; the
+texts are in `licenses/webrtc-third-party.txt`:
+
+| Code                                   | Origin                                     | Licence                                  | Required in binaries |
+| -------------------------------------- | ------------------------------------------ | ---------------------------------------- | -------------------- |
+| FFT (`common_audio/third_party/ooura`) | Takuya Ooura                               | free use with credit                     | the notice           |
+| Square root (`spl_sqrt_floor`)         | Wilco Dijkstra                             | public domain                            | nothing              |
+| FFT (`modules/third_party/fft`)        | Mark Olesen, Queen's University            | permissive, notice in copies             | the notice           |
+| PFFFT (`third_party/pffft`)            | Julien Pommier, after FFTPACK (NCAR)       | FFTPACK licence (BSD-style)              | the notice           |
+| RNNoise's voice detector (`third_party/rnnoise`) | Xiph.Org, Jean-Marc Valin          | BSD-3-Clause                             | the notice           |
+
+### Abseil (Windows client, inside `haychat-webrtc-apm.dll`)
+
+- Licence: Apache License 2.0 (`licenses/abseil-LICENSE.txt`)
+- Copyright The Abseil Authors
+- Required in binaries: a copy of the licence. Abseil ships no NOTICE file.
+
 ### Inter (both clients, embedded)
 
 - Licence: SIL Open Font License 1.1 (`licenses/InterVariable-OFL.txt`), for both
@@ -201,8 +241,9 @@ distributing it inside an application. They ask for no notice.
 
 The server, the server archive, and the Linux client link these at runtime and do not
 include them: glibc, libpq (PostgreSQL licence), libenet (MIT), SDL3 and SDL3_ttf (zlib)
-with the FreeType, HarfBuzz and PlutoSVG they use, libopus (BSD-3-Clause), and RNNoise
-(BSD-3-Clause) when it is installed. The distribution's packages carry their licences.
+with the FreeType, HarfBuzz and PlutoSVG they use, libopus (BSD-3-Clause), RNNoise
+(BSD-3-Clause) when it is installed, and webrtc-audio-processing 2.x (BSD-3-Clause) with its
+Abseil (Apache-2.0) when it is installed. The distribution's packages carry their licences.
 
 ## Notice Texts
 

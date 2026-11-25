@@ -315,8 +315,10 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	column := ui.Rect{area.x, area.y - offset, area.w - ui.dp(ctx, 12), max(f32(1e6), area.h)}
 	top := column.y
 
-	voiceSettingsWrapped(ctx, &column, VOICE_ECHO_NOTICE, ctx.theme.fgMuted)
-	_ = ui.cutTop(&column, sectionGap)
+	if view.echoNotice != "" {
+		voiceSettingsWrapped(ctx, &column, view.echoNotice, ctx.theme.fgMuted)
+		_ = ui.cutTop(&column, sectionGap)
+	}
 
 	voiceSettingsLabel(ctx, &column, "Input device")
 	voiceSettingsWrapped(ctx, &column, view.devicesNote, ctx.theme.warning)
@@ -350,6 +352,27 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 	_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
 	noiseNoteColor := view.noiseAvailable ? ctx.theme.fgMuted : ctx.theme.warning
 	voiceSettingsWrapped(ctx, &column, view.noiseNote, noiseNoteColor)
+	_ = ui.cutTop(&column, sectionGap)
+
+	// #171: AEC3, offered only when WebRTC audio processing loads.
+	voiceSettingsLabel(ctx, &column, "Echo cancellation")
+	echoRow := ui.cutTop(&column, ui.dp(ctx, ROW_HEIGHT))
+	echoOn := view.echoAvailable && settings.echoCancellation
+	echoOptions := ui.ButtonOptions {
+		selected = echoOn,
+		color    = echoOn ? ctx.theme.fg : ctx.theme.fgMuted,
+	}
+	echoClicked := ui.button(
+		ctx,
+		ui.idOf("voice-echo-cancellation"),
+		echoRow,
+		view.echoText,
+		echoOptions,
+	)
+	echoClicked &&= view.echoAvailable
+	_ = ui.cutTop(&column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	echoNoteColor := view.echoAvailable ? ctx.theme.fgMuted : ctx.theme.warning
+	voiceSettingsWrapped(ctx, &column, view.echoNote, echoNoteColor)
 	_ = ui.cutTop(&column, sectionGap)
 
 	voiceSettingsLabel(ctx, &column, "Mode")
@@ -548,6 +571,9 @@ viewVoiceSettings :: proc(state: ^State, ctx: ^ui.Context, area: ui.Rect) {
 		changed = true
 	case noiseClicked:
 		next.noiseSuppression = !settings.noiseSuppression
+		changed = true
+	case echoClicked:
+		next.echoCancellation = !settings.echoCancellation
 		changed = true
 	}
 	for result, index in ([4]ui.SliderResult{threshold, gain, volume, bitrate}) {

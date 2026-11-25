@@ -33,9 +33,13 @@ Config :: struct {
 	voice_input_gain:       Maybe(f32) `json:"voice_input_gain,omitempty"`,
 	voice_output_volume:    Maybe(f32) `json:"voice_output_volume,omitempty"`,
 	voice_bitrate:          Maybe(int) `json:"voice_bitrate,omitempty"`,
-	// RNNoise noise suppression on the microphone (#170, client/rnnoise); on when unset. It
-	// only works when the library loads; the voice settings say why when it does not.
+	// Noise suppression on the microphone (#170, #171): RNNoise (client/rnnoise), or WebRTC's
+	// suppressor (client/webrtcapm) while echo cancellation runs or without RNNoise; on when
+	// unset. It only works when one of them loads; the voice settings say why when neither does.
 	voice_noise_suppression: Maybe(bool) `json:"voice_noise_suppression,omitempty"`,
+	// Echo cancellation of what HayChat plays (#171, AEC3 in client/webrtcapm); on when unset.
+	// It only works when WebRTC audio processing loads; the voice settings say why otherwise.
+	voice_echo_cancellation: Maybe(bool) `json:"voice_echo_cancellation,omitempty"`,
 	// This profile's voice device ID (protocol 13, common/voice_device.odin): 32 lowercase hex
 	// characters, random, generated on first use and sent with every voice join so the server
 	// can tell this device's stale voice session from another device's. loadConfig replaces a
@@ -621,6 +625,7 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_output_volume = config.voice_output_volume,
 		voice_bitrate = config.voice_bitrate,
 		voice_noise_suppression = config.voice_noise_suppression,
+		voice_echo_cancellation = config.voice_echo_cancellation,
 		device_id = strings.clone(config.device_id),
 		encryption_private_key = strings.clone(config.encryption_private_key),
 		encryption_public_key = strings.clone(config.encryption_public_key),

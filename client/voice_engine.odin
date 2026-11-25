@@ -26,11 +26,16 @@ package client
 //   - SDL's audio subsystem is initialised only when a device source or sink is opened, so a
 //     headless client never touches SDL unless asked to.
 //
-// Noise suppression (#170): between the input gain and the level meter, every captured frame
-// goes through the capture-processing stage (voice_capture.odin), RNNoise when it loads and
-// config.noiseSuppression (or VoiceEngine_setNoiseSuppression) asks for it. Its speech
-// probability joins the level in the voice activity gate. Without RNNoise frames pass through
-// unchanged and the level gate decides alone; nothing on the wire changes.
+// Noise suppression and echo cancellation (#170, #171): between the input gain and the level
+// meter, every captured frame goes through the capture-processing stage (voice_capture.odin):
+// WebRTC's AEC3 echo canceller and noise suppression when that library loads, RNNoise for
+// noise when it does not, as config.noiseSuppression and config.echoCancellation (or
+// VoiceEngine_setNoiseSuppression / VoiceEngine_setEchoCancellation) ask. The echo reference is
+// what the engine plays: the mixed frame of a file or null sink, and for a device sink the
+// decoded frames summed (with each speaker's gain and the output volume) at the place SDL will
+// play them (VoiceEngine_addEchoReference). RNNoise's speech probability joins the level in
+// the voice activity gate. Without the libraries frames pass through unchanged and the level
+// gate decides alone; nothing on the wire changes.
 //
 // Encrypted rooms (protocol 21, e2ee-voice-design.md 5 and 7.1): an engine created with
 // config.encryption.enabled seals every encoded frame (common/voice_e2ee.odin) before
@@ -59,6 +64,7 @@ import "core:thread"
 import "core:time"
 import "opus"
 import SDL "vendor:sdl3"
+import "webrtcapm"
 
 #assert(ODIN_ENDIAN == .Little, "raw F32LE file sources and sinks assume a little-endian host")
 
@@ -86,6 +92,18 @@ VOICE_ERROR_BUFFER_SIZE :: 512
 VOICE_SPEAKER_CONTROL_CAPACITY :: 256
 // The highest per-speaker gain, 200 %. Linear, like the output volume.
 VOICE_SPEAKER_GAIN_MAX :: f32(2)
+VOICE_SAMPLES_PER_MS :: common.VOICE_SAMPLE_RATE / 1000
+// The echo reference of a device sink (#171): a ring of what SDL will play, written where each
+// speaker's frame will be played and read (fed to the echo canceller) as the clock reaches it.
+// 320 ms, a whole number of 10 ms frames, covers SDL's queue (VOICE_PLAYBACK_TARGET_FRAMES)
+// many times over.
+VOICE_ECHO_REFERENCE_SAMPLES :: 32 * webrtcapm.FRAME_SIZE
+// The simulated echo path of a file or null sink (VoiceEchoSimulation, tests and the harness):
+// up to 500 ms of what was played.
+VOICE_ECHO_SIMULATION_SAMPLES :: 500 * VOICE_SAMPLES_PER_MS
+VOICE_ECHO_SIMULATION_MIN_DELAY_MS :: 20
+VOICE_ECHO_SIMULATION_MAX_DELAY_MS :: 400
+VOICE_ECHO_SIMULATION_MAX_GAIN :: f32(2)
 
 // The size every Opus packet of an encrypted room is capped at and padded to, as a multiple of
 // the bitrate's nominal 20 ms frame (bitrate / 400 bytes), in fifths: 8 = 1.6 times. Measured
@@ -267,10 +285,30 @@ VoiceEngineConfig :: struct {
 	timingUserdata:   rawptr,
 	// Protocol 21: set for an encrypted room's voice. Implies fixed-size (padded) packets.
 	encryption:       VoiceEngineEncryption,
-	// #170: run captured frames through RNNoise when it loads (VoiceEngine_setNoiseSuppression
-	// changes it while the engine runs). The zero value is off, so tests and the harness keep
-	// their tones untouched unless they ask; the user's setting defaults to on.
+	// #170: suppress noise in captured frames (VoiceEngine_setNoiseSuppression changes it
+	// while the engine runs): WebRTC's suppressor while echo cancellation runs, else RNNoise
+	// (voiceNoiseBackendFor). The
+	// zero value is off, so tests and the harness keep their tones untouched unless they ask;
+	// the user's setting defaults to on.
 	noiseSuppression: bool,
+	// #171: cancel what the engine plays from captured frames with AEC3, when WebRTC audio
+	// processing loads (VoiceEngine_setEchoCancellation changes it). Off by default, like
+	// noiseSuppression; the user's setting defaults to on.
+	echoCancellation: bool,
+	// Which noise suppressor to use; tests and the harness can keep RNNoise (#170's proof).
+	noisePreference:  VoiceNoisePreference,
+	// Tests and the harness: play a file or null sink's mix back into the capture, delayed
+	// and scaled, as a loudspeaker next to the microphone would.
+	echoSimulation:   VoiceEchoSimulation,
+}
+
+// A simulated acoustic echo for file and null sinks: every captured frame gets what was played
+// delayMS earlier, times gain, added before the input gain. Zero values (or a device sink)
+// simulate nothing. delayMS is clamped to VOICE_ECHO_SIMULATION_MIN_DELAY_MS ..
+// VOICE_ECHO_SIMULATION_MAX_DELAY_MS.
+VoiceEchoSimulation :: struct {
+	delayMS: int,
+	gain:    f32,
 }
 
 VoiceEngineStats :: struct {
@@ -305,12 +343,25 @@ VoiceEngineStats :: struct {
 	faultDelayed:        u64,
 	// Protocol 21: sealing and opening in an encrypted room.
 	e2ee:                VoiceEngineE2EEStats,
-	// #170: captured frames RNNoise processed, and the time it took per 20 ms frame (two
-	// RNNoise frames), in microseconds.
+	// #170: captured frames noise suppression processed, and the capture stage's time per
+	// 20 ms frame on them, in microseconds (with echo cancellation on too, it includes AEC3).
 	framesDenoised:      u64,
 	denoiseTotalUS:      f64,
 	denoiseMaxUS:        f64,
+	// #171: captured frames AEC3 processed and the capture stage's time on them, and the
+	// 10 ms render (reference) frames fed to it and their time.
+	framesEchoCancelled: u64,
+	echoTotalUS:         f64,
+	echoMaxUS:           f64,
+	renderFrames:        u64,
+	renderTotalUS:       f64,
+	renderMaxUS:         f64,
+	// Render frames that were not silence (a peak above VOICE_RENDER_ACTIVE_PEAK).
+	renderActiveFrames:  u64,
 }
+
+// A render frame with a sample above this counts in renderActiveFrames (about −80 dBFS).
+VOICE_RENDER_ACTIVE_PEAK :: f32(1e-4)
 
 VoiceSpeakerSnapshot :: struct {
 	userID:         u32,
@@ -337,6 +388,13 @@ VoiceEngineSnapshot :: struct {
 	// frame's speech probability (0 when none was denoised).
 	noiseSuppression:  VoiceNoiseSuppressionStatus,
 	speechProbability: f32,
+	// The suppressor in use while noiseSuppression is Active.
+	noiseBackend:      VoiceNoiseBackend,
+	// #171: what the echo canceller does, and AEC3's latest statistics (ERLE, delay) once it
+	// has some.
+	echoCancellation:  VoiceEchoCancellationStatus,
+	hasEchoStats:      bool,
+	echoStats:         webrtcapm.Stats,
 	// Totals over every speaker, including expired ones.
 	jitter:        JitterStats,
 	speakerCount:  int,
@@ -375,6 +433,8 @@ VoiceEngine :: struct {
 	pttHeld:             bool,
 	gateMode:            VoiceGateMode,
 	noiseSuppression:    bool,
+	echoCancellation:    bool,
+	noisePreference:     VoiceNoisePreference,
 	thresholdBits:       u32,
 	inputGainBits:       u32,
 	outputVolumeBits:    u32,
@@ -407,6 +467,21 @@ VoiceEngine :: struct {
 	// probability.
 	captureStage:        VoiceCaptureStage,
 	speechProbability:   f32,
+	// The last captured frame's suppressor, and whether the reference is being fed.
+	noiseBackend:        VoiceNoiseBackend,
+	echoActive:          bool,
+	// The device sink's echo reference (VOICE_ECHO_REFERENCE_SAMPLES), indexed by the engine
+	// clock in samples; renderEmitted is the next sample to feed. Zero where nothing plays.
+	echoReference:       [VOICE_ECHO_REFERENCE_SAMPLES]f32,
+	renderEmitted:       i64,
+	renderStarted:       bool,
+	// Device buffer delays (playback plus capture), for the echo canceller's delay hint.
+	deviceDelayMS:       int,
+	// The simulated echo path (config.echoSimulation): what a file or null sink played,
+	// indexed by played sample, and how many samples were played and captured.
+	echoPath:            [VOICE_ECHO_SIMULATION_SAMPLES]f32,
+	echoPathPlayed:      i64,
+	echoPathCaptured:    i64,
 	frameSequence:       u32,
 	captureFrame:        [common.VOICE_FRAME_SAMPLES]f32,
 	decodeFrame:         [common.VOICE_FRAME_SAMPLES]f32,
@@ -509,6 +584,8 @@ VoiceEngine_create :: proc(
 	}
 	engine.gateMode = config.gateMode
 	engine.noiseSuppression = config.noiseSuppression
+	engine.echoCancellation = config.echoCancellation
+	engine.noisePreference = config.noisePreference
 	engine.thresholdBits = transmute(u32)threshold
 	engine.inputGainBits = transmute(u32)engine.config.inputGain
 	engine.outputVolumeBits = transmute(u32)engine.config.outputVolume
@@ -663,9 +740,19 @@ VoiceEngine_open :: proc(engine: ^VoiceEngine) -> bool {
 	}
 
 	engine.gate = {}
-	// Optional: without RNNoise the stage passes frames through and the snapshot says so.
+	// Optional: without RNNoise and WebRTC audio processing the stage passes frames through
+	// and the snapshot says so.
 	_ = VoiceCaptureStage_open(&engine.captureStage)
 	engine.speechProbability = 0
+	engine.noiseBackend = .None
+	engine.echoActive = false
+	mem.zero_slice(engine.echoReference[:])
+	engine.renderEmitted = 0
+	engine.renderStarted = false
+	mem.zero_slice(engine.echoPath[:])
+	engine.echoPathPlayed = 0
+	engine.echoPathCaptured = 0
+	engine.deviceDelayMS = VoiceEngine_deviceDelayMS(engine)
 	if sink.kind != .Device {
 		engine.appliedOutputVolume = transmute(f32)sync.atomic_load(&engine.outputVolumeBits)
 	}
@@ -780,12 +867,35 @@ voiceSDLStreamRole :: proc(os: runtime.Odin_OS_Type) -> cstring {
 	return "Communication"
 }
 
+// voiceSDLRawStream is the SDL_HINT_AUDIO_DEVICE_RAW_STREAM value: "1" on Windows while
+// HayChat's own noise suppression or echo cancellation is on, so Windows' default-mode
+// processing (OEM noise suppression, beamforming, gain) never stacks under it; "0" otherwise
+// and on other systems, where SDL ignores it.
+voiceSDLRawStream :: proc(
+	os: runtime.Odin_OS_Type,
+	noiseSuppression, echoCancellation: bool,
+) -> cstring {
+	if os == .Windows && (noiseSuppression || echoCancellation) {
+		return "1"
+	}
+	return "0"
+}
+
 @(private = "file")
 VoiceEngine_initSDLAudio :: proc(engine: ^VoiceEngine) -> bool {
 	// Hints set at normal priority, so SDL_AUDIO_* environment variables still win (the
 	// disk driver in tests relies on that).
 	_ = SDL.SetHint(SDL.HINT_AUDIO_DEVICE_STREAM_ROLE, voiceSDLStreamRole(ODIN_OS))
 	_ = SDL.SetHint(SDL.HINT_AUDIO_DEVICE_STREAM_NAME, "HayChat voice")
+	// #171 and #172: while HayChat processes the microphone itself, Windows must not process
+	// it too (one owner per job, docs/plan/2026-11-25-wasapi-communications-capture.md, "No
+	// Double Processing"), so the stream asks for raw mode. SDL reads the hint when it opens a
+	// device and applies it to playback as well; a change of either setting reopens the
+	// engine on Windows (voiceSettingsNeedReopen).
+	_ = SDL.SetHint(
+		SDL.HINT_AUDIO_DEVICE_RAW_STREAM,
+		voiceSDLRawStream(ODIN_OS, engine.config.noiseSuppression, engine.config.echoCancellation),
+	)
 	// No HINT_AUDIO_DEVICE_SAMPLE_FRAMES: with "480" (10 ms), SDL 3.4's PipeWire backend
 	// delivered under half the captured samples on a host whose minimum quantum is 1024.
 	if !SDL.InitSubSystem({.AUDIO}) {
@@ -865,6 +975,31 @@ VoiceEngine_openPlayback :: proc(engine: ^VoiceEngine) -> bool {
 	return true
 }
 
+// The playback and capture devices' buffer delays in milliseconds (SDL's sample frames per
+// buffer), the part of the echo path the engine can see; 0 without devices.
+@(private = "file")
+VoiceEngine_deviceDelayMS :: proc(engine: ^VoiceEngine) -> int {
+	frames := 0
+	spec: SDL.AudioSpec
+	if engine.playbackDevice != 0 {
+		sampleFrames: c.int
+		if SDL.GetAudioDeviceFormat(engine.playbackDevice, &spec, &sampleFrames) &&
+		   spec.freq > 0 {
+			frames += int(sampleFrames) * common.VOICE_SAMPLE_RATE / int(spec.freq)
+		}
+	}
+	if engine.captureStream != nil {
+		device := SDL.GetAudioStreamDevice(engine.captureStream)
+		sampleFrames: c.int
+		if device != 0 &&
+		   SDL.GetAudioDeviceFormat(device, &spec, &sampleFrames) &&
+		   spec.freq > 0 {
+			frames += int(sampleFrames) * common.VOICE_SAMPLE_RATE / int(spec.freq)
+		}
+	}
+	return frames / VOICE_SAMPLES_PER_MS
+}
+
 // ── Controls (any thread) ─────────────────────────────────────────
 
 VoiceEngine_setMuted :: proc(engine: ^VoiceEngine, muted: bool) {
@@ -901,6 +1036,17 @@ VoiceEngine_setNoiseSuppression :: proc(engine: ^VoiceEngine, enabled: bool) {
 
 // VoiceEngine_setInputGain sets the linear gain applied to every captured frame before the
 // level meter and the gate see it, from the next frame on.
+// #171: turns AEC3 on or off from the next captured frame (it needs WebRTC audio processing).
+VoiceEngine_setEchoCancellation :: proc(engine: ^VoiceEngine, enabled: bool) {
+	sync.atomic_store(&engine.echoCancellation, enabled)
+}
+
+// Which noise suppressor the next frames use (VoiceNoisePreference; the harness's
+// `voice-noise rnnoise`).
+VoiceEngine_setNoisePreference :: proc(engine: ^VoiceEngine, preference: VoiceNoisePreference) {
+	sync.atomic_store(&engine.noisePreference, preference)
+}
+
 VoiceEngine_setInputGain :: proc(engine: ^VoiceEngine, gain: f32) {
 	sync.atomic_store(&engine.inputGainBits, transmute(u32)max(gain, 0))
 }
@@ -1423,12 +1569,15 @@ VoiceEngine_capture :: proc(engine: ^VoiceEngine, now: f64) {
 			available -= VOICE_FRAME_BYTES
 		}
 		for available >= VOICE_FRAME_BYTES {
+			// The frame's first sample was captured this long ago, which adds to the echo
+			// canceller's delay hint.
+			backlogMS := available / size_of(f32) / VOICE_SAMPLES_PER_MS
 			got := SDL.GetAudioStreamData(engine.captureStream, raw_data(frame), VOICE_FRAME_BYTES)
 			if got != VOICE_FRAME_BYTES {
 				break
 			}
 			available -= VOICE_FRAME_BYTES
-			VoiceEngine_processCapturedFrame(engine)
+			VoiceEngine_processCapturedFrame(engine, engine.deviceDelayMS + backlogMS)
 		}
 	case .Silence, .Tone, .File:
 		if engine.config.unpaced {
@@ -1483,8 +1632,9 @@ VoiceEngine_generateFrame :: proc(engine: ^VoiceEngine) {
 }
 
 @(private = "file")
-VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
+VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine, delayHintMS := 0) {
 	frame := engine.captureFrame[:]
+	VoiceEngine_addSimulatedEcho(engine, frame)
 	gain := transmute(f32)sync.atomic_load(&engine.inputGainBits)
 	if gain != 1 {
 		for &sample in frame {
@@ -1497,14 +1647,26 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 	capture := VoiceCaptureStage_process(
 		&engine.captureStage,
 		frame,
-		sync.atomic_load(&engine.noiseSuppression),
+		{
+			noiseSuppression = sync.atomic_load(&engine.noiseSuppression),
+			echoCancellation = sync.atomic_load(&engine.echoCancellation),
+			noisePreference = sync.atomic_load(&engine.noisePreference),
+			delayHintMS = delayHintMS,
+		},
 	)
+	elapsedUS := time.duration_microseconds(capture.elapsed)
 	if capture.denoised {
-		elapsedUS := time.duration_microseconds(capture.elapsed)
 		engine.stats.framesDenoised += 1
 		engine.stats.denoiseTotalUS += elapsedUS
 		engine.stats.denoiseMaxUS = max(engine.stats.denoiseMaxUS, elapsedUS)
 	}
+	if capture.echoCancelled {
+		engine.stats.framesEchoCancelled += 1
+		engine.stats.echoTotalUS += elapsedUS
+		engine.stats.echoMaxUS = max(engine.stats.echoMaxUS, elapsedUS)
+	}
+	engine.noiseBackend = capture.noiseBackend
+	engine.echoActive = capture.echoCancelled
 	engine.speechProbability = capture.speechProbability
 	level := voiceFrameLevelDB(frame)
 	sync.atomic_store(&engine.inputLevelBits, transmute(u32)level)
@@ -1517,7 +1679,7 @@ VoiceEngine_processCapturedFrame :: proc(engine: ^VoiceEngine) {
 			thresholdDB = transmute(f32)sync.atomic_load(&engine.thresholdBits),
 			muted = sync.atomic_load(&engine.muted),
 			pttHeld = sync.atomic_load(&engine.pttHeld),
-			hasSpeechProbability = capture.denoised,
+			hasSpeechProbability = capture.hasSpeechProbability,
 			speechProbability = capture.speechProbability,
 		},
 	)
@@ -1888,11 +2050,25 @@ VoiceEngine_playout :: proc(engine: ^VoiceEngine, now: f64) {
 	switch engine.config.sink.kind {
 	case .Device:
 		target := c.int(VOICE_PLAYBACK_TARGET_FRAMES * VOICE_FRAME_BYTES)
+		// The echo reference follows the engine clock in samples; SDL plays a frame put into a
+		// speaker's stream after what the stream already holds.
+		reference := engine.echoActive
+		nowSample := i64(now * VOICE_SAMPLES_PER_MS)
+		if reference {
+			VoiceEngine_beginEchoReference(engine, nowSample)
+		} else if engine.renderStarted {
+			mem.zero_slice(engine.echoReference[:])
+			engine.renderStarted = false
+		}
 		for &speaker in engine.speakers {
 			if !speaker.active {
 				continue
 			}
-			for SDL.GetAudioStreamQueued(speaker.stream) < target {
+			for {
+				queued := SDL.GetAudioStreamQueued(speaker.stream)
+				if queued < 0 || queued >= target {
+					break
+				}
 				output := JitterBuffer_next(&speaker.jitter)
 				if output.action == .Idle {
 					speaker.levelDB = VOICE_LEVEL_FLOOR_DB
@@ -1900,7 +2076,18 @@ VoiceEngine_playout :: proc(engine: ^VoiceEngine, now: f64) {
 				}
 				pcm := VoiceEngine_decode(engine, &speaker, output, now)
 				_ = SDL.PutAudioStreamData(speaker.stream, raw_data(pcm), VOICE_FRAME_BYTES)
+				if reference {
+					VoiceEngine_addEchoReference(
+						engine,
+						nowSample + i64(queued) / size_of(f32),
+						pcm,
+						speaker.gain * engine.appliedOutputVolume,
+					)
+				}
 			}
+		}
+		if reference {
+			VoiceEngine_emitEchoReference(engine, nowSample)
 		}
 	case .File, .Null:
 		if engine.config.unpaced {
@@ -1942,10 +2129,124 @@ VoiceEngine_playMixedFrame :: proc(engine: ^VoiceEngine, now: f64) {
 		sample = clamp(sample * volume, -1, 1)
 	}
 	engine.stats.framesPlayed += 1
+	// What is played is the echo reference, and the simulated echo's source.
+	if engine.echoActive {
+		VoiceEngine_noteRender(engine, VoiceCaptureStage_render(&engine.captureStage, mix), mix)
+	}
+	VoiceEngine_recordSimulatedEcho(engine, mix)
 	if engine.sinkFile != nil {
 		if _, writeErr := os.write(engine.sinkFile, mem.slice_to_bytes(mix)); writeErr != nil {
 			engine.stats.sinkWriteErrors += 1
 		}
+	}
+}
+
+// ── Echo reference (#171) ─────────────────────────────────────────
+
+@(private = "file")
+VoiceEngine_noteRender :: proc(engine: ^VoiceEngine, elapsed: time.Duration, played: []f32) {
+	frames := u64(len(played) / webrtcapm.FRAME_SIZE)
+	if frames == 0 {
+		return
+	}
+	for part in 0 ..< int(frames) {
+		for sample in played[part * webrtcapm.FRAME_SIZE:][:webrtcapm.FRAME_SIZE] {
+			if abs(sample) > VOICE_RENDER_ACTIVE_PEAK {
+				engine.stats.renderActiveFrames += 1
+				break
+			}
+		}
+	}
+	elapsedUS := time.duration_microseconds(elapsed)
+	engine.stats.renderFrames += frames
+	engine.stats.renderTotalUS += elapsedUS
+	engine.stats.renderMaxUS = max(engine.stats.renderMaxUS, elapsedUS / f64(frames))
+}
+
+// Starts (or restarts, after a stall longer than half the ring) the device sink's reference at
+// nowSample, rounded down to a 10 ms frame, with an empty ring.
+@(private = "file")
+VoiceEngine_beginEchoReference :: proc(engine: ^VoiceEngine, nowSample: i64) {
+	behind := nowSample - engine.renderEmitted
+	if engine.renderStarted && behind <= VOICE_ECHO_REFERENCE_SAMPLES / 2 {
+		return
+	}
+	mem.zero_slice(engine.echoReference[:])
+	engine.renderEmitted = nowSample - nowSample % webrtcapm.FRAME_SIZE
+	engine.renderStarted = true
+}
+
+// Adds pcm, scaled by gain, to the reference at sample position (where SDL will play it).
+// Samples the canceller was already given, or beyond the ring, are left out.
+@(private = "file")
+VoiceEngine_addEchoReference :: proc(
+	engine: ^VoiceEngine,
+	position: i64,
+	pcm: []f32,
+	gain: f32,
+) {
+	ring := engine.echoReference[:]
+	for sample, index in pcm {
+		at := position + i64(index)
+		if at < engine.renderEmitted || at - engine.renderEmitted >= VOICE_ECHO_REFERENCE_SAMPLES {
+			continue
+		}
+		ring[at % VOICE_ECHO_REFERENCE_SAMPLES] += sample * gain
+	}
+}
+
+// Feeds every whole 10 ms frame of the reference up to nowSample to the echo canceller, and
+// clears it for the next lap of the ring.
+@(private = "file")
+VoiceEngine_emitEchoReference :: proc(engine: ^VoiceEngine, nowSample: i64) {
+	for engine.renderEmitted + webrtcapm.FRAME_SIZE <= nowSample {
+		start := int(engine.renderEmitted % VOICE_ECHO_REFERENCE_SAMPLES)
+		chunk := engine.echoReference[start:][:webrtcapm.FRAME_SIZE]
+		for &sample in chunk {
+			// SDL clamps the device mix the same way.
+			sample = clamp(sample, -1, 1)
+		}
+		VoiceEngine_noteRender(engine, VoiceCaptureStage_render(&engine.captureStage, chunk), chunk)
+		mem.zero_slice(chunk)
+		engine.renderEmitted += webrtcapm.FRAME_SIZE
+	}
+}
+
+// The simulated echo (config.echoSimulation): a file or null sink records what it played...
+@(private = "file")
+VoiceEngine_recordSimulatedEcho :: proc(engine: ^VoiceEngine, played: []f32) {
+	if engine.config.echoSimulation.gain == 0 {
+		return
+	}
+	for sample in played {
+		engine.echoPath[engine.echoPathPlayed % VOICE_ECHO_SIMULATION_SAMPLES] = sample
+		engine.echoPathPlayed += 1
+	}
+}
+
+// ...and the next captured frames get it back, delayMS later and scaled by gain.
+@(private = "file")
+VoiceEngine_addSimulatedEcho :: proc(engine: ^VoiceEngine, frame: []f32) {
+	simulation := engine.config.echoSimulation
+	if simulation.gain == 0 || engine.config.sink.kind == .Device {
+		return
+	}
+	delay := i64(
+		clamp(
+			simulation.delayMS,
+			VOICE_ECHO_SIMULATION_MIN_DELAY_MS,
+			VOICE_ECHO_SIMULATION_MAX_DELAY_MS,
+		) *
+		VOICE_SAMPLES_PER_MS,
+	)
+	gain := clamp(simulation.gain, 0, VOICE_ECHO_SIMULATION_MAX_GAIN)
+	for &sample in frame {
+		at := engine.echoPathCaptured - delay
+		if at >= 0 && at < engine.echoPathPlayed {
+			echo := engine.echoPath[at % VOICE_ECHO_SIMULATION_SAMPLES]
+			sample = clamp(sample + gain * echo, -1, 1)
+		}
+		engine.echoPathCaptured += 1
 	}
 }
 
@@ -1979,6 +2280,24 @@ VoiceEngine_publish :: proc(engine: ^VoiceEngine) {
 			VoiceCaptureStage_available(&engine.captureStage) ? .Active : .Unavailable
 	}
 	snapshot.speechProbability = engine.speechProbability
+	snapshot.noiseBackend = snapshot.noiseSuppression == .Active ? engine.noiseBackend : .None
+	if snapshot.noiseSuppression == .Active && snapshot.noiseBackend == .None {
+		// Before the first frame: the suppressor the next frame will use.
+		snapshot.noiseBackend = VoiceCaptureStage_noiseBackend(
+			&engine.captureStage,
+			{
+				noiseSuppression = true,
+				echoCancellation = sync.atomic_load(&engine.echoCancellation),
+				noisePreference = sync.atomic_load(&engine.noisePreference),
+			},
+		)
+	}
+	snapshot.echoCancellation = .Off
+	if snapshot.running && sync.atomic_load(&engine.echoCancellation) {
+		snapshot.echoCancellation =
+			VoiceCaptureStage_echoAvailable(&engine.captureStage) ? .Active : .Unavailable
+	}
+	snapshot.echoStats, snapshot.hasEchoStats = VoiceCaptureStage_echoStats(&engine.captureStage)
 	snapshot.jitter = engine.retiredJitter
 	snapshot.speakerCount = 0
 	for &speaker in engine.speakers {

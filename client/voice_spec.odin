@@ -51,3 +51,23 @@ voiceParseSinkSpec :: proc(spec: string) -> (sink: VoiceSinkConfig, ok: bool) {
 	}
 	return {}, false
 }
+
+// voiceParseEchoSimulation parses MS:GAIN for --echo-sim: a delay of
+// VOICE_ECHO_SIMULATION_MIN_DELAY_MS to VOICE_ECHO_SIMULATION_MAX_DELAY_MS and a gain above 0
+// and at most VOICE_ECHO_SIMULATION_MAX_GAIN.
+voiceParseEchoSimulation :: proc(spec: string) -> (simulation: VoiceEchoSimulation, ok: bool) {
+	colon := strings.index_byte(spec, ':')
+	if colon < 0 {
+		return
+	}
+	delayMS, delayOK := strconv.parse_int(spec[:colon])
+	gain, gainOK := strconv.parse_f32(spec[colon + 1:])
+	if !delayOK ||
+	   !gainOK ||
+	   delayMS < VOICE_ECHO_SIMULATION_MIN_DELAY_MS ||
+	   delayMS > VOICE_ECHO_SIMULATION_MAX_DELAY_MS ||
+	   !(gain > 0 && gain <= VOICE_ECHO_SIMULATION_MAX_GAIN) {
+		return
+	}
+	return {delayMS = delayMS, gain = gain}, true
+}

@@ -323,9 +323,10 @@ reconnect never moves voice away from another device: while another device of yo
 it is refused with "voice is active on another device", and that device stays in voice.
 
 Voice needs libopus (see [Client Dependencies](development.md#client-dependencies)); without it,
-or without a working audio device, voice reports why and chat keeps working. There is no echo
-cancellation: use headphones. Background noise is removed by RNNoise when it is available (see
-[Noise suppression](#noise-suppression)).
+or without a working audio device, voice reports why and chat keeps working. HayChat cancels
+the echo of what it plays when WebRTC audio processing is available (see
+[Echo cancellation](#echo-cancellation)), and removes background noise (see
+[Noise suppression](#noise-suppression)); headphones still sound best.
 
 - **Room header:** **Join voice**, or **Leave voice** while in (or joining, or re-joining) that
   room's voice. A text-only room has no **Join voice**.
@@ -340,7 +341,8 @@ cancellation: use headphones. Background noise is removed by RNNoise when it is 
 - **Per-user volume and mute:** Server settings → Voice, or a voice participant's right-click
   menu. Only you hear the change.
 - **Echo and noise on Linux:** PipeWire can cancel echo and suppress background noise before
-  HayChat hears your microphone; see [Voice on Linux](voice-linux-audio.md).
+  HayChat hears your microphone instead; see [Voice on Linux](voice-linux-audio.md). Use one
+  echo canceller, HayChat's or PipeWire's, not both.
 
 ### Encrypted voice
 
@@ -375,7 +377,8 @@ unencrypted room is not: the server can hear it as it relays it.
 - Input and output device lists ("System default" first; a chosen device that is unplugged stays
   listed as "(not connected)", and the default plays meanwhile).
 - Voice activity or push-to-talk, and the push-to-talk key (click it, press a key; Esc cancels).
-- **Noise suppression** on or off (see below).
+- **Noise suppression** and **Echo cancellation** on or off (see below). While echo
+  cancellation is unavailable or off, a note at the top of the section says to use headphones.
 - The voice activity threshold over a live input level meter, input gain, output volume, and the
   Opus bitrate.
 - **Test microphone** runs a loopback (microphone → Opus → your own speakers) while the section
@@ -389,13 +392,21 @@ named device when it is plugged back in.
 
 ### Noise suppression
 
-**Noise suppression** (Settings → Voice, `voice_noise_suppression`, on by default) runs your
-microphone through RNNoise 0.2 before it is encoded: steady background noise such as fans, hum
-and traffic is removed, mostly between words. In voice activity mode RNNoise also says whether
-a frame is speech, and only speech that is louder than the threshold opens the microphone, so
-loud noise that is not speech does not. The level meter and **Test microphone** show the
-signal after noise suppression. It adds 10 ms of delay and costs about 0.6 % of one CPU core.
-It changes nothing in what is sent over the network: it works the same in encrypted and
+**Noise suppression** (Settings → Voice, `voice_noise_suppression`, on by default) removes
+steady background noise such as fans, hum and traffic from your microphone before it is
+encoded, mostly between words. RNNoise 0.2 does it, except while
+[Echo cancellation](#echo-cancellation) runs: then WebRTC's noise suppressor does it, right
+after the echo canceller, because RNNoise behind an echo canceller takes speech away when you
+and the others talk at once. Never both: two suppressors in a row take speech away. Turning
+echo cancellation on or off (for example for a headset) switches between them at once.
+Without RNNoise installed, WebRTC's suppressor does it in every case.
+In voice activity mode RNNoise also says whether a frame is speech (with WebRTC's suppressor it
+only listens), and only speech that is louder than the threshold opens the microphone, so loud
+noise that is not speech does not. The level meter and **Test microphone** show the signal
+after noise suppression. RNNoise adds 10 ms of delay and costs about 0.6 % of one CPU core;
+WebRTC's suppressor adds none, and removes less noise than RNNoise (about 18 dB of steady
+noise, against RNNoise's 60 dB or more), which the speech gate makes up for between words. It
+changes nothing in what is sent over the network: it works the same in encrypted and
 unencrypted rooms, and listeners need nothing.
 
 - RNNoise 0.2 removes loud typing less well than older versions did; key clicks can still get
@@ -405,6 +416,34 @@ unencrypted rooms, and listeners need nothing.
   `haychat-client.exe` on Windows (the release zip has it). Without it voice works, the toggle
   reads **Noise suppression: unavailable**, and the note under it says why; the threshold alone
   then decides when you are speaking.
+
+### Echo cancellation
+
+**Echo cancellation** (Settings → Voice, `voice_echo_cancellation`, on by default) removes the
+voices HayChat plays from your microphone, so with speakers the others do not hear themselves.
+It is WebRTC's echo canceller (AEC3, from webrtc-audio-processing 2), the one web browsers use
+for calls. It compares your microphone with what HayChat plays and finds the delay between them
+itself, so it works with any speakers and microphone and keeps up when the delay changes; it
+needs a few seconds after you join to settle. While it runs, WebRTC's noise suppressor does the
+noise suppression too (see above). It adds no delay and costs about 0.5 % of one CPU core
+(about 100 µs per 20 ms; 200 µs with noise suppression). Nothing on the network changes.
+
+- It only removes what HayChat itself plays. Music or a video from another app still reaches
+  your microphone; headphones avoid all of it.
+- With headphones you do not need it: turn it off to save the CPU.
+- Use one echo canceller. If you set up PipeWire's echo cancellation on Linux
+  ([Voice on Linux](voice-linux-audio.md)), turn HayChat's off.
+- On Windows, while echo cancellation or noise suppression is on, HayChat asks Windows for the
+  microphone's raw signal, so Windows' own processing (noise suppression, a laptop's
+  microphone array) does not run underneath HayChat's. That also applies to the speakers, and
+  a laptop's built-in microphones can sound quieter: raise **Input gain** if they do. Turning
+  both off gives Windows its processing back (the audio devices reopen; you stay in voice).
+- It is loaded when it is needed: on Linux `libhaychat-webrtc-apm.so` next to `haychat-client`
+  (the release archive has it) with the distribution's webrtc-audio-processing 2.x (the
+  `webrtc-audio-processing` package on Fedora and Arch; Debian 13 and Ubuntu ship only
+  version 1.3, which HayChat cannot use), and `haychat-webrtc-apm.dll` next to
+  `haychat-client.exe` on Windows (the release zip has it). Without it voice works, the toggle
+  reads **Echo cancellation: unavailable**, and the note under it says why.
 
 ### Push-to-talk
 

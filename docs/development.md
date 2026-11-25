@@ -164,6 +164,14 @@ collection. No other GUI library is needed.
   - `./check.sh` sets `HAYCHAT_REQUIRE_OPUS=1`, so the Opus and voice engine tests fail instead
     of skipping when libopus is missing; set `HAYCHAT_REQUIRE_OPUS=0` to let them skip on a host
     without it.
+- **Noise suppression and echo cancellation** (`client/rnnoise`, `client/webrtcapm`) load RNNoise
+  and HayChat's wrapper around webrtc-audio-processing 2.x at runtime the same way, so the
+  client starts and voice works without them. `./check.sh` builds the wrapper
+  (`deploy/build-linux-webrtc-apm.sh`, which needs `webrtc-audio-processing-devel` and a C++
+  compiler, both in the dev image), points `HAYCHAT_WEBRTC_APM_LIBRARY` at it, and sets
+  `HAYCHAT_REQUIRE_RNNOISE=1` and `HAYCHAT_REQUIRE_WEBRTC_APM=1`; set either to `0` to let its
+  tests skip. To run a client you built with echo cancellation, put `libhaychat-webrtc-apm.so`
+  next to it or set `HAYCHAT_WEBRTC_APM_LIBRARY`.
 - **Push-to-talk hotkeys** (`client/hotkey`) load libX11 and libdbus-1 at runtime. Their tests
   need Xvfb, libXtst and dbus-daemon (in the dev image); `./check.sh` sets
   `HAYCHAT_REQUIRE_HOTKEY_TESTS=1` so they fail instead of skipping without them.

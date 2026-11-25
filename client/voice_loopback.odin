@@ -10,6 +10,7 @@ import "core:fmt"
 import "core:strconv"
 import "core:time"
 import "rnnoise"
+import "webrtcapm"
 
 VOICE_LOOPBACK_FLAG :: "--voice-loopback"
 VOICE_LOOPBACK_DEFAULT_SECONDS :: 10
@@ -17,6 +18,7 @@ VOICE_LOOPBACK_MAX_SECONDS :: 600
 VOICE_LOOPBACK_USAGE ::
 	"usage: client --voice-loopback [--seconds N] [--source SPEC] [--sink SPEC] [--loss PCT]\n" +
 	"                               [--threshold DB] [--always-on] [--noise-suppression]\n" +
+	"                               [--rnnoise] [--echo-cancellation] [--echo-sim MS:GAIN]\n" +
 	"  --seconds N      how long to run (default 10, at most 600)\n" +
 	"  --source SPEC    device[:NAME] (default), tone:HZ[:AMP], file:PATH (raw F32LE mono\n" +
 	"                   48 kHz), or silence\n" +
@@ -24,8 +26,13 @@ VOICE_LOOPBACK_USAGE ::
 	"  --loss PCT       drop this share of loopback frames (0-90) to hear FEC and PLC\n" +
 	"  --threshold DB   voice activity threshold in dBFS (default -45)\n" +
 	"  --always-on      send every frame (push-to-talk held) instead of voice activity\n" +
-	"  --noise-suppression  run the microphone through RNNoise (librnnoise.so.0 or\n" +
-	"                   rnnoise.dll next to the executable) before the gate\n" +
+	"  --noise-suppression  suppress noise on the microphone before the gate: RNNoise, or\n" +
+	"                   WebRTC's suppressor with --echo-cancellation (or without RNNoise)\n" +
+	"  --rnnoise        with --noise-suppression, keep RNNoise even behind the echo canceller\n" +
+	"  --echo-cancellation  cancel what is played from the microphone with AEC3\n" +
+	"                   (libhaychat-webrtc-apm.so or haychat-webrtc-apm.dll)\n" +
+	"  --echo-sim MS:GAIN  a file or null sink's playback returns into the capture MS\n" +
+	"                   (20-400) later, times GAIN (0-2), like a loudspeaker\n" +
 	"Prints the input level every second on stderr and the engine counters as JSON on stdout."
 
 voiceLoopbackRequested :: proc(args: []string) -> bool {
@@ -58,6 +65,14 @@ voiceLoopbackMain :: proc(args: []string) -> int {
 		case "--noise-suppression":
 			config.noiseSuppression = true
 			continue
+		case "--rnnoise":
+			config.noisePreference = .RNNoise
+			continue
+		case "--echo-cancellation":
+			config.echoCancellation = true
+			continue
+		case "--echo-sim":
+			config.echoSimulation, ok = voiceParseEchoSimulation(value)
 		case "--help", "-h":
 			fmt.println(VOICE_LOOPBACK_USAGE)
 			return 0
@@ -120,16 +135,29 @@ voiceLoopbackMain :: proc(args: []string) -> int {
 	if snapshot.noiseSuppression == .Unavailable {
 		fmt.eprintln("[Warn] noise suppression unavailable:", rnnoise.loadError())
 	}
+	if snapshot.echoCancellation == .Unavailable {
+		fmt.eprintln("[Warn] echo cancellation unavailable:", webrtcapm.loadError())
+	}
 	denoiseMeanUS: f64
 	if snapshot.stats.framesDenoised > 0 {
 		denoiseMeanUS = snapshot.stats.denoiseTotalUS / f64(snapshot.stats.framesDenoised)
 	}
 	stats := snapshot.stats
 	jitter := snapshot.jitter
+	echoMeanUS, renderMeanUS: f64
+	if stats.framesEchoCancelled > 0 {
+		echoMeanUS = stats.echoTotalUS / f64(stats.framesEchoCancelled)
+	}
+	if stats.renderFrames > 0 {
+		renderMeanUS = stats.renderTotalUS / f64(stats.renderFrames)
+	}
 	fmt.printfln(
 		`{{"result":"voice-loopback","captured":%d,"sent":%d,"gated":%d,"captureDropped":%d,` +
 		`"loopbackDropped":%d,"decoded":%d,"fec":%d,"plc":%d,"late":%d,"decodeErrors":%d,` +
-		`"noiseSuppression":"%s","denoised":%d,"denoiseMeanUS":%.1f,"denoiseMaxUS":%.1f}}`,
+		`"noiseSuppression":"%s","noiseBackend":"%s","denoised":%d,"denoiseMeanUS":%.1f,` +
+		`"denoiseMaxUS":%.1f,"echoCancellation":"%s","echoFrames":%d,"echoMeanUS":%.1f,` +
+		`"echoMaxUS":%.1f,"renderFrames":%d,"renderMeanUS":%.1f,"erleDB":%.1f,` +
+		`"echoDelayMS":%d}}`,
 		stats.framesCaptured,
 		stats.framesSent,
 		stats.framesGated,
@@ -141,9 +169,18 @@ voiceLoopbackMain :: proc(args: []string) -> int {
 		jitter.late,
 		stats.decodeErrors,
 		HEADLESS_NOISE_SUPPRESSION_NAMES[snapshot.noiseSuppression],
+		HEADLESS_NOISE_BACKEND_NAMES[snapshot.noiseBackend],
 		stats.framesDenoised,
 		denoiseMeanUS,
 		stats.denoiseMaxUS,
+		HEADLESS_ECHO_CANCELLATION_NAMES[snapshot.echoCancellation],
+		stats.framesEchoCancelled,
+		echoMeanUS,
+		stats.echoMaxUS,
+		stats.renderFrames,
+		renderMeanUS,
+		snapshot.echoStats.echoReturnLossEnhancement,
+		snapshot.echoStats.delayMS,
 	)
 	return 0
 }

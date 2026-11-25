@@ -14,15 +14,28 @@ set -euo pipefail
 #                   tone in B's file, and the counters must show nothing lost on loopback:
 #                   A sent at least 95 % of the frames its time in voice calls for, B received
 #                   at least 95 % of what A sent, and FEC plus PLC stayed under 2 % of that.
-#   1b. noise suppression (#170): N sends tone bursts over white noise (voice-check
+#   1b. noise suppression (#170, #171): N sends tone bursts over white noise (voice-check
 #                   --write-noisy-tone: 440 Hz at 0.5 amplitude, 1.5 s on and 1 s off, over
-#                   -34 dBFS of noise) from a file with an open gate, once with `voice-noise off`
-#                   and once with `voice-noise on`, and M records each. voice-check must find the
-#                   tone in both recordings; the noise floor between the bursts must stay at or
-#                   above -50 dBFS without RNNoise (the noise really travels; Opus leaves about
-#                   -42 dBFS of it) and fall to -60 dBFS or below with it, and N's voice-stats
-#                   must report noise suppression off and then active, with RNNoise's time per
-#                   20 ms frame.
+#                   -34 dBFS of noise) from a file with an open gate, with `voice-noise off`,
+#                   with `voice-noise on` (RNNoise, the client's rule while echo cancellation is
+#                   off) and with `voice-noise on` plus `voice-echo on` (WebRTC's suppressor
+#                   behind AEC3, since the wrapper is next to the client), and M records each.
+#                   voice-check must find the tone in every recording; the noise floor between
+#                   the bursts must stay at or above -50 dBFS without suppression (the noise
+#                   really travels; Opus leaves about -42 dBFS of it), fall to -60 dBFS or below
+#                   with RNNoise and to -48 dBFS or below with WebRTC's suppressor, and N's
+#                   voice-stats must report what ran (noiseSuppression, noiseBackend), with its
+#                   time per 20 ms frame.
+#   1c. echo cancellation (#171): X sends a 440 Hz tone; Y plays it into a null sink that
+#                   `voice-echo-sim 120 0.5` returns into Y's capture 120 ms later at -6 dB, like
+#                   a loudspeaker next to the microphone, and Y sends with an open gate; X
+#                   records what Y sends. With `voice-echo off` the echo reaches X (about -15
+#                   dBFS); with `voice-echo on` the tone's level in the last seconds of X's
+#                   recording must fall by at least 20 dB (the echo return loss enhancement,
+#                   printed). Then double talk: Y also sends its own 1 kHz tone at 0.1
+#                   amplitude, which must reach X within 6 dB while the echo stays 15 dB down.
+#                   Y's voice-stats report AEC3's frames, its time per frame and its own ERLE
+#                   and delay estimate.
 #   2. SDL devices: the same through SDL's audio devices on its disk driver, which needs no
 #                   audio server: C captures a 440 Hz file through `voice-source device`
 #                   (SDL_AUDIO_DISK_INPUT_FILE) and D plays through `voice-sink device`
@@ -61,6 +74,9 @@ set -euo pipefail
 # HAYCHAT_VOICE_PROOF_FAULTS=0 skips the faults stage; HAYCHAT_TEST_VOICE_SEED changes its
 # loss pattern (default 1). HAYCHAT_VOICE_PROOF_NOISE=0 skips the noise suppression stage, and
 # HAYCHAT_VOICE_PROOF_NOISE_SECONDS sets how long N talks in it (default 6, over two bursts).
+# HAYCHAT_VOICE_PROOF_ECHO=0 skips the echo cancellation stage, and
+# HAYCHAT_VOICE_PROOF_ECHO_SECONDS sets how long Y talks in each of its rounds (default 8; the
+# level is measured over the last half, after AEC3 has converged).
 # HAYCHAT_VOICE_PROOF_ENCRYPTED=0 skips the encrypted stage, which
 # needs psql (through the HAYCHAT_DATABASE_* variables) to make EA an admin.
 #
@@ -76,6 +92,8 @@ run_faults=${HAYCHAT_VOICE_PROOF_FAULTS:-1}
 run_encrypted=${HAYCHAT_VOICE_PROOF_ENCRYPTED:-1}
 run_noise=${HAYCHAT_VOICE_PROOF_NOISE:-1}
 noise_talk_seconds=${HAYCHAT_VOICE_PROOF_NOISE_SECONDS:-6}
+run_echo=${HAYCHAT_VOICE_PROOF_ECHO:-1}
+echo_talk_seconds=${HAYCHAT_VOICE_PROOF_ECHO_SECONDS:-8}
 fault_loss=0.05
 fault_jitter_ms=20
 fault_seed=${HAYCHAT_TEST_VOICE_SEED:-1}
@@ -266,6 +284,9 @@ cd "$repo_dir"
 echo "==> [voice] building the client and dev/tools/voice-check"
 odin build client -out:"$client_bin"
 odin build dev/tools/voice-check -out:"$check_bin"
+# The echo canceller's wrapper (#171) next to the client, as the release ships it, so
+# voice-noise on and voice-echo on run WebRTC audio processing.
+deploy/build-linux-webrtc-apm.sh "$work_dir"
 if [[ "$run_faults" == 1 ]]; then
 	odin build client -define:HAYCHAT_TEST_FAULTS=true -out:"$faults_client_bin"
 	# The hook must be absent from the normal build: its environment names are not in it.
@@ -301,18 +322,23 @@ stop_client b
 echo "==> [voice] file path passed"
 
 if [[ "$run_noise" == 1 ]]; then
-	echo "==> [voice] noise suppression: N sends tone bursts over noise, without and with RNNoise"
+	echo "==> [voice] noise suppression: N sends tone bursts over noise, without suppression," \
+		"with RNNoise (echo cancellation off) and with WebRTC's suppressor (echo cancellation on)"
 	noisy_file="$work_dir/noisy.f32"
 	"$check_bin" --write-noisy-tone "$noisy_file" --freq "$tone_hz" \
 		--seconds "$((noise_talk_seconds + 30))" --amplitude "$tone_amplitude" >/dev/null
 	saved_talk_seconds=$talk_seconds
 	talk_seconds=$noise_talk_seconds
-	for noise_mode in off on; do
+	# off: no suppression; on: the client's rule with echo cancellation off, RNNoise; echo: the
+	# same with echo cancellation on, WebRTC's suppressor behind AEC3 (nothing is played, so
+	# AEC3 has nothing to cancel).
+	for noise_mode in off on echo; do
 		# Client names cannot repeat within a run (their pipes stay), so each mode has its own.
 		speaker="n$noise_mode"
 		listener="m$noise_mode"
-		start_client "$speaker" "voice-n-$noise_mode-$run_tag"
-		start_client "$listener" "voice-m-$noise_mode-$run_tag"
+		# Display names are at most 32 bytes: two letters of the mode.
+		start_client "$speaker" "voice-n-${noise_mode:0:2}-$run_tag"
+		start_client "$listener" "voice-m-${noise_mode:0:2}-$run_tag"
 		expect_connected "$speaker"
 		expect_connected "$listener"
 		user_n=$(connected_user_id "$speaker")
@@ -320,15 +346,32 @@ if [[ "$run_noise" == 1 ]]; then
 		noise_sink="$work_dir/m-$noise_mode.f32"
 		expect_ok "$speaker" voice-source "file:$noisy_file"
 		expect_ok "$speaker" voice-gate open
-		expect_ok "$speaker" voice-noise "$noise_mode"
+		if [[ "$noise_mode" == off ]]; then
+			expect_ok "$speaker" voice-noise off
+		else
+			expect_ok "$speaker" voice-noise on
+		fi
+		if [[ "$noise_mode" == echo ]]; then
+			expect_ok "$speaker" voice-echo on
+		fi
 		expect_ok "$listener" voice-sink "file:$noise_sink"
 		talk "$speaker" "$listener" "$user_n" "$user_m"
 		expect_ok "$listener" voice-flush
-		if [[ "$noise_mode" == on ]]; then
-			[[ "$speaker_stats" == *'"noiseSuppression":"active"'* ]] \
-				|| fail "[noise] N does not report RNNoise active: $speaker_stats"
+		if [[ "$noise_mode" != off ]]; then
+			backend=rnnoise
 			floor_limit=(--max-floor -60)
-			echo "    [noise] RNNoise on N: $(json_number "$speaker_stats" denoisedFrames)" \
+			if [[ "$noise_mode" == echo ]]; then
+				backend=webrtc
+				# WebRTC's noise estimator starts on the fixture's first burst, which the
+				# speaker sends from its first frame, and takes about 9 dB off it; the later
+				# bursts keep their level, which the --tone-level check below holds it to.
+				floor_limit=(--max-floor -48 --level-tolerance 12)
+			fi
+			[[ "$speaker_stats" == *'"noiseSuppression":"active"'* ]] \
+				|| fail "[noise] N does not report noise suppression active: $speaker_stats"
+			[[ "$speaker_stats" == *"\"noiseBackend\":\"$backend\""* ]] \
+				|| fail "[noise] N does not report $backend suppressing: $speaker_stats"
+			echo "    [noise] $backend on N: $(json_number "$speaker_stats" denoisedFrames)" \
 				"frames, $(json_number "$speaker_stats" denoiseMeanUS) us per 20 ms frame" \
 				"(max $(json_number "$speaker_stats" denoiseMaxUS) us)"
 		else
@@ -338,7 +381,13 @@ if [[ "$run_noise" == 1 ]]; then
 		fi
 		"$check_bin" "$noise_sink" --freq "$tone_hz" --tolerance 5 --min-seconds 1 \
 			--amplitude "$tone_amplitude" "${floor_limit[@]}" \
-			|| fail "[noise] voice-check rejected M's recording with RNNoise $noise_mode"
+			|| fail "[noise] voice-check rejected M's recording with voice-noise $noise_mode"
+		if [[ "$noise_mode" == echo ]]; then
+			# The last 4 s hold most of two bursts at about 0.65 duty: -9 dBFS of tone
+			# averages to about -11 dBFS there.
+			"$check_bin" "$noise_sink" --freq "$tone_hz" --tone-level 4 --min-level -15 \
+				|| fail "[noise] the later bursts lost their level behind WebRTC's suppressor"
+		fi
 		check_counters "noise $noise_mode"
 		expect_ok "$listener" voice-leave
 		stop_client "$speaker"
@@ -346,6 +395,90 @@ if [[ "$run_noise" == 1 ]]; then
 	done
 	talk_seconds=$saved_talk_seconds
 	echo "==> [voice] noise suppression passed"
+fi
+
+# echo_round MODE NEAR_SOURCE: X (the far end, sending the tone) and Y (playing it back into
+# its own capture) join, Y talks for echo_talk_seconds, and X flushes its recording of Y while
+# Y still talks. Sets echo_file and echo_stats (Y's voice-stats).
+echo_round() {
+	local mode=$1 near_source=$2 far="x$1" near="y$1" start user_near
+	start_client "$far" "voice-x-${mode:0:2}-$run_tag"
+	start_client "$near" "voice-y-${mode:0:2}-$run_tag"
+	expect_connected "$far"
+	expect_connected "$near"
+	user_near=$(connected_user_id "$near")
+	echo_file="$work_dir/x-$mode.f32"
+	expect_ok "$far" voice-source "tone:$tone_hz:$tone_amplitude"
+	expect_ok "$far" voice-gate open
+	expect_ok "$far" voice-sink "file:$echo_file"
+	expect_ok "$near" voice-source "$near_source"
+	expect_ok "$near" voice-gate open
+	expect_ok "$near" voice-sink null
+	expect_ok "$near" voice-echo-sim 120 0.5
+	if [[ "$mode" == off ]]; then
+		expect_ok "$near" voice-echo off
+	else
+		expect_ok "$near" voice-echo on
+	fi
+	join_voice "$far"
+	start=$(wc -l <"$work_dir/$far.out")
+	join_voice "$near"
+	expect_event "$far" \
+		"${speaking_prefix}\"userID\":$user_near,\"speaking\":true,\"self\":false\\}$" \
+		"$start" "never heard $near"
+	sleep "$echo_talk_seconds"
+	expect_ok "$near" voice-stats
+	echo_stats=$last_result
+	expect_ok "$far" voice-flush
+	expect_ok "$near" voice-leave
+	expect_ok "$far" voice-leave
+	stop_client "$far"
+	stop_client "$near"
+}
+
+# tone_level FILE HZ [LIMITS...]: the level of HZ alone over the last half of Y's talk.
+tone_level() {
+	local file=$1 hz=$2 line
+	shift 2
+	line=$("$check_bin" "$file" --freq "$hz" --tone-level "$((echo_talk_seconds / 2))" "$@") \
+		|| fail "[echo] $line"
+	echo "    $line" >&2
+	[[ "$line" =~ at\ (-?[0-9]+\.[0-9]+)\ dBFS ]] || fail "[echo] no level in: $line"
+	printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+if [[ "$run_echo" == 1 ]]; then
+	echo "==> [voice] echo cancellation: Y plays X's tone back into its microphone (120 ms," \
+		"-6 dB), without and with AEC3, then with Y talking too"
+	echo_round off silence
+	[[ "$echo_stats" == *'"echoCancellation":"off"'* ]] \
+		|| fail "[echo] Y does not report echo cancellation off: $echo_stats"
+	echo_off_db=$(tone_level "$echo_file" "$tone_hz" --min-level -21)
+	echo_round on silence
+	[[ "$echo_stats" == *'"echoCancellation":"active"'* ]] \
+		|| fail "[echo] Y does not report echo cancellation active: $echo_stats"
+	echo_on_db=$(tone_level "$echo_file" "$tone_hz")
+	erle=$(awk -v off="$echo_off_db" -v on="$echo_on_db" 'BEGIN { printf "%.1f", off - on }')
+	awk -v erle="$erle" 'BEGIN { exit !(erle >= 20) }' \
+		|| fail "[echo] the echo fell by $erle dB ($echo_off_db -> $echo_on_db dBFS), not 20"
+	echo "    [echo] ERLE $erle dB ($echo_off_db -> $echo_on_db dBFS at X);" \
+		"AEC3 on Y: $(json_number "$echo_stats" echoFrames) frames," \
+		"$(json_number "$echo_stats" echoMeanUS) us per 20 ms frame" \
+		"(max $(json_number "$echo_stats" echoMaxUS) us), render" \
+		"$(json_number "$echo_stats" renderMeanUS) us per 10 ms frame, its own ERLE" \
+		"$(json_number "$echo_stats" erleDB) dB, delay $(json_number "$echo_stats" echoDelayMS) ms"
+	near_hz=1000
+	near_amplitude=0.1
+	echo_round double "tone:$near_hz:$near_amplitude"
+	near_db=$(tone_level "$echo_file" "$near_hz" --min-level "$(awk -v a="$near_amplitude" \
+		'BEGIN { printf "%.1f", 20 * log(a / sqrt(2)) / log(10) - 6 }')")
+	double_echo_db=$(tone_level "$echo_file" "$tone_hz" --max-level "$(awk -v off="$echo_off_db" \
+		'BEGIN { printf "%.1f", off - 15 }')")
+	echo "    [echo] double talk: Y's own ${near_hz} Hz tone reached X at $near_db dBFS" \
+		"(sent at $(awk -v a="$near_amplitude" \
+			'BEGIN { printf "%.1f", 20 * log(a / sqrt(2)) / log(10) }') dBFS)," \
+		"the echo at $double_echo_db dBFS"
+	echo "==> [voice] echo cancellation passed"
 fi
 
 echo "==> [voice] SDL devices: C captures through the disk driver, D plays through it"

@@ -18,6 +18,7 @@ import "core:strconv"
 import "core:sync"
 import "core:time"
 import "rnnoise"
+import "webrtcapm"
 
 // How long voice-flush waits for the voice thread to serve the flush.
 HEADLESS_VOICE_FLUSH_TIMEOUT :: 2 * time.Second
@@ -30,6 +31,18 @@ HEADLESS_VOICE_STATUS_NAMES := [VoiceSessionStatus]string {
 }
 
 HEADLESS_NOISE_SUPPRESSION_NAMES := [VoiceNoiseSuppressionStatus]string {
+	.Off         = "off",
+	.Active      = "active",
+	.Unavailable = "unavailable",
+}
+
+HEADLESS_NOISE_BACKEND_NAMES := [VoiceNoiseBackend]string {
+	.None    = "none",
+	.RNNoise = "rnnoise",
+	.WebRTC  = "webrtc",
+}
+
+HEADLESS_ECHO_CANCELLATION_NAMES := [VoiceEchoCancellationStatus]string {
 	.Off         = "off",
 	.Active      = "active",
 	.Unavailable = "unavailable",
@@ -363,14 +376,31 @@ HeadlessVoiceStatsJSON :: struct {
 	transmitting:      bool,
 	frameSequence:     u32,
 	// #170: noise suppression ("off", "active" or "unavailable", from the running engine or
-	// else the template and the library), why RNNoise did not load, the last denoised frame's
-	// speech probability, and RNNoise's time per 20 ms frame in microseconds.
+	// else the template and the libraries), why RNNoise did not load, the last denoised frame's
+	// speech probability, and the capture stage's time per 20 ms frame in microseconds.
 	noiseSuppression:  string,
 	noiseError:        string,
 	speechProbability: f32,
 	denoisedFrames:    u64,
 	denoiseMeanUS:     f64,
 	denoiseMaxUS:      f64,
+	// #171: the suppressor ("none", "rnnoise" or "webrtc"), echo cancellation ("off",
+	// "active" or "unavailable") and why WebRTC audio processing did not load; frames AEC3
+	// processed and the stage's time on them, render frames (10 ms) fed and their time; and
+	// AEC3's own statistics once it has them (hasEchoStats): ERLE and ERL in dB and its delay
+	// estimate in ms.
+	noiseBackend:      string,
+	echoCancellation:  string,
+	echoError:         string,
+	echoFrames:        u64,
+	echoMeanUS:        f64,
+	echoMaxUS:         f64,
+	renderFrames:      u64,
+	renderMeanUS:      f64,
+	hasEchoStats:      bool,
+	erleDB:            f64,
+	erlDB:             f64,
+	echoDelayMS:       int,
 	engine:            VoiceEngineStats,
 	jitter:            JitterStats,
 	speakers:          []HeadlessVoiceSpeakerJSON,
@@ -498,17 +528,55 @@ headlessVoiceStatsJSON :: proc(
 		network  = network,
 	}
 	status := VoiceNoiseSuppressionStatus.Off
+	backend := VoiceNoiseBackend.None
+	echo := VoiceEchoCancellationStatus.Off
+	template := voice.engineTemplate
 	if snapshot != nil && snapshot.running {
 		status = snapshot.noiseSuppression
-	} else if voice.engineTemplate.noiseSuppression {
-		status = rnnoise.isLoaded() ? .Active : .Unavailable
+		backend = snapshot.noiseBackend
+		echo = snapshot.echoCancellation
+	} else {
+		if template.noiseSuppression {
+			backend = voiceNoiseBackendFor(
+				rnnoise.isLoaded(),
+				webrtcapm.isLoaded(),
+				template.echoCancellation,
+				template.noisePreference,
+			)
+			status = backend == .None ? .Unavailable : .Active
+		}
+		if template.echoCancellation {
+			echo = webrtcapm.isLoaded() ? .Active : .Unavailable
+		}
 	}
 	result.noiseSuppression = HEADLESS_NOISE_SUPPRESSION_NAMES[status]
+	result.noiseBackend = HEADLESS_NOISE_BACKEND_NAMES[backend]
 	if status == .Unavailable {
 		result.noiseError = rnnoise.loadError()
 	}
+	result.echoCancellation = HEADLESS_ECHO_CANCELLATION_NAMES[echo]
+	if echo == .Unavailable {
+		result.echoError = webrtcapm.loadError()
+	}
 	if snapshot == nil {
 		return result
+	}
+	stats := snapshot.stats
+	result.echoFrames = stats.framesEchoCancelled
+	if stats.framesEchoCancelled > 0 {
+		result.echoMeanUS = stats.echoTotalUS / f64(stats.framesEchoCancelled)
+	}
+	result.echoMaxUS = stats.echoMaxUS
+	result.renderFrames = stats.renderFrames
+	if stats.renderFrames > 0 {
+		result.renderMeanUS = stats.renderTotalUS / f64(stats.renderFrames)
+	}
+	if snapshot.hasEchoStats {
+		echoStats := snapshot.echoStats
+		result.hasEchoStats = true
+		result.erleDB = echoStats.echoReturnLossEnhancement
+		result.erlDB = echoStats.echoReturnLoss
+		result.echoDelayMS = int(echoStats.delayMS)
 	}
 	result.speechProbability = snapshot.speechProbability
 	result.denoisedFrames = snapshot.stats.framesDenoised
@@ -701,11 +769,44 @@ headlessCommandVoiceSink :: proc(harness: ^HeadlessHarness, command: ^HeadlessPa
 	headlessVoiceWriteSetting(harness, command, command.args[0], state.voice.engine != nil)
 }
 
-// voice-noise on|off: RNNoise noise suppression for the next join and the running engine (#170).
-// The harness starts with it off, so tones stay exactly as sent unless a script asks; the GUI
-// follows the voice_noise_suppression setting (on by default). The reply's value is the
-// switch; voice-stats says whether RNNoise runs ("active") or could not be loaded.
+// voice-noise on|off|rnnoise: noise suppression for the next join and the running engine
+// (#170, #171). on is the client's rule (WebRTC's suppressor when WebRTC audio processing
+// loads, else RNNoise); rnnoise keeps RNNoise, #170's suppressor, even then. The harness
+// starts with it off, so tones stay exactly as sent unless a script asks; the GUI follows the
+// voice_noise_suppression setting (on by default). The reply's value is the switch;
+// voice-stats says what runs (noiseSuppression, noiseBackend) or why nothing could be loaded.
 headlessCommandVoiceNoise :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
+	preference := VoiceNoisePreference.Auto
+	enabled, ok := headlessParseSwitch(command.args[0])
+	if command.args[0] == "rnnoise" {
+		enabled, ok, preference = true, true, .RNNoise
+	}
+	if !ok {
+		headlessVoiceUsage(harness, command)
+		return
+	}
+	state := &harness.state
+	if enabled {
+		// Loaded here, so voice-stats can report them before the next join.
+		_ = rnnoise.load()
+		_ = webrtcapm.load()
+	}
+	template := state.voice.engineTemplate
+	template.noiseSuppression = enabled
+	template.noisePreference = preference
+	State_setVoiceEngineTemplate(state, template)
+	if engine := state.voice.engine; engine != nil {
+		VoiceEngine_setNoisePreference(engine, preference)
+		VoiceEngine_setNoiseSuppression(engine, enabled)
+	}
+	headlessVoiceWriteSetting(harness, command, command.args[0])
+}
+
+// voice-echo on|off: AEC3 echo cancellation for the next join and the running engine (#171).
+// Off in the harness until a script asks, like voice-noise; the GUI follows the
+// voice_echo_cancellation setting (on by default). voice-stats says whether it runs
+// (echoCancellation) or why WebRTC audio processing could not be loaded (echoError).
+headlessCommandVoiceEcho :: proc(harness: ^HeadlessHarness, command: ^HeadlessParsedCommand) {
 	enabled, ok := headlessParseSwitch(command.args[0])
 	if !ok {
 		headlessVoiceUsage(harness, command)
@@ -713,16 +814,48 @@ headlessCommandVoiceNoise :: proc(harness: ^HeadlessHarness, command: ^HeadlessP
 	}
 	state := &harness.state
 	if enabled {
-		// Loaded here, so voice-stats can report it before the next join.
-		_ = rnnoise.load()
+		_ = webrtcapm.load()
 	}
 	template := state.voice.engineTemplate
-	template.noiseSuppression = enabled
+	template.echoCancellation = enabled
 	State_setVoiceEngineTemplate(state, template)
 	if engine := state.voice.engine; engine != nil {
-		VoiceEngine_setNoiseSuppression(engine, enabled)
+		VoiceEngine_setEchoCancellation(engine, enabled)
 	}
 	headlessVoiceWriteSetting(harness, command, command.args[0])
+}
+
+// voice-echo-sim DELAY_MS GAIN | voice-echo-sim off: from the next join, a file or null sink's
+// playback comes back into this client's capture DELAY_MS (20..400) later, times GAIN
+// (0..2), like a loudspeaker next to the microphone (VoiceEchoSimulation). For proofs of the
+// echo canceller without audio devices.
+headlessCommandVoiceEchoSim :: proc(
+	harness: ^HeadlessHarness,
+	command: ^HeadlessParsedCommand,
+) {
+	simulation: VoiceEchoSimulation
+	if command.args[0] != "off" || command.argCount != 1 {
+		delayMS, delayOK := headlessParseNumber(command.args[0])
+		gain, gainOK := strconv.parse_f32(command.argCount > 1 ? command.args[1] : "")
+		if !delayOK ||
+		   !gainOK ||
+		   delayMS < VOICE_ECHO_SIMULATION_MIN_DELAY_MS ||
+		   delayMS > VOICE_ECHO_SIMULATION_MAX_DELAY_MS ||
+		   !(gain > 0 && gain <= VOICE_ECHO_SIMULATION_MAX_GAIN) {
+			headlessVoiceUsage(harness, command)
+			return
+		}
+		simulation = {delayMS = delayMS, gain = gain}
+	}
+	state := &harness.state
+	template := state.voice.engineTemplate
+	template.echoSimulation = simulation
+	State_setVoiceEngineTemplate(state, template)
+	value := "off"
+	if simulation.gain != 0 {
+		value = fmt.tprintf("%d %g", simulation.delayMS, simulation.gain)
+	}
+	headlessVoiceWriteSetting(harness, command, value, state.voice.engine != nil)
 }
 
 // voice-gate vad [THRESHOLD_DB] | ptt | open. open is push-to-talk with the key held for the
