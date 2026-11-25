@@ -39,6 +39,7 @@ package client
 // every packet is capped at and padded to one size per bitrate (voiceE2EEPaddedOpusBytes), so
 // frame lengths do not follow the speech.
 
+import "base:runtime"
 import "../common"
 import "core:c"
 import "core:crypto"
@@ -734,11 +735,27 @@ VoiceEngine_wipeKeys :: proc(engine: ^VoiceEngine) {
 
 // ── SDL devices ───────────────────────────────────────────────────
 
+// voiceSDLStreamRole is the SDL_HINT_AUDIO_DEVICE_STREAM_ROLE value for voice on each OS.
+// The backends spell it differently: SDL's PipeWire backend passes the hint through as
+// `media.role`, whose standard value is "Communication", while the WASAPI backend
+// (src/audio/wasapi/SDL_wasapi.c, WASAPI_PrepDevice) compares it with "Communications" to
+// choose AudioCategory_Communications. That WASAPI code is under `#if 0` from SDL 3.4.0
+// through 3.4.18 (which we ship) and main, because a category broke some USB microphones,
+// so on Windows the role does nothing yet; it is passed so the category applies once SDL
+// turns the code back on (#172, docs/plan/2026-11-25-wasapi-communications-capture.md).
+voiceSDLStreamRole :: proc(os: runtime.Odin_OS_Type) -> cstring {
+	#partial switch os {
+	case .Windows:
+		return "Communications"
+	}
+	return "Communication"
+}
+
 @(private = "file")
 VoiceEngine_initSDLAudio :: proc(engine: ^VoiceEngine) -> bool {
 	// Hints set at normal priority, so SDL_AUDIO_* environment variables still win (the
 	// disk driver in tests relies on that).
-	_ = SDL.SetHint(SDL.HINT_AUDIO_DEVICE_STREAM_ROLE, "Communication")
+	_ = SDL.SetHint(SDL.HINT_AUDIO_DEVICE_STREAM_ROLE, voiceSDLStreamRole(ODIN_OS))
 	_ = SDL.SetHint(SDL.HINT_AUDIO_DEVICE_STREAM_NAME, "HayChat voice")
 	// No HINT_AUDIO_DEVICE_SAMPLE_FRAMES: with "480" (10 ms), SDL 3.4's PipeWire backend
 	// delivered under half the captured samples on a host whose minimum quantum is 1024.

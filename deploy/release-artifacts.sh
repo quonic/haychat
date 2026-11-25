@@ -50,7 +50,11 @@ SDL3_TTF_DLL_SHA256=95a20af07f194f057b6e778bee0ce608d3c90c3dbd64a4b5120dc4879f43
 # yuv2rgb, fdlibm and others), read from that SDL's source and the VisualC/SDL/SDL.vcxproj
 # that builds the release DLL. A new SDL may bundle other code, so a change of the DLL's hash
 # fails --check-licences until someone re-checks that list and the licence texts in
-# deploy/licenses/, and pins the new hash here.
+# deploy/licenses/, and pins the new hash here. Check src/audio/wasapi/SDL_wasapi.c of the new
+# SDL too: while the stream role code there is under `#if 0`, the client's "Communications"
+# role (voiceSDLStreamRole) does nothing on Windows; once it is live, SDL's capture gets
+# Windows' communications processing and the in-app noise suppression and echo canceller must
+# not run on top of it (docs/plan/2026-11-25-wasapi-communications-capture.md).
 SDL3_DLL_SHA256=2b4b128d8d510cc2d442693cf848c050d700d43dc667afe9e5fd82b0570d667e
 FREETYPE_CREDIT="Portions of this software are copyright © 2023 The FreeType Project"
 TWEMOJI_CREDIT="Twemoji by Twitter, Inc. and contributors"
