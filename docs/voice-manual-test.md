@@ -42,6 +42,7 @@ Settings, all optional, as environment variables:
 | `HAYCHAT_VOICE_MANUAL_LEVELS` | `-6 -18 -30` | Peak levels of the speech, in dBFS |
 | `HAYCHAT_VOICE_MANUAL_NOISE_DB` | `-60` | Pink noise under the speech, RMS in dBFS |
 | `HAYCHAT_VOICE_MANUAL_THRESHOLD_DB` | the client's default | A's voice activity threshold |
+| `HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION` | `0` | `1` turns RNNoise on for A's microphone (`voice-noise on`, #170). Off by default, as in the harness, so runs compare with older ones; the GUI's default is on |
 | `HAYCHAT_VOICE_MANUAL_CLICKS` | `20` | Clicks in the latency train, and taps in the `taps` phase |
 | `HAYCHAT_VOICE_MANUAL_CLIENT` | build one | Use this client binary, for example one built with a changed constant, to compare |
 | `HAYCHAT_VOICE_MANUAL_KEEP` | `0` | `1` keeps the work directory with every recording and log |
@@ -271,6 +272,35 @@ frame is dropped, not delayed). A one-frame look-back, sending the frame before 
 opened the gate, would recover it without the attack-1 problems. That is an engine change for
 later. The spurt-start delay sits at the design's 150 ms loopback target, and the steady state
 is under it.
+
+## Noise Suppression (RNNoise, #170)
+
+Measured on 2026-11-25 on the same host (PipeWire 1.6.11, quantum 2048), `main` with #170, the
+dev pod on loopback, the default threshold (−45 dBFS). Each pair is one run with
+`HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION=0` and one with `=1`. While RNNoise runs, voice
+activity needs both the level threshold and a speech probability of at least 0.5
+(`VOICE_VAD_SPEECH_PROBABILITY`). Each cell: speech heard at B, word starts clipped (mean
+clip), background sent beyond the hangover.
+
+| Speech level (noise floor) | RNNoise off | RNNoise on |
+| --- | --- | --- |
+| −24 dBFS (−60 dBFS pink) | 99.8 %, 0/9 (2 ms), 0 ms | 99.4 %, 1/9 (8 ms), 0 ms |
+| −36 dBFS (−60 dBFS pink) | 98.3 %, 4/9 (21 ms), 0 ms | 97.5 %, 6/9 (30 ms), 0 ms |
+| −47 dBFS (−60 dBFS pink) | 69.9 %, 8/10 (142 ms), 0 ms | 62.3 %, 9/10 (188 ms), 0 ms |
+| −24 dBFS (−40 dBFS pink) | 100 %, 0/10, **11.7 s** (gate never closed) | 99.3 %, 0/10 (7 ms), 0 ms |
+| −33 dBFS (−40 dBFS pink) | 100 %, 0/20, **12.3 s** (gate never closed) | 99.7 %, 0/20 (1 ms), 0 ms |
+| −38 dBFS (−40 dBFS pink) | 100 %, 0/38, **13.3 s** (gate never closed) | 68.3 %, 9/36 (17 ms), 0 ms |
+
+- **Noisy rooms:** with a −40 dBFS floor the level gate alone stays open and sends the noise
+  all the time; with RNNoise it sends none, and speech 7 dB or more above the noise comes
+  through whole. Speech barely above the noise (−38 over −40 dBFS) loses about a third.
+- **Quiet rooms:** RNNoise costs a little: word starts lose about 6 to 10 ms more, and quiet
+  speech under the threshold is cut more. 0.5 stays the threshold.
+- **Not speech:** with RNNoise no tap opened the gate (0 of 20, against 5), and only 1 of the
+  10 bursts did, so the `bursts` phase measures nothing then: run it with RNNoise off. The tone
+  phase is unchanged (SNR 76.0 dB, level −9.83 dBFS, 0 dropouts).
+- **Delay:** clicks (gate held open) took 166.5 ms against 142.5 ms. RNNoise adds 10 ms; the
+  rest is within the run-to-run spread of the quantum alignment (up to 19 ms, above).
 
 ## Listening Yourself
 

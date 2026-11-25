@@ -48,6 +48,8 @@ set -euo pipefail
 #   HAYCHAT_VOICE_MANUAL_LEVELS         speech peak levels in dBFS (default "-6 -18 -30")
 #   HAYCHAT_VOICE_MANUAL_NOISE_DB       pink noise floor under the speech, RMS dBFS (default -60)
 #   HAYCHAT_VOICE_MANUAL_THRESHOLD_DB   A's voice activity threshold (default: the client's)
+#   HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION=1  RNNoise on A's microphone (voice-noise on, #170;
+#                                       default 0, the harness's default, so runs compare)
 #   HAYCHAT_VOICE_MANUAL_CLICKS         clicks in the latency train (default 20)
 #   HAYCHAT_VOICE_MANUAL_PHASES         phases to run (default "tone speech taps bursts clicks")
 #   HAYCHAT_VOICE_MANUAL_CLIENT         use this client binary instead of building one, for
@@ -66,6 +68,7 @@ psql_command=${HAYCHAT_VOICE_MANUAL_PSQL:-"$repo_dir/dev.sh psql"}
 speech_levels=${HAYCHAT_VOICE_MANUAL_LEVELS:-"-6 -18 -30"}
 noise_db=${HAYCHAT_VOICE_MANUAL_NOISE_DB:--60}
 threshold_db=${HAYCHAT_VOICE_MANUAL_THRESHOLD_DB:-}
+noise_suppression=${HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION:-0}
 click_count=${HAYCHAT_VOICE_MANUAL_CLICKS:-20}
 client_override=${HAYCHAT_VOICE_MANUAL_CLIENT:-}
 phases=" ${HAYCHAT_VOICE_MANUAL_PHASES:-tone speech taps bursts clicks} "
@@ -650,6 +653,12 @@ expect_ok a voice-source "device:$mic_name"
 expect_ok a voice-sink null
 expect_ok b voice-source silence
 expect_ok b voice-sink "device:$b_out_name"
+if [[ "$noise_suppression" == 1 ]]; then
+	expect_ok a voice-noise on
+	note "noise suppression: on (RNNoise on A's microphone)"
+else
+	expect_ok a voice-noise off
+fi
 set_vad_gate
 join_voice b
 expect_routed b sink-inputs sinks "$b_sink"
@@ -661,7 +670,9 @@ if [[ "$encrypted" == 1 ]]; then
 fi
 
 # Summary lines in phase order.
-summary=()
+noise_state=off
+[[ "$noise_suppression" == 1 ]] && noise_state=on
+summary=("noise suppression (RNNoise on A): $noise_state")
 
 # record_phase NAME FILE: plays FILE into A's microphone with the probe recording around it,
 # and prints the counters that changed.
