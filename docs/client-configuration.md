@@ -43,7 +43,8 @@ to the right place.
 | `voice_input_gain` | Linear microphone gain, 0 to 4. Default 1 |
 | `voice_output_volume` | Linear output volume, 0 to 2. Default 1 |
 | `voice_bitrate` | Opus bitrate in bit/s, 12000 to 64000. Default 24000 |
-| `voice_noise_suppression` | `true` (default: RNNoise removes background noise from the microphone, and in voice activity mode only speech opens it; see [Noise suppression](user-guide.md#noise-suppression)) or `false`. It takes effect only when RNNoise loads (`librnnoise.so.0` on Linux, `rnnoise.dll` next to the executable on Windows); otherwise voice works without it |
+| `voice_noise_suppression` | `true` (default: background noise is removed from the microphone, and in voice activity mode only speech opens it; see [Noise suppression](user-guide.md#noise-suppression)) or `false`. WebRTC's suppressor does it when WebRTC audio processing loads (see `voice_echo_cancellation`), else RNNoise (`librnnoise.so.0` on Linux, `rnnoise.dll` next to the executable on Windows); with neither, voice works without it |
+| `voice_echo_cancellation` | `true` (default: WebRTC's AEC3 removes the voices HayChat plays from the microphone, so others do not hear themselves; see [Echo cancellation](user-guide.md#echo-cancellation)) or `false` (for headphones). It takes effect only when WebRTC audio processing loads (`libhaychat-webrtc-apm.so` next to the executable plus the system's `libwebrtc-audio-processing-2.so.1` on Linux, `haychat-webrtc-apm.dll` next to the executable on Windows); otherwise voice works without it. On Windows, while this or noise suppression is on, the audio devices open in raw mode (no Windows processing) |
 
 Settings → Voice writes the voice keys only when they differ from the default, so a later change
 of a default reaches everyone who did not choose otherwise. When the config is read,

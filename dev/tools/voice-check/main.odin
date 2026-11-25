@@ -8,11 +8,17 @@ package voice_check
 //   odin run dev/tools/voice-check -- --write-tone FILE --freq 440 --seconds 8
 //   odin run dev/tools/voice-check -- --write-noisy-tone FILE --freq 440 --seconds 30
 //   odin run dev/tools/voice-check -- FILE --freq 440 --min-seconds 1 --max-floor -60
+//   odin run dev/tools/voice-check -- FILE --freq 440 --tone-level 5 --max-level -40
 //
 // The noisy tone (#170, noise suppression) is tone bursts (--burst seconds on, --gap seconds
 // off) over white noise at --noise-db dBFS RMS, from a fixed seed (toneanalysis.NoisyTone).
 // --max-floor and --min-floor check the recording's noise floor: the 25th percentile of its
 // 20 ms block levels between the first and last tone-loud block, which lies in the gaps.
+//
+// --tone-level S (#171, echo cancellation) measures instead of checking: the RMS level of
+// --freq alone (toneanalysis.toneLevelDB) over the last S seconds, which reads an echo's
+// residual even next to a louder near-end tone at another frequency. --max-level and
+// --min-level make it pass or fail.
 //
 // Files are raw F32LE samples at 48 kHz, the format of the client's file sink and source
 // (mono) and of SDL's disk audio driver (interleaved, so pass --channels 2 for a playback
@@ -44,6 +50,8 @@ USAGE ::
 	"                   [--channels N] [--rate HZ]\n" +
 	"       voice-check --write-noisy-tone FILE --freq HZ --seconds S [--amplitude A]\n" +
 	"                   [--noise-db DB] [--burst S] [--gap S]\n" +
+	"       voice-check FILE --freq HZ --tone-level S [--max-level DB] [--min-level DB]\n" +
+	"                   [--channels N] [--rate HZ]\n" +
 	"  FILE                raw F32LE samples (the client's file sink: mono, 48 kHz)\n" +
 	"  --freq HZ           the expected tone, 50 to 4050 Hz (the analyser's scan range)\n" +
 	"  --tolerance HZ      how far the dominant frequency may be off (default 5)\n" +
@@ -59,26 +67,32 @@ USAGE ::
 	"  --noise-db DB       the noise's RMS level (default -34 dBFS)\n" +
 	"  --burst S, --gap S  seconds of tone, then of noise alone (default 1.5 and 1)\n" +
 	"  --max-floor DB      fail when the noise floor between the bursts is above DB\n" +
-	"  --min-floor DB      fail when it is below DB (the noise must be there)"
+	"  --min-floor DB      fail when it is below DB (the noise must be there)\n" +
+	"  --tone-level S      print the level of --freq alone over the last S seconds instead\n" +
+	"  --max-level DB, --min-level DB  fail when that level is above or below DB"
 
 Options :: struct {
-	path:           string,
-	writeTone:      bool,
-	freq:           f64,
-	toleranceHz:    f64,
-	minSeconds:     f64,
-	amplitude:      f64,
-	levelTolerance: f64,
-	minSNR:         f64,
-	channels:       int,
-	rate:           f64,
-	seconds:        f64,
-	writeNoisyTone: bool,
-	noiseDB:        f64,
-	burstSeconds:   f64,
-	gapSeconds:     f64,
-	maxFloor:       Maybe(f64),
-	minFloor:       Maybe(f64),
+	path:             string,
+	writeTone:        bool,
+	freq:             f64,
+	toleranceHz:      f64,
+	minSeconds:       f64,
+	amplitude:        f64,
+	levelTolerance:   f64,
+	minSNR:           f64,
+	channels:         int,
+	rate:             f64,
+	seconds:          f64,
+	writeNoisyTone:   bool,
+	noiseDB:          f64,
+	burstSeconds:     f64,
+	gapSeconds:       f64,
+	maxFloor:         Maybe(f64),
+	minFloor:         Maybe(f64),
+	// --tone-level S: seconds at the end of FILE to measure (0: check the tone instead).
+	toneLevelSeconds: f64,
+	maxLevel:         Maybe(f64),
+	minLevel:         Maybe(f64),
 }
 
 DEFAULT_NOISE_DB :: -34.0
@@ -171,6 +185,15 @@ parseOptions :: proc(args: []string) -> (options: Options, err: string) {
 		case "--min-floor":
 			ok = number <= 0
 			options.minFloor = number
+		case "--tone-level":
+			ok = number > 0 && number <= MAX_TONE_SECONDS
+			options.toneLevelSeconds = number
+		case "--max-level":
+			ok = number <= 0
+			options.maxLevel = number
+		case "--min-level":
+			ok = number <= 0
+			options.minLevel = number
 		case:
 			return {}, "unknown option"
 		}
@@ -237,6 +260,50 @@ writeToneFile :: proc(options: Options) -> int {
 		options.channels,
 		options.rate,
 	)
+	return EXIT_PASS
+}
+
+// --tone-level: the level of --freq alone over the file's last toneLevelSeconds.
+measureToneLevel :: proc(options: Options) -> int {
+	bytes, readErr := os.read_entire_file_from_path(options.path, context.allocator)
+	if readErr != nil {
+		fmt.eprintfln("voice-check: cannot read %s: %v", options.path, readErr)
+		return EXIT_USAGE
+	}
+	defer delete(bytes)
+	interleaved := mem.slice_data_cast([]f32, bytes[:len(bytes) / 4 * 4])
+	frames := len(interleaved) / options.channels
+	wanted := min(int(options.toneLevelSeconds * options.rate), frames)
+	samples := make([]f32, wanted)
+	defer delete(samples)
+	for &sample, index in samples {
+		sample = interleaved[(frames - wanted + index) * options.channels]
+	}
+	level, blocks := toneanalysis.toneLevelDB(samples, options.rate, options.freq)
+	free_all(context.temp_allocator)
+	failure := ""
+	if maxLevel, has := options.maxLevel.?; has && level > maxLevel {
+		failure = "the tone is above --max-level"
+	}
+	if minLevel, has := options.minLevel.?; has && level < minLevel {
+		failure = "the tone is below --min-level"
+	}
+	fmt.printfln(
+		"voice-check: %s %s: %.2f Hz at %.2f dBFS RMS over the last %.2f s (%d block(s); " +
+		"max %v, min %v)",
+		len(failure) == 0 ? "PASS" : "FAIL",
+		options.path,
+		options.freq,
+		level,
+		f64(wanted) / options.rate,
+		blocks,
+		options.maxLevel,
+		options.minLevel,
+	)
+	if len(failure) > 0 || blocks == 0 {
+		fmt.printfln("voice-check: %s", blocks == 0 ? "the file is too short" : failure)
+		return EXIT_FAIL
+	}
 	return EXIT_PASS
 }
 
@@ -328,6 +395,14 @@ main :: proc() {
 		fmt.eprintln(USAGE)
 		os.exit(EXIT_USAGE)
 	}
-	status := options.writeTone ? writeToneFile(options) : checkFile(options)
+	status: int
+	switch {
+	case options.writeTone:
+		status = writeToneFile(options)
+	case options.toneLevelSeconds > 0:
+		status = measureToneLevel(options)
+	case:
+		status = checkFile(options)
+	}
 	os.exit(status)
 }

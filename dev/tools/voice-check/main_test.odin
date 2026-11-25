@@ -117,3 +117,27 @@ testParseOptionsReadsTheNoiseOptions :: proc(t: ^testing.T) {
 	_, err = parseOptions({"--write-noisy-tone", "n.f32", "--freq", "440", "--noise-db", "-40"})
 	testing.expect(t, err != "", "expected --write-noisy-tone without --seconds to be rejected")
 }
+
+// #171: --tone-level measures the end of a file, with optional limits.
+@(test)
+testParseOptionsReadsTheToneLevelOptions :: proc(t: ^testing.T) {
+	options, err := parseOptions(
+		{"x.f32", "--freq", "440", "--tone-level", "5", "--max-level", "-40"},
+	)
+	maxLevel, hasMax := options.maxLevel.?
+	testing.expectf(
+		t,
+		err == "" &&
+		options.toneLevelSeconds == 5 &&
+		hasMax &&
+		maxLevel == -40 &&
+		options.minLevel == nil,
+		"%v: %q",
+		options,
+		err,
+	)
+	_, err = parseOptions({"x.f32", "--freq", "440", "--tone-level", "0"})
+	testing.expect(t, err != "", "expected an empty window to be rejected")
+	_, err = parseOptions({"x.f32", "--freq", "440", "--tone-level", "5", "--min-level", "1"})
+	testing.expect(t, err != "", "expected a level above 0 dBFS to be rejected")
+}

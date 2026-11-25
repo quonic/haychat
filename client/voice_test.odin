@@ -914,3 +914,98 @@ testVoiceEngineDevicePathWithTheDiskDriver :: proc(t: ^testing.T) {
 	// The tail holds the steady tone; the start is device and jitter pre-roll.
 	voiceTestExpectTone(left[len(left) - common.VOICE_SAMPLE_RATE / 2:], 440, 0.5, "disk driver")
 }
+
+// #171: a device sink's echo reference. A far-end tone pushed in as a remote speaker plays
+// through SDL's disk driver, and with echo cancellation on, what SDL plays also reaches AEC3:
+// two 10 ms render frames per 20 ms, most of them carrying the tone. The microphone is a
+// generated silence, so the reference is the only thing that is not silent.
+@(test)
+testVoiceEngineDeviceSinkFeedsTheEchoReference :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) || !voiceTestWebRTCAPMAvailable(t) {
+		return
+	}
+	sync.mutex_lock(&voiceDeviceTestMutex)
+	defer sync.mutex_unlock(&voiceDeviceTestMutex)
+	if SDL.WasInit({.AUDIO}) != {} {
+		log.warn("skipping: SDL audio is already initialised in this process")
+		return
+	}
+	dir := configTestCreateTempDir("haychat_voice_disk_echo")
+	defer configTestRemovePathIfExists(dir)
+	outputPath := configTestJoinPath({dir, "speaker.f32"})
+	hints := [?]cstring {
+		SDL.HINT_AUDIO_DRIVER,
+		SDL.HINT_AUDIO_DISK_OUTPUT_FILE,
+		SDL.HINT_AUDIO_DEVICE_STREAM_ROLE,
+		SDL.HINT_AUDIO_DEVICE_STREAM_NAME,
+		SDL.HINT_AUDIO_DEVICE_RAW_STREAM,
+	}
+	defer for hint in hints {
+		_ = SDL.ResetHint(hint)
+	}
+	_ = SDL.SetHint(SDL.HINT_AUDIO_DRIVER, "disk")
+	_ = SDL.SetHint(
+		SDL.HINT_AUDIO_DISK_OUTPUT_FILE,
+		strings.clone_to_cstring(outputPath, context.temp_allocator),
+	)
+	engine := VoiceEngine_create(
+		{source = {kind = .Silence}, sink = {kind = .Device}, echoCancellation = true},
+	)
+	started := VoiceEngine_start(engine)
+	raw := SDL.GetHint(SDL.HINT_AUDIO_DEVICE_RAW_STREAM)
+	encoder, code := opus.createVoiceEncoder(common.VOICE_SAMPLE_RATE, opus.VOICE_ENCODER_SETTINGS)
+	assert(encoder != nil, fmt.tprintf("expected an encoder: %s", opus.errorString(code)))
+	tone: [common.VOICE_FRAME_SAMPLES]f32
+	packet: [opus.MAX_PACKET_BYTES]u8
+	// 1.5 s of a far-end tone, pushed in real time.
+	if started {
+		begin := time.tick_now()
+		for frame in 0 ..< 75 {
+			for &sample, index in tone {
+				at := frame * common.VOICE_FRAME_SAMPLES + index
+				phase := 2 * math.PI * 440 * f64(at) / common.VOICE_SAMPLE_RATE
+				sample = 0.5 * f32(math.sin(phase))
+			}
+			length := opus.encodeFloat(encoder, tone[:], packet[:])
+			_ = VoiceEngine_pushInbound(engine, 7, u32(frame), 0, packet[:length])
+			due := time.Duration(frame + 1) * 20 * time.Millisecond
+			if wait := due - time.tick_since(begin); wait > 0 {
+				time.sleep(wait)
+			}
+		}
+		time.sleep(200 * time.Millisecond)
+	}
+	opus.destroyEncoder(encoder)
+	snapshot := VoiceEngine_snapshot(engine)
+	errorText := strings.clone(VoiceEngine_lastError(engine), context.temp_allocator)
+	VoiceEngine_destroy(engine)
+	assert(started, fmt.tprintf("expected the disk driver to open: %s", errorText))
+	stats := snapshot.stats
+	log.infof(
+		"device echo reference: %d render frames (%d with sound) for %d captured frames, " +
+		"%d decoded; capture %.1f us, render %.1f us per frame",
+		stats.renderFrames,
+		stats.renderActiveFrames,
+		stats.framesEchoCancelled,
+		stats.framesDecoded,
+		stats.echoTotalUS / f64(max(stats.framesEchoCancelled, 1)),
+		stats.renderTotalUS / f64(max(stats.renderFrames, 1)),
+	)
+	assert(
+		snapshot.echoCancellation == .Active && stats.framesEchoCancelled >= 60,
+		fmt.tprintf("expected AEC3 on every captured frame, got %v", stats),
+	)
+	// Two render frames per captured frame, give or take the step that is still running.
+	assert(
+		stats.renderFrames + 4 >= 2 * stats.framesEchoCancelled &&
+		stats.renderFrames <= 2 * stats.framesEchoCancelled + 4,
+		fmt.tprintf("expected two render frames per captured frame, got %v", stats),
+	)
+	// The tone played for about 1.4 s of the run (pre-roll and the tail are silent).
+	assert(
+		stats.renderActiveFrames >= 2 * (stats.framesDecoded - 5) &&
+		stats.renderActiveFrames <= stats.renderFrames,
+		fmt.tprintf("expected the played tone in the reference, got %v", stats),
+	)
+	assert(raw == voiceSDLRawStream(ODIN_OS, false, true), "expected the raw stream hint")
+}

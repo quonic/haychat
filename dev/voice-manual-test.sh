@@ -48,8 +48,15 @@ set -euo pipefail
 #   HAYCHAT_VOICE_MANUAL_LEVELS         speech peak levels in dBFS (default "-6 -18 -30")
 #   HAYCHAT_VOICE_MANUAL_NOISE_DB       pink noise floor under the speech, RMS dBFS (default -60)
 #   HAYCHAT_VOICE_MANUAL_THRESHOLD_DB   A's voice activity threshold (default: the client's)
-#   HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION=1  RNNoise on A's microphone (voice-noise on, #170;
-#                                       default 0, the harness's default, so runs compare)
+#   HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION=1  noise suppression on A's microphone (voice-noise
+#                                       on, #170: WebRTC's suppressor where WebRTC audio
+#                                       processing loads, else RNNoise; `rnnoise` keeps
+#                                       RNNoise, as #170's measurements had it; default 0, the
+#                                       harness's default, so runs compare)
+#   HAYCHAT_VOICE_MANUAL_ECHO_CANCELLATION=1  AEC3 on A's microphone (voice-echo on, #171;
+#                                       default 0). A plays into a null sink, so there is no
+#                                       echo to cancel: this measures what the canceller costs
+#                                       speech, the gate and the delay on real devices
 #   HAYCHAT_VOICE_MANUAL_CLICKS         clicks in the latency train (default 20)
 #   HAYCHAT_VOICE_MANUAL_PHASES         phases to run (default "tone speech taps bursts clicks")
 #   HAYCHAT_VOICE_MANUAL_CLIENT         use this client binary instead of building one, for
@@ -69,6 +76,7 @@ speech_levels=${HAYCHAT_VOICE_MANUAL_LEVELS:-"-6 -18 -30"}
 noise_db=${HAYCHAT_VOICE_MANUAL_NOISE_DB:--60}
 threshold_db=${HAYCHAT_VOICE_MANUAL_THRESHOLD_DB:-}
 noise_suppression=${HAYCHAT_VOICE_MANUAL_NOISE_SUPPRESSION:-0}
+echo_cancellation=${HAYCHAT_VOICE_MANUAL_ECHO_CANCELLATION:-0}
 click_count=${HAYCHAT_VOICE_MANUAL_CLICKS:-20}
 client_override=${HAYCHAT_VOICE_MANUAL_CLIENT:-}
 phases=" ${HAYCHAT_VOICE_MANUAL_PHASES:-tone speech taps bursts clicks} "
@@ -551,6 +559,23 @@ else
 		fail "could not build the client"
 	mv -- "$repo_dir/.headless-profiles/voice-manual-client" "$client_bin"
 fi
+# The voice-noise and voice-echo settings use WebRTC audio processing (#171) when its wrapper
+# sits next to the client; it needs the host's libwebrtc-audio-processing-2.so.1 at runtime.
+if [[ -n "${HAYCHAT_WEBRTC_APM_LIBRARY:-}" ]]; then
+	:
+elif deploy/build-linux-webrtc-apm.sh "$work_dir" 2>>"$work_dir/build.err"; then
+	:
+else
+	mkdir -p "$repo_dir/.headless-profiles/voice-manual-apm"
+	if "$repo_dir/dev.sh" shell deploy/build-linux-webrtc-apm.sh \
+		.headless-profiles/voice-manual-apm; then
+		mv -- "$repo_dir/.headless-profiles/voice-manual-apm/libhaychat-webrtc-apm.so" \
+			"$work_dir/"
+	else
+		echo "    could not build libhaychat-webrtc-apm.so: echo cancellation is unavailable"
+	fi
+	rm -rf -- "$repo_dir/.headless-profiles/voice-manual-apm"
+fi
 if have odin && odin build dev/tools/voice-check -out:"$check_bin" 2>>"$work_dir/build.err"; then
 	:
 else
@@ -655,9 +680,18 @@ expect_ok b voice-source silence
 expect_ok b voice-sink "device:$b_out_name"
 if [[ "$noise_suppression" == 1 ]]; then
 	expect_ok a voice-noise on
-	note "noise suppression: on (RNNoise on A's microphone)"
+	note "noise suppression: on (A's microphone)"
+elif [[ "$noise_suppression" == rnnoise ]]; then
+	expect_ok a voice-noise rnnoise
+	note "noise suppression: RNNoise (A's microphone)"
 else
 	expect_ok a voice-noise off
+fi
+if [[ "$echo_cancellation" == 1 ]]; then
+	expect_ok a voice-echo on
+	note "echo cancellation: on (AEC3 on A's microphone)"
+else
+	expect_ok a voice-echo off
 fi
 set_vad_gate
 join_voice b
@@ -672,7 +706,10 @@ fi
 # Summary lines in phase order.
 noise_state=off
 [[ "$noise_suppression" == 1 ]] && noise_state=on
-summary=("noise suppression (RNNoise on A): $noise_state")
+[[ "$noise_suppression" == rnnoise ]] && noise_state=rnnoise
+echo_state=off
+[[ "$echo_cancellation" == 1 ]] && echo_state=on
+summary=("noise suppression on A: $noise_state" "echo cancellation on A: $echo_state")
 
 # record_phase NAME FILE: plays FILE into A's microphone with the probe recording around it,
 # and prints the counters that changed.

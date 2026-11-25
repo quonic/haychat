@@ -12,7 +12,12 @@ Run it
    next to it. libopus-0.dll, also in the folder, is the voice codec; without it text chat
    still works and voice reports that libopus was not found. rnnoise.dll removes background
    noise from your microphone (Settings -> Voice -> Noise suppression); without it voice
-   works without noise suppression.
+   works without noise suppression. haychat-webrtc-apm.dll cancels the echo of the voices
+   HayChat plays, so others do not hear themselves through your speakers (Settings -> Voice
+   -> Echo cancellation), and then also takes over noise suppression; without it voice works
+   without echo cancellation. While either is on, HayChat asks Windows for the microphone's
+   raw signal, without Windows' own processing, so a laptop's built-in microphones can sound
+   quieter: raise Input gain if they do.
 2. Double-click haychat-client.exe. Windows SmartScreen may warn that the app is from an
    unknown publisher, because test builds are not signed: choose "More info", then
    "Run anyway".
@@ -46,8 +51,9 @@ THIRD_PARTY_NOTICES.txt lists the third-party code and fonts in this download, t
 licences, and their copyright lines; the licence texts are in licenses\. They cover SDL3 and
 SDL3_ttf (zlib licence), the HIDAPI, yuv2rgb and fdlibm code inside SDL3.dll, the FreeType,
 HarfBuzz, PlutoSVG and PlutoVG code inside SDL3_ttf.dll, libopus (BSD licence), RNNoise in
-rnnoise.dll (BSD licence), the ENet library, the Odin core library, and the embedded Inter and
-Twemoji fonts.
+rnnoise.dll (BSD licence), WebRTC audio processing (BSD licence and Google's patent grant)
+and Abseil (Apache licence 2.0) in haychat-webrtc-apm.dll, the ENet library, the Odin core
+library, and the embedded Inter and Twemoji fonts.
 
 This software is based in part on the work of the FreeType Team.
 Portions of this software are copyright © 2023 The FreeType Project (www.freetype.org).

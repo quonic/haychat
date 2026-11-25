@@ -143,3 +143,28 @@ testNoisyToneHasItsNoiseLevelInTheGaps :: proc(t: ^testing.T) {
 	silent, none := noiseFloorDB(padded[:int(TEST_RATE)], TEST_RATE, -29)
 	assert(none == 0 && silent == LEVEL_FLOOR_DB, "expected no floor without a loud block")
 }
+
+// #171: the level of one frequency alone, next to another tone.
+@(test)
+testToneLevelMeasuresOneFrequencyAlone :: proc(t: ^testing.T) {
+	samples := make([]f32, 48000 * 3)
+	defer delete(samples)
+	writeTone(samples, 48000, 440, 0.25)
+	near := make([]f32, len(samples))
+	defer delete(near)
+	writeTone(near, 48000, 1000, 0.1)
+	for &sample, index in samples {
+		sample += near[index]
+	}
+	level, blocks := toneLevelDB(samples, 48000, 440)
+	nearLevel, _ := toneLevelDB(samples, 48000, 1000)
+	absent, _ := toneLevelDB(samples, 48000, 2500)
+	free_all(context.temp_allocator)
+	assert(blocks == 6, fmt.tprintf("expected 6 blocks, got %d", blocks))
+	assert(
+		abs(level - sineRMSDB(0.25)) < 0.2 && abs(nearLevel - sineRMSDB(0.1)) < 0.2,
+		fmt.tprintf("expected -15.1 and -23.0 dBFS, got %.2f and %.2f", level, nearLevel),
+	)
+	assert(absent < -80, fmt.tprintf("expected nothing at 2500 Hz, got %.1f", absent))
+	_ = t
+}

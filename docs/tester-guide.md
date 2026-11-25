@@ -178,14 +178,23 @@ one server, and keep chatting anywhere while you are.
 - **Mute and deafen:** **Mute** in the voice bar stops sending your microphone at once;
   **Deafen** stops playing the others at once (and mutes you). The others see "muted" or
   "deafened" next to your name. **Leave** (or **Leave voice** in the room's header) leaves.
-- **Headphones:** HayChat has **no echo cancellation** yet. With speakers, your microphone
-  picks up the others and they hear themselves. Use headphones. On Linux, PipeWire can cancel
-  echo and noise: see [Voice on Linux](voice-linux-audio.md).
+- **Echo cancellation:** on by default (Settings → Voice). With speakers, your microphone
+  picks up the others; HayChat's echo canceller removes what it plays, so they do not hear
+  themselves. It needs a few seconds after you join to settle. Headphones are still best, and
+  with them you can turn it off. On Linux it needs the `webrtc-audio-processing` package
+  (version 2: Fedora, Arch; Debian 13 and Ubuntu have only version 1.3) and
+  `libhaychat-webrtc-apm.so` next to the client; without them the setting says "unavailable":
+  use headphones, or PipeWire's echo cancellation ([Voice on Linux](voice-linux-audio.md)),
+  not both.
 - **Noise suppression:** on by default (Settings → Voice). It removes fans, hum and other
   steady background noise from your microphone, and in voice activity mode only speech opens
-  it. Loud typing can still get through. On Linux it needs the `rnnoise` package (Fedora,
-  Arch; `librnnoise0` on Debian testing); without it the setting says "unavailable" and voice
-  works as before.
+  it. Loud typing can still get through. With echo cancellation available, WebRTC's noise
+  suppressor does it; otherwise RNNoise, which on Linux needs the `rnnoise` package (Fedora,
+  Arch; `librnnoise0` on Debian testing). Without either the setting says "unavailable" and
+  voice works as before.
+- **Windows:** while echo cancellation or noise suppression is on, HayChat takes the
+  microphone's raw signal, without Windows' own processing. A laptop's built-in microphones
+  can then sound quieter: raise **Input gain**. Tell us if they do, and which laptop.
 - **Settings → Voice:** choose the microphone and speakers (or "System default"), the mode,
   and the levels. **Test microphone** plays your microphone back to you through the same
   codec, so you can set the **voice activity threshold** against the live level meter (the
@@ -227,9 +236,12 @@ one server, and keep chatting anywhere while you are.
   until the meter stays under the line while you are silent.
 - **Choppy or robotic sound:** usually the network. Tell us your connection (Wi-Fi or cable,
   how far from the server) and whether it happens to everyone in the room or one person.
-- **Others hear an echo of themselves:** somebody is using speakers. HayChat has no echo
-  cancellation; that person should use headphones or, on Linux,
-  [PipeWire's echo cancellation](voice-linux-audio.md#echo-cancellation).
+- **Others hear an echo of themselves:** somebody is using speakers. That person should check
+  that **Echo cancellation** is on in Settings → Voice (and not "unavailable"), give it a few
+  seconds after joining, and otherwise use headphones or, on Linux,
+  [PipeWire's echo cancellation](voice-linux-audio.md#echo-cancellation). Music or videos from
+  other apps are not cancelled. If the echo stays, tell us the speakers, the microphone and how
+  loud the speakers are.
 
 When you report a voice problem, include a screenshot of **Settings → Voice** (devices, mode,
 threshold and the meter while you talk), the text of the voice bar, and the client log. If you

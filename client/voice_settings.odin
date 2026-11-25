@@ -7,6 +7,7 @@ package client
 // bitrate through the engine's atomic controls, a device change by reopening the engine while
 // the session stays joined.
 
+import "base:runtime"
 import "core:c"
 import "core:math"
 import "core:strings"
@@ -41,8 +42,11 @@ VoiceSettings :: struct {
 	inputGain:        f32,
 	outputVolume:     f32,
 	bitrate:          int,
-	// RNNoise on the microphone (#170). Works only when the library loads.
+	// Noise suppression on the microphone (#170): WebRTC's or RNNoise. Works only when one of
+	// the libraries loads.
 	noiseSuppression: bool,
+	// AEC3 echo cancellation (#171). Works only when WebRTC audio processing loads.
+	echoCancellation: bool,
 }
 
 VOICE_DEFAULT_SETTINGS :: VoiceSettings {
@@ -54,6 +58,7 @@ VOICE_DEFAULT_SETTINGS :: VoiceSettings {
 	outputVolume     = 1,
 	bitrate          = VOICE_BITRATE_DEFAULT,
 	noiseSuppression = true,
+	echoCancellation = true,
 }
 
 @(private = "file")
@@ -144,6 +149,9 @@ Config_voiceSettings :: proc(config: Config) -> VoiceSettings {
 	if value, ok := config.voice_noise_suppression.?; ok {
 		settings.noiseSuppression = value
 	}
+	if value, ok := config.voice_echo_cancellation.?; ok {
+		settings.echoCancellation = value
+	}
 	return voiceSettingsValidate(settings)
 }
 
@@ -195,10 +203,14 @@ Config_setVoiceSettings :: proc(config: ^Config, settings: VoiceSettings) {
 	if valid.noiseSuppression != defaults.noiseSuppression {
 		config.voice_noise_suppression = valid.noiseSuppression
 	}
+	config.voice_echo_cancellation = nil
+	if valid.echoCancellation != defaults.echoCancellation {
+		config.voice_echo_cancellation = valid.echoCancellation
+	}
 }
 
-// Returns base with the user's settings applied: device names, gate mode, levels, bitrate and
-// noise suppression.
+// Returns base with the user's settings applied: device names, gate mode, levels, bitrate,
+// noise suppression and echo cancellation.
 // The source and sink kinds stay as they are, so a test or the harness that runs on tones,
 // files or null sinks keeps them; device names only matter to device sources and sinks.
 // Strings are borrowed; State_setVoiceEngineTemplate clones them.
@@ -215,6 +227,7 @@ voiceEngineConfigWithSettings :: proc(
 	config.outputVolume = settings.outputVolume
 	config.explicitLevels = true
 	config.noiseSuppression = settings.noiseSuppression
+	config.echoCancellation = settings.echoCancellation
 	if config.encoder == {} {
 		config.encoder = opus.VOICE_ENCODER_SETTINGS
 	}
@@ -236,6 +249,23 @@ VoiceEngine_applySettings :: proc(engine: ^VoiceEngine, settings: VoiceSettings)
 	VoiceEngine_setOutputVolume(engine, settings.outputVolume)
 	VoiceEngine_setBitrate(engine, i32(settings.bitrate))
 	VoiceEngine_setNoiseSuppression(engine, settings.noiseSuppression)
+	VoiceEngine_setEchoCancellation(engine, settings.echoCancellation)
+}
+
+// Whether a settings change needs the engine reopened rather than applied in place: a new
+// input or output device, or (on Windows) a change of whether HayChat processes the
+// microphone itself, since SDL reads the raw stream hint (voiceSDLRawStream) only when it
+// opens a device.
+voiceSettingsNeedReopen :: proc(
+	previous, next: VoiceSettings,
+	os: runtime.Odin_OS_Type = ODIN_OS,
+) -> bool {
+	if previous.inputDevice != next.inputDevice || previous.outputDevice != next.outputDevice {
+		return true
+	}
+	previousRaw := voiceSDLRawStream(os, previous.noiseSuppression, previous.echoCancellation)
+	nextRaw := voiceSDLRawStream(os, next.noiseSuppression, next.echoCancellation)
+	return previousRaw != nextRaw
 }
 
 State_voiceSettings :: proc(state: ^State) -> VoiceSettings {
@@ -258,7 +288,8 @@ State_voiceUpdateTemplate :: proc(state: ^State, settings: VoiceSettings) {
 // Changes the voice settings: validates them, stores them in the config (and saves it when
 // persist is set; a slider being dragged passes false until it is released), updates the
 // template, and reapplies them to the joined engine and the microphone test. A new input or
-// output device reopens the engine; the session stays joined and the server is not told.
+// output device (or on Windows a change of the raw stream, voiceSettingsNeedReopen) reopens
+// the engine; the session stays joined and the server is not told.
 State_applyVoiceSettings :: proc(state: ^State, settings: VoiceSettings, persist := true) {
 	// settings may borrow from the config fields that are about to be replaced.
 	next := voiceSettingsValidate(settings)
@@ -266,8 +297,7 @@ State_applyVoiceSettings :: proc(state: ^State, settings: VoiceSettings, persist
 	next.outputDevice = strings.clone(next.outputDevice, context.temp_allocator)
 	next.pttKey = strings.clone(next.pttKey, context.temp_allocator)
 	previous := State_voiceSettings(state)
-	devicesChanged :=
-		previous.inputDevice != next.inputDevice || previous.outputDevice != next.outputDevice
+	devicesChanged := voiceSettingsNeedReopen(previous, next)
 
 	Config_setVoiceSettings(&state.config, next)
 	if persist {

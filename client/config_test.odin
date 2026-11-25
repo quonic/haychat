@@ -651,6 +651,47 @@ testConfigVoiceNoiseSuppressionDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
 	_ = t
 }
 
+// voice_echo_cancellation (#171) defaults to on, is stored only when turned off, and survives a
+// round trip and a clone.
+@(test)
+testConfigVoiceEchoCancellationDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
+	assert(Config_voiceSettings(Config{}).echoCancellation, "expected echo cancellation on")
+	config: Config
+	defer Config_deinit(&config)
+	settings := VOICE_DEFAULT_SETTINGS
+	settings.echoCancellation = false
+	Config_setVoiceSettings(&config, settings)
+	data, marshalErr := json.marshal(config)
+	defer delete(data)
+	assert(marshalErr == nil, "expected the config to marshal")
+	assert(
+		strings.contains(string(data), `"voice_echo_cancellation":false`),
+		fmt.tprintf("expected voice_echo_cancellation stored as false, got %s", string(data)),
+	)
+	loaded: Config
+	defer Config_deinit(&loaded)
+	unmarshalErr := json.unmarshal(data, &loaded)
+	assert(unmarshalErr == nil, fmt.tprintf("expected %s to load, got %v", data, unmarshalErr))
+	assert(!Config_voiceSettings(loaded).echoCancellation, "expected it off after a load")
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	assert(!Config_voiceSettings(clone).echoCancellation, "expected Config_clone to keep it")
+	template := voiceDefaultEngineTemplate(clone)
+	assert(!template.echoCancellation, "expected the engine template to follow the setting")
+	assert(template.noiseSuppression, "expected noise suppression left on")
+
+	settings.echoCancellation = true
+	Config_setVoiceSettings(&config, settings)
+	assert(config.voice_echo_cancellation == nil, "expected the default (on) stored as unset")
+	unset, unsetErr := json.marshal(config)
+	defer delete(unset)
+	assert(
+		unsetErr == nil && !strings.contains(string(unset), "voice_echo_cancellation"),
+		fmt.tprintf("expected the key left out while unset, got %s", string(unset)),
+	)
+	_ = t
+}
+
 // Per-server settings (server_settings.odin, user_voice.odin): display_name and user_voice
 // survive a JSON round trip and a clone, are left out of config.json while unset, and a
 // default volume is stored as unset.

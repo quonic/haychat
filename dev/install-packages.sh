@@ -28,6 +28,17 @@ build_packages=(
 	# librnnoise.so.0, loaded at runtime by client/rnnoise for noise suppression (#170); the
 	# noise suppression tests need it. Not rnnoise-devel: the client never links it.
 	rnnoise
+	# Echo cancellation (#171): deploy/build-linux-webrtc-apm.sh builds HayChat's C wrapper
+	# (libhaychat-webrtc-apm.so, loaded at runtime by client/webrtcapm) against
+	# webrtc-audio-processing 2.x, so the echo cancellation tests and the release need its
+	# headers and runtime library and a C++ compiler's standard library headers.
+	webrtc-audio-processing
+	webrtc-audio-processing-devel
+	libstdc++-devel
+	# deploy/build-windows-webrtc-apm.sh cross-builds webrtc-audio-processing and abseil for
+	# the Windows client with their own Meson build.
+	meson
+	ninja-build
 	libX11-devel
 	# Global push-to-talk tests (client/hotkey): a private D-Bus daemon for the mock
 	# GlobalShortcuts portal (libdbus-1.so.3 is loaded at runtime), and an Xvfb display with

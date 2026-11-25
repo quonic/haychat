@@ -561,8 +561,8 @@ Release assets:
 | Asset                                    | Contents                                                                                                                                                                                                                |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `haychat-server-TAG-linux-x86_64.tar.gz` | Server binary, SQL helpers, `DEPLOY.md`, `env.example`, `LICENSE`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, pg)                                                                                       |
-| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji)                                                                                         |
-| `haychat-client-TAG-windows-x86_64.zip`  | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus) |
+| `haychat-client-TAG-linux-x86_64.tar.gz` | `haychat-client`, `libhaychat-webrtc-apm.so` (#171), `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (Odin, compiler-rt, ENet, Inter, Twemoji, WebRTC)                                         |
+| `haychat-client-TAG-windows-x86_64.zip`  | `haychat-client.exe`, `SDL3.dll`, `SDL3_ttf.dll`, `libopus-0.dll`, `rnnoise.dll`, `haychat-webrtc-apm.dll`, `README.txt`, `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt`, `licenses/` (the Linux set plus SDL3, SDL3_ttf, FreeType, HarfBuzz, PlutoSVG, PlutoVG, Opus, RNNoise, WebRTC's third-party code, Abseil) |
 | `SHA256SUMS`                             | Checksums of the three archives                                                                                                                                                                                         |
 
 **Licences.** [THIRD_PARTY_NOTICES.md](https://git.spyingwind.com/quonic/haychat/src/branch/main/THIRD_PARTY_NOTICES.md)
@@ -600,6 +600,11 @@ GLib, and copying that chain onto other distributions is fragile. It loads the s
 libopus (`libopus.so.0`) at runtime for voice and starts without it. Its `README.txt` tells
 testers which packages to install (Fedora `SDL3 SDL3_ttf enet opus`, Ubuntu 25.04+ and
 Debian 13+ `libsdl3-0 libsdl3-ttf0 libenet7 libopus0`). The binary needs glibc 2.34 or newer.
+Echo cancellation (#171) ships as HayChat's small wrapper `libhaychat-webrtc-apm.so` next to the
+binary, built by `deploy/build-linux-webrtc-apm.sh` against the build host's
+`webrtc-audio-processing-devel` (2.x); at runtime it needs the distribution's
+`libwebrtc-audio-processing-2.so.1` (Fedora and Arch `webrtc-audio-processing`; Debian 13 and
+Ubuntu have only 1.3), and without it the client runs without echo cancellation.
 
 **The Windows client is cross-compiled on Linux.** The pinned Odin refuses a Windows target
 without `-windows-sdk-root:PATH` and links it with `lld-link`, which needs the MSVC CRT and
@@ -615,7 +620,12 @@ Git LFS pointers, so a plain clone has 130-byte placeholders. The zip ships `SDL
 `SDL3_ttf.dll` with their licences (zlib; SDL3.dll also contains HIDAPI, yuv2rgb, and fdlibm
 code, and SDL3_ttf.dll FreeType, HarfBuzz, PlutoSVG, and PlutoVG, whose licences and notices
 are included, and its `README.txt` carries the FreeType credit), and `libopus-0.dll` (the copy Odin ships for SDL3_mixer, which the client loads at
-runtime for voice) with its BSD licence as `licenses/opus-LICENSE.txt`. The cross-built
+runtime for voice) with its BSD licence as `licenses/opus-LICENSE.txt`. It also builds
+`rnnoise.dll` (`deploy/build-windows-rnnoise.sh`) and `haychat-webrtc-apm.dll`
+(`deploy/build-windows-webrtc-apm.sh`: webrtc-audio-processing 2.1 and abseil 20240722.0 from
+their pinned, checksummed source releases with Meson, clang-cl and lld-link against the same
+sysroot, linked statically with HayChat's wrapper, static CRT, `/Brepro`; about 1 MB, importing
+only `KERNEL32.dll` and `WINMM.dll`, and about 3.5 CPU-minutes to build). The cross-built
 client was run under Wine in headless mode against the release image and connected and
 chatted; it has not been run on a real Windows machine yet.
 

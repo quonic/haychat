@@ -154,6 +154,9 @@ source "$repo_dir/dev/harness-lib.sh"
 cd "$repo_dir"
 echo "==> [ui] building the client"
 odin build client -out:"$client_bin"
+# The echo canceller's wrapper (#171) next to the client, as the release ships it, so the GUI's
+# defaults (echo cancellation and WebRTC's noise suppression on) run on the dummy audio driver.
+deploy/build-linux-webrtc-apm.sh "$(dirname -- "$client_bin")"
 
 nickname_alice="ui-alice-$run_tag"
 nickname_bob="ui-bob-$run_tag"

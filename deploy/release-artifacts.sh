@@ -13,17 +13,22 @@ set -euo pipefail
 # Output in OUT_DIR:
 #   haychat-server-VERSION-linux-x86_64.tar.gz    server binary, SQL helpers, deploy docs,
 #                                                 notices, licences
-#   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, README.txt, notices, licences
-#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3, libopus and RNNoise DLLs,
-#                                                 README.txt, notices, licences
+#   haychat-client-VERSION-linux-x86_64.tar.gz    client binary, the echo canceller wrapper
+#                                                 (libhaychat-webrtc-apm.so), README.txt,
+#                                                 notices, licences
+#   haychat-client-VERSION-windows-x86_64.zip     client.exe, SDL3, libopus, RNNoise and
+#                                                 WebRTC audio processing DLLs, README.txt,
+#                                                 notices, licences
 #   SHA256SUMS
 #
 # Every archive carries THIRD_PARTY_NOTICES.txt and the licence texts its contents need (the
 # *_LICENCES tables below). --check-licences verifies, without building anything or needing
 # the Windows SDK, that every licence source exists in the repository and the pinned Odin
 # toolchain, that SDL3.dll and SDL3_ttf.dll are still the builds THIRD_PARTY_NOTICES.md
-# describes, that rnnoise.dll (built from source by deploy/build-windows-rnnoise.sh) is named
-# where it ships, and that the required credits are present; ./check.sh runs it, and every build
+# describes, that rnnoise.dll and haychat-webrtc-apm.dll (built from source by
+# deploy/build-windows-rnnoise.sh and deploy/build-windows-webrtc-apm.sh) and the Linux
+# libhaychat-webrtc-apm.so are named where they ship, and that the required credits are
+# present; ./check.sh runs it, and every build
 # runs it first. --stage-licences copies one artifact's notices and
 # licences into DIR, which is what the builds below and deploy/Containerfile use.
 #
@@ -37,7 +42,13 @@ set -euo pipefail
 #     Visual Studio build tools and Windows SDK on your behalf. The download is about 1 GB
 #     and is cached in HAYCHAT_XWIN_CACHE (default ~/.cache/haychat-xwin).
 # It also downloads the pinned RNNoise source release (deploy/build-windows-rnnoise.sh, cached in
-# HAYCHAT_RNNOISE_CACHE) and builds rnnoise.dll with the same sysroot.
+# HAYCHAT_RNNOISE_CACHE) and the pinned webrtc-audio-processing and abseil releases
+# (deploy/build-windows-webrtc-apm.sh, cached in HAYCHAT_WEBRTC_APM_CACHE), and builds
+# rnnoise.dll and haychat-webrtc-apm.dll with the same sysroot.
+#
+# The Linux client's libhaychat-webrtc-apm.so (#171) is built against the system's
+# webrtc-audio-processing 2.x headers (deploy/build-linux-webrtc-apm.sh; the dev image's
+# webrtc-audio-processing-devel), so building needs those, and running needs that library.
 
 XWIN_VERSION=0.10.0
 XWIN_SHA256=d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88
@@ -80,6 +91,10 @@ LINUX_CLIENT_LICENCES=(
 	odin:LICENSE:licenses/Odin-LICENSE.txt
 	odin:base/runtime/LICENSE-compiler-rt.txt:licenses/compiler-rt-LICENSE.txt
 	odin:vendor/ENet/LICENSE:licenses/ENet-LICENSE.txt
+	# libhaychat-webrtc-apm.so compiles in WebRTC's header code; the library itself is the
+	# system's.
+	repo:deploy/licenses/webrtc-LICENSE.txt:licenses/webrtc-LICENSE.txt
+	repo:deploy/licenses/webrtc-PATENTS.txt:licenses/webrtc-PATENTS.txt
 )
 # The Windows client also ships the DLLs (and the code inside them) and links ENet statically.
 WINDOWS_CLIENT_LICENCES=(
@@ -94,6 +109,8 @@ WINDOWS_CLIENT_LICENCES=(
 	repo:deploy/licenses/hidapi-LICENSE-bsd.txt:licenses/hidapi-LICENSE-bsd.txt
 	repo:deploy/licenses/yuv2rgb-LICENSE.txt:licenses/yuv2rgb-LICENSE.txt
 	repo:deploy/licenses/rnnoise-COPYING.txt:licenses/rnnoise-LICENSE.txt
+	repo:deploy/licenses/webrtc-third-party.txt:licenses/webrtc-third-party.txt
+	repo:deploy/licenses/abseil-LICENSE.txt:licenses/abseil-LICENSE.txt
 )
 
 repo_dir=$(cd -- "$(dirname -- "$0")/.." >/dev/null 2>&1 && pwd)
@@ -218,6 +235,13 @@ check_licences() {
 		# documents must name it with its licence.
 		grep -qF "rnnoise.dll" "$repo_dir/$file" \
 			|| problems+=("$file does not name rnnoise.dll (RNNoise, BSD-3-Clause)")
+		# The same for haychat-webrtc-apm.dll (#171: WebRTC audio processing and abseil).
+		grep -qF "haychat-webrtc-apm.dll" "$repo_dir/$file" \
+			|| problems+=("$file does not name haychat-webrtc-apm.dll (WebRTC, abseil)")
+	done
+	for file in THIRD_PARTY_NOTICES.md deploy/client-README-linux.txt; do
+		grep -qF "libhaychat-webrtc-apm.so" "$repo_dir/$file" \
+			|| problems+=("$file does not name libhaychat-webrtc-apm.so (#171)")
 	done
 	for file in THIRD_PARTY_NOTICES.md deploy/client-README-windows.txt \
 		deploy/client-README-linux.txt; do
@@ -322,6 +346,8 @@ log_step "Building the Linux client"
 linux_dir="$work_dir/haychat-$version-linux"
 mkdir -p "$linux_dir"
 odin build client -o:speed -out:"$linux_dir/haychat-client"
+# The echo canceller's wrapper (#171), next to the client, which loads it from there.
+"$repo_dir/deploy/build-linux-webrtc-apm.sh" "$linux_dir"
 stage_licences linux "$linux_dir"
 sed "s/@VERSION@/$version/g" deploy/client-README-linux.txt >"$linux_dir/README.txt"
 tar -C "$work_dir" -czf "$out_dir/haychat-client-$version-linux-x86_64.tar.gz" \
@@ -397,6 +423,9 @@ if $build_windows; then
 	# rnnoise.dll (noise suppression, #170) is built from the pinned RNNoise source release
 	# with the same sysroot. The client loads it at runtime, next to haychat-client.exe first.
 	"$repo_dir/deploy/build-windows-rnnoise.sh" "$sysroot" "$windows_dir"
+	# haychat-webrtc-apm.dll (echo cancellation, #171): webrtc-audio-processing and abseil
+	# from their pinned source releases, linked statically with HayChat's wrapper.
+	"$repo_dir/deploy/build-windows-webrtc-apm.sh" "$sysroot" "$windows_dir"
 	stage_licences windows "$windows_dir"
 	sed "s/@VERSION@/$version/g" deploy/client-README-windows.txt \
 		| sed 's/$/\r/' >"$windows_dir/README.txt"

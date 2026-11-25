@@ -8,6 +8,7 @@ import "core:strings"
 import "core:testing"
 import "core:time"
 import "rnnoise"
+import "webrtcapm"
 
 @(private = "file")
 testHeadlessVoiceRun :: proc(
@@ -29,6 +30,10 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-gate vad -40",
 		"voice-gate open",
 		"voice-noise on",
+		"voice-noise rnnoise",
+		"voice-echo on",
+		"voice-echo-sim 120 0.5",
+		"voice-echo-sim off",
 		"voice-mute on",
 		"voice-deafen off",
 		"voice-ptt down",
@@ -53,6 +58,10 @@ testHeadlessVoiceCommandsParseTheirArguments :: proc(t: ^testing.T) {
 		"voice-gate vad -40 fast",
 		"voice-noise",
 		"voice-noise on off",
+		"voice-echo",
+		"voice-echo on off",
+		"voice-echo-sim",
+		"voice-echo-sim 120 0.5 1",
 		"voice-mute",
 		"voice-deafen on off",
 		"voice-ptt",
@@ -92,7 +101,12 @@ testHeadlessVoiceCommandsRejectBadValues :: proc(t: ^testing.T) {
 		{"voice-gate ptt -40", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
 		{"voice-gate vad 5", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
 		{"voice-gate vad quiet", "voice-gate vad [THRESHOLD_DB]|ptt|open"},
-		{"voice-noise yes", "voice-noise on|off"},
+		{"voice-noise yes", "voice-noise on|off|rnnoise"},
+		{"voice-echo maybe", "voice-echo on|off"},
+		{"voice-echo-sim 5 0.5", "voice-echo-sim DELAY_MS GAIN|off"},
+		{"voice-echo-sim 120", "voice-echo-sim DELAY_MS GAIN|off"},
+		{"voice-echo-sim 120 3", "voice-echo-sim DELAY_MS GAIN|off"},
+		{"voice-echo-sim off 0.5", "voice-echo-sim DELAY_MS GAIN|off"},
 		{"voice-mute yes", "voice-mute on|off"},
 		{"voice-deafen 1", "voice-deafen on|off"},
 		{"voice-ptt sideways", "voice-ptt down|up"},
@@ -259,8 +273,63 @@ testHeadlessVoiceCommandsSetTheTemplateAndControls :: proc(t: ^testing.T) {
 		expectedNoise,
 		noiseOn,
 	)
+	testHeadlessVoiceRun(&harness, &builder, "voice-noise rnnoise")
+	testing.expect(
+		t,
+		state.voice.engineTemplate.noiseSuppression &&
+		state.voice.engineTemplate.noisePreference == .RNNoise,
+		"expected RNNoise kept in the template",
+	)
 	testHeadlessVoiceRun(&harness, &builder, "voice-noise off")
 	testing.expect(t, !state.voice.engineTemplate.noiseSuppression, "expected it off again")
+
+	// #171: echo cancellation, off until asked (switched off here as above), and the echo
+	// simulation for the next join.
+	testHeadlessVoiceRun(&harness, &builder, "voice-echo off")
+	echoOff := testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	testing.expectf(
+		t,
+		strings.contains(echoOff, `"echoCancellation":"off","echoError":""`),
+		"expected echo cancellation off in the stats, got %s",
+		echoOff,
+	)
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-echo on"),
+		`{"ok":true,"cmd":"voice-echo","value":"on","pendingRejoin":false}` + "\n",
+		"echo cancellation on",
+	)
+	echoOn := testHeadlessVoiceRun(&harness, &builder, "voice-stats")
+	expectedEcho := `"echoCancellation":"active","echoError":""`
+	if !webrtcapm.isLoaded() {
+		expectedEcho = `"echoCancellation":"unavailable","echoError":"WebRTC audio processing`
+	}
+	testing.expectf(
+		t,
+		strings.contains(echoOn, expectedEcho),
+		"expected %s in the stats, got %s",
+		expectedEcho,
+		echoOn,
+	)
+	testHeadlessVoiceRun(&harness, &builder, "voice-echo off")
+	testing.expect(t, !state.voice.engineTemplate.echoCancellation, "expected echo off again")
+	testExpectString(
+		t,
+		testHeadlessVoiceRun(&harness, &builder, "voice-echo-sim 120 0.5"),
+		`{"ok":true,"cmd":"voice-echo-sim","value":"120 0.5","pendingRejoin":false}` + "\n",
+		"an echo simulation",
+	)
+	testing.expect(
+		t,
+		state.voice.engineTemplate.echoSimulation == {delayMS = 120, gain = 0.5},
+		"expected the simulation in the template",
+	)
+	testHeadlessVoiceRun(&harness, &builder, "voice-echo-sim off")
+	testing.expect(
+		t,
+		state.voice.engineTemplate.echoSimulation == {},
+		"expected the simulation off",
+	)
 
 	testExpectString(
 		t,

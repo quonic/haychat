@@ -40,6 +40,12 @@ voiceTestRNNoiseAvailable :: proc(t: ^testing.T, loc := #caller_location) -> boo
 	return false
 }
 
+// #170's suppressor, kept even where WebRTC audio processing loads (which would take over).
+VOICE_TEST_RNNOISE_OPTIONS :: VoiceCaptureOptions {
+	noiseSuppression = true,
+	noisePreference  = .RNNoise,
+}
+
 // The fixture of the noise suppression tests (and of dev/voice-proof.sh's stage): 440 Hz bursts
 // at -9 dBFS RMS, 1.5 s on and 1 s off, over white noise at -34 dBFS, which is above the
 // default -45 dBFS gate threshold, so the level gate alone sends the noise between the bursts.
@@ -129,8 +135,11 @@ testVoiceCaptureStageRemovesNoiseBetweenTheBursts :: proc(t: ^testing.T) {
 	speechInBursts, speechInGaps, burstFrames, gapFrames := 0, 0, 0, 0
 	for frame in 0 ..< VOICE_TEST_NOISY_FRAMES {
 		samples := output[frame * common.VOICE_FRAME_SAMPLES:][:common.VOICE_FRAME_SAMPLES]
-		result := VoiceCaptureStage_process(&stage, samples, true)
-		assert(result.denoised, "expected every frame to be denoised")
+		result := VoiceCaptureStage_process(&stage, samples, VOICE_TEST_RNNOISE_OPTIONS)
+		assert(
+			result.denoised && result.noiseBackend == .RNNoise,
+			"expected every frame to be denoised by RNNoise",
+		)
 		elapsedUS := time.duration_microseconds(result.elapsed)
 		totalUS += elapsedUS
 		maxUS = max(maxUS, elapsedUS)
@@ -202,8 +211,15 @@ testVoiceCaptureStagePassesFramesThroughWhenOffOrMissing :: proc(t: ^testing.T) 
 
 	missing: VoiceCaptureStage
 	assert(!VoiceCaptureStage_available(&missing), "expected a stage that never opened")
-	result := VoiceCaptureStage_process(&missing, frame, true)
-	assert(!result.denoised && result.speechProbability == 0, "expected no denoising")
+	result := VoiceCaptureStage_process(
+		&missing,
+		frame,
+		{noiseSuppression = true, echoCancellation = true},
+	)
+	assert(
+		!result.denoised && !result.echoCancelled && result.speechProbability == 0,
+		"expected no processing",
+	)
 	assert(
 		mem.compare(mem.slice_to_bytes(frame), mem.slice_to_bytes(input[:len(frame)])) == 0,
 		"expected the frame unchanged without RNNoise",
@@ -214,8 +230,8 @@ testVoiceCaptureStagePassesFramesThroughWhenOffOrMissing :: proc(t: ^testing.T) 
 	stage: VoiceCaptureStage
 	assert(VoiceCaptureStage_open(&stage), "expected RNNoise to open")
 	defer VoiceCaptureStage_close(&stage)
-	result = VoiceCaptureStage_process(&stage, frame, false)
-	assert(!result.denoised, "expected an off stage not to denoise")
+	result = VoiceCaptureStage_process(&stage, frame, {})
+	assert(!result.denoised && !result.echoCancelled, "expected an off stage not to process")
 	assert(
 		mem.compare(mem.slice_to_bytes(frame), mem.slice_to_bytes(input[:len(frame)])) == 0,
 		"expected the frame unchanged while off",
@@ -225,7 +241,11 @@ testVoiceCaptureStagePassesFramesThroughWhenOffOrMissing :: proc(t: ^testing.T) 
 // Runs the fixture through an unpaced engine in voice activity mode at the default threshold
 // and returns its counters.
 @(private = "file")
-voiceTestNoisyEngine :: proc(path: string, noiseSuppression: bool) -> VoiceEngineSnapshot {
+voiceTestNoisyEngine :: proc(
+	path: string,
+	noiseSuppression: bool,
+	preference := VoiceNoisePreference.RNNoise,
+) -> VoiceEngineSnapshot {
 	engine := VoiceEngine_create(
 		{
 			source = {kind = .File, path = path},
@@ -233,6 +253,7 @@ voiceTestNoisyEngine :: proc(path: string, noiseSuppression: bool) -> VoiceEngin
 			gateMode = .VoiceActivity,
 			unpaced = true,
 			noiseSuppression = noiseSuppression,
+			noisePreference = preference,
 		},
 	)
 	defer VoiceEngine_destroy(engine)
@@ -310,7 +331,12 @@ testVoiceEngineNoiseSuppressionFollowsItsControl :: proc(t: ^testing.T) {
 		return
 	}
 	engine := VoiceEngine_create(
-		{source = {kind = .Tone, toneHz = 440}, sink = {kind = .Null}, unpaced = true},
+		{
+			source = {kind = .Tone, toneHz = 440},
+			sink = {kind = .Null},
+			unpaced = true,
+			noisePreference = .RNNoise,
+		},
 	)
 	defer VoiceEngine_destroy(engine)
 	assert(VoiceEngine_open(engine), "expected to open")
@@ -326,8 +352,10 @@ testVoiceEngineNoiseSuppressionFollowsItsControl :: proc(t: ^testing.T) {
 	}
 	snapshot = VoiceEngine_snapshot(engine)
 	assert(
-		snapshot.noiseSuppression == .Active && snapshot.stats.framesDenoised == 5,
-		fmt.tprintf("expected 5 frames denoised, got %v", snapshot.stats),
+		snapshot.noiseSuppression == .Active &&
+		snapshot.noiseBackend == .RNNoise &&
+		snapshot.stats.framesDenoised == 5,
+		fmt.tprintf("expected 5 frames denoised by RNNoise, got %v", snapshot.stats),
 	)
 	assert(
 		snapshot.speechProbability >= VOICE_VAD_SPEECH_PROBABILITY,
@@ -378,4 +406,106 @@ testVoiceGateNeedsSpeechWhenNoiseSuppressionRuns :: proc(t: ^testing.T) {
 		opened = VoiceGate_update(&gate, speech).transmit
 	}
 	assert(opened, "expected loud speech to open the gate")
+}
+
+// #171: where WebRTC audio processing loads, its suppressor takes the noise out of the gaps
+// instead of RNNoise, and RNNoise (listening only) still tells the gate which frames are
+// speech. Its numbers are logged for the pull request.
+@(test)
+testVoiceCaptureStageWebRTCRemovesNoiseBetweenTheBursts :: proc(t: ^testing.T) {
+	if !voiceTestWebRTCAPMAvailable(t) || !voiceTestRNNoiseAvailable(t) {
+		return
+	}
+	input := voiceTestNoisyFixture()
+	defer delete(input)
+	output := make([]f32, len(input))
+	defer delete(output)
+	copy(output, input)
+
+	stage: VoiceCaptureStage
+	assert(VoiceCaptureStage_open(&stage), "expected the stage to open")
+	defer VoiceCaptureStage_close(&stage)
+	totalUS: f64
+	speechInBursts, speechInGaps, burstFrames, gapFrames := 0, 0, 0, 0
+	for frame in 0 ..< VOICE_TEST_NOISY_FRAMES {
+		samples := output[frame * common.VOICE_FRAME_SAMPLES:][:common.VOICE_FRAME_SAMPLES]
+		result := VoiceCaptureStage_process(&stage, samples, {noiseSuppression = true})
+		assert(
+			result.denoised && result.noiseBackend == .WebRTC && result.hasSpeechProbability,
+			"expected WebRTC's suppressor with RNNoise's speech probability",
+		)
+		totalUS += time.duration_microseconds(result.elapsed)
+		speech := result.speechProbability >= VOICE_VAD_SPEECH_PROBABILITY
+		burst, gap := voiceTestFramePhase(frame)
+		if burst {
+			burstFrames += 1
+			speechInBursts += speech ? 1 : 0
+		} else if gap {
+			gapFrames += 1
+			speechInGaps += speech ? 1 : 0
+		}
+	}
+	burstIn, gapIn := voiceTestBurstAndGapLevels(input)
+	burstOut, gapOut := voiceTestBurstAndGapLevels(output)
+	log.infof(
+		"WebRTC noise suppression: bursts %.1f -> %.1f dBFS, gaps %.1f -> %.1f dBFS; speech " +
+		"in %d of %d burst and %d of %d gap frames; %.1f us per 20 ms frame with RNNoise's VAD",
+		burstIn,
+		burstOut,
+		gapIn,
+		gapOut,
+		speechInBursts,
+		burstFrames,
+		speechInGaps,
+		gapFrames,
+		totalUS / VOICE_TEST_NOISY_FRAMES,
+	)
+	assert(
+		gapOut < gapIn - 15,
+		fmt.tprintf("expected the gaps 15 dB quieter, got %.1f -> %.1f dBFS", gapIn, gapOut),
+	)
+	// WebRTC's suppressor takes a little of a steady tone too (2.3 dB at High).
+	assert(
+		abs(burstOut - burstIn) < 4,
+		fmt.tprintf("expected the bursts kept within 4 dB, got %.1f -> %.1f", burstIn, burstOut),
+	)
+	assert(
+		speechInBursts * 10 >= burstFrames * 9 && speechInGaps == 0,
+		fmt.tprintf(
+			"expected speech in 90 %% of the bursts and none of the gaps, got %d/%d and %d/%d",
+			speechInBursts,
+			burstFrames,
+			speechInGaps,
+			gapFrames,
+		),
+	)
+}
+
+// The engine with the client's rule (Auto): WebRTC suppresses, RNNoise's speech probability
+// still gates the gaps.
+@(test)
+testVoiceEngineWebRTCNoiseSuppressionGatesTheNoise :: proc(t: ^testing.T) {
+	if !voiceTestOpusAvailable(t) ||
+	   !voiceTestRNNoiseAvailable(t) ||
+	   !voiceTestWebRTCAPMAvailable(t) {
+		return
+	}
+	dir := configTestCreateTempDir("haychat_voice_webrtc_noise")
+	defer configTestRemovePathIfExists(dir)
+	path := configTestJoinPath({dir, "noisy.f32"})
+	input := voiceTestNoisyFixture()
+	writeErr := os.write_entire_file(path, mem.slice_to_bytes(input))
+	delete(input)
+	assert(writeErr == nil, fmt.tprintf("expected to write the fixture: %v", writeErr))
+	on := voiceTestNoisyEngine(path, true, .Auto)
+	gapFrames := 100 - 2 * VOICE_VAD_HANGOVER_FRAMES
+	assert(
+		on.noiseSuppression == .Active && on.noiseBackend == .WebRTC,
+		fmt.tprintf("expected WebRTC noise suppression, got %v", on.noiseBackend),
+	)
+	assert(
+		int(on.stats.framesGated) >= gapFrames - 10 &&
+		on.stats.framesSent >= 200 - 2 * VOICE_VAD_ATTACK_FRAMES,
+		fmt.tprintf("expected the gaps gated and the bursts sent, got %v", on.stats),
+	)
 }
