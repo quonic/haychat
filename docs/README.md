@@ -47,3 +47,4 @@ describe the current state.
 | [plan/2026-11-18-roles-and-registration.md](plan/2026-11-18-roles-and-registration.md) | Roles and permissions, room permissions, and registration with invite codes (#43, protocols 23-25) |
 | [plan/2026-11-19-file-attachments.md](plan/2026-11-19-file-attachments.md) | File attachments design: storage, transfer, access checks, client-side encryption, moderation (#118; F1-F5, protocols 26-28), with the round's status and follow-ups |
 | [plan/2026-11-19-message-edit-delete.md](plan/2026-11-19-message-edit-delete.md) | Editing and deleting messages: signed edits and deletes, tombstones, edit history, admin moderation (#76; M1-M3) |
+| [plan/2026-11-25-wasapi-communications-capture.md](plan/2026-11-25-wasapi-communications-capture.md) | Spike: Windows capture in the communications category (WASAPI), the `wasapi-probe` tool, and the no double processing rules for the in-app noise suppression and echo canceller (#172) |
