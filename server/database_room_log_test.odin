@@ -3,6 +3,7 @@ package server
 import "../common"
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "core:testing"
 import "shared:pg"
@@ -722,6 +723,176 @@ testRoomLogFullRoomAgainstPostgreSQL :: proc(t: ^testing.T) {
 		first == min(common.ROOM_LOG_FETCH_MAX_ENTRIES, head.version) &&
 		headVersion == head.version,
 		fmt.tprintf("expected a first page, got %v %d %d", outcome, first, headVersion),
+	)
+}
+
+// #103 review: a restricted member of an encrypted room gets the key of every account the room's
+// log names (a signer who left and shares nothing else with it, a removed target, a manager
+// removed or still named by the Create) and of the sender and forwarder of an envelope wrapped
+// for it, since it replays the log and checks envelopes against pinned keys; an account named
+// only in another room's log or in envelopes for others still reads as missing, and so do all
+// of them once it is removed from the room.
+@(test)
+testRestrictedMemberGetsRoomLogKeysAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "room_log_keys")
+	_, serverKey, _ := common.generateIdentityKeyPair()
+	alice := roomLogTestAccount(conn, "lk-alice")
+	databaseAdminTestGrant(conn, alice.userID)
+	carol := roomLogTestAccount(conn, "lk-carol")
+	dave := roomLogTestAccount(conn, "lk-dave")
+	erin := roomLogTestAccount(conn, "lk-erin")
+	lena := roomLogTestAccount(conn, "lk-lena")
+	mona := roomLogTestAccount(conn, "lk-mona")
+	gina := roomLogTestAccount(conn, "lk-gina")
+	hank := roomLogTestAccount(conn, "lk-hank")
+	ivan := roomLogTestAccount(conn, "lk-ivan")
+	judy := roomLogTestAccount(conn, "lk-judy")
+	kate := roomLogTestAccount(conn, "lk-kate")
+	zed := roomLogTestAccount(conn, "lk-zed")
+	everyone := [?]RoomLogTestAccount {
+		alice, carol, dave, erin, lena, mona, gina, hank, ivan, judy, kate, zed,
+	}
+	for account, index in everyone {
+		bundle := common.DatabasePublishEncryptionKeyRequest {
+			userId    = account.userID,
+			createdAt = 1_700_000_000,
+		}
+		for byteIndex in 0 ..< len(bundle.encryptionPublicKey) {
+			bundle.encryptionPublicKey[byteIndex] = u8(index + 1)
+		}
+		published := databaseExecuteRequest(conn, bundle)
+		assert(published.success, fmt.tprintf("expected a bundle: %s", published.message))
+		IPC__database_query_response_deinit(published)
+	}
+
+	// The room: alice creates it with lena and mona as managers, adds carol, who adds erin and
+	// dave; alice removes dave and mona as a manager, and carol leaves.
+	room := roomLogTestCreateRoom(conn, alice.userID, "lk-room", .MemberInvite).room.id
+	head := RoomLogTestHead {
+		roomID = room,
+	}
+	managers := []RoomLogTestAccount{alice, lena, mona}
+	steps := [?]struct {
+		sender: RoomLogTestAccount,
+		spec:   RoomLogTestEntry,
+		label:  string,
+	} {
+		{alice, {action = .Create, actor = alice, access = .MemberInvite, history = .FromJoin,
+				joins = true, managers = managers}, "the Create"},
+		{alice, {action = .Add, actor = alice, target = carol}, "alice adds carol"},
+		{carol, {action = .Add, actor = carol, target = erin}, "carol adds erin"},
+		{carol, {action = .Add, actor = carol, target = dave}, "carol adds dave"},
+		{alice, {action = .Remove, actor = alice, target = dave}, "alice removes dave"},
+		{alice, {action = .RemoveManager, actor = alice, target = mona}, "alice removes mona"},
+		{carol, {action = .Leave, actor = carol, target = carol}, "carol leaves"},
+	}
+	for step in steps {
+		roomLogTestExpect(conn, serverKey, &head, step.sender.userID,
+			roomLogTestSign(serverKey, head, step.spec), .Applied, step.label)
+	}
+	assert(
+		roomLogTestMembers(conn, room) == roomLogTestIDs({alice.userID, erin.userID}) &&
+		roomLogTestManagers(conn, room) == roomLogTestIDs({alice.userID, lena.userID}),
+		"expected alice and erin the members, alice and lena the managers",
+	)
+	// Another room erin is not in names kate.
+	other := roomLogTestCreateRoom(conn, alice.userID, "lk-other", .MemberInvite).room.id
+	otherHead := RoomLogTestHead {
+		roomID = other,
+	}
+	aliceOnly := []RoomLogTestAccount{alice}
+	roomLogTestExpect(conn, serverKey, &otherHead, alice.userID,
+		roomLogTestSign(serverKey, otherHead, {action = .Create, actor = alice,
+			access = .MemberInvite, history = .FromJoin, joins = true, managers = aliceOnly}),
+		.Applied, "the other room's Create")
+	roomLogTestExpect(conn, serverKey, &otherHead, alice.userID,
+		roomLogTestSign(serverKey, otherHead, {action = .Add, actor = alice, target = kate}),
+		.Applied, "alice adds kate to the other room")
+	// Envelopes: hank's chain wrapped for erin and alice, alice's chain forwarded to erin by
+	// gina; ivan's chain and judy's forward wrap only alice. erin becomes restricted.
+	databaseDefaultRoomTestExec(
+		conn,
+		"store the envelopes",
+		fmt.tprintf(
+			"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+			"recipient_user_ids, envelope, forwarder_user_id) VALUES " +
+			"(%d, 1, %d, '\\x00112233445566778899aabbccddeeff', ARRAY[%d, %d]::bigint[], " +
+			"'\\x01', NULL), " +
+			"(%d, 1, %d, '\\x00112233445566778899aabbccddeeff', ARRAY[%d]::bigint[], " +
+			"'\\x01', %d), " +
+			"(%d, 1, %d, '\\x00112233445566778899aabbccddeeff', ARRAY[%d]::bigint[], " +
+			"'\\x01', NULL), " +
+			"(%d, 1, %d, '\\x00112233445566778899aabbccddeeff', ARRAY[%d]::bigint[], " +
+			"'\\x01', %d); " +
+			"UPDATE users SET restricted = true WHERE id = %d",
+			room, hank.userID, erin.userID, alice.userID,
+			room, alice.userID, erin.userID, gina.userID,
+			room, ivan.userID, alice.userID,
+			room, alice.userID, alice.userID, judy.userID,
+			erin.userID,
+		),
+	)
+
+	// The IDs erin got bundles for and the IDs listed as missing, both sorted.
+	fetch :: proc(conn: pg.Conn, viewer: int, ids: []RoomLogTestAccount) -> (string, string) {
+		request := common.DatabaseFetchUserKeysRequest {
+			requesterUserId = viewer,
+			userIds         = make([dynamic]int, 0, len(ids)),
+		}
+		defer delete(request.userIds)
+		for account in ids {
+			append(&request.userIds, account.userID)
+		}
+		response := databaseExecuteRequest(conn, request)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected the fetch to run: %s", response.message))
+		fetched := response.result.(common.DatabaseFetchUserKeysResult)
+		found := make([dynamic]int, 0, len(fetched.keys), context.temp_allocator)
+		for bundle in fetched.keys {
+			append(&found, bundle.userId)
+		}
+		absent := slice.clone(fetched.missingUserIds[:], context.temp_allocator)
+		slice.sort(found[:])
+		slice.sort(absent)
+		return roomLogTestIDs(found[:]), roomLogTestIDs(absent)
+	}
+	sorted :: proc(accounts: ..RoomLogTestAccount) -> string {
+		ids := make([]int, len(accounts), context.temp_allocator)
+		for account, index in accounts {
+			ids[index] = account.userID
+		}
+		slice.sort(ids)
+		return roomLogTestIDs(ids)
+	}
+	keys, missing := fetch(conn, erin.userID, everyone[:])
+	wantKeys := sorted(alice, carol, dave, erin, lena, mona, gina, hank)
+	wantMissing := sorted(ivan, judy, kate, zed)
+	assert(
+		keys == wantKeys && missing == wantMissing,
+		fmt.tprintf(
+			"expected erin to get the keys of the log's accounts (%s) and the envelopes' " +
+			"senders and forwarder, with %s missing, got %s and %s",
+			wantKeys,
+			wantMissing,
+			keys,
+			missing,
+		),
+	)
+
+	// Removed from the room, erin keeps only her own key and the admin's.
+	outcome, changed, _, _ := roomLogTestMemberAction(conn, serverKey, .Remove, alice.userID,
+		room, erin.userID)
+	assert(outcome == .Applied && changed, "expected alice to remove erin")
+	keys, missing = fetch(conn, erin.userID, everyone[:])
+	wantKeys = sorted(alice, erin)
+	wantMissing = sorted(carol, dave, lena, mona, gina, hank, ivan, judy, kate, zed)
+	assert(
+		keys == wantKeys && missing == wantMissing,
+		fmt.tprintf("expected only %s after the removal, got %s and %s", wantKeys, keys, missing),
 	)
 }
 

@@ -613,8 +613,11 @@ D7-D19). The rules in user terms are in
   the same refusal as an unknown ID ("Unknown direct message recipient", "Unknown user").
   The restricted refusal is only for a peer the account already has a conversation with. Keys
   stay available for the accounts the server already shows the requester: those it may see,
-  old conversation peers, and the authors of room messages it can read (past the From join cut),
-  whose signatures it must check.
+  old conversation peers, the authors of room messages it can read (past the From join cut),
+  whose signatures it must check, and, in an encrypted room whose member log it reads (as a
+  member or a log manager), every account an entry names as actor or target and every current
+  manager, since the client replays the log against pinned keys, plus the sender and forwarder
+  of each room key envelope wrapped for it in a room it is a member of.
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting
   it joins the Public rooms.

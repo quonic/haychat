@@ -292,7 +292,10 @@ or Admin invite room) is **restricted** to that room:
   with it read gets the same answer as for an account ID that was never used. Only a peer it
   already has a conversation with gets "You no longer share a room with this person". Keys stay
   available for accounts the server already shows it, including the authors of room messages it
-  can read, so it can check their signatures.
+  can read, so it can check their signatures, and, in an encrypted room it is in, everyone the
+  room's member list history names (who added or removed whom, the managers) and whoever sent
+  or passed on a room key meant for it, so the room keeps working on a new device even after
+  those people have left.
 - Voice participants: a room's participant list goes only to the room's members, and only
   members can be in its voice. Removing an account from a room (by a member manager, by
   leaving, through a role change or a room edit) takes it out of the room's voice first, so a
