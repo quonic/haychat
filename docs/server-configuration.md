@@ -27,6 +27,12 @@ depends on how it runs:
 The role must be able to create and alter objects in its schema (`public`), because the server
 migrates the schema itself (see [Schema Migrations](#schema-migrations)).
 
+The server opens two connections with these settings: one for its queries and one that only
+`LISTEN`s for changes made in the database (#116, for example `deploy/sql/set-restricted.sql`).
+`LISTEN` needs a session of its own, so connect the server to PostgreSQL directly or through a
+pooler in session mode; a transaction-mode pooler (such as PgBouncer's `pool_mode =
+transaction`) drops the notifications.
+
 ### Network and Paths
 
 | Variable | Default |
