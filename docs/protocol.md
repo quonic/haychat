@@ -580,7 +580,9 @@ D7-D19). The rules in user terms are in
   approval, the sign-in creates no account: the server declines the request itself with the
   reason "The room this invite was for is no longer available; ask for a new invite", so the
   applicant gets `ServerRegistrationRequired{status Declined}` or, still registering,
-  `ServerRegisterResponse{Declined}` and is disconnected.
+  `ServerRegisterResponse{Declined}` and is disconnected. Approvers get the declined request
+  as `ServerRegistrationRequestUpdated`, as for an approver's decline, even when the applicant
+  left before the server answered (#165).
 - **Restricted accounts (D11, D17):** `UserSummary.isRestricted`. A restricted account never
   joins Public rooms automatically; only holders of ManageMembers in a room add it there
   ("Only a member manager can add this restricted account"). It sees, and exchanges direct
@@ -592,7 +594,8 @@ D7-D19). The rules in user terms are in
   restricted member (#104). A newly created account (any sign-up or Open sign-in, or a claimed
   keyless account) reaches every other session allowed to see it as a full `ServerUserUpdated`
   before its `ServerUserPresence` (#102), so clients add it with its restriction, identity key
-  and roles. A refused direct
+  and roles. An account whose session ended before the server finished creating it is
+  announced the same way, offline and without presence (#166). A refused direct
   message is "You no longer share a room with this person"; older history stays readable.
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting

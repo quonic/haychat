@@ -244,6 +244,86 @@ MainRouterState_announceNewAccount :: proc(
 	)
 }
 
+// #166: an account was created (or claimed) by a sign-in or sign-up whose session is gone, or
+// whose ServerAuthSuccess failed to go out. The account exists all the same, so the sessions
+// allowed to see it (D17) get its UserSummary (offline unless another of its sessions is
+// online) and the router records its restriction. excludePeerID is the session that asked
+// when it is still there (0 when its peer ID may belong to another session now). roleIDs is
+// borrowed.
+MainRouterState_announceAccountWithoutSession :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	excludePeerID: u32,
+	userID: int,
+	nickname: string,
+	isAdmin: bool,
+	isRestricted: bool,
+	identityPublicKey: common.IdentityPublicKeyBytes,
+	roleIDs: []int,
+) {
+	if userID <= 0 {
+		return
+	}
+	MainRouterState_setUserRestricted(state, userID, isRestricted)
+	MainRouterState_announceNewAccount(
+		pm,
+		state,
+		excludePeerID,
+		userID,
+		nickname,
+		isAdmin,
+		isRestricted,
+		identityPublicKey,
+		roleIDs,
+	)
+}
+
+// The pending entry of an identity statement session asked for. The request outlives a
+// disconnect (#165, #166) and ENet reuses peer IDs, so the session ID and key say which
+// session its answer belongs to (MainRouterState_identityRequestIsLive).
+MainRouterState_identityPendingRequest :: proc(session: RouterPeerSession) -> PendingDBRequest {
+	return PendingDBRequest {
+		requestType = .ResolveUserIdentity,
+		sessionID = session.sessionID,
+		identityPublicKey = session.clientIdentityPublicKey,
+	}
+}
+
+// Whether the session that asked for an identity statement is still the one at its peer ID.
+MainRouterState_identityRequestIsLive :: proc(
+	state: ^MainRouterState,
+	request: PendingDBRequest,
+) -> bool {
+	session, ok := state.peerSessions[request.peerID]
+	if !ok {
+		return false
+	}
+	sessionID := session.sessionID
+	requestSessionID := request.sessionID
+	return common.constantTimeEqual(sessionID[:], requestSessionID[:])
+}
+
+// #165: the identity statement declined the key's approved request because its room went away
+// (#115). Approvers hear of it exactly as of an approver's decline: ServerRegistrationRequest
+// Updated to every approver session, and the key's other registering sessions are answered
+// Declined (the session that asked is answered by its own result).
+MainRouterState_noteServerDeclinedRequest :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	identity: common.DatabaseUserIdentityResult,
+) {
+	if identity.declinedRequest.id <= 0 {
+		return
+	}
+	MainRouterState_sendRegistrationRequestUpdated(
+		pm,
+		state,
+		identity.declinedRequest,
+		identity.pendingCount,
+	)
+	MainRouterState_settleRegisteringApplicants(pm, state, identity.declinedRequest)
+}
+
 // Sends every authenticated session of userIDs a fresh ServerUserList (their view changed).
 MainRouterState_resendUserLists :: proc(
 	pm: ^ProcessManager,
@@ -745,17 +825,35 @@ MainRouterState_handleRegisterResult :: proc(
 			registered.pendingCount,
 		)
 	}
-	if response.success && registeredOK && registered.outcome == .Created {
+	created := response.success && registeredOK && registered.outcome == .Created
+	if created {
 		MainRouterState_setUserRestricted(state, registered.userId, registered.isRestricted)
 	}
 	session, sessionOK := &state.peerSessions[request.peerID]
-	if !sessionOK || !session.isRegistering || !session.registerInFlight {
-		return
-	}
 	// A reused peer ID: the answer belongs to the key that asked, not to this session.
-	sessionKey := session.clientIdentityPublicKey
+	sessionKey: common.IdentityPublicKeyBytes
+	if sessionOK {
+		sessionKey = session.clientIdentityPublicKey
+	}
 	requestKey := request.identityPublicKey
-	if !common.constantTimeEqual(sessionKey[:], requestKey[:]) {
+	if !sessionOK ||
+	   !session.isRegistering ||
+	   !session.registerInFlight ||
+	   !common.constantTimeEqual(sessionKey[:], requestKey[:]) {
+		if created {
+			// #166: the applicant left before the answer; the account still exists.
+			MainRouterState_announceAccountWithoutSession(
+				pm,
+				state,
+				0,
+				registered.userId,
+				registered.nickname,
+				false,
+				registered.isRestricted,
+				request.identityPublicKey,
+				registered.roleIds[:],
+			)
+		}
 		return
 	}
 	session.registerInFlight = false
@@ -1355,7 +1453,7 @@ MainRouterState_settleRegisteringApplicants :: proc(
 				hasAdminPublicKey = state.hasAdminPublicKey,
 				registering = true,
 			},
-			PendingDBRequest{requestType = .ResolveUserIdentity},
+			MainRouterState_identityPendingRequest(session^),
 		)
 	}
 }

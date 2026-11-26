@@ -355,10 +355,13 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 
 	for requestID, request in state.pendingDatabaseRequests {
 		// A ClientRegister stays: its answer still tells the approvers of a new request. So does
-		// an attachment step, which must finish what the storage worker started, and (protocol
-		// 30) a message edit or delete, whose readers must hear of it.
+		// an attachment step, which must finish what the storage worker started, (protocol
+		// 30) a message edit or delete, whose readers must hear of it, and (#165, #166) the
+		// identity statement, which may have created an account or declined a request that
+		// others must hear of (its answer reaches only the session that asked).
 		if request.peerID == peerID &&
 		   request.requestType != .Register &&
+		   request.requestType != .ResolveUserIdentity &&
 		   request.requestType != .Attachment &&
 		   request.requestType != .MessageChange {
 			append(&requestIDs, requestID)
@@ -592,6 +595,20 @@ MainRouterState_completeAuthentication :: proc(
 		},
 	) {
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to send auth success")
+		if created {
+			// #166: the account exists whether or not this session does.
+			MainRouterState_announceAccountWithoutSession(
+				pm,
+				state,
+				peerID,
+				userID,
+				stored.clientNickname,
+				isAdmin,
+				isRestricted,
+				stored.clientIdentityPublicKey,
+				roleIDs,
+			)
+		}
 		return
 	}
 	MainRouterState_setUserRestricted(state, userID, isRestricted)
@@ -758,8 +775,10 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 
 		switch request.requestType {
 		case .ResolveUserIdentity:
-			MainRouterState_sendAuthFailure(pm, state, request.peerID, message)
-			MainRouterState_disconnectPeer(pm, request.peerID)
+			if MainRouterState_identityRequestIsLive(state, request) {
+				MainRouterState_sendAuthFailure(pm, state, request.peerID, message)
+				MainRouterState_disconnectPeer(pm, request.peerID)
+			}
 		case .ListRooms,
 		     .PostChatMessage,
 		     .GetRoomHistory,
@@ -1049,11 +1068,10 @@ MainRouterState_handleClientAuthRequest :: proc(
 	common.TransportState_activate(&session.transport, session.sessionID, keys, .Trusted)
 	common.DirectionalTransportKeys_wipe(&keys)
 	MainRouterState_setPeerSession(state, peerID, session)
-	MainRouterState_sendDatabaseRequest(
+	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
 		state,
 		peerID,
-		.ResolveUserIdentity,
 		common.DatabaseUserIdentityRequest {
 			nickname = strings.clone(session.clientNickname),
 			publicKey = session.clientIdentityPublicKey,
@@ -1061,6 +1079,7 @@ MainRouterState_handleClientAuthRequest :: proc(
 			hasAdminPublicKey = state.hasAdminPublicKey,
 			registering = req.registering,
 		},
+		MainRouterState_identityPendingRequest(session),
 	)
 }
 
@@ -1758,6 +1777,27 @@ MainRouterState_handleDatabaseResult :: proc(
 	switch request.requestType {
 	case .ResolveUserIdentity:
 		identity, identityOK := response.result.(common.DatabaseUserIdentityResult)
+		if response.success && identityOK {
+			// #165: approvers hear of a server decline whether or not the applicant stayed.
+			MainRouterState_noteServerDeclinedRequest(pm, state, identity)
+		}
+		if !MainRouterState_identityRequestIsLive(state, request) {
+			// #166: the session that asked is gone; an account it created is still announced.
+			if response.success && identityOK && identity.created && !identity.banned {
+				MainRouterState_announceAccountWithoutSession(
+					pm,
+					state,
+					0,
+					identity.userId,
+					identity.nickname,
+					identity.isAdmin,
+					identity.isRestricted,
+					request.identityPublicKey,
+					identity.roleIds[:],
+				)
+			}
+			return
+		}
 		if session, sessionOK := MainRouterState_getPeerSession(state, request.peerID);
 		   sessionOK && session.isRegistering {
 			// An approval re-ran the statement for a registering session (D14).

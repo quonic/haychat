@@ -2585,6 +2585,12 @@ DatabaseUserIdentityResult :: struct {
 	// other sessions its full UserSummary.
 	created:             bool,
 	roleIds:             [dynamic]int,
+	// #165: when this statement declined the key's approved request because its room went
+	// away (#115), declinedRequest (owned) is that request after the decline and pendingCount
+	// the number of pending requests, for ServerRegistrationRequestUpdated to approvers; the
+	// request's id is 0 otherwise.
+	declinedRequest:     RegistrationRequestSummary,
+	pendingCount:        int,
 }
 
 DatabaseRoomListResult :: struct {

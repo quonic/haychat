@@ -158,6 +158,11 @@ registrationTestIdentity :: proc(
 	result.banReason = strings.clone(identity.banReason, context.temp_allocator)
 	result.decisionReason = strings.clone(identity.decisionReason, context.temp_allocator)
 	result.roleIds = slice.clone_to_dynamic(identity.roleIds[:], context.temp_allocator)
+	result.declinedRequest = common.RegistrationRequestSummary_clone(
+		identity.declinedRequest,
+		context.temp_allocator,
+	)
+	common.RegistrationRequestSummary_deinit(&identity.declinedRequest)
 	delete(identity.roleIds)
 	delete(identity.nickname)
 	delete(identity.previousNickname)
@@ -1051,7 +1056,11 @@ testRoomCodeRequestWhoseRoomChangedAgainstPostgreSQL :: proc(t: ^testing.T) {
 		outcome := decide(conn, approver, requestID, true)
 		assert(outcome == .Applied, fmt.tprintf("expected %s approved, got %v", name, outcome))
 		databaseDefaultRoomTestExec(conn, "change the room", fmt.tprintf(change, roomID))
-		for registering in ([]bool{true, false}) {
+		pending := databaseAdminTestValue(
+			conn,
+			"SELECT count(*)::text FROM registration_requests WHERE status = 1",
+		)
+		for registering, attempt in ([]bool{true, false}) {
 			identity := registrationTestIdentity(conn, name, key, registering = registering)
 			assert(
 				identity.userId == 0 &&
@@ -1061,6 +1070,27 @@ testRoomCodeRequestWhoseRoomChangedAgainstPostgreSQL :: proc(t: ^testing.T) {
 				!identity.created,
 				fmt.tprintf("expected %s declined by the server, got %v", name, identity),
 			)
+			// #165: the sign-in that declined it reports the request for the approvers; a
+			// later one finds it declined already and reports none.
+			declined := identity.declinedRequest
+			if attempt == 0 {
+				assert(
+					declined.id == requestID &&
+					declined.status == .Declined &&
+					declined.nickname == name &&
+					declined.identityPublicKey == key &&
+					declined.decidedBy == 0 &&
+					len(declined.decidedAt) > 0 &&
+					declined.decisionReason == common.REGISTRATION_ROOM_GONE_REASON &&
+					fmt.tprintf("%d", identity.pendingCount) == pending,
+					fmt.tprintf("expected %s's declined request, got %v", name, identity),
+				)
+			} else {
+				assert(
+					declined.id == 0 && identity.pendingCount == 0,
+					fmt.tprintf("expected no second decline for %s, got %v", name, declined),
+				)
+			}
 		}
 		assert(accounts(conn, name) == "0", fmt.tprintf("expected no account for %s", name))
 		stored := databaseAdminTestValue(
