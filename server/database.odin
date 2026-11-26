@@ -1313,6 +1313,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteSharedRooms(conn, r)
 	case common.DatabaseRestrictedUsersRequest:
 		return databaseExecuteRestrictedUsers(conn)
+	case common.DatabaseRestrictedChangesRequest:
+		return databaseExecuteRestrictedChanges(conn, r)
 	case common.DatabaseAttachmentRequest:
 		return databaseExecuteAttachmentRequest(conn, r)
 	case common.DatabaseMessageChangeRequest:
@@ -1442,6 +1444,15 @@ databaseServerLoop :: proc(pm: ^ProcessManager) {
 		fmt.eprintfln("[Database] Failed to report startup readiness")
 		return
 	}
+
+	// #116: changes made in the database (database_notifications.odin), on a connection and a
+	// thread of their own so they never delay a query. After readiness, so the migration has
+	// created the triggers; stopped before this worker returns, so a restart starts a new one.
+	changeListener := databaseChangeListenerStart(
+		databaseListenerConninfo(pm.config^),
+		pm.config.databaseFd,
+	)
+	defer databaseChangeListenerStop(changeListener)
 
 	running := true
 	for running {

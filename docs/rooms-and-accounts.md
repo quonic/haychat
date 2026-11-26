@@ -290,6 +290,15 @@ or Admin invite room) is **restricted** to that room:
 - An admin can lift the restriction (**Lift restriction** in the Admin section), which joins the
   account to every Public room. A room code cannot target an encrypted room yet, because the
   server cannot sign the room's member list.
+- An operator can restrict an account or lift its restriction with SQL:
+  `deploy/sql/set-restricted.sql` (`psql -v account=NAME -v restricted=true|false`), which also
+  joins a lifted account to every Public room, or a plain `UPDATE users SET restricted = ...`.
+  No restart is needed (#116): a trigger (migration 18) notifies the running server, which
+  applies the change exactly as it applies an admin's, so the account's sessions and everyone's
+  user lists follow at once and a lifted account joins the Public rooms. The server reads the
+  restricted accounts again whenever its listener reconnects to the database, so a change made
+  while that connection was down is not lost. A plain `UPDATE` made while the server is stopped
+  joins no Public rooms; the helper does.
 
 ## Room Permissions
 

@@ -154,6 +154,8 @@ SQL_TESTS+=,server.testMessageEditsMigrationUpgradesVersion16AgainstPostgreSQL
 SQL_TESTS+=,server.testRoomMessageEditsAndDeletesAgainstPostgreSQL
 SQL_TESTS+=,server.testMessageDeleteRemovesItsFilesAgainstPostgreSQL
 SQL_TESTS+=,server.testDirectMessageEditsAndDeletesAgainstPostgreSQL
+SQL_TESTS+=,server.testChangeNotificationsMigrationUpgradesVersion17AgainstPostgreSQL
+SQL_TESTS+=,server.testRestrictedChangeInTheDatabaseReachesSessionsAgainstPostgreSQL
 
 tests=("$STARTUP_AUTH_TEST")
 run_harness=false

@@ -1230,6 +1230,37 @@ DATABASE_MESSAGE_EDITS_CHECKS ::
 	"('direct message edits client message id index', " +
 	"to_regclass('direct_message_edits_sender_client_message_id') IS NOT NULL)"
 
+// Migration 18 (database change notifications, #116, the mechanism #75 shares).
+//
+// - haychat_notify_row_id(): a trigger function that sends NOTIFY on the channel named by its
+//   first trigger argument with the changed row's id as the payload. Channel names are
+//   DATABASE_CHANGE_CHANNEL_* in database_notifications.odin.
+// - users_restricted_notify: after an UPDATE that changes users.restricted, notify
+//   'haychat_restricted' with the account's ID. PostgreSQL delivers it when the transaction
+//   commits (never for a rolled-back one) and folds identical notifications of one transaction
+//   into one. The server's database listener (database_notifications.odin) hands the IDs to the
+//   router, which applies the change like ClientAdminSetRestricted, so an operator's
+//   `UPDATE users SET restricted = ...` reaches connected sessions without a restart. The
+//   router's own ClientAdminSetRestricted fires it too; the router finds its set already
+//   current and sends nothing more.
+//
+// No row changes. Never edit it; append a migration instead.
+DATABASE_MIGRATION_18_CHANGE_NOTIFICATIONS_SQL ::
+	"CREATE FUNCTION haychat_notify_row_id() RETURNS trigger LANGUAGE plpgsql AS $$ " +
+	"BEGIN PERFORM pg_notify(TG_ARGV[0], NEW.id::text); RETURN NULL; END $$; " +
+	"CREATE TRIGGER users_restricted_notify AFTER UPDATE OF restricted ON users " +
+	"FOR EACH ROW WHEN (OLD.restricted IS DISTINCT FROM NEW.restricted) " +
+	"EXECUTE FUNCTION haychat_notify_row_id('haychat_restricted')"
+
+// What migration 18 adds, for DATABASE_SCHEMA_VALIDATION_SQL.
+DATABASE_CHANGE_NOTIFICATIONS_CHECKS ::
+	"('haychat_notify_row_id function', " +
+	"to_regprocedure('haychat_notify_row_id()') IS NOT NULL), " +
+	"('users restricted notify trigger', EXISTS (SELECT 1 FROM pg_trigger " +
+	"WHERE tgrelid = to_regclass('users') AND tgname = 'users_restricted_notify' " +
+	"AND NOT tgisinternal AND tgenabled <> 'D' " +
+	"AND tgfoid = to_regprocedure('haychat_notify_row_id()')))"
+
 // The ordered, append-only migration list. Versions start at 1 and increase by one.
 DATABASE_MIGRATIONS := [?]DatabaseMigration {
 	{version = 1, name = "baseline", sql = DATABASE_MIGRATION_1_BASELINE_SQL},
@@ -1328,6 +1359,12 @@ DATABASE_MIGRATIONS := [?]DatabaseMigration {
 		name = "message edits",
 		sql = DATABASE_MIGRATION_17_MESSAGE_EDITS_SQL,
 		checks = DATABASE_MESSAGE_EDITS_CHECKS,
+	},
+	{
+		version = 18,
+		name = "change notifications",
+		sql = DATABASE_MIGRATION_18_CHANGE_NOTIFICATIONS_SQL,
+		checks = DATABASE_CHANGE_NOTIFICATIONS_CHECKS,
 	},
 }
 
@@ -1461,6 +1498,8 @@ DATABASE_SCHEMA_VALIDATION_SQL ::
 	DATABASE_ATTACHMENT_REMOVALS_CHECKS +
 	", " +
 	DATABASE_MESSAGE_EDITS_CHECKS +
+	", " +
+	DATABASE_CHANGE_NOTIFICATIONS_CHECKS +
 	DATABASE_SCHEMA_VALIDATION_SUFFIX
 
 // The validation query for the schema migrations builds: the baseline, the runner's

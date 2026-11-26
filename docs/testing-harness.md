@@ -1041,6 +1041,10 @@ the encryption proof) with headless clients, through the [Registration](#registr
    see her, and SQL finds her restricted. Her direct message to carol is refused ("You no longer
    share a room with this person") until alice adds carol to the room; erin's `user_list` then
    gains carol and carol receives the next message.
+   7a. While erin is connected, `deploy/sql/set-restricted.sql` lifts her restriction with psql:
+   erin gets `account_updated` with `isRestricted` false and `room_membership` for `#general`,
+   and alice `user_updated`, without a restart (#116); restricting her again the same way
+   reaches both too.
 8. A second server (`HAYCHAT_REGISTRATION_PROOF_PORT`, default 12346) on a database the proof
    creates and drops, in Invite only mode from the start (`set-registration-mode.sql`) and with
    `HAYCHAT_ADMIN_PUBLIC_KEY` set to boss's key: zed is told to register, boss signs in

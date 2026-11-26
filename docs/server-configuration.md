@@ -151,6 +151,9 @@ client. A new or upgraded server is **Open**. Two SQL helpers change things with
   mode; new sign-ins follow it at once.
 - `deploy/sql/create-invite.sql` (`psql -v uses=1 -v days=7 -v note=... -f ...`) prints a new
   invite code, for an operator who has no admin account yet. Only its sha256 is stored.
+- `deploy/sql/set-restricted.sql` (`psql -v account=NAME -v restricted=true|false -f ...`)
+  restricts an account or lifts its restriction. A running server applies it at once (database
+  change notifications, #116); no restart and no setting is needed.
 
 `HAYCHAT_ADMIN_PUBLIC_KEY` can always sign up, whatever the mode. What each mode, invite codes
 and restricted accounts mean is in

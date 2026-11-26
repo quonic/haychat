@@ -1940,3 +1940,81 @@ testMessageEditsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		"expected schema validation to require migration 17's checks",
 	)
 }
+
+// Migration 18 (#116) from version 17 with rows: nothing changes, and the trigger notifies
+// haychat_restricted with the account's ID only when users.restricted changes, at commit.
+@(test)
+testChangeNotificationsMigrationUpgradesVersion17AgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "change_notifications_v17")
+	_ = schema
+
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:17])
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill version 17 schema",
+		DATABASE_MIGRATION_TEST_SIGNED_ROWS_SQL,
+	)
+	kept := databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL)
+	RESTRICTED_SQL :: "SELECT string_agg(id || ':' || restricted, ',' ORDER BY id) FROM users"
+	restricted := databaseMigrationTestValue(conn, RESTRICTED_SQL)
+
+	outcome := databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:18])
+	assert(
+		outcome == DatabaseMigrationOutcome{previousVersion = 17, version = 18},
+		fmt.tprintf("expected only migration 18 to run, got %v", outcome),
+	)
+	databaseMigrationTestValidationPassesFor(conn, DATABASE_MIGRATIONS[:18])
+	assert(
+		databaseMigrationTestValue(conn, DATABASE_MIGRATION_TEST_KEPT_FINGERPRINT_SQL) == kept &&
+		databaseMigrationTestValue(conn, RESTRICTED_SQL) == restricted,
+		"expected every account, room and membership intact",
+	)
+
+	// This connection hears its own notifications once each transaction commits. IDs from
+	// other schemas on the same database (other servers or tests) are ignored: only mig-bob's
+	// (2) count.
+	databaseDefaultRoomTestExec(conn, "listen", "LISTEN haychat_restricted")
+	notified :: proc(conn: pg.Conn) -> int {
+		batch: DatabaseChangeBatch
+		defer DatabaseChangeBatch_deinit(&batch)
+		assert(databaseListenerPoll(conn, &batch, 0), "expected the connection to stay up")
+		count := 0
+		for id in batch.ids[.Restricted] {
+			count += id == 2 ? 1 : 0
+		}
+		return count
+	}
+	databaseDefaultRoomTestExec(conn, "restrict", "UPDATE users SET restricted = true WHERE id = 2")
+	got := notified(conn)
+	assert(got == 1, fmt.tprintf("expected one notification for a restriction, got %d", got))
+	databaseDefaultRoomTestExec(
+		conn,
+		"unchanged",
+		"UPDATE users SET restricted = true WHERE id = 2; " +
+		"UPDATE users SET nickname = 'mig-bobby' WHERE id = 2",
+	)
+	got = notified(conn)
+	assert(got == 0, fmt.tprintf("expected nothing for an unchanged restriction, got %d", got))
+	databaseDefaultRoomTestExec(
+		conn,
+		"rolled back",
+		"BEGIN; UPDATE users SET restricted = false WHERE id = 2; ROLLBACK",
+	)
+	got = notified(conn)
+	assert(got == 0, fmt.tprintf("expected nothing for a rolled-back change, got %d", got))
+	// PostgreSQL folds a transaction's identical notifications into one.
+	databaseDefaultRoomTestExec(
+		conn,
+		"three changes",
+		"BEGIN; UPDATE users SET restricted = false WHERE id = 2; " +
+		"UPDATE users SET restricted = true WHERE id = 2; " +
+		"UPDATE users SET restricted = false WHERE id = 2; COMMIT",
+	)
+	got = notified(conn)
+	assert(got == 1, fmt.tprintf("expected one notification for one transaction, got %d", got))
+	databaseDefaultRoomTestExec(conn, "unlisten", "UNLISTEN *")
+}

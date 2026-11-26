@@ -141,6 +141,8 @@ networkDrainIPC :: proc(
 		     DatabaseError,
 		     DatabaseStartupReady,
 		     DatabaseStartupFailed,
+		     DatabaseChangeNotification,
+		     DatabaseChangeListening,
 		     StorageCommand,
 		     StorageResponse:
 			fmt.eprintfln("[Network] Received database or storage message, ignoring")

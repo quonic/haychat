@@ -21,6 +21,7 @@ and the release builds that produce the image and the client downloads. Testers 
 | `deploy/sql/make-admin.sql`      | Gives one existing account the admin role                                                                                              |
 | `deploy/sql/create-invite.sql`   | Prints a new invite code, for a server that is not Open and has no admin yet                                                           |
 | `deploy/sql/set-registration-mode.sql` | Sets the registration mode (`open`, `invite`, `approval`) without a client                                                       |
+| `deploy/sql/set-restricted.sql` | Restricts one account or lifts its restriction without a client; a running server applies it at once                             |
 | `deploy/sql/attachment-usage.sql` | Shows attachment storage use: totals, the accounts that store the most, and one account's files                                 |
 | `deploy/sql/remove-attachment.sql` | Removes one attachment by its blob ID; the server deletes the file within the hour                                             |
 | `deploy/release-artifacts.sh`    | Builds the server binary and client archives for a release                                                                             |
@@ -60,7 +61,7 @@ the dev image and CI use.
 | Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`), `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) and `/var/lib/haychat/attachments` (`HAYCHAT_ATTACHMENT_DIR`: attachment files, protocol 26)                                                       |
 | Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
-| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `set-restricted.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the four
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
@@ -282,6 +283,25 @@ and [the server's rules](https://git.spyingwind.com/quonic/haychat/src/branch/ma
 environment uses. It creates the accounts `admin` (ID 1) and `haypeer` (ID 2) and resets `#general`,
 and it **deletes any account that holds ID 1 or 2 under another name**, with its messages.
 Load it only into an empty database, and only if you want those accounts.
+
+### Restricted Accounts
+
+A restricted account sees and is seen by only the accounts it shares a room with, and admins
+([the rules](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/rooms-and-accounts.md#restricted-accounts)).
+Room codes make them; an admin restricts or lifts from the client, or you do it with SQL:
+
+```sh
+podman exec -i haychat-db psql -U haychat -d haychat -v account=erin -v restricted=true \
+	<deploy/sql/set-restricted.sql
+```
+
+`restricted` is `true` or `false`; lifting also adds the account to every Public room. No
+restart is needed: the server listens for changes to `users.restricted` (migration 18,
+`LISTEN haychat_restricted` on a connection of its own), so the account's sessions and
+everyone's user lists follow at once, as after an admin's change from a client. A plain
+`UPDATE users SET restricted = ...` reaches a running server the same way, but joins no Public
+rooms while the server is stopped; the helper does. If the server's listener connection drops,
+it reconnects and reads the restricted accounts again, so nothing is missed.
 
 ### Server Identity Key and HAYCHAT_ADMIN_PUBLIC_KEY
 

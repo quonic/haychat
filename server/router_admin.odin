@@ -453,27 +453,12 @@ MainRouterState_handleAdminUserResult :: proc(
 		if !result.changed {
 			return
 		}
-		// Protocol 25 (D11, D17): the router's set first, so the fan-outs below filter by it.
-		MainRouterState_setUserRestricted(state, userID, result.user.isRestricted)
-		MainRouterState_sendMessageToUserID(
-			pm,
-			state,
-			userID,
-			.ServerAccountUpdated,
-			common.ServerAccountUpdatedPayload {
-				isAdmin = result.user.isAdmin,
-				nickname = result.user.nickname,
-				nicknameLocked = result.nicknameLocked,
-				permissions = result.permissions,
-				isRestricted = result.user.isRestricted,
-			},
-		)
-		for roomID in result.addedRoomIDs {
-			MainRouterState_roomMembersAdded(pm, state, roomID, []int{userID})
+		// The statement fires the users_restricted_notify trigger too (#116); by the time its
+		// notification is read back the set is current, and it sends nothing more.
+		if MainRouterState_applyRestrictedChange(pm, state, result) {
+			// Who sees the account, and whom it sees, changed for everyone.
+			MainRouterState_resendAllUserLists(pm, state)
 		}
-		MainRouterState_broadcastUserUpdated(pm, state, result.user)
-		// Who sees the account, and whom it sees, changed for everyone.
-		MainRouterState_resendAllUserLists(pm, state)
 	case .SaveRole,
 	     .DeleteRole,
 	     .SetUserRoles,
@@ -484,4 +469,42 @@ MainRouterState_handleAdminUserResult :: proc(
 	// Role actions are DatabaseRoleRequests (router_roles.odin), registration ones
 	// router_registration.odin's, and attachment removal router_attachment_moderation.odin's.
 	}
+}
+
+// Applies one account's restriction as the database now has it (an admin's SetRestricted, or
+// #116 a change made in the database): the router's set first, so the fan-outs below filter
+// by it (D17), then ServerAccountUpdated to the account's sessions, the Public rooms a lifted
+// restriction joined, and ServerUserUpdated to every session that may see the account. The
+// caller resends the user lists once (MainRouterState_resendAllUserLists), also for several
+// accounts. false, and nothing sent, when the set already matches and no room was joined, so
+// a change applied once is never applied twice.
+MainRouterState_applyRestrictedChange :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	account: common.DatabaseAdminUserResult,
+) -> bool {
+	userID := account.user.id
+	if MainRouterState_userIsRestricted(state, userID) == account.user.isRestricted &&
+	   len(account.addedRoomIDs) == 0 {
+		return false
+	}
+	MainRouterState_setUserRestricted(state, userID, account.user.isRestricted)
+	MainRouterState_sendMessageToUserID(
+		pm,
+		state,
+		userID,
+		.ServerAccountUpdated,
+		common.ServerAccountUpdatedPayload {
+			isAdmin = account.user.isAdmin,
+			nickname = account.user.nickname,
+			nicknameLocked = account.nicknameLocked,
+			permissions = account.permissions,
+			isRestricted = account.user.isRestricted,
+		},
+	)
+	for roomID in account.addedRoomIDs {
+		MainRouterState_roomMembersAdded(pm, state, roomID, []int{userID})
+	}
+	MainRouterState_broadcastUserUpdated(pm, state, account.user)
+	return true
 }
