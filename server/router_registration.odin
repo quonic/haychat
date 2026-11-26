@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:time"
 
@@ -37,7 +38,8 @@ import "core:time"
 // room, or an admin on either side) before the message goes out. Which accounts are restricted
 // is MainRouterState.restrictedUserIDs, loaded from the database when the router starts and
 // kept current by every path that changes users.restricted (sign-in, sign-up, an admin's
-// ClientAdminSetRestricted); a change made directly in the database needs a restart.
+// ClientAdminSetRestricted) and (#116) by the database's change notifications, which bring a
+// change made with SQL (router_database_changes.odin).
 
 // What MainRouterState_sendAboutUser sends.
 MainRouterVisibilityKind :: enum u8 {
@@ -433,7 +435,8 @@ MainRouterState_noteMembersAddedVisibility :: proc(
 	MainRouterState_resendUserLists(pm, state, affected[:])
 }
 
-// Asks the database for every restricted account; the main loop calls it once at start.
+// Asks the database for every restricted account: the main loop once at start, and (#116)
+// the router again whenever the database change listener (re)connects.
 MainRouterState_loadRestrictedUsers :: proc(pm: ^ProcessManager, state: ^MainRouterState) {
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
@@ -444,7 +447,11 @@ MainRouterState_loadRestrictedUsers :: proc(pm: ^ProcessManager, state: ^MainRou
 	)
 }
 
+// The first answer fills the set. A later one (#116: a resync once the database change
+// listener (re)connected, when changes made with SQL may have gone unreported) replaces
+// nothing: the accounts that differ are read again and applied like a notification.
 MainRouterState_handleRestrictedUsersResult :: proc(
+	pm: ^ProcessManager,
 	state: ^MainRouterState,
 	response: common.DatabaseQueryResponse,
 ) {
@@ -453,10 +460,31 @@ MainRouterState_handleRestrictedUsersResult :: proc(
 		fmt.printfln("[Main] Could not load restricted accounts: %s", response.message)
 		return
 	}
-	clear(&state.restrictedUserIDs)
-	for userID in loaded.userIds {
-		state.restrictedUserIDs[userID] = true
+	if !state.restrictedUsersLoaded {
+		clear(&state.restrictedUserIDs)
+		for userID in loaded.userIds {
+			state.restrictedUserIDs[userID] = true
+		}
+		state.restrictedUsersLoaded = true
+		return
 	}
+	nowRestricted := make(map[int]bool)
+	defer delete(nowRestricted)
+	differing := make([dynamic]int)
+	defer delete(differing)
+	for userID in loaded.userIds {
+		nowRestricted[userID] = true
+		if !MainRouterState_userIsRestricted(state, userID) {
+			append(&differing, userID)
+		}
+	}
+	for userID in state.restrictedUserIDs {
+		if !nowRestricted[userID] {
+			append(&differing, userID)
+		}
+	}
+	slice.sort(differing[:])
+	MainRouterState_restrictedChangedInDatabase(pm, state, differing[:])
 }
 
 // Sets the permissions every session of userID carries (presence filtering and approver

@@ -15,6 +15,12 @@ clients ◄─ENet/UDP─► network thread ◄─IPC─► main thread ◄─IP
   commands `NetworkVoiceSessionOpen`, `NetworkVoiceRoute` and `NetworkVoiceReset`, and the
   `ProcessShutdown` / `ProcessRestart` signals.
 - main ↔ database: `DatabaseQuery` / `DatabaseQueryResult`.
+- database listener → main (#116): `DatabaseChangeNotification` (a channel and the IDs it
+  reported in one pass) and `DatabaseChangeListening` (connected and listening, so the router
+  reads each channel's state again). The listener is a thread the database thread starts once
+  it is ready and stops before it returns, with a PostgreSQL connection of its own that
+  `LISTEN`s, so waiting for notifications or reconnecting never delays a query
+  (`server/database_notifications.odin`).
 
 The listen port is `HAYCHAT_LISTEN_PORT` (default `12345`, `common.DEFAULT_SERVER_PORT`).
 

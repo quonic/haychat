@@ -2237,6 +2237,7 @@ DatabaseQueryRequest :: union {
 	DatabaseRegistrationModeRequest,
 	DatabaseSharedRoomsRequest,
 	DatabaseRestrictedUsersRequest,
+	DatabaseRestrictedChangesRequest,
 	// Attachments (protocol 26, common/attachment_protocol.odin).
 	DatabaseAttachmentRequest,
 	// Message edits and deletes (protocol 30, common/message_edits.odin).
@@ -2549,6 +2550,7 @@ DatabaseQueryResult :: union {
 	DatabaseRegistrationModeResult,
 	DatabaseSharedRoomsResult,
 	DatabaseRestrictedUsersResult,
+	DatabaseRestrictedChangesResult,
 	DatabaseAttachmentResult,
 	DatabaseMessageChangeResult,
 }

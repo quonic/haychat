@@ -59,6 +59,9 @@ PendingDBRequestType :: enum {
 	// decision, and the registration mode.
 	VisibleRecipients,
 	LoadRestrictedUsers,
+	// #116 (router_database_changes.odin): accounts whose restriction changed in the database,
+	// read again (no peer).
+	RestrictedChanges,
 	Register,
 	InviteAction,
 	RegistrationRequests,
@@ -237,6 +240,9 @@ MainRouterState :: struct {
 	// by request ID, wiped once answered.
 	restrictedUserIDs:        map[int]bool,
 	pendingInviteCodes:       map[u64]common.InviteCodeBytes,
+	// #116: restrictedUserIDs was loaded once, so a later load (a resync after the database
+	// change listener connected) applies what differs instead of replacing it.
+	restrictedUsersLoaded:    bool,
 	// Protocol 26 (router_attachments.odin): uploads, downloads and storage steps.
 	attachments:              RouterAttachmentState,
 }
@@ -359,7 +365,10 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 		// 30) a message edit or delete, whose readers must hear of it, and (#165, #166) the
 		// identity statement, which may have created an account or declined a request that
 		// others must hear of (its answer reaches only the session that asked).
+		// The router's own reads (no peer, peerID 0, which ENet also gives a peer) stay too.
 		if request.peerID == peerID &&
+		   request.requestType != .LoadRestrictedUsers &&
+		   request.requestType != .RestrictedChanges &&
 		   request.requestType != .Register &&
 		   request.requestType != .ResolveUserIdentity &&
 		   request.requestType != .Attachment &&
@@ -820,7 +829,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 					message,
 				)
 			}
-		case .VisibleRecipients, .LoadRestrictedUsers:
+		case .VisibleRecipients, .LoadRestrictedUsers, .RestrictedChanges:
 		case .Attachment:
 			MainRouterState_attachmentDatabaseFailed(pm, state, request)
 		case .MessageChange:
@@ -2253,7 +2262,9 @@ MainRouterState_handleDatabaseResult :: proc(
 	case .VisibleRecipients:
 		MainRouterState_handleVisibleRecipientsResult(pm, state, request, response)
 	case .LoadRestrictedUsers:
-		MainRouterState_handleRestrictedUsersResult(state, response)
+		MainRouterState_handleRestrictedUsersResult(pm, state, response)
+	case .RestrictedChanges:
+		MainRouterState_handleRestrictedChangesResult(pm, state, response)
 	case .Register:
 		MainRouterState_handleRegisterResult(pm, state, request, response)
 	case .InviteAction:
@@ -2536,6 +2547,11 @@ mainLoopHandleMessage :: proc(
 			m.request_id,
 			common.DatabaseQueryResponse{success = false, message = m.error},
 		)
+	case DatabaseChangeNotification:
+		MainRouterState_handleDatabaseChange(pm, routerState, m)
+		delete(m.ids)
+	case DatabaseChangeListening:
+		MainRouterState_databaseChangesListening(pm, routerState)
 	case DatabaseStartupReady, DatabaseStartupFailed:
 	// Startup-only coordination messages are consumed before the main loop starts.
 	case ProcessShutdown:

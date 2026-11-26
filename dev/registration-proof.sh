@@ -28,6 +28,9 @@ set -euo pipefail
 #                 until alice adds carol to the room; then carol receives it. alice sees erin
 #                 restricted at once, from the user_updated her sign-up sends (#102). alice
 #                 makes the room Public: erin's user list gains bob, and bob's gains erin (#104).
+#   7a. SQL:      deploy/sql/set-restricted.sql lifts erin's restriction while she is connected:
+#                 she gets account_updated and joins #general, and alice user_updated, with no
+#                 restart (#116); restricting her again the same way reaches both too.
 #   7b. gone room: two requests through a room code (ivy, jack). ivy is approved while away,
 #                 then alice deletes the room: approving jack is refused ("The room this invite
 #                 was for is no longer available"), declining him still works, and ivy's next
@@ -520,6 +523,30 @@ expect_event erin "^\\{\"event\":\"user_list\",.*\"nickname\":\"$nickname_bob\",
 	"erin's user list did not gain bob once the room was Public"
 expect_event bob "^\\{\"event\":\"user_list\",.*\"nickname\":\"$nickname_erin\"," "$start_b" \
 	"bob's user list did not gain erin once the room was Public"
+
+# #116: an operator changes erin's restriction with deploy/sql/set-restricted.sql while she is
+# connected, and the running server applies it at once (database change notifications).
+echo "==> [registration] 7a. a restriction changed with SQL reaches connected clients"
+erin_entry="^\\{\"event\":\"user_updated\",\"serverID\":1,\"user\":\\{\"id\":$user_erin,"
+erin_account="^\\{\"event\":\"account_updated\",\"serverID\":1,"
+start_e=$(lines erin)
+start_a=$(lines alice)
+proof_psql "$main_db" -v account="$nickname_erin" -v restricted=false \
+	-f deploy/sql/set-restricted.sql >/dev/null || fail "set-restricted.sql did not lift erin"
+expect_event erin "$erin_account.*\"isRestricted\":false\\}$" "$start_e" \
+	"erin was not told that SQL lifted her restriction"
+expect_event erin "^\\{\"event\":\"room_membership\",\"serverID\":1,\"roomID\":1,\"joined\":true," \
+	"$start_e" "erin did not join #general when SQL lifted her restriction"
+expect_event alice "$erin_entry.*\"isRestricted\":false" "$start_a" \
+	"alice was not told that SQL lifted erin's restriction"
+start_e=$(lines erin)
+start_a=$(lines alice)
+proof_psql "$main_db" -v account="$nickname_erin" -v restricted=true \
+	-f deploy/sql/set-restricted.sql >/dev/null || fail "set-restricted.sql did not restrict erin"
+expect_event erin "$erin_account.*\"isRestricted\":true\\}$" "$start_e" \
+	"erin was not told that SQL restricted her"
+expect_event alice "$erin_entry.*\"isRestricted\":true" "$start_a" \
+	"alice was not told that SQL restricted erin"
 stop_client erin
 
 echo "==> [registration] 7b. a room code whose room is deleted after approval signs nobody up"

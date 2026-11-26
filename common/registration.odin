@@ -625,3 +625,22 @@ DatabaseRestrictedUsersRequest :: struct {}
 DatabaseRestrictedUsersResult :: struct {
 	userIds: [dynamic]int,
 }
+
+// #116: accounts whose users.restricted changed outside the router (an operator's SQL, told by
+// the database's change notifications, server/database_notifications.odin), or that a resync
+// after the listener reconnected found changed. userIds (owned, distinct) are the accounts to
+// read again; restrictedUserIds (owned) those the router counts as restricted, of which the
+// ones no longer restricted join every Public room in the same statement, as a lifted
+// ClientAdminSetRestricted does.
+DatabaseRestrictedChangesRequest :: struct {
+	userIds:           [dynamic]int,
+	restrictedUserIds: [dynamic]int,
+}
+
+// One entry per account that still exists, in ID order: outcome Applied, changed true, and
+// the fields of a SetRestricted DatabaseAdminUserResult (each entry owns its strings and
+// arrays). addedRoomIDs is every Public room for an account of restrictedUserIds that is no
+// longer restricted (joined now or already, as deploy/sql/set-restricted.sql does), else empty.
+DatabaseRestrictedChangesResult :: struct {
+	accounts: [dynamic]DatabaseAdminUserResult,
+}

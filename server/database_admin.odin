@@ -273,37 +273,56 @@ databaseExecuteAdminUser :: proc(
 	if !outcomeOK {
 		return databaseErrorResponse(strings.clone("database returned an unknown admin outcome"))
 	}
-	adminResult := common.DatabaseAdminUserResult {
-		outcome = outcome,
-	}
 	if outcome != .Applied {
-		return databaseSuccess(adminResult)
+		return databaseSuccess(common.DatabaseAdminUserResult{outcome = outcome})
 	}
-	userID, userIDOK := databaseGetInt(result, 0, 2)
-	if !userIDOK {
+	adminResult, rowOK := databaseGetAdminUserRow(result, 0, request.action == .SetRestricted)
+	if !rowOK {
 		return databaseErrorResponse(strings.clone("database returned an invalid user ID"))
 	}
-	adminResult.changed = databaseGetBool(result, 0, 1)
-	roleIDs := databaseGetText(result, 0, 10)
+	return databaseSuccess(adminResult)
+}
+
+// An Applied row of the admin statements (columns 1..12, see the file comment, and with
+// addedRooms column 13, the Public rooms a lifted restriction joined) as an owned result.
+// DATABASE_RESTRICTED_CHANGES_SQL (#116) returns the same columns. false for a row without a
+// valid user ID, with nothing allocated.
+databaseGetAdminUserRow :: proc(
+	result: pg.Result,
+	row: i32,
+	addedRooms: bool,
+) -> (
+	common.DatabaseAdminUserResult,
+	bool,
+) {
+	userID, userIDOK := databaseGetInt(result, row, 2)
+	if !userIDOK {
+		return {}, false
+	}
+	adminResult := common.DatabaseAdminUserResult {
+		outcome = .Applied,
+		changed = databaseGetBool(result, row, 1),
+	}
+	roleIDs := databaseGetText(result, row, 10)
 	defer delete(roleIDs)
-	mask, _ := databaseGetInt(result, 0, 11)
+	mask, _ := databaseGetInt(result, row, 11)
 	adminResult.user = common.UserSummary {
 		id               = userID,
-		nickname         = databaseGetText(result, 0, 3),
-		isAdmin          = databaseGetBool(result, 0, 5),
-		isBanned         = databaseGetBool(result, 0, 6),
-		hasEncryptionKey = databaseGetBool(result, 0, 9),
+		nickname         = databaseGetText(result, row, 3),
+		isAdmin          = databaseGetBool(result, row, 5),
+		isBanned         = databaseGetBool(result, row, 6),
+		hasEncryptionKey = databaseGetBool(result, row, 9),
 		roleIds          = databaseParseIDList(roleIDs),
-		isRestricted     = databaseGetBool(result, 0, 12),
+		isRestricted     = databaseGetBool(result, row, 12),
 	}
-	adminResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, 0, 8)
-	if request.action == .SetRestricted {
-		added := databaseGetText(result, 0, 13)
+	adminResult.user.identityPublicKey = databaseGetIdentityPublicKey(result, row, 8)
+	if addedRooms {
+		added := databaseGetText(result, row, 13)
 		defer delete(added)
 		adminResult.addedRoomIDs = databaseParseIDList(added)
 	}
 	adminResult.permissions = common.serverPermissionsFromMask(i64(mask))
-	adminResult.nicknameLocked = databaseGetBool(result, 0, 4)
-	adminResult.previousNickname = databaseGetText(result, 0, 7)
-	return databaseSuccess(adminResult)
+	adminResult.nicknameLocked = databaseGetBool(result, row, 4)
+	adminResult.previousNickname = databaseGetText(result, row, 7)
+	return adminResult, true
 }

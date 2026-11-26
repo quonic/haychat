@@ -335,8 +335,8 @@ stage_licences server "$server_dir"
 cp deploy/README.md "$server_dir/DEPLOY.md"
 cp .env.example "$server_dir/env.example"
 cp server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql deploy/sql/create-invite.sql \
-	deploy/sql/set-registration-mode.sql deploy/sql/attachment-usage.sql \
-	deploy/sql/remove-attachment.sql "$server_dir/sql/"
+	deploy/sql/set-registration-mode.sql deploy/sql/set-restricted.sql \
+	deploy/sql/attachment-usage.sql deploy/sql/remove-attachment.sql "$server_dir/sql/"
 tar -C "$work_dir" -czf "$out_dir/haychat-server-$version-linux-x86_64.tar.gz" \
 	"haychat-server-$version"
 

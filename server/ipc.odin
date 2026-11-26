@@ -28,6 +28,9 @@ Message :: union {
 	DatabaseError,
 	DatabaseStartupReady,
 	DatabaseStartupFailed,
+	// Database change notifications (#116, database_notifications.odin)
+	DatabaseChangeNotification,
+	DatabaseChangeListening,
 	// Storage worker messages (protocol 26, storage.odin)
 	StorageCommand,
 	StorageResponse,
@@ -349,6 +352,9 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	case common.DatabaseMessageChangeRequest:
 		request := r
 		common.DatabaseMessageChangeRequest_deinit(&request)
+	case common.DatabaseRestrictedChangesRequest:
+		delete(r.userIds)
+		delete(r.restrictedUserIds)
 	case common.DatabaseRegistrationModeRequest, common.DatabaseRestrictedUsersRequest:
 	case common.DatabaseRoomListRequest,
 	     common.DatabaseRoomMemberListRequest,
@@ -466,10 +472,12 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		declined := r.declinedRequest
 		common.RegistrationRequestSummary_deinit(&declined)
 	case common.DatabaseAdminUserResult:
-		user := r.user
-		common.UserSummary_deinit(&user)
-		delete(r.previousNickname)
-		delete(r.addedRoomIDs)
+		IPC__admin_user_result_deinit(r)
+	case common.DatabaseRestrictedChangesResult:
+		for account in r.accounts {
+			IPC__admin_user_result_deinit(account)
+		}
+		delete(r.accounts)
 	case common.DatabaseRegisterResult:
 		delete(r.nickname)
 		delete(r.roleIds)
@@ -552,6 +560,13 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	}
 }
 
+IPC__admin_user_result_deinit :: proc(result: common.DatabaseAdminUserResult) {
+	user := result.user
+	common.UserSummary_deinit(&user)
+	delete(result.previousNickname)
+	delete(result.addedRoomIDs)
+}
+
 IPC__message_deinit :: proc(msg: ^Message) {
 	#partial switch &m in msg^ {
 	case NetworkDataReceived:
@@ -574,6 +589,8 @@ IPC__message_deinit :: proc(msg: ^Message) {
 		delete(m.error)
 	case DatabaseStartupFailed:
 		delete(m.error)
+	case DatabaseChangeNotification:
+		delete(m.ids)
 	case StorageCommand:
 		StorageRequest_deinit(m.request)
 	case StorageResponse:
