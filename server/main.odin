@@ -1491,6 +1491,9 @@ MainRouterState_dispatchApplicationPacket :: proc(
 	packet: common.Packet,
 ) {
 	#partial switch packet.messageType {
+	case .Ping:
+	// A keepalive with any payload, accepted and never answered, as in a registering session
+	// (#106): ENet measures latency. Pong, a retired placeholder, falls to the default.
 	case .ClientChatMessage:
 		MainRouterState_handleClientChatMessage(pm, state, peerID, packet.payload)
 	case .ClientListRooms:

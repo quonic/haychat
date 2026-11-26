@@ -81,6 +81,15 @@ Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retir
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
 type". Nothing else on the wire changed, so the protocol version stayed 25.
 
+Wire values 10 and 11 (`Ping`, `Pong`, #106): nothing answers a `Ping`. ENet keeps the
+connection alive and measures round-trip time (`peer.roundTripTime`) on both sides, so that is
+the latency source. The server accepts a sealed `Ping` with any payload from a registering or
+an authenticated session as a keepalive and sends nothing back (an authenticated session's
+`Ping` was answered with "Unsupported message type" before; no client sends one). `Pong` is a
+retired placeholder, never sent: the server answers it with "Unsupported message type", and a
+registering session's ends the session. Neither payload nor enum changed, so the protocol
+version stayed 31.
+
 The behaviour behind these versions is described in [rooms-and-accounts.md](rooms-and-accounts.md)
 (rooms, admins, direct messages, read state) and the [user guide](user-guide.md#voice) (voice).
 
@@ -531,7 +540,7 @@ D7-D19). The rules in user terms are in
   `ServerRegistrationRequired{mode, status, message}` (`status`: None 0, Pending 1, Declined 3
   with the approver's reason in `message`), and both sides activate the transport exactly as on
   `ServerAuthSuccess`. The session is then registering: the server accepts only encrypted
-  `ClientRegister` and `Ping` (ignored); anything else ends the session with a sealed
+  `ClientRegister` and `Ping` (a keepalive it never answers); anything else ends the session with a sealed
   `ServerProtocolError`, and a plaintext `ClientRegister` is refused. The invite code never
   travels in plaintext.
 - **`ClientRegister{inviteCode, reason}`** (sealed; the name is the `ClientHello` nickname):
@@ -539,7 +548,8 @@ D7-D19). The rules in user terms are in
   either case, O for 0, I and L for 1); empty only on an Open server, which then creates a plain
   account. `reason` 0..500 characters, needed (1..) when the code needs approval; clients leave
   that check to the server, since only it knows whether the code skips approval. One at a time.
-  The client wipes the sealed packet's CBOR plaintext before freeing it.
+  The client wipes the sealed packet's CBOR plaintext before freeing it, and the copies
+  `cbor.marshal` outgrew while encoding it (#111).
 - **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
   authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`,
   the new account's `ServerUserUpdated` and its presence follow as after a sign-in, with no

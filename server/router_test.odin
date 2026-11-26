@@ -1337,6 +1337,48 @@ RouterTestRetiredStoreFileRequest :: struct {
 	content:  []u8,
 }
 
+// #106: an authenticated session's Ping is a keepalive nothing answers, as a registering
+// session's is; Pong, a retired placeholder, is refused like any message without a handler.
+@(test)
+testMainRouterPingIsUnansweredAndPongIsUnsupported :: proc(t: ^testing.T) {
+	_ = t
+
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	peerID := u32(1)
+	clientTransport := routerCompleteHandshake(&h, peerID)
+
+	routerTestSendSealed(&h, &clientTransport, peerID, .Ping, common.ClientListRoomsPayload{})
+	routerTestExpectNoNetworkMessage(&h, "expected nothing to answer an authenticated Ping")
+	routerTestExpectNoDatabaseQuery(&h, "expected an authenticated Ping to reach no database")
+
+	routerTestSendSealed(&h, &clientTransport, peerID, .Pong, common.ClientListRoomsPayload{})
+	refusal := routerTestOpenInnerPacket(&h, &clientTransport)
+	defer delete(refusal.payload)
+	assert(
+		refusal.messageType == .ServerProtocolError,
+		fmt.tprintf("expected ServerProtocolError for Pong, got %v", refusal.messageType),
+	)
+	refusalPayload: common.ProtocolErrorResponse
+	assert(
+		cbor.unmarshal(refusal.payload, &refusalPayload) == nil,
+		"expected the protocol error payload to decode",
+	)
+	defer delete(refusalPayload.message)
+	assert(
+		refusalPayload.message == "Unsupported message type",
+		fmt.tprintf(
+			"expected \"Unsupported message type\" for Pong, got %q",
+			refusalPayload.message,
+		),
+	)
+	routerTestExpectNoNetworkMessage(&h, "expected an authenticated Pong not to end the session")
+}
+
 @(test)
 testMainRouterRetiredStoreFileIsUnsupported :: proc(t: ^testing.T) {
 	_ = t
