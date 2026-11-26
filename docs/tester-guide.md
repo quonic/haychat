@@ -131,8 +131,8 @@ shows **Sign up on …** with a field for the code: paste the code the maintaine
 press **Sign up**. If someone has to approve sign-ups, also say in a few words who you are; the
 client then shows **Waiting for approval** until they do (keep it open, or press **Check again**
 later). An invite link (`haychat://…/invite/…`) fills the code in for you after you confirm the
-server; to open such links with HayChat, run `haychat-client --register-url-handler` once. If you were given a code for a server where anyone may join, tick **I have an invite
-code** when you add the server, so the code's roles or room apply to your new account. See the
+server; HayChat makes itself the handler for such links when it starts. If you were given a
+code for a server where anyone may join, tick **I have an invite code** when you add the server, so the code's roles or room apply to your new account. See the
 [user guide](user-guide.md#signing-up).
 
 ## What You See on Screen

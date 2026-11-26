@@ -60,8 +60,10 @@ To keep a log for a bug report, run it like this instead and attach haychat.log:
 On the first start, enter a display name and the server host and port the server's
 maintainer gave you, then press Connect.
 
-To open haychat:// invite links with HayChat, run this once (and again after moving the
-folder). It adds haychat.desktop to ~/.local/share/applications for your user only:
+HayChat opens haychat:// invite links: when it starts, it adds haychat.desktop to
+~/.local/share/applications for your user only and makes it the handler for those links
+(also after you move the folder). It needs xdg-utils (xdg-mime). To keep another HayChat
+as the handler, set "register_url_handler": false in config.json; to register by hand, run:
 
   ./haychat-client --register-url-handler
 

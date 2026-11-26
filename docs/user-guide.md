@@ -97,10 +97,10 @@ the room, instead of signing you in. The rules behind it are in
 ### Invite Links
 
 An invite link (`haychat://HOST:PORT/invite/CODE?key=…`) holds the server's address, the code
-and the server's identity key. Opening one (with HayChat registered as the handler for
-`haychat://` links: run `haychat-client --register-url-handler` once, and again after moving
-the client) hands it to the running window, or starts HayChat, which asks first: **Sign up on SERVER with
-an invite?** with the server key's fingerprint, **Continue** and **Cancel**. Continue adds the
+and the server's identity key. Opening one (HayChat registers itself as the handler for
+`haychat://` links when it starts; see
+[client configuration](client-configuration.md#haychat-links)) hands it to the running window,
+or starts HayChat, which asks first: **Sign up on SERVER with an invite?** with the server key's fingerprint, **Continue** and **Cancel**. Continue adds the
 server if it is new, pins the link's key, switches to it and opens the sign-up screen with the
 code filled in; you still press **Sign up**. A link that names another key than the one already
 pinned for that address is refused, because it may not lead to the real server. A link for a
