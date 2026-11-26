@@ -539,7 +539,8 @@ D7-D19). The rules in user terms are in
   either case, O for 0, I and L for 1); empty only on an Open server, which then creates a plain
   account. `reason` 0..500 characters, needed (1..) when the code needs approval; clients leave
   that check to the server, since only it knows whether the code skips approval. One at a time.
-  The client wipes the sealed packet's CBOR plaintext before freeing it.
+  The client wipes the sealed packet's CBOR plaintext before freeing it, and the copies
+  `cbor.marshal` outgrew while encoding it (#111).
 - **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
   authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`,
   the new account's `ServerUserUpdated` and its presence follow as after a sign-in, with no

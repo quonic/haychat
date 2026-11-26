@@ -1247,8 +1247,17 @@ TransportState_checkReceiveSequence :: proc(state: ^TransportState, sequence: u6
 	return sequence == state.controlReceive.nextSequence
 }
 
-buildPacket :: proc(messageType: MessageType, payload: any) -> (Packet, bool) {
-	payloadBytes, err := cbor.marshal(payload)
+// The allocator is used for the encoding and its outgrown buffers too (cbor.marshal grows its
+// output as it writes), so a WipingAllocator's wipes every copy.
+buildPacket :: proc(
+	messageType: MessageType,
+	payload: any,
+	allocator := context.allocator,
+) -> (
+	Packet,
+	bool,
+) {
+	payloadBytes, err := cbor.marshal_into_bytes(payload, cbor.ENCODE_SMALL, allocator, allocator)
 	if err != nil {
 		return {}, false
 	}
@@ -1256,8 +1265,8 @@ buildPacket :: proc(messageType: MessageType, payload: any) -> (Packet, bool) {
 	return Packet{messageType = messageType, payload = payloadBytes}, true
 }
 
-marshalPacket :: proc(packet: Packet) -> ([]u8, bool) {
-	packetBytes, err := cbor.marshal(packet)
+marshalPacket :: proc(packet: Packet, allocator := context.allocator) -> ([]u8, bool) {
+	packetBytes, err := cbor.marshal_into_bytes(packet, cbor.ENCODE_SMALL, allocator, allocator)
 	if err != nil {
 		return nil, false
 	}
@@ -1286,25 +1295,25 @@ sealPacketForSession :: proc(
 		return {}, false
 	}
 
-	// Both CBOR buffers hold the plaintext (an invite code in ClientRegister, a message's text),
-	// so they are wiped before they are freed.
-	innerPacket, buildOK := buildPacket(messageType, payload)
+	// Both CBOR buffers hold the plaintext (an invite code in ClientRegister, a message's text,
+	// key material), so they are encoded with a WipingAllocator: the copies cbor.marshal
+	// outgrows are wiped as it grows them (#111), and the buffers themselves when they are
+	// freed through it here. The bytes past len were never written.
+	wiping := WipingAllocator {
+		backing = context.allocator,
+	}
+	wipingAllocator := WipingAllocator_allocator(&wiping)
+	innerPacket, buildOK := buildPacket(messageType, payload, wipingAllocator)
 	if !buildOK {
 		return {}, false
 	}
-	defer {
-		crypto.zero_explicit(raw_data(innerPacket.payload), len(innerPacket.payload))
-		delete(innerPacket.payload)
-	}
+	defer delete(innerPacket.payload, wipingAllocator)
 
-	innerPacketBytes, marshalOK := marshalPacket(innerPacket)
+	innerPacketBytes, marshalOK := marshalPacket(innerPacket, wipingAllocator)
 	if !marshalOK {
 		return {}, false
 	}
-	defer {
-		crypto.zero_explicit(raw_data(innerPacketBytes), len(innerPacketBytes))
-		delete(innerPacketBytes)
-	}
+	defer delete(innerPacketBytes, wipingAllocator)
 
 	sequence, sequenceOK := TransportState_nextSendSequence(state)
 	if !sequenceOK {
@@ -1341,6 +1350,12 @@ sealPacketForSession :: proc(
 }
 
 // Opens a control-channel packet. The strict counter accepts only the next sequence.
+//
+// The decrypted CBOR is wiped before it is freed, and the inner packet is decoded with a
+// WipingAllocator, so the copies cbor.unmarshal outgrows while it reads a payload of more than
+// 1 KiB are wiped too (#111). The returned payload is a block of the caller's context
+// allocator, freed with delete as before; wiping it, and what handlers decode from it, is the
+// caller's.
 openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Packet, bool) {
 	if !TransportState_canEncrypt(state) {
 		return {}, false
@@ -1377,11 +1392,24 @@ openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Pa
 	if !ok {
 		return {}, false
 	}
-	defer delete(innerPacketBytes)
+	defer {
+		crypto.zero_explicit(raw_data(innerPacketBytes), len(innerPacketBytes))
+		delete(innerPacketBytes)
+	}
 	state.controlReceive.nextSequence += 1
 
+	wiping := WipingAllocator {
+		backing = context.allocator,
+	}
+	wipingAllocator := WipingAllocator_allocator(&wiping)
 	innerPacket: Packet
-	if cbor.unmarshal(innerPacketBytes, &innerPacket) != nil {
+	decodeErr := cbor.unmarshal_from_bytes(
+		innerPacketBytes,
+		&innerPacket,
+		allocator = wipingAllocator,
+		temp_allocator = wipingAllocator,
+	)
+	if decodeErr != nil {
 		return {}, false
 	}
 
