@@ -651,6 +651,35 @@ testConfigVoiceNoiseSuppressionDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
 	_ = t
 }
 
+// register_url_handler (#169) defaults to on, keeps false through a round trip and a clone, and
+// stays out of config.json while unset.
+@(test)
+testConfigRegisterURLHandlerDefaultsOnAndRoundTrips :: proc(t: ^testing.T) {
+	assert(Config_registerURLHandler(Config{}), "expected the startup registration on by default")
+	unsetConfig: Config
+	unset, unsetErr := json.marshal(unsetConfig)
+	defer delete(unset)
+	assert(
+		unsetErr == nil && !strings.contains(string(unset), "register_url_handler"),
+		fmt.tprintf("expected the key left out while unset, got %s", string(unset)),
+	)
+	loaded: Config
+	defer Config_deinit(&loaded)
+	unmarshalErr := json.unmarshal(transmute([]u8)string(`{"register_url_handler":false}`), &loaded)
+	assert(unmarshalErr == nil, fmt.tprintf("expected the config to load, got %v", unmarshalErr))
+	assert(!Config_registerURLHandler(loaded), "expected false to turn it off")
+	clone := Config_clone(loaded)
+	defer Config_deinit(&clone)
+	assert(!Config_registerURLHandler(clone), "expected Config_clone to keep it off")
+	data, marshalErr := json.marshal(clone)
+	defer delete(data)
+	assert(
+		marshalErr == nil && strings.contains(string(data), `"register_url_handler":false`),
+		fmt.tprintf("expected register_url_handler stored as false, got %s", string(data)),
+	)
+	_ = t
+}
+
 // voice_echo_cancellation (#171) defaults to on, is stored only when turned off, and survives a
 // round trip and a clone.
 @(test)

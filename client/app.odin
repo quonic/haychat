@@ -3,6 +3,7 @@ package client
 import "core:fmt"
 import "core:os"
 import "core:sync"
+import "core:thread"
 import "core:time"
 import "hotkey"
 import "ui"
@@ -70,7 +71,7 @@ main :: proc() {
 		appShowProfileLockedError()
 		os.exit(1)
 	}
-	if !runApp() {
+	if !runApp({registerURLHandler = true}) {
 		os.exit(1)
 	}
 }
@@ -89,6 +90,9 @@ AppOptions :: struct {
 	script:       ^UIScriptRunner,
 	windowWidth:  i32, // 0 means WINDOW_DEFAULT_WIDTH
 	windowHeight: i32, // 0 means WINDOW_DEFAULT_HEIGHT
+	// Set only by main's GUI start (#169): register this executable as the haychat:// handler
+	// when it is not already and config.json's register_url_handler allows it.
+	registerURLHandler: bool,
 }
 
 runApp :: proc(options: AppOptions = {}) -> bool {
@@ -160,6 +164,12 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 	state := init(wakeProc, &wake)
 	// Deferred last so it runs first: the worker stops before the window and SDL go away.
 	defer State_deinit(&state)
+	// The haychat:// handler (#169), on its own thread; joined at exit, before State_deinit.
+	urlHandlerWorker: ^thread.Thread
+	if options.registerURLHandler && Config_registerURLHandler(state.config) {
+		urlHandlerWorker = schemeStartupRegistrationStart()
+	}
+	defer schemeStartupRegistrationStop(urlHandlerWorker)
 	// A conversation counts as viewed, and is marked read, only while the window has focus.
 	// A UI script drives the window like a user sitting at it, so it counts as focused even
 	// where the video driver (offscreen) never reports focus.

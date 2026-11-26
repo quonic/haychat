@@ -403,7 +403,9 @@ run them on desktop Windows 10 or 11 with a real microphone and speakers, and re
 
 The `haychat://` registration and the link hand-off between processes (#110, #109) ran once on
 Windows Server 2025 (Desktop Experience) in a VM: steps 1 to 5 below, with links opened by
-`Start-Process 'haychat://…'` and the handler started from another session, against no server.
+`Start-Process 'haychat://…'` and the handler started from another session, against no server,
+and step 6 (#169) from an SSH session with `SDL_VIDEO_DRIVER=offscreen`, the move into a folder
+whose name has a space.
 Run them on a desktop Windows (10 or 11) before a release that changes them, with links clicked
 in a browser and a server that has an invite code to give:
 
@@ -424,6 +426,12 @@ in a browser and a server that has an invite code to give:
    start a new one, open a link: the new window takes it.
 5. **A path with spaces:** move the folder to one whose name has a space, run the
    registration again, and repeat step 2.
+6. **Registration at startup (#169):** delete the key (`reg delete HKCU\Software\Classes\haychat
+   /f`) and start HayChat by double-clicking it. The console prints that HayChat now opens
+   `haychat://` links, and `reg query` shows the values of step 1. Close it and start it again:
+   nothing is printed about links. Move the folder and start it from there: it prints the line
+   again, with the new path. With `"register_url_handler": false` in `config.json`, delete the
+   key and start it: the key stays gone.
 
 Report anything that differs, with the Windows version and the device names.
 

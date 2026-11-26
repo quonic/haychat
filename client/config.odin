@@ -40,6 +40,9 @@ Config :: struct {
 	// Echo cancellation of what HayChat plays (#171, AEC3 in client/webrtcapm); on when unset.
 	// It only works when WebRTC audio processing loads; the voice settings say why otherwise.
 	voice_echo_cancellation: Maybe(bool) `json:"voice_echo_cancellation,omitempty"`,
+	// Whether the window registers this executable as the haychat:// link handler when it
+	// starts and the handler points elsewhere (#169, mime-handler.odin); on when unset.
+	register_url_handler:    Maybe(bool) `json:"register_url_handler,omitempty"`,
 	// This profile's voice device ID (protocol 13, common/voice_device.odin): 32 lowercase hex
 	// characters, random, generated on first use and sent with every voice join so the server
 	// can tell this device's stale voice session from another device's. loadConfig replaces a
@@ -626,6 +629,7 @@ Config_clone :: proc(config: Config) -> Config {
 		voice_bitrate = config.voice_bitrate,
 		voice_noise_suppression = config.voice_noise_suppression,
 		voice_echo_cancellation = config.voice_echo_cancellation,
+		register_url_handler = config.register_url_handler,
 		device_id = strings.clone(config.device_id),
 		encryption_private_key = strings.clone(config.encryption_private_key),
 		encryption_public_key = strings.clone(config.encryption_public_key),
@@ -636,6 +640,11 @@ Config_clone :: proc(config: Config) -> Config {
 		append(&clone.servers, Server_clone(server))
 	}
 	return clone
+}
+
+// Whether the window registers the haychat:// handler at startup (register_url_handler, #169).
+Config_registerURLHandler :: proc(config: Config) -> bool {
+	return config.register_url_handler.? or_else true
 }
 
 Config_deinit :: proc(config: ^Config) {

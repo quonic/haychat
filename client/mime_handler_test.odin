@@ -145,3 +145,80 @@ testSchemeDesktopFileWrittenToDataHome :: proc(t: ^testing.T) {
 		"expected the flag recognised",
 	)
 }
+
+// #169: the startup registration's "already registered" decision, from what the queries would
+// find. Nothing here runs xdg-mime or reads the registry.
+@(test)
+testSchemeRegistrationCurrentLinux :: proc(t: ^testing.T) {
+	plan, ok := schemeRegistrationPlanLinux("/opt/haychat/haychat-client", "/home/u/.data")
+	defer SchemeRegistrationPlan_deinit(&plan)
+	assert(ok, "expected a Linux plan")
+	testing.expect(
+		t,
+		schemeRegistrationCurrentLinux(plan, plan.desktopFile, "haychat.desktop\n"),
+		"expected the same desktop file and xdg-mime default to count as registered",
+	)
+	moved, movedOK := schemeRegistrationPlanLinux("/home/u/haychat/haychat-client", "/home/u/.data")
+	defer SchemeRegistrationPlan_deinit(&moved)
+	assert(movedOK, "expected a plan for the moved executable")
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentLinux(moved, plan.desktopFile, "haychat.desktop\n"),
+		"expected a desktop file naming another executable to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentLinux(plan, plan.desktopFile, "other-app.desktop\n"),
+		"expected another default handler to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentLinux(plan, plan.desktopFile, ""),
+		"expected no default handler to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentLinux(plan, "", "haychat.desktop\n"),
+		"expected a missing desktop file to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentLinux({}, "", "haychat.desktop"),
+		"expected an empty plan never to count as registered",
+	)
+}
+
+@(test)
+testSchemeRegistrationCurrentWindows :: proc(t: ^testing.T) {
+	exe := "C:\\Users\\Hay User\\HayChat\\haychat-client.exe"
+	command := "\"C:\\Users\\Hay User\\HayChat\\haychat-client.exe\" \"%1\""
+	testing.expect(
+		t,
+		schemeRegistrationCurrentWindows(exe, command, true),
+		"expected this executable's open command to count as registered",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentWindows(exe, command, false),
+		"expected a missing URL Protocol value to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentWindows(
+			"D:\\HayChat\\haychat-client.exe",
+			command,
+			true,
+		),
+		"expected an open command naming another executable to register again",
+	)
+	testing.expect(
+		t,
+		!schemeRegistrationCurrentWindows(exe, "", true),
+		"expected an empty open command to register again",
+	)
+	// The plan's open command is the one the check compares with.
+	plan, ok := schemeRegistrationPlanWindows(exe, "C:\\Windows")
+	defer SchemeRegistrationPlan_deinit(&plan)
+	assert(ok && len(plan.commands) == 3, "expected a Windows plan")
+	testExpectString(t, plan.commands[2].argv[5], command, "the plan's open command")
+}

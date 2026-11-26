@@ -23,8 +23,10 @@ Run it
    "Run anyway".
 3. On the first start, enter a display name and the server host and port the server's
    maintainer gave you, then press Connect.
-4. To open haychat:// invite links with HayChat, open PowerShell in the folder and run this
-   once (and again after moving the folder). It changes the registry for your user only:
+4. HayChat opens haychat:// invite links: when it starts, it registers itself as their
+   handler in the registry, for your user only (also after you move the folder). To keep
+   another HayChat as the handler, set "register_url_handler": false in config.json; to
+   register by hand, open PowerShell in the folder and run:
 
      .\haychat-client.exe --register-url-handler
 

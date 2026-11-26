@@ -3,6 +3,7 @@ package client
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:thread"
 
 // Registering HayChat as the handler for haychat:// links (#110), for this user only, by
 // `client --register-url-handler` (SCHEME_HANDLER_FLAG):
@@ -19,11 +20,22 @@ import "core:strings"
 // command line. schemeRegistrationPlanLinux and schemeRegistrationPlanWindows only build the
 // plan, so tests check the argument lists (and write the desktop file into a temporary
 // directory) without touching the desktop; runSchemeRegistration carries a plan out.
+//
+// The window also registers when it starts (#169, schemeStartupRegistrationStart, on its own
+// thread), but only while the handler does not already point at this executable
+// (schemeRegistrationStatus: the desktop file and `xdg-mime query default` on Linux, the
+// registry's open command on Windows; mime_handler_linux.odin, mime_handler_windows.odin), so
+// the last HayChat started takes the handler. register_url_handler = false in config.json turns
+// that off; the flag still registers. schemeRegistrationCurrentLinux and
+// schemeRegistrationCurrentWindows decide from what the queries found, so tests check the
+// decision without running a query.
 
 SCHEME_HANDLER_FLAG :: "--register-url-handler"
 SCHEME_MIME_TYPE :: "x-scheme-handler/haychat"
 SCHEME_DESKTOP_FILE_ID :: "haychat.desktop"
-SCHEME_WINDOWS_KEY :: "HKCU\\Software\\Classes\\haychat"
+// The class key under HKEY_CURRENT_USER, and as reg.exe names it.
+SCHEME_WINDOWS_SUBKEY :: "Software\\Classes\\haychat"
+SCHEME_WINDOWS_KEY :: "HKCU\\" + SCHEME_WINDOWS_SUBKEY
 SCHEME_WINDOWS_DESCRIPTION :: "URL:HayChat Protocol"
 
 // One command of a registration: the program and its arguments.
@@ -149,6 +161,11 @@ schemeRegistrationPlanLinux :: proc(
 	return plan, true
 }
 
+// The registry's shell\open\command value for exe: "EXE" "%1". Allocated with allocator.
+schemeOpenCommandWindows :: proc(exe: string, allocator := context.allocator) -> string {
+	return strings.concatenate({"\"", exe, "\" \"%1\""}, allocator)
+}
+
 // The Windows registration for exe, with reg.exe from systemRoot (%SystemRoot%). Nothing is
 // run. ok is false (and plan empty) for a path that cannot go into the command.
 schemeRegistrationPlanWindows :: proc(
@@ -168,7 +185,7 @@ schemeRegistrationPlanWindows :: proc(
 		{SCHEME_WINDOWS_KEY, "\\shell\\open\\command"},
 		context.temp_allocator,
 	)
-	openCommand := strings.concatenate({"\"", exe, "\" \"%1\""}, context.temp_allocator)
+	openCommand := schemeOpenCommandWindows(exe, context.temp_allocator)
 	SchemeRegistrationPlan_add(
 		&plan,
 		false,
@@ -255,8 +272,11 @@ writeSchemeDesktopFile :: proc(plan: SchemeRegistrationPlan) -> bool {
 }
 
 // Carries a plan out: the desktop file, then each command in turn. A required command that
-// fails stops it.
-runSchemeRegistration :: proc(plan: SchemeRegistrationPlan) -> bool {
+// fails stops it; failureLabel starts its log line.
+runSchemeRegistration :: proc(
+	plan: SchemeRegistrationPlan,
+	failureLabel := "[Error]",
+) -> bool {
 	if !writeSchemeDesktopFile(plan) {
 		return false
 	}
@@ -270,7 +290,7 @@ runSchemeRegistration :: proc(plan: SchemeRegistrationPlan) -> bool {
 		if err == nil && state.exited && state.exit_code == 0 {
 			continue
 		}
-		label := command.optional ? "[Warning]" : "[Error]"
+		label := command.optional ? "[Warning]" : failureLabel
 		if err != nil {
 			fmt.eprintln(label, command.argv[0], "could not run:", err)
 		} else {
@@ -289,26 +309,123 @@ runSchemeRegistration :: proc(plan: SchemeRegistrationPlan) -> bool {
 	return true
 }
 
+// This executable and its registration plan. ok is false (with the reason logged under label)
+// when there is none; the plan is owned (SchemeRegistrationPlan_deinit) and exe is allocated.
+@(private = "file")
+schemeOwnRegistrationPlan :: proc(
+	label: string,
+) -> (
+	exe: string,
+	plan: SchemeRegistrationPlan,
+	ok: bool,
+) {
+	exeErr: os.Error
+	exe, exeErr = os.get_executable_path(context.allocator)
+	if exeErr != nil {
+		fmt.eprintln(label, "Could not find HayChat's own executable:", exeErr)
+		return "", {}, false
+	}
+	plan, ok = schemeRegistrationPlan(exe)
+	if !ok {
+		fmt.eprintln(label, "HayChat cannot register a haychat:// handler for", exe)
+		SchemeRegistrationPlan_deinit(&plan)
+		delete(exe)
+		return "", {}, false
+	}
+	return exe, plan, true
+}
+
 // Registers this executable as the haychat:// handler for this user. Returns whether it did.
 registerSchemeHandler :: proc() -> bool {
-	exe, exeErr := os.get_executable_path(context.allocator)
-	if exeErr != nil {
-		fmt.eprintln("[Error] Could not find HayChat's own executable:", exeErr)
+	exe, plan, ok := schemeOwnRegistrationPlan("[Error]")
+	if !ok {
 		return false
 	}
 	defer delete(exe)
-	plan, ok := schemeRegistrationPlan(exe)
 	defer SchemeRegistrationPlan_deinit(&plan)
-	if !ok {
-		fmt.eprintln("[Error] HayChat cannot register a haychat:// handler for", exe)
-		return false
-	}
 	if !runSchemeRegistration(plan) {
 		fmt.eprintln("[Error] Registering the haychat:// handler failed")
 		return false
 	}
 	fmt.println("[Info] HayChat now opens haychat:// links:", exe)
 	return true
+}
+
+// What schemeRegistrationStatus found.
+SchemeRegistrationStatus :: enum {
+	// The handler already points at this executable: nothing to do.
+	Current,
+	// It is missing or points elsewhere: register.
+	Stale,
+	// It could not be checked (no xdg-mime, say), so it is left alone. Already logged.
+	Unknown,
+}
+
+// Whether the Linux registration in plan is in place: the desktop file holds exactly what the
+// plan writes (so its Exec names this executable), and mimeDefault, the output of `xdg-mime
+// query default x-scheme-handler/haychat`, names its desktop file ID.
+schemeRegistrationCurrentLinux :: proc(
+	plan: SchemeRegistrationPlan,
+	desktopFileOnDisk, mimeDefault: string,
+) -> bool {
+	return(
+		len(plan.desktopFile) > 0 &&
+		desktopFileOnDisk == plan.desktopFile &&
+		strings.trim_space(mimeDefault) == SCHEME_DESKTOP_FILE_ID
+	)
+}
+
+// Whether the Windows registration for exe is in place: openCommand is the registry's
+// shell\open\command default value and hasURLProtocol whether the class key has its
+// "URL Protocol" value.
+schemeRegistrationCurrentWindows :: proc(exe, openCommand: string, hasURLProtocol: bool) -> bool {
+	return hasURLProtocol && openCommand == schemeOpenCommandWindows(exe, context.temp_allocator)
+}
+
+// Registers this executable as the haychat:// handler unless it already is (#169). Logs only
+// warnings, never fails the window. Returns whether the handler points at this executable.
+registerSchemeHandlerIfStale :: proc() -> bool {
+	exe, plan, ok := schemeOwnRegistrationPlan("[Warning]")
+	if !ok {
+		return false
+	}
+	defer delete(exe)
+	defer SchemeRegistrationPlan_deinit(&plan)
+	switch schemeRegistrationStatus(exe, plan) {
+	case .Current:
+		return true
+	case .Unknown:
+		return false
+	case .Stale:
+	}
+	if !runSchemeRegistration(plan, "[Warning]") {
+		fmt.eprintln("[Warning] Could not register HayChat as the haychat:// link handler")
+		return false
+	}
+	fmt.println("[Info] HayChat now opens haychat:// links:", exe)
+	return true
+}
+
+@(private = "file")
+schemeStartupRegistrationRun :: proc() {
+	_ = registerSchemeHandlerIfStale()
+}
+
+// Starts registerSchemeHandlerIfStale on its own thread, so the window never waits for
+// xdg-mime or reg.exe. Only the GUI's start calls it (runApp with
+// AppOptions.registerURLHandler), never a test. Stop it with schemeStartupRegistrationStop.
+schemeStartupRegistrationStart :: proc() -> ^thread.Thread {
+	return thread.create_and_start(schemeStartupRegistrationRun)
+}
+
+// Waits for the startup registration to finish (a few hundred milliseconds at most) and frees
+// its thread. nil does nothing.
+schemeStartupRegistrationStop :: proc(worker: ^thread.Thread) {
+	if worker == nil {
+		return
+	}
+	thread.join(worker)
+	thread.destroy(worker)
 }
 
 // Whether the command line asks for registerSchemeHandler (SCHEME_HANDLER_FLAG).

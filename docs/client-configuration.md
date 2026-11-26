@@ -45,6 +45,7 @@ to the right place.
 | `voice_bitrate` | Opus bitrate in bit/s, 12000 to 64000. Default 24000 |
 | `voice_noise_suppression` | `true` (default: background noise is removed from the microphone, and in voice activity mode only speech opens it; see [Noise suppression](user-guide.md#noise-suppression)) or `false`. RNNoise does it, or WebRTC's suppressor while echo cancellation runs (see `voice_echo_cancellation`) or when RNNoise is missing (`librnnoise.so.0` on Linux, `rnnoise.dll` next to the executable on Windows); with neither, voice works without it |
 | `voice_echo_cancellation` | `true` (default: WebRTC's AEC3 removes the voices HayChat plays from the microphone, so others do not hear themselves; see [Echo cancellation](user-guide.md#echo-cancellation)) or `false` (for headphones). It takes effect only when WebRTC audio processing loads (`libhaychat-webrtc-apm.so` next to the executable plus the system's `libwebrtc-audio-processing-2.so.1` on Linux, `haychat-webrtc-apm.dll` next to the executable on Windows); otherwise voice works without it. On Windows, while this or noise suppression is on, the audio devices open in raw mode (no Windows processing) |
+| `register_url_handler` | `true` (default: the window registers this executable as the handler for `haychat://` links when it starts, unless it already is; see [`haychat://` links](#haychat-links)) or `false` (leave the handler as it is; `--register-url-handler` still registers) |
 
 Settings → Voice writes the voice keys only when they differ from the default, so a later change
 of a default reaches everyone who did not choose otherwise. When the config is read,
@@ -52,6 +53,8 @@ out-of-range numbers are clamped and invalid strings fall back to the default.
 
 Server settings (`servers[].display_name`, labels, `servers[].user_voice[]`,
 `servers[].use_invite_code`) live in this one profile and are not synced between devices.
+
+## haychat:// Links
 
 `haychat://` links (protocol 25, plan D19) are handed from the process the link starts to a
 HayChat window that already runs through a file only the user can read: `link-handoff` in
@@ -68,8 +71,19 @@ server is removed or its pinned key changes (changing the address clears the pin
 settings change that reconnects the server, such as a new display name, still signs up with the
 code. It is never written to `config.json` or a log.
 
-`haychat-client --register-url-handler` registers this executable as the handler for
-`haychat://` links for the current user and exits:
+The window registers this executable as the handler for `haychat://` links for the current
+user when it starts, on its own thread, unless the handler already points at it (#169). On
+Linux that is when `haychat.desktop` already holds exactly what HayChat would write and
+`xdg-mime query default x-scheme-handler/haychat` prints `haychat.desktop`; on Windows when
+`shell\open\command` is `"EXECUTABLE" "%1"` for this executable and `URL Protocol` exists.
+So the last HayChat started takes the handler, also after the client moved. `--headless`,
+`--ui-script` and a start that only hands a link to a running window never register. A
+failure (no `xdg-mime`, say) only logs a `[Warning]`; the window works as before.
+`"register_url_handler": false` turns it off, for example to keep an installed HayChat as the
+handler while running a development build.
+
+`haychat-client --register-url-handler` registers the same way (also with
+`register_url_handler` off) and exits:
 
 - **Linux:** writes `haychat.desktop` (`MimeType=x-scheme-handler/haychat;`,
   `Exec="EXECUTABLE" %u`) to `$XDG_DATA_HOME/applications/` (by default
@@ -79,8 +93,6 @@ code. It is never written to `config.json` or a log.
 - **Windows:** writes `HKEY_CURRENT_USER\Software\Classes\haychat` (no administrator rights
   needed): the default value `URL:HayChat Protocol`, an empty `URL Protocol` value, and
   `shell\open\command` = `"EXECUTABLE" "%1"`.
-
-Run it again after moving the client to another folder.
 
 ## One Client per Profile
 
