@@ -463,6 +463,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 		delete(r.banReason)
 		delete(r.decisionReason)
 		delete(r.roleIds)
+		declined := r.declinedRequest
+		common.RegistrationRequestSummary_deinit(&declined)
 	case common.DatabaseAdminUserResult:
 		user := r.user
 		common.UserSummary_deinit(&user)

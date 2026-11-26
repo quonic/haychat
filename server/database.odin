@@ -61,7 +61,8 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // no restricted account without rooms is created. When nothing else lets the key in, `stale`
 // declines that request with the server's reason ($5, common.REGISTRATION_ROOM_GONE_REASON) and
 // the status and reason columns report the decline, which the router answers like an
-// approver's (D16).
+// approver's (D16). #165: the last columns are that declined request (NULL otherwise) and the
+// pending count, so the router tells approvers of the decline as it does of an approver's.
 //
 // The statement always returns exactly one row; the account columns are NULL when the identity
 // did not resolve. A key that owns an account resolves to it whatever the mode and $4 say.
@@ -74,7 +75,8 @@ DatabaseConnectionFinishProc :: #type proc "cdecl" (conn: pg.Conn)
 // registration mode, the key's request status (0 none), a decline's reason and whether the
 // account is restricted, (protocol 27, D18) the account's stored attachment bytes, and (#102)
 // whether this sign-in created (or claimed) the account and then its role IDs (comma
-// separated, empty unless created).
+// separated, empty unless created), and (#165) the request `stale` declined in
+// DATABASE_REQUEST_COLUMNS_SQL order and the pending count (0 without a decline).
 DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"WITH settings AS (SELECT COALESCE((SELECT registration_mode FROM server_settings " +
 	"WHERE id = 1), 1) AS mode), " +
@@ -98,7 +100,7 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"stale AS (UPDATE registration_requests rr SET status = 3, decided_by_user_id = NULL, " +
 	"decision_reason = $5::text, decided_at = CURRENT_TIMESTAMP FROM request q " +
 	"WHERE rr.id = q.id AND q.status = 2 AND NOT EXISTS (SELECT 1 FROM approved) " +
-	"AND NOT (SELECT ok FROM may_create) RETURNING rr.id), " +
+	"AND NOT (SELECT ok FROM may_create) RETURNING rr.*), " +
 	"existing AS (SELECT id FROM users WHERE nickname = $1), " +
 	"renamed AS (" +
 	"UPDATE users SET nickname = $1 FROM by_key " +
@@ -164,8 +166,12 @@ DATABASE_RESOLVE_USER_IDENTITY_SQL ::
 	"SELECT usr.role_id FROM user_server_roles usr WHERE usr.user_id = resolved.id " +
 	"UNION SELECT ir.role_id FROM approved a JOIN invite_roles ir ON ir.invite_id = a.invite_id " +
 	"JOIN server_roles sr ON sr.id = ir.role_id AND NOT sr.builtin) x WHERE resolved.is_new), " +
-	"'') " +
-	"FROM (SELECT 1) one LEFT JOIN resolved ON true LEFT JOIN users u ON u.id = resolved.id"
+	"''), " +
+	// #165: the request `stale` declined, for the approvers.
+	DATABASE_REQUEST_COLUMNS_SQL + ", (CASE WHEN rr.id IS NULL THEN 0 ELSE (SELECT count(*) " +
+	"FROM registration_requests WHERE status = 1) END)::text " +
+	"FROM (SELECT 1) one LEFT JOIN resolved ON true LEFT JOIN users u ON u.id = resolved.id " +
+	"LEFT JOIN stale rr ON true LEFT JOIN invites i ON i.id = rr.invite_id"
 
 // Creates the default room on a server that has none, so a fresh server is usable without
 // loading a fixture. Rooms are open, so every existing account joins it, except restricted
@@ -439,6 +445,14 @@ databaseExecuteUserIdentityResolution :: proc(
 			roleIDs := databaseGetText(result, 0, 16)
 			defer delete(roleIDs)
 			identity.roleIds = databaseParseIDList(roleIDs)
+		}
+		if declined, declinedOK := databaseGetRegistrationRequest(result, 0, 17); declinedOK {
+			identity.declinedRequest = declined
+			identity.pendingCount, _ = databaseGetInt(
+				result,
+				0,
+				17 + DATABASE_REQUEST_COLUMN_COUNT,
+			)
 		}
 		if identity.userId <= 0 {
 			// Only a resolved account's columns mean anything.

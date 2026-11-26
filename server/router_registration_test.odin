@@ -31,6 +31,12 @@ routerRegistrationTestBegin :: proc(
 	mode := common.RegistrationMode.InviteOnly,
 	status := common.RegistrationRequestStatus.None,
 	expectRequired := true,
+	// #165, #166: answer (owned, handed over) replaces the stubbed needsRegistration result,
+	// and disconnectFirst drops the session before the identity statement answers.
+	answer: ^common.DatabaseUserIdentityResult = nil,
+	disconnectFirst := false,
+	// With disconnectFirst: a new connection takes the peer ID before the answer.
+	reusePeerID := false,
 ) -> RouterRegistrationTestClient {
 	if _, ok := h.state.peerSessions[peerID]; !ok {
 		h.state.connectedPeers[peerID] = true
@@ -97,19 +103,29 @@ routerRegistrationTestBegin :: proc(
 		identityOK2 && identityRequest.registering == registering,
 		"expected the identity statement to carry registering",
 	)
+	if disconnectFirst {
+		MainRouterState_handlePeerDisconnected(&h.pm, &h.state, peerID)
+		if reusePeerID {
+			h.state.connectedPeers[peerID] = true
+			MainRouterState_setPeerSession(&h.state, peerID, RouterPeerSession_init())
+		}
+	}
+	result: common.DatabaseUserIdentityResult
+	if answer != nil {
+		result = answer^
+	} else {
+		result = {
+			needsRegistration = true,
+			registrationMode  = mode,
+			requestStatus     = status,
+			decisionReason    = status == .Declined ? strings.clone("full") : "",
+		}
+	}
 	MainRouterState_handleDatabaseResult(
 		&h.pm,
 		&h.state,
 		identityQuery.request_id,
-		common.DatabaseQueryResponse {
-			success = true,
-			result = common.DatabaseUserIdentityResult {
-				needsRegistration = true,
-				registrationMode = mode,
-				requestStatus = status,
-				decisionReason = status == .Declined ? strings.clone("full") : "",
-			},
-		},
+		common.DatabaseQueryResponse{success = true, result = result},
 	)
 
 	client := RouterRegistrationTestClient {
@@ -992,6 +1008,285 @@ testApprovedRequestWhoseRoomWentAwayIsDeclinedLive :: proc(t: ^testing.T) {
 		!session.isRegistering && !session.isAuthenticated,
 		"expected the session ended, not authenticated",
 	)
+}
+
+// #166: a sign-in that created an account still announces it when its session dropped before
+// the identity statement answered (the request outlives the disconnect), offline and through
+// the D17 filter, and never completes a new session that got the same peer ID.
+@(test)
+testNewAccountIsAnnouncedWhenItsSessionDroppedFirst :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	bob, approver: common.TransportState
+	peers := []RouterTestPeer{{peerID = 1, transport = &bob}, {peerID = 3, transport = &approver}}
+	bob = routerCompleteHandshake(&h, 1, userID = 2, nickname = "bob")
+	defer common.TransportState_deinit(&bob)
+	h.state.connectedPeers[3] = true
+	MainRouterState_setPeerSession(&h.state, 3, RouterPeerSession_init())
+	approver = routerCompleteHandshake(&h, 3, userID = 4, nickname = "approver")
+	defer common.TransportState_deinit(&approver)
+	routerRegistrationTestDrainNetwork(&h, peers)
+	if session, ok := &h.state.peerSessions[3]; ok {
+		session.permissions = {.ApproveRegistrations}
+	}
+
+	// frank is new and unrestricted; his peer ID goes to a new connection before the answer.
+	frankRoles := make([dynamic]int)
+	append(&frankRoles, 7)
+	frankAnswer := common.DatabaseUserIdentityResult {
+		userId   = 6,
+		nickname = strings.clone("frank"),
+		created  = true,
+		roleIds  = frankRoles,
+	}
+	h.state.connectedPeers[2] = true
+	MainRouterState_setPeerSession(&h.state, 2, RouterPeerSession_init())
+	frank := routerRegistrationTestBegin(
+		&h,
+		2,
+		nickname = "frank",
+		registering = false,
+		expectRequired = false,
+		answer = &frankAnswer,
+		disconnectFirst = true,
+		reusePeerID = true,
+	)
+	told: [2]bool
+	for _ in 0 ..< 2 {
+		recipient, user := routerRegistrationTestUserUpdated(&h, peers, 6)
+		defer common.UserSummary_deinit(&user)
+		assert(
+			user.nickname == "frank" &&
+			!user.isOnline &&
+			!user.isRestricted &&
+			user.identityPublicKey == frank.publicKey &&
+			len(user.roleIds) == 1 &&
+			user.roleIds[0] == 7,
+			fmt.tprintf("expected frank's full summary, offline, got %v", user),
+		)
+		told[recipient == 1 ? 0 : 1] = true
+	}
+	assert(told == {true, true}, "expected bob and the approver told once each")
+	routerTestExpectNoNetworkMessage(&h, "presence for an account nobody signed in as")
+	routerTestExpectNoDatabaseQuery(&h, "a visibility check for an unrestricted account")
+	reused, _ := MainRouterState_getPeerSession(&h.state, 2)
+	assert(
+		!reused.isAuthenticated && reused.authenticatedUserID == 0,
+		"expected the session that got the peer ID untouched",
+	)
+
+	// erin is new and restricted: the approver hears at once, bob only if the database says
+	// they share a room, which it does not.
+	erinAnswer := common.DatabaseUserIdentityResult {
+		userId       = 5,
+		nickname     = strings.clone("erin"),
+		isRestricted = true,
+		created      = true,
+	}
+	h.state.connectedPeers[4] = true
+	MainRouterState_setPeerSession(&h.state, 4, RouterPeerSession_init())
+	routerRegistrationTestBegin(
+		&h,
+		4,
+		nickname = "erin",
+		registering = false,
+		expectRequired = false,
+		answer = &erinAnswer,
+		disconnectFirst = true,
+	)
+	recipient, user := routerRegistrationTestUserUpdated(&h, peers, 5)
+	assert(
+		recipient == 3 && user.isRestricted && !user.isOnline,
+		fmt.tprintf("expected the approver told erin is restricted, got %v", user),
+	)
+	common.UserSummary_deinit(&user)
+	assert(
+		MainRouterState_userIsRestricted(&h.state, 5),
+		"expected the router to record erin's restriction",
+	)
+	check := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(check.request)
+	shared, sharedOK := check.request.(common.DatabaseSharedRoomsRequest)
+	assert(
+		sharedOK &&
+		shared.userId == 5 &&
+		len(shared.candidateUserIds) == 1 &&
+		shared.candidateUserIds[0] == 2,
+		fmt.tprintf("expected bob checked, got %v", check.request),
+	)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		check.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseSharedRoomsResult{userIds = make([dynamic]int)},
+		},
+	)
+	routerTestExpectNoNetworkMessage(&h, "erin to bob, who shares no room with her")
+}
+
+// #166: a sign-up whose applicant left before the register statement answered Created still
+// announces the account.
+@(test)
+testSignUpCreatedAfterTheApplicantLeftIsAnnounced :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	bob := routerCompleteHandshake(&h, 1, userID = 2, nickname = "bob")
+	defer common.TransportState_deinit(&bob)
+	peers := []RouterTestPeer{{peerID = 1, transport = &bob}}
+	h.state.connectedPeers[2] = true
+	MainRouterState_setPeerSession(&h.state, 2, RouterPeerSession_init())
+	client := routerRegistrationTestBegin(&h, 2, nickname = "gina")
+	defer common.TransportState_deinit(&client.transport)
+	_, text := routerRegistrationTestCode()
+	defer delete(text)
+	routerRegistrationTestRegister(&h, &client, text)
+	query := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(query.request)
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, 2)
+	roles := make([dynamic]int)
+	append(&roles, 3)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRegisterResult {
+				outcome = .Created,
+				userId = 70,
+				nickname = strings.clone("gina"),
+				roleIds = roles,
+			},
+		},
+	)
+	_, user := routerRegistrationTestUserUpdated(&h, peers, 70)
+	defer common.UserSummary_deinit(&user)
+	assert(
+		user.nickname == "gina" &&
+		!user.isOnline &&
+		user.identityPublicKey == client.publicKey &&
+		len(user.roleIds) == 1 &&
+		user.roleIds[0] == 3,
+		fmt.tprintf("expected gina's summary, offline, got %v", user),
+	)
+	routerTestExpectNoNetworkMessage(&h, "anything more about gina")
+}
+
+// #165: a sign-in whose identity statement declined a stale room-code request (#115) sends the
+// declined request to every approver session and to nobody else, like an approver's decline,
+// whether or not the applicant is still connected.
+@(test)
+testServerDeclinedRequestReachesApprovers :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	first, bob, second: common.TransportState
+	peers := []RouterTestPeer {
+		{peerID = 1, transport = &first},
+		{peerID = 2, transport = &bob},
+		{peerID = 3, transport = &second},
+	}
+	first = routerCompleteHandshake(&h, 1, userID = 4, nickname = "approver")
+	defer common.TransportState_deinit(&first)
+	h.state.connectedPeers[2] = true
+	MainRouterState_setPeerSession(&h.state, 2, RouterPeerSession_init())
+	bob = routerCompleteHandshake(&h, 2, userID = 2, nickname = "bob")
+	defer common.TransportState_deinit(&bob)
+	routerRegistrationTestDrainNetwork(&h, peers)
+	h.state.connectedPeers[3] = true
+	MainRouterState_setPeerSession(&h.state, 3, RouterPeerSession_init())
+	second = routerCompleteHandshake(&h, 3, userID = 6, nickname = "admin")
+	defer common.TransportState_deinit(&second)
+	routerRegistrationTestDrainNetwork(&h, peers)
+	for peerID in ([]u32{1, 3}) {
+		if session, ok := &h.state.peerSessions[peerID]; ok {
+			session.permissions = {.ApproveRegistrations}
+		}
+	}
+
+	for leaves in ([]bool{false, true}) {
+		requestID := leaves ? 12 : 9
+		answer := common.DatabaseUserIdentityResult {
+			needsRegistration = true,
+			registrationMode = .InviteApproval,
+			requestStatus = .Declined,
+			decisionReason = strings.clone(common.REGISTRATION_ROOM_GONE_REASON),
+			declinedRequest = {
+				id = requestID,
+				nickname = strings.clone("erin"),
+				status = .Declined,
+				decisionReason = strings.clone(common.REGISTRATION_ROOM_GONE_REASON),
+			},
+			pendingCount = 2,
+		}
+		applicantPeer := leaves ? u32(5) : u32(4)
+		h.state.connectedPeers[applicantPeer] = true
+		MainRouterState_setPeerSession(&h.state, applicantPeer, RouterPeerSession_init())
+		applicant := routerRegistrationTestBegin(
+			&h,
+			applicantPeer,
+			nickname = "erin",
+			registering = false,
+			mode = .InviteApproval,
+			status = .Declined,
+			expectRequired = false,
+			answer = &answer,
+			disconnectFirst = leaves,
+		)
+		_ = applicant
+		toldApprovers: [2]bool
+		for _ in 0 ..< 2 {
+			recipient, packet := routerTestReceive(&h, peers)
+			defer delete(packet.payload)
+			assert(
+				packet.messageType == .ServerRegistrationRequestUpdated,
+				fmt.tprintf("expected the declined request, got %v", packet.messageType),
+			)
+			updated: common.ServerRegistrationRequestUpdatedPayload
+			assert(cbor.unmarshal(packet.payload, &updated) == nil, "expected its payload")
+			defer common.ServerRegistrationRequestUpdatedPayload_deinit(&updated)
+			assert(
+				updated.request.id == requestID &&
+				updated.request.status == .Declined &&
+				updated.request.decisionReason == common.REGISTRATION_ROOM_GONE_REASON &&
+				updated.pendingCount == 2,
+				fmt.tprintf(
+					"expected request %d declined by the server, got %v",
+					requestID,
+					updated,
+				),
+			)
+			assert(recipient == 1 || recipient == 3, "expected only approvers told")
+			toldApprovers[recipient == 1 ? 0 : 1] = true
+		}
+		assert(toldApprovers == {true, true}, "expected both approver sessions told once")
+		if !leaves {
+			// The applicant still gets its own plaintext answer.
+			requiredSend := routerPollNetworkSend(&h)
+			defer delete(requiredSend.data)
+			requiredPacket := routerDecodePacketBytes(requiredSend.data)
+			defer delete(requiredPacket.payload)
+			assert(
+				requiredSend.peerId == applicantPeer &&
+				requiredPacket.messageType == .ServerRegistrationRequired,
+				fmt.tprintf("expected the applicant told, got %v", requiredPacket.messageType),
+			)
+		}
+		routerTestExpectNoNetworkMessage(&h, "the declined request to anyone but approvers")
+	}
 }
 
 // #104 (D17): restricted erin is a member of invite room 8; an admin edits it to Public, which
