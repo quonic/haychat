@@ -180,12 +180,15 @@ echo "==> Building webrtc-audio-processing $WEBRTC_APM_VERSION for Windows (x86-
 )
 
 echo "==> Linking haychat-webrtc-apm.dll" >&2
+# `--` ends clang-cl's options: on Linux a source path such as /workspace/... (the CI
+# checkout) otherwise reads as an option (/wo, "warn once") and the file is dropped.
 clang-cl --target=x86_64-pc-windows-msvc /winsysroot "$sysroot" \
 	/nologo /c /O2 /MT /Brepro /EHsc /std:c++17 /W3 \
 	/DNDEBUG /DWEBRTC_WIN /DNOMINMAX "/DHAYCHAT_APM_BUILT_VERSION=\"$WEBRTC_APM_VERSION\"" \
 	"/I$src_dir/webrtc" "/I$src_dir/subprojects/abseil-cpp-$ABSEIL_VERSION" \
 	"/clang:-ffile-prefix-map=$repo_dir/=" \
-	"/Fo$work_dir/haychat_webrtc_apm.obj" "$repo_dir/client/webrtcapm/native/haychat_webrtc_apm.cc"
+	"/Fo$work_dir/haychat_webrtc_apm.obj" \
+	-- "$repo_dir/client/webrtcapm/native/haychat_webrtc_apm.cc"
 {
 	echo "LIBRARY haychat-webrtc-apm.dll"
 	echo "EXPORTS"

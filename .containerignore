@@ -12,3 +12,7 @@ server/server
 !dev/bootstrap-odin.sh
 !deploy/sql/
 !deploy/release-artifacts.sh
+# #load-ed by the server's test files, which `odin build server` checks too.
+!.env.example
+!docs/server-configuration.md
+!deploy/README.md
