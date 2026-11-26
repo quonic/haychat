@@ -29,14 +29,35 @@ DATABASE_PUBLISH_ENCRYPTION_KEY_SQL ::
 	"encode(up.encryption_public_key, 'hex'), up.created_at_unix::text, " +
 	"encode(up.signature, 'hex') FROM upserted up JOIN users u ON u.id = up.user_id"
 
-// The bundles of the accounts in $1 (a bigint array literal), one row per requested ID in the
-// order asked. An account without an identity key or a bundle, or an ID with no account, comes
-// back with NULL key columns.
+// Whether the requester ($1) may have the bundle of account u.id (D17, #103): itself; every
+// account for holders of ApproveRegistrations (admins hold every permission), as in the user
+// list; a peer it knows (DATABASE_DIRECT_PEER_KNOWN_*: a shared room, an admin on either side,
+// neither restricted, or an existing conversation); or the author of a room message it can
+// read (a member of the room, past the From join cut DATABASE_HISTORY_SINCE_*), whose
+// signature it must verify. The last two name accounts the server has already shown the
+// requester, so they reveal nothing; withholding them would leave readable history unverified
+// on a new device.
+DATABASE_FETCH_USER_KEYS_VISIBLE_SQL ::
+	"(u.id = $1::bigint OR v.sees_all OR " + DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" +
+	DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "u.id" + DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL +
+	" OR EXISTS (SELECT 1 FROM room_members ka_m JOIN chat_messages ka_c " +
+	"ON ka_c.room_id = ka_m.room_id WHERE ka_m.user_id = $1::bigint " +
+	"AND ka_c.sender_user_id = u.id AND ka_c.client_message_id IS NOT NULL " +
+	"AND ka_c.created_at > COALESCE(" + DATABASE_HISTORY_SINCE_OPEN_SQL + "ka_m.room_id" +
+	DATABASE_HISTORY_SINCE_MIDDLE_SQL + "$1::bigint" + DATABASE_HISTORY_SINCE_CLOSE_SQL +
+	", '-infinity'::timestamptz)))"
+
+// The bundles of the accounts in $2 (a bigint array literal) that the requester $1 may see
+// (DATABASE_FETCH_USER_KEYS_VISIBLE_SQL), one row per requested ID in the order asked. An
+// account without an identity key or a bundle, an ID with no account, and (protocol 25, D17,
+// #103) an account the requester may not see all come back with NULL key columns, so the
+// answer lists them alike in missingUserIds.
 DATABASE_FETCH_USER_KEYS_SQL ::
+	"WITH viewer AS (SELECT " + DATABASE_ACTOR_APPROVES_REGISTRATIONS_SQL + " AS sees_all) " +
 	"SELECT r.id::text, encode(u.public_key, 'hex'), encode(k.encryption_public_key, 'hex'), " +
 	"k.created_at_unix::text, encode(k.signature, 'hex') " +
-	"FROM unnest($1::bigint[]) WITH ORDINALITY AS r(id, position) " +
-	"LEFT JOIN users u ON u.id = r.id " +
+	"FROM unnest($2::bigint[]) WITH ORDINALITY AS r(id, position) CROSS JOIN viewer v " +
+	"LEFT JOIN users u ON u.id = r.id AND " + DATABASE_FETCH_USER_KEYS_VISIBLE_SQL + " " +
 	"LEFT JOIN user_encryption_keys k ON k.user_id = u.id AND u.public_key IS NOT NULL " +
 	"ORDER BY r.position"
 
@@ -159,9 +180,11 @@ databaseExecuteFetchUserKeys :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseFetchUserKeysRequest,
 ) -> common.DatabaseQueryResponse {
+	requesterParam := databaseIntParam(request.requesterUserId)
+	defer delete(requesterParam)
 	idsParam := databaseIntArrayParam(request.userIds[:])
 	defer delete(idsParam)
-	params := [?][^]byte{transmute([^]byte)idsParam}
+	params := [?][^]byte{transmute([^]byte)requesterParam, transmute([^]byte)idsParam}
 	result := databaseExecParams(conn, DATABASE_FETCH_USER_KEYS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)

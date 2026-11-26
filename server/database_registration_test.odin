@@ -817,8 +817,9 @@ testRestrictedAccountsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		assert(response.success, response.message)
 		return response.result.(common.DatabasePostDirectMessageResult).outcome
 	}
-	assert(post(conn, erin, carol) == .Restricted, "expected erin refused a DM to carol")
-	assert(post(conn, carol, erin) == .Restricted, "expected carol refused a DM to erin")
+	// #103: a peer they may not see is refused as unknown (testRestrictedVisibility...).
+	assert(post(conn, erin, carol) == .UnknownRecipient, "expected erin refused a DM to carol")
+	assert(post(conn, carol, erin) == .UnknownRecipient, "expected carol refused a DM to erin")
 	assert(post(conn, erin, bob) == .Stored, "expected erin to DM bob")
 	assert(post(conn, erin, admin) == .Stored, "expected erin to DM the admin")
 	assert(post(conn, carol, bob) == .Stored, "expected unrestricted DMs unchanged")
@@ -945,6 +946,207 @@ testRestrictedAccountsAgainstPostgreSQL :: proc(t: ^testing.T) {
 		strings.contains(registrationTestRooms(conn, erin), "rst-new-public"),
 		"expected setting it to keep the memberships",
 	)
+}
+
+// #103 (D17): a restricted account cannot tell an account it may not see from one that does not
+// exist. The key fetch lists both in missingUserIds; mark-read, plaintext and sealed direct
+// messages and a direct message upload refuse both alike; a peer it knows (an old conversation)
+// still gets the restricted refusal. Keys stay available for accounts the server already shows
+// it: room mates, admins, old conversations and authors of room messages it can read.
+@(test)
+testRestrictedVisibilityAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "restricted_visibility")
+	erin := databaseSQLTestCreateUser(conn, "vis-erin")
+	bob := databaseSQLTestCreateUser(conn, "vis-bob")
+	carol := databaseSQLTestCreateUser(conn, "vis-carol")
+	dave := databaseSQLTestCreateUser(conn, "vis-dave")
+	frank := databaseSQLTestCreateUser(conn, "vis-frank")
+	admin := databaseSQLTestCreateUser(conn, "vis-admin")
+	databaseAdminTestGrant(conn, admin)
+	approver := databaseSQLTestCreateUser(conn, "vis-approver")
+	approverRole := registrationTestRole(conn, "vis-approvers", {.ApproveRegistrations})
+	registrationTestHold(conn, approver, approverRole)
+	ghost := frank + 1000
+	everyone := [?]int{erin, bob, carol, dave, frank, admin, approver}
+	for userID, index in everyone {
+		bundle := common.DatabasePublishEncryptionKeyRequest {
+			userId    = userID,
+			createdAt = 1_700_000_000,
+		}
+		for byteIndex in 0 ..< len(bundle.encryptionPublicKey) {
+			bundle.encryptionPublicKey[byteIndex] = u8(index + 1)
+		}
+		published := databaseExecuteRequest(conn, bundle)
+		assert(published.success, fmt.tprintf("expected a bundle: %s", published.message))
+		IPC__database_query_response_deinit(published)
+	}
+
+	// club (Full history): erin and bob; dave wrote there and is not a member. lounge (From
+	// join): frank wrote there an hour before erin joined, and left.
+	club := registrationTestRoom(conn, "vis-club", 2)
+	registrationTestJoin(conn, club, erin)
+	registrationTestJoin(conn, club, bob)
+	lounge := registrationTestRoom(conn, "vis-lounge", 2)
+	registrationTestJoin(conn, lounge, erin)
+	databaseDefaultRoomTestExec(
+		conn,
+		"fill the rooms",
+		fmt.tprintf(
+			"UPDATE rooms SET history_visibility = 1 WHERE id = %d; " +
+			"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+			"signature) VALUES (%d, %d, 'from dave', " +
+			DATABASE_TEST_PLAIN_COLUMNS_SQL +
+			"); " +
+			"INSERT INTO chat_messages (room_id, sender_user_id, content, created_at, " +
+			"client_message_id, signature) VALUES (%d, %d, 'from frank', " +
+			"now() - interval '1 hour', " +
+			DATABASE_TEST_PLAIN_COLUMNS_SQL +
+			"); " +
+			"UPDATE users SET restricted = true WHERE id = %d",
+			lounge,
+			club,
+			dave,
+			lounge,
+			frank,
+			erin,
+		),
+	)
+
+	// The IDs viewer got bundles for, and the IDs listed as missing.
+	fetch :: proc(conn: pg.Conn, viewer: int, ids: ..int) -> (keys: []int, missing: []int) {
+		request := common.DatabaseFetchUserKeysRequest {
+			requesterUserId = viewer,
+			userIds         = make([dynamic]int, 0, len(ids)),
+		}
+		defer delete(request.userIds)
+		append(&request.userIds, ..ids)
+		response := databaseExecuteRequest(conn, request)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected the fetch to run: %s", response.message))
+		fetched := response.result.(common.DatabaseFetchUserKeysResult)
+		found := make([dynamic]int, 0, len(fetched.keys), context.temp_allocator)
+		for bundle in fetched.keys {
+			append(&found, bundle.userId)
+		}
+		absent := slice.clone(fetched.missingUserIds[:], context.temp_allocator)
+		slice.sort(found[:])
+		slice.sort(absent)
+		return found[:], absent
+	}
+	keys, missing := fetch(conn, erin, carol, ghost, bob, dave, frank, admin, approver, erin)
+	assert(
+		slice.equal(keys, []int{erin, bob, dave, admin}) &&
+		slice.equal(missing, []int{carol, frank, approver, ghost}),
+		fmt.tprintf(
+			"expected erin to get her own, bob's, dave's and the admin's keys and carol, " +
+			"frank and the approver missing like an unknown ID, got %v and %v",
+			keys,
+			missing,
+		),
+	)
+	keys, missing = fetch(conn, carol, erin, bob, ghost)
+	assert(
+		slice.equal(keys, []int{bob}) && slice.equal(missing, []int{erin, ghost}),
+		fmt.tprintf("expected erin missing for carol, got %v and %v", keys, missing),
+	)
+	keys, missing = fetch(conn, approver, erin, carol, ghost)
+	assert(
+		slice.equal(keys, []int{erin, carol}) && slice.equal(missing, []int{ghost}),
+		fmt.tprintf("expected the approver to get every key, got %v and %v", keys, missing),
+	)
+	keys, missing = fetch(conn, admin, erin, frank)
+	assert(len(keys) == 2 && len(missing) == 0, "expected the admin to get every key")
+
+	// Direct messages, unknown and invisible alike.
+	post :: proc(conn: pg.Conn, sender, recipient: int) -> common.DirectMessagePostOutcome {
+		response := databaseSQLTestPost(conn, sender, recipient, "hello")
+		defer IPC__database_query_response_deinit(response)
+		return response.result.(common.DatabasePostDirectMessageResult).outcome
+	}
+	assert(post(conn, erin, ghost) == .UnknownRecipient, "expected an unknown recipient")
+	assert(post(conn, erin, carol) == .UnknownRecipient, "expected carol read as unknown")
+	assert(post(conn, carol, erin) == .UnknownRecipient, "expected erin read as unknown")
+	assert(post(conn, erin, bob) == .Stored, "expected erin to DM bob, a room mate")
+
+	sealed :: proc(conn: pg.Conn, sender, recipient: int) -> common.DirectMessagePostOutcome {
+		envelope := [?]u8{1, 2, 3, 4}
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabasePostDirectMessageRequest {
+				senderId = sender,
+				recipientId = recipient,
+				clientMessageId = databaseTestClientMessageID(),
+				envelope = envelope[:],
+			},
+		)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected the post to run: %s", response.message))
+		return response.result.(common.DatabasePostDirectMessageResult).outcome
+	}
+	assert(sealed(conn, erin, ghost) == .UnknownRecipient, "expected a sealed DM to nobody")
+	assert(
+		sealed(conn, erin, carol) == .UnknownRecipient,
+		"expected a sealed DM to carol refused before its envelope is checked",
+	)
+	assert(sealed(conn, erin, bob) == .InvalidEnvelope, "expected bob's key checked")
+
+	upload :: proc(conn: pg.Conn, owner, recipient: int) -> common.DatabaseAttachmentOutcome {
+		blobId: common.AttachmentBlobID
+		assert(common.generateRandomBytes(blobId[:]), "expected a random blob ID")
+		blobId[0] |= 1
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabaseAttachmentRequest {
+				action = .Begin,
+				userId = owner,
+				blobId = blobId,
+				recipientUserId = recipient,
+				size = 100,
+				maxBytes = 1_000_000,
+			},
+		)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected the begin to run: %s", response.message))
+		return response.result.(common.DatabaseAttachmentResult).outcome
+	}
+	assert(upload(conn, erin, ghost) == .UnknownRecipient, "expected an upload to nobody")
+	assert(upload(conn, erin, carol) == .UnknownRecipient, "expected carol read as unknown")
+
+	markRead :: proc(conn: pg.Conn, userID, peer: int) -> bool {
+		response := databaseExecuteRequest(
+			conn,
+			common.DatabaseMarkReadRequest {
+				userId = userID,
+				kind = .Direct,
+				conversationId = peer,
+				messageId = 1 << 40,
+			},
+		)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected mark-read to run: %s", response.message))
+		return response.result.(common.DatabaseMarkReadResult).allowed
+	}
+	assert(!markRead(conn, erin, ghost), "expected an unknown peer refused")
+	assert(!markRead(conn, erin, carol), "expected carol refused like an unknown peer")
+	assert(!markRead(conn, carol, erin), "expected erin refused like an unknown peer")
+	assert(markRead(conn, erin, bob), "expected erin's conversation with bob")
+
+	// bob leaves the last shared room: erin still knows him (their conversation), so she keeps
+	// his key, her marker and his history, and hears why a new message is refused.
+	databaseDefaultRoomTestExec(
+		conn,
+		"take bob out",
+		fmt.tprintf("DELETE FROM room_members WHERE room_id = %d AND user_id = %d", club, bob),
+	)
+	keys, missing = fetch(conn, erin, bob)
+	assert(slice.equal(keys, []int{bob}), "expected bob's key kept through the conversation")
+	assert(markRead(conn, erin, bob), "expected the old conversation marked read")
+	assert(post(conn, erin, bob) == .Restricted, "expected the restricted refusal for bob")
+	assert(upload(conn, erin, bob) == .Restricted, "expected the restricted refusal for bob")
 }
 
 // #115: a room code's request whose room is deleted or made Public cannot be approved, and an

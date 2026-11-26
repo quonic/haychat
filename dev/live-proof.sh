@@ -133,6 +133,7 @@ SQL_TESTS+=,server.testIdentityRegistrationPathsAgainstPostgreSQL
 SQL_TESTS+=,server.testInviteStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRegistrationRequestStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRestrictedAccountsAgainstPostgreSQL
+SQL_TESTS+=,server.testRestrictedVisibilityAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomCodeRequestWhoseRoomChangedAgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentsMigrationUpgradesVersion13AgainstPostgreSQL
 SQL_TESTS+=,server.testAttachmentBeginStatementAgainstPostgreSQL

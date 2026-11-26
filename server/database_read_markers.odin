@@ -33,14 +33,18 @@ DATABASE_MARK_ROOM_READ_SQL ::
 	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // The conversation's newest message is the larger of the two directions' newest, each read
-// from its own index.
+// from its own index. Protocol 25 (D17, #103): the peer must be one the requester knows
+// (DATABASE_DIRECT_PEER_KNOWN_*, the direct history's rule), so a peer it may not see is refused
+// exactly like an account that does not exist ("Unknown user").
 DATABASE_MARK_DIRECT_READ_SQL ::
 	"WITH target AS (SELECT p.id AS peer_id, LEAST($3::bigint, COALESCE(GREATEST(" +
 	"(SELECT max(d.id) FROM direct_messages d " +
 	"WHERE d.sender_user_id = $1::bigint AND d.recipient_user_id = p.id), " +
 	"(SELECT max(d.id) FROM direct_messages d " +
 	"WHERE d.sender_user_id = p.id AND d.recipient_user_id = $1::bigint)), 0)) AS id " +
-	"FROM users p WHERE p.id = $2::bigint AND p.id <> $1::bigint), " +
+	"FROM users p WHERE p.id = $2::bigint AND p.id <> $1::bigint AND " +
+	DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" + DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "p.id" +
+	DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL + "), " +
 	"stored AS (INSERT INTO direct_read_markers (user_id, peer_user_id, last_read_message_id) " +
 	"SELECT $1::bigint, target.peer_id, target.id FROM target WHERE target.id > 0 " +
 	"ON CONFLICT (user_id, peer_user_id) DO UPDATE SET last_read_message_id = GREATEST(" +

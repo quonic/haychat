@@ -203,12 +203,13 @@ databaseAttachmentHexText :: proc(hex: string) -> (string, bool) {
 // A room upload needs membership of a room with chat, the room permissions above through the
 // shared subquery (admins hold every bit), and the room's encryption flag; a direct message
 // upload needs a recipient that exists and is not the owner, whom the owner may meet
-// (DATABASE_USERS_MAY_MEET_*, the direct message send's rule). The quota sums the owner's rows
-// that are not Removed, the rate every row of the owner created in the last hour, the capacity
-// every row that is not Removed; the insert reserves the declared size at once, so later
-// begins see it. One row: each check (member, send, chat, encryption, recipient, visibility,
-// size, quota, rate, capacity; protocol 27 reports Send and AttachFiles apart) and the new row's
-// ID (NULL when nothing was stored).
+// (DATABASE_USERS_MAY_MEET_*, the direct message send's rule); a recipient the owner does not
+// know (DATABASE_DIRECT_PEER_KNOWN_*) is refused as unknown, never as restricted (D17, #103).
+// The quota sums the owner's rows that are not Removed, the rate every row of the owner created
+// in the last hour, the capacity every row that is not Removed; the insert reserves the
+// declared size at once, so later begins see it. One row: each check (member, send, chat,
+// encryption, recipient, visibility, size, quota, rate, capacity; protocol 27 reports Send and
+// AttachFiles apart) and the new row's ID (NULL when nothing was stored).
 DATABASE_ATTACHMENT_BEGIN_SQL ::
 	"WITH room AS (SELECT r.encrypted, r.room_type FROM rooms r " +
 	"WHERE r.id = $2::bigint AND $2::bigint > 0), " +
@@ -218,7 +219,8 @@ DATABASE_ATTACHMENT_BEGIN_SQL ::
 	DATABASE_ROOM_PERMISSIONS_OPEN_SQL + "$1" + DATABASE_ROOM_PERMISSIONS_ROOM_SQL + "$2" +
 	DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " AS mask) p), " +
 	"peer AS (SELECT id FROM users WHERE id = $3::bigint AND id <> $1::bigint " +
-	"AND $3::bigint > 0), " +
+	"AND $3::bigint > 0 AND " + DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" +
+	DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "$3" + DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL + "), " +
 	"allowed AS (SELECT " + DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" +
 	DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$3" + DATABASE_USERS_MAY_MEET_CLOSE_SQL + " AS ok), " +
 	"usage AS (SELECT COALESCE(sum(size) FILTER (WHERE state <> 3), 0) AS stored, " +

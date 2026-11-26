@@ -23,9 +23,11 @@ set -euo pipefail
 #                 he sees at once and again on his next attempt.
 #   7. room code: alice's code for an Admin invite room (with skip approval) signs erin up
 #                 restricted: her rooms are that room only (not #general), her users only the
-#                 room's members (alice, not carol or bob), and bob does not see her. Her direct
-#                 message to carol is refused ("You no longer share a room with this person")
-#                 until alice adds carol to the room; then carol receives it. alice sees erin
+#                 room's members (alice, not carol or bob), and bob does not see her. Her key
+#                 fetch lists carol as missing exactly like an unused account ID (#103), so her
+#                 direct message to carol is refused (never "You no longer share a room with
+#                 this person", which would say carol exists) until alice adds carol to the
+#                 room; then carol receives it. alice sees erin
 #                 restricted at once, from the user_updated her sign-up sends (#102). alice
 #                 makes the room Public: erin's user list gains bob, and bob's gains erin (#104).
 #   7a. SQL:      deploy/sql/set-restricted.sql lifts erin's restriction while she is connected:
@@ -478,17 +480,36 @@ restricted_entry="\\{\"id\":$user_erin,\"nickname\":\"$nickname_erin\",[^}]*\"is
 [[ "$last_result" =~ $restricted_entry ]] ||
 	fail "alice's users do not show erin restricted: $last_result"
 
+# #103: erin cannot tell carol, whom she may not see, from an account that does not exist. Her
+# key fetch gets alice's key (they share the room), but lists carol exactly like an unused ID.
+# fetch_user_keys ID: user-keys from erin and the user_keys event that answers it, in last_event.
+fetch_user_keys() {
+	local start
+	start=$(lines erin)
+	expect_ok erin user-keys "$1"
+	expect_event erin "^\\{\"event\":\"user_keys\",\"serverID\":1,\"userID\":$1," "$start" \
+		"erin got no user_keys for user $1"
+}
+user_id_of erin "$nickname_alice"
+fetch_user_keys "$found_user"
+[[ "$last_event" == *'"keyState":"unverified"'* && "$last_event" == *'"hasPin":true'* ]] ||
+	fail "erin did not get alice's key: $last_event"
+unused_user=$((user_carol + 1000000))
+for hidden_user in "$user_carol" "$unused_user"; do
+	fetch_user_keys "$hidden_user"
+	[[ "$last_event" == *'"keyState":"not_set_up"'* && "$last_event" == *'"hasPin":false'* ]] ||
+		fail "erin's key fetch for user $hidden_user was not answered as missing: $last_event"
+done
+
+# Her direct message to carol therefore never leaves her client: carol's key reads as missing.
+# (A server that got it would refuse it as for an unknown account, never as restricted: the
+# server SQL proof tests that.)
 start_e=$(lines erin)
 start_c=$(lines carol)
 erin_refused="erin to carol, refused $run_tag"
-result=$(client_command erin dm "$user_carol" "$erin_refused") || fail "erin: no result for dm"
-echo "    erin> dm $user_carol $erin_refused"
-echo "    erin< $result"
-if [[ "$result" == '{"ok":true,'* ]]; then
-	expect_event erin \
-		"^\\{\"event\":\"protocol_error\",\"serverID\":1,\"message\":\"$RESTRICTED_DM\"\\}$" \
-		"$start_e" "the server did not refuse erin's direct message to carol"
-fi
+expect_not_ok erin dm "$user_carol" "$erin_refused"
+! grep -Fq -- "$RESTRICTED_DM" <(tail -n "+$((start_e + 1))" "$work_dir/erin.out") ||
+	fail "erin was told that carol exists"
 expect_ok carol sleep 1000
 ! grep -Fq -- "$erin_refused" <(tail -n "+$((start_c + 1))" "$work_dir/carol.out") ||
 	fail "carol received erin's direct message without a shared room"
@@ -508,7 +529,7 @@ dm_pattern="^\\{\"event\":\"direct_message\",.*\"senderID\":$user_erin,"
 dm_pattern+=".*\"content\":\"$erin_allowed\"\\}$"
 expect_event carol "$dm_pattern" "$start_c" \
 	"carol did not receive erin's direct message once they shared a room"
-# The refused message was queued by erin's client and dropped, never sent once allowed.
+# The refused message was dropped by erin's client, never sent once allowed.
 ! grep -Fq -- "$erin_refused" "$work_dir/carol.out" ||
 	fail "erin's refused direct message reached carol later"
 

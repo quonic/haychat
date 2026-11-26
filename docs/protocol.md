@@ -607,6 +607,14 @@ D7-D19). The rules in user terms are in
   and roles. An account whose session ended before the server finished creating it is
   announced the same way, offline and without presence (#166). A refused direct
   message is "You no longer share a room with this person"; older history stays readable.
+  Nothing tells an account it may not see from one that does not exist (#103, no protocol
+  change): `ServerUserKeys` lists it in `missingUserIds`, and a direct message (plaintext or
+  sealed), a direct message upload, direct history and a direct `ClientMarkRead` naming it get
+  the same refusal as an unknown ID ("Unknown direct message recipient", "Unknown user").
+  The restricted refusal is only for a peer the account already has a conversation with. Keys
+  stay available for the accounts the server already shows the requester: those it may see,
+  old conversation peers, and the authors of room messages it can read (past the From join cut),
+  whose signatures it must check.
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting
   it joins the Public rooms.
@@ -638,7 +646,9 @@ The first part of end-to-end encryption ([plan/e2ee-design.md](plan/e2ee-design.
   session as `ServerUserKeyChanged`.
 - **Fetching.** `ServerUserList` and `ServerUserUpdated` carry each account's identity key and
   whether it has a bundle. `ClientFetchUserKeys` asks for 1 to 64 distinct accounts' bundles;
-  `ServerUserKeys` answers with the bundles and the IDs that have none.
+  `ServerUserKeys` answers with the bundles and the IDs that have none. Since #103 (no protocol
+  change) an account the requester may not see is listed with them, exactly like an ID with no
+  account: see [Restricted accounts](#registration-protocol-25).
 - **Pinning.** The client checks every bundle's signature against the bundle's identity key and
   that identity key against its pin. The first bundle it sees for an account is pinned,
   unverified, in the per-server [key store](client-configuration.md#key-store). Another identity

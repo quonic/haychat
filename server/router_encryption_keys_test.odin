@@ -252,12 +252,14 @@ testMainRouterFetchUserKeysAnswersOnlyTheRequester :: proc(t: ^testing.T) {
 	query := routerPollDatabaseQuery(&h)
 	defer IPC__database_query_request_deinit(query.request)
 	request, ok := query.request.(common.DatabaseFetchUserKeysRequest)
+	// #103 (D17): the statement decides what bob may see, so it must know who asks.
 	assert(
 		ok &&
+		request.requesterUserId == ROUTER_KEYS_TEST_BOB &&
 		len(request.userIds) == 2 &&
 		request.userIds[0] == ROUTER_KEYS_TEST_ALICE &&
 		request.userIds[1] == 99,
-		fmt.tprintf("expected a fetch of alice and 99, got %v", query),
+		fmt.tprintf("expected bob's fetch of alice and 99, got %v", query),
 	)
 
 	bundle := routerKeysTestBundle(alicePrivateKey)

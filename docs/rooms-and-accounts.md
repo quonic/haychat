@@ -287,6 +287,17 @@ or Admin invite room) is **restricted** to that room:
   once. A direct message without a
   shared room is refused ("You no longer share a room with this person"); history from before
   stays readable.
+- It cannot tell an account it may not see from one that does not exist (#103): asking for that
+  account's encryption key, sending it a direct message or a file, or marking a conversation
+  with it read gets the same answer as for an account ID that was never used. Only a peer it
+  already has a conversation with gets "You no longer share a room with this person". Keys stay
+  available for accounts the server already shows it, including the authors of room messages it
+  can read, so it can check their signatures.
+- Voice participants: a room's participant list goes only to the room's members, and only
+  members can be in its voice. Removing an account from a room (by a member manager, by
+  leaving, through a role change or a room edit) takes it out of the room's voice first, so a
+  restricted account sees only room mates in voice, and the list it gets after a removal no
+  longer names the removed account. Nothing more is hidden there; the server's tests pin this.
 - An admin can lift the restriction (**Lift restriction** in the Admin section), which joins the
   account to every Public room. A room code cannot target an encrypted room yet, because the
   server cannot sign the room's member list.

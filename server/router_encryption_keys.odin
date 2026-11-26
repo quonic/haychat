@@ -11,7 +11,9 @@ import "core:encoding/cbor"
 //   an identical bundle changes nothing, and a first or different bundle is sent to every
 //   authenticated session as ServerUserKeyChanged.
 // - ClientFetchUserKeys: 1..USER_KEYS_FETCH_MAX distinct positive IDs, answered with
-//   ServerUserKeys (the bundles, and the requested IDs that have none).
+//   ServerUserKeys (the bundles, and the requested IDs that have none). Protocol 25 (D17,
+//   #103): an account the requester may not see is listed in missingUserIds exactly like an
+//   unknown ID (DATABASE_FETCH_USER_KEYS_VISIBLE_SQL).
 //
 // Both decode with the heap as CBOR's temporary allocator: fixed-size byte strings are decoded
 // through it, and the router never frees the temporary allocator.
@@ -73,12 +75,13 @@ MainRouterState_handleClientFetchUserKeys :: proc(
 	peerID: u32,
 	payload: []u8,
 ) {
-	if _, ok := MainRouterState_authenticatedUserID(
+	userID, ok := MainRouterState_authenticatedUserID(
 		pm,
 		state,
 		peerID,
 		ENCRYPTION_KEY_UNAUTHENTICATED_MESSAGE,
-	); !ok {
+	)
+	if !ok {
 		return
 	}
 	req: common.ClientFetchUserKeysPayload
@@ -98,7 +101,7 @@ MainRouterState_handleClientFetchUserKeys :: proc(
 		pm,
 		state,
 		peerID,
-		common.DatabaseFetchUserKeysRequest{userIds = req.userIds},
+		common.DatabaseFetchUserKeysRequest{requesterUserId = userID, userIds = req.userIds},
 		PendingDBRequest{requestType = .FetchUserKeys},
 	)
 }
