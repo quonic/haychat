@@ -109,7 +109,9 @@ compile() {
 	shift
 	local object="$work_dir/obj/${source//\//_}.obj"
 	mkdir -p "$work_dir/obj"
-	clang-cl "${cflags[@]}" "$@" "/Fo$object" "$src_dir/$source"
+	# `--` ends the options, so a path that starts like a clang-cl option (/wo..., /U...)
+	# stays a source file.
+	clang-cl "${cflags[@]}" "$@" "/Fo$object" -- "$src_dir/$source"
 	objects+=("$object")
 }
 echo "==> Compiling RNNoise $RNNOISE_VERSION for Windows (x86-64)" >&2

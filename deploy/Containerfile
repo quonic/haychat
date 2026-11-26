@@ -25,6 +25,13 @@ ENV ODIN_ROOT=/opt/Odin \
 WORKDIR /src
 COPY common common
 COPY server server
+# `odin build` checks the server's test files too, and they #load these from outside server/
+# (config_test.odin, database_attachments_test.odin). Keep this list, and .containerignore,
+# in step with every #load("../...") under server/.
+COPY .env.example ./
+COPY docs/server-configuration.md docs/
+COPY deploy/README.md deploy/
+COPY deploy/sql/remove-attachment.sql deploy/sql/
 RUN mkdir -p /out \
 	&& odin build server -o:speed -out:/out/haychat-server \
 	&& echo "Shared libraries the server links:" \
