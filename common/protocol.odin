@@ -187,9 +187,15 @@ User :: struct {
 MessageType :: enum {
 	None = 0, // Placeholder for uninitialized message type, should not be used in actual messages
 
-	// Connection management
-	Ping = 10, // Simple ping message to check if the connection is alive, includes a timestamp that the recipient should include in the response to measure latency
-	Pong, // Response to Ping message, includes the timestamp from the original Ping message for latency measurement
+	// Connection management (#106). ENet keeps the connection alive and measures latency
+	// (peer.roundTripTime), so nothing answers a Ping: the server accepts a sealed Ping from a
+	// registering or an authenticated session as a keepalive with any payload and sends
+	// nothing back. Pong is a retired placeholder, never sent: the server answers it with
+	// "Unsupported message type" (a registering session's ends the session). Both are kept so
+	// that every member after them keeps its wire value; protocol_test.odin pins them at 10
+	// and 11.
+	Ping = 10,
+	Pong,
 
 	// Authentication & Session Management
 	ClientHello, // Starts the transport handshake with identity and ephemeral keys

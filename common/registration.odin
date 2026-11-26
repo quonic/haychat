@@ -15,7 +15,8 @@ import "core:unicode/utf8"
 // request nor HAYCHAT_ADMIN_PUBLIC_KEY lets it in), the server answers with the plaintext
 // ServerRegistrationRequired instead of ServerAuthSuccess. Both sides then activate the
 // transport exactly as they would on ServerAuthSuccess, and the session is registering: the
-// only encrypted packets the server accepts are ClientRegister and Ping (which it ignores).
+// only encrypted packets the server accepts are ClientRegister and Ping (a keepalive it never
+// answers, #106).
 // The invite code therefore never travels in plaintext. A registering session gets
 // REGISTER_ATTEMPTS_MAX ClientRegister answers and REGISTER_SESSION_SECONDS before the server
 // disconnects it, and at most REGISTERING_SESSIONS_MAX sessions may be registering at once.

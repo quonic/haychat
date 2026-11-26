@@ -568,7 +568,7 @@ MainRouterState_handleRegisteringPacket :: proc(
 	case .ClientRegister:
 		MainRouterState_handleClientRegister(pm, state, peerID, innerPacket.payload)
 	case .Ping:
-	// A keepalive; nothing to answer.
+	// A keepalive, as in an authenticated session: nothing answers a Ping (#106).
 	case:
 		MainRouterState_protocolViolation(pm, state, peerID, "Sign up before anything else")
 	}

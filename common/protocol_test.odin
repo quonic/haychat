@@ -13,6 +13,9 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	value:       int,
 } {
 	{.None, 0},
+	// Ping is an accepted keepalive nothing answers; Pong is a retired placeholder (#106).
+	{.Ping, 10},
+	{.Pong, 11},
 	{.ClientHello, 12},
 	{.ServerHello, 13},
 	{.ClientRegister, 14},
