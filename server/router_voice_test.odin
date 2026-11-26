@@ -700,6 +700,111 @@ testVoiceRouterEvictsOnMemberRemovalAndRoomDeletion :: proc(t: ^testing.T) {
 	assert(len(h.state.voiceRooms) == 0 && len(h.state.peerVoiceRoom) == 0, "expected no voice")
 }
 
+// D17 (#103): a restricted account hears about a room's voice participants only as a member,
+// and every participant is a member too (a removal takes the account out of voice first), so a
+// participant list never names an account it shares no room with. Pinned here: bob, removed
+// from the room erin is in, is gone from her next list and never named again.
+@(test)
+testVoiceRouterRestrictedMemberHearsOnlyRoomMates :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	clients := [?]RouterVoiceTestClient {
+		{peerID = 1, userID = 42}, // erin, restricted
+		{peerID = 2, userID = 43}, // bob
+		{peerID = 3, userID = 44}, // carol
+	}
+	routerVoiceTestConnect(&h, clients[:])
+	defer routerVoiceTestDisconnectAll(clients[:])
+	MainRouterState_setUserRestricted(&h.state, 42, true)
+
+	names :: proc(drain: ^RouterVoiceTestDrain, peerID: u32) -> (userIDs: []int, found: bool) {
+		payload, ok := routerVoiceTestParticipants(drain, peerID, 7)
+		if !ok {
+			return nil, false
+		}
+		defer common.ServerVoiceParticipantsPayload_deinit(&payload)
+		ids := make([dynamic]int, 0, len(payload.participants), context.temp_allocator)
+		for participant in payload.participants {
+			append(&ids, participant.userId)
+		}
+		return ids[:], true
+	}
+
+	// bob joins room 7's voice; erin, a member, sees him; carol, not a member, hears nothing.
+	routerVoiceTestJoin(&h, &clients[1], 7, {42, 43})
+	drain := routerVoiceTestDrain(&h, clients[:])
+	erinSees, erinHeard := names(&drain, 1)
+	assert(
+		erinHeard && len(erinSees) == 1 && erinSees[0] == 43,
+		fmt.tprintf("expected erin to see bob, her room mate, got %v", erinSees),
+	)
+	_, carolHeard := names(&drain, 3)
+	assert(!carolHeard, "expected carol, not a member, to hear nothing")
+	RouterVoiceTestDrain_deinit(&drain)
+
+	// bob is removed from room 7: he leaves voice before erin's next list, which names nobody.
+	removeID := MainRouterState_generateRequestID(&h.state)
+	h.state.pendingDatabaseRequests[removeID] = PendingDBRequest {
+		requestID        = removeID,
+		peerID           = 3,
+		requestType      = .RoomMemberAction,
+		roomID           = 7,
+		targetUserID     = 43,
+		roomMemberAction = .Remove,
+	}
+	remainingMembers := make([dynamic]int)
+	append(&remainingMembers, 42)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		removeID,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRoomMemberActionResult {
+				outcome = .Applied,
+				changed = true,
+				access = .AdminInvite,
+				memberUserIDs = remainingMembers,
+			},
+		},
+	)
+	drain = routerVoiceTestDrain(&h, clients[:])
+	erinSees, erinHeard = names(&drain, 1)
+	assert(
+		erinHeard && len(erinSees) == 0,
+		fmt.tprintf("expected bob gone from erin's list, got %v", erinSees),
+	)
+	_, _, bobLeft := routerVoiceTestReason(&drain, 2, .ServerVoiceLeft)
+	assert(bobLeft, "expected bob evicted from the room's voice")
+	RouterVoiceTestDrain_deinit(&drain)
+	// The removal involved a restricted account: the user lists are fetched again.
+	for {
+		msg, err := IPC_Client_poll(h.databaseFd)
+		if err != nil {
+			break
+		}
+		if query, ok := msg.(DatabaseQuery); ok {
+			IPC__database_query_request_deinit(query.request)
+		}
+	}
+
+	// carol, added since, joins: erin's list names carol only, never bob again.
+	routerVoiceTestJoin(&h, &clients[2], 7, {42, 44})
+	drain = routerVoiceTestDrain(&h, clients[:])
+	defer RouterVoiceTestDrain_deinit(&drain)
+	erinSees, erinHeard = names(&drain, 1)
+	assert(
+		erinHeard && len(erinSees) == 1 && erinSees[0] == 44,
+		fmt.tprintf("expected erin to see carol only, got %v", erinSees),
+	)
+	_, bobHeard := names(&drain, 2)
+	assert(!bobHeard, "expected bob, no longer a member, to hear nothing")
+}
+
 @(test)
 testVoiceRouterDisconnectAndProtocolViolationFanOut :: proc(t: ^testing.T) {
 	_ = t

@@ -273,7 +273,8 @@ testAttachmentBeginStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 
 	// Direct messages: the recipient must exist, not be the owner, and be someone the owner may
-	// meet (D17): a restricted account only once a room is shared.
+	// meet (D17): a restricted account only once a room is shared. One the owner does not know
+	// (no shared room, no conversation) is refused as unknown (#103).
 	assert(
 		attachmentSQLTestBegin(conn, alice, 10, recipientID = bob) == .Applied,
 		"expected an upload to a direct conversation",
@@ -287,8 +288,8 @@ testAttachmentBeginStatementAgainstPostgreSQL :: proc(t: ^testing.T) {
 		"expected an upload to oneself refused",
 	)
 	assert(
-		attachmentSQLTestBegin(conn, alice, 10, recipientID = carol) == .Restricted,
-		"expected a restricted recipient without a shared room refused",
+		attachmentSQLTestBegin(conn, alice, 10, recipientID = carol) == .UnknownRecipient,
+		"expected a restricted recipient without a shared room refused as unknown",
 	)
 	attachmentSQLTestJoin(conn, voiceOnly, carol)
 	assert(

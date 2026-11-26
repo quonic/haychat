@@ -19,7 +19,9 @@ import "shared:pg"
 // identity, register, create room, edit room and default room statements skip them) and
 // only accounts holding ManageMembers in a room may add them to it. Their roles' Role rooms
 // are joined like anyone else's: only admins give roles. D17's visibility rule, used by the
-// user list and direct message statements, is DATABASE_USERS_MAY_MEET_* below.
+// user list and direct message statements, is DATABASE_USERS_MAY_MEET_* below; the direct
+// message paths that name a peer and the key fetch (#103) also use
+// DATABASE_DIRECT_PEER_KNOWN_*.
 
 // Whether two accounts may see each other and exchange direct messages (D17): neither is
 // restricted, they share a room, or either is an admin. A scalar boolean (false when neither
@@ -41,6 +43,28 @@ DATABASE_USERS_MAY_MEET_MIDDLE_SQL :: "::bigint AS a, "
 DATABASE_USERS_MAY_MEET_CLOSE_SQL ::
 	"::bigint AS b) meet_ids JOIN users meet_u ON meet_u.id IN (meet_ids.a, meet_ids.b) " +
 	"GROUP BY meet_ids.a, meet_ids.b), false)"
+
+// Whether account a knows account b as a direct message peer (D17, #103): they may meet
+// (DATABASE_USERS_MAY_MEET_*), or they already have a conversation, whose history stays
+// readable after the last shared room is gone. Every direct message path that names a peer
+// treats a peer a does not know exactly as an account that does not exist, so a restricted
+// account cannot tell the two apart; a known peer it may no longer meet gets the restricted
+// refusal. A scalar boolean, built as
+//
+//   DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + a + DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + b +
+//   DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL
+//
+// where a and b are account ID expressions, which may name outer aliases; its own aliases start
+// with pk_ (and meet_).
+DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL ::
+	"(SELECT " + DATABASE_USERS_MAY_MEET_OPEN_SQL + "pk_ids.a" +
+	DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "pk_ids.b" + DATABASE_USERS_MAY_MEET_CLOSE_SQL +
+	" OR EXISTS (SELECT 1 FROM direct_messages pk_h WHERE pk_h.sender_user_id = pk_ids.a " +
+	"AND pk_h.recipient_user_id = pk_ids.b) " +
+	"OR EXISTS (SELECT 1 FROM direct_messages pk_h WHERE pk_h.sender_user_id = pk_ids.b " +
+	"AND pk_h.recipient_user_id = pk_ids.a) FROM (SELECT "
+DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL :: "::bigint AS a, "
+DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL :: "::bigint AS b) pk_ids)"
 
 // Whether the requester ($1) holds CreateInvites / ApproveRegistrations (admins hold both).
 DATABASE_ACTOR_CREATES_INVITES_SQL ::

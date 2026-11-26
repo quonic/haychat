@@ -29,14 +29,81 @@ DATABASE_PUBLISH_ENCRYPTION_KEY_SQL ::
 	"encode(up.encryption_public_key, 'hex'), up.created_at_unix::text, " +
 	"encode(up.signature, 'hex') FROM upserted up JOIN users u ON u.id = up.user_id"
 
-// The bundles of the accounts in $1 (a bigint array literal), one row per requested ID in the
-// order asked. An account without an identity key or a bundle, or an ID with no account, comes
-// back with NULL key columns.
+// The user IDs a stored room log entry names, read from its bytes (alias ka_e;
+// common/e2ee.odin, "RoomLogEntry, format 1", integers little-endian; PostgreSQL's get_byte
+// counts from 0): targetUserId, the i64 at byte 50, and actorUserId, the i64 at byte 90. Both
+// are 0 where the entry names nobody (a SetAccess's target, a server Remove's actor), which
+// never matches an account. An entry too short to hold the ID (only a damaged one: the append
+// stores whole entries) reads NULL instead of failing the fetch.
+DATABASE_ROOM_LOG_ENTRY_TARGET_USER_ID_SQL ::
+	"(CASE WHEN octet_length(ka_e.entry) >= 58 THEN " +
+	"get_byte(ka_e.entry, 50)::bigint | (get_byte(ka_e.entry, 51)::bigint << 8) | " +
+	"(get_byte(ka_e.entry, 52)::bigint << 16) | (get_byte(ka_e.entry, 53)::bigint << 24) | " +
+	"(get_byte(ka_e.entry, 54)::bigint << 32) | (get_byte(ka_e.entry, 55)::bigint << 40) | " +
+	"(get_byte(ka_e.entry, 56)::bigint << 48) | (get_byte(ka_e.entry, 57)::bigint << 56)" +
+	" END)"
+DATABASE_ROOM_LOG_ENTRY_ACTOR_USER_ID_SQL ::
+	"(CASE WHEN octet_length(ka_e.entry) >= 98 THEN " +
+	"get_byte(ka_e.entry, 90)::bigint | (get_byte(ka_e.entry, 91)::bigint << 8) | " +
+	"(get_byte(ka_e.entry, 92)::bigint << 16) | (get_byte(ka_e.entry, 93)::bigint << 24) | " +
+	"(get_byte(ka_e.entry, 94)::bigint << 32) | (get_byte(ka_e.entry, 95)::bigint << 40) | " +
+	"(get_byte(ka_e.entry, 96)::bigint << 48) | (get_byte(ka_e.entry, 97)::bigint << 56)" +
+	" END)"
+
+// The rooms whose member log the server sends the requester ($1): those it is a member of and
+// those whose log names it as a manager (DATABASE_FETCH_ROOM_LOG_SQL lets both fetch). Only
+// encrypted rooms have log rows, so the joins below find nothing in the others.
+DATABASE_FETCH_USER_KEYS_LOG_ROOMS_SQL ::
+	"(SELECT room_id FROM room_members WHERE user_id = $1::bigint " +
+	"UNION SELECT room_id FROM room_log_managers WHERE user_id = $1::bigint)"
+
+// Whether the requester ($1) may have the bundle of account u.id (D17, #103): itself; every
+// account for holders of ApproveRegistrations (admins hold every permission), as in the user
+// list; a peer it knows (DATABASE_DIRECT_PEER_KNOWN_*: a shared room, an admin on either side,
+// neither restricted, or an existing conversation); the author of a room message it can read
+// (a member of the room, past the From join cut DATABASE_HISTORY_SINCE_*), whose signature it
+// must verify; in an encrypted room whose log it reads (the LOG_ROOMS statement above), the
+// actor or target of any log entry and a current log manager (the Create's managers still in
+// force; removed ones are RemoveManager targets), since a client replays the whole log against
+// pinned identity keys; and the sender or forwarder of a room key envelope with a wrap for it
+// in a room it is a member of (what DATABASE_FETCH_ROOM_KEYS_SQL returns), whose signature it
+// verifies. Everything after the first two names accounts the server has already
+// shown the requester, so their keys reveal nothing; withholding them would leave readable
+// history unverified, or an encrypted room's log unverifiable, on a new device. Each EXISTS
+// runs per requested ID (at most USER_KEYS_FETCH_MAX) over the requester's rooms, through
+// room_members_by_user_id, room_log_managers_by_user_id, the room_log_entries key and
+// room_key_envelopes_by_chain or room_key_envelopes_by_room_id_and_epoch.
+DATABASE_FETCH_USER_KEYS_VISIBLE_SQL ::
+	"(u.id = $1::bigint OR v.sees_all OR " + DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" +
+	DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "u.id" + DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL +
+	" OR EXISTS (SELECT 1 FROM room_members ka_m JOIN chat_messages ka_c " +
+	"ON ka_c.room_id = ka_m.room_id WHERE ka_m.user_id = $1::bigint " +
+	"AND ka_c.sender_user_id = u.id AND ka_c.client_message_id IS NOT NULL " +
+	"AND ka_c.created_at > COALESCE(" + DATABASE_HISTORY_SINCE_OPEN_SQL + "ka_m.room_id" +
+	DATABASE_HISTORY_SINCE_MIDDLE_SQL + "$1::bigint" + DATABASE_HISTORY_SINCE_CLOSE_SQL +
+	", '-infinity'::timestamptz)) " +
+	"OR EXISTS (SELECT 1 FROM " + DATABASE_FETCH_USER_KEYS_LOG_ROOMS_SQL + " ka_l " +
+	"JOIN room_log_entries ka_e ON ka_e.room_id = ka_l.room_id WHERE u.id IN (" +
+	DATABASE_ROOM_LOG_ENTRY_TARGET_USER_ID_SQL + ", " +
+	DATABASE_ROOM_LOG_ENTRY_ACTOR_USER_ID_SQL + ")) " +
+	"OR EXISTS (SELECT 1 FROM " + DATABASE_FETCH_USER_KEYS_LOG_ROOMS_SQL + " ka_l " +
+	"JOIN room_log_managers ka_g ON ka_g.room_id = ka_l.room_id AND ka_g.user_id = u.id) " +
+	"OR EXISTS (SELECT 1 FROM room_members ka_km JOIN room_key_envelopes ka_k " +
+	"ON ka_k.room_id = ka_km.room_id WHERE ka_km.user_id = $1::bigint " +
+	"AND (ka_k.sender_user_id = u.id OR ka_k.forwarder_user_id = u.id) " +
+	"AND $1::bigint = ANY (ka_k.recipient_user_ids)))"
+
+// The bundles of the accounts in $2 (a bigint array literal) that the requester $1 may see
+// (DATABASE_FETCH_USER_KEYS_VISIBLE_SQL), one row per requested ID in the order asked. An
+// account without an identity key or a bundle, an ID with no account, and (protocol 25, D17,
+// #103) an account the requester may not see all come back with NULL key columns, so the
+// answer lists them alike in missingUserIds.
 DATABASE_FETCH_USER_KEYS_SQL ::
+	"WITH viewer AS (SELECT " + DATABASE_ACTOR_APPROVES_REGISTRATIONS_SQL + " AS sees_all) " +
 	"SELECT r.id::text, encode(u.public_key, 'hex'), encode(k.encryption_public_key, 'hex'), " +
 	"k.created_at_unix::text, encode(k.signature, 'hex') " +
-	"FROM unnest($1::bigint[]) WITH ORDINALITY AS r(id, position) " +
-	"LEFT JOIN users u ON u.id = r.id " +
+	"FROM unnest($2::bigint[]) WITH ORDINALITY AS r(id, position) CROSS JOIN viewer v " +
+	"LEFT JOIN users u ON u.id = r.id AND " + DATABASE_FETCH_USER_KEYS_VISIBLE_SQL + " " +
 	"LEFT JOIN user_encryption_keys k ON k.user_id = u.id AND u.public_key IS NOT NULL " +
 	"ORDER BY r.position"
 
@@ -159,9 +226,11 @@ databaseExecuteFetchUserKeys :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseFetchUserKeysRequest,
 ) -> common.DatabaseQueryResponse {
+	requesterParam := databaseIntParam(request.requesterUserId)
+	defer delete(requesterParam)
 	idsParam := databaseIntArrayParam(request.userIds[:])
 	defer delete(idsParam)
-	params := [?][^]byte{transmute([^]byte)idsParam}
+	params := [?][^]byte{transmute([^]byte)requesterParam, transmute([^]byte)idsParam}
 	result := databaseExecParams(conn, DATABASE_FETCH_USER_KEYS_SQL, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)

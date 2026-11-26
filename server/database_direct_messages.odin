@@ -16,7 +16,10 @@ import "shared:pg"
 // It always returns exactly one row: whether the recipient was accepted, then the stored ID
 // and time (NULL when nothing was stored), both nicknames, and (protocol 25, D17) whether the
 // two accounts may exchange messages: neither is restricted, they share a room, or one is an
-// admin (database_registration.odin). Nothing is stored when they may not.
+// admin (database_registration.odin). Nothing is stored when they may not. The eighth column
+// (#103) says whether the sender knows the recipient (DATABASE_DIRECT_PEER_KNOWN_*: they may
+// meet or already have a conversation); a recipient it does not know is refused as unknown,
+// never as restricted, so a restricted account cannot tell it from a missing one.
 //
 // Protocol 27 (attachments plan D1, D11): $8..$12 list the message's attachments
 // (databaseAttachmentBindParams; all '' for none). Every listed blob must be the sender's, Ready
@@ -52,15 +55,18 @@ DATABASE_POST_DIRECT_MESSAGE_SQL ::
 	"SELECT EXISTS (SELECT 1 FROM recipient), s.id::text, s.created_at::text, " +
 	"COALESCE((SELECT nickname FROM users WHERE id = $1::bigint), ''), " +
 	"COALESCE((SELECT nickname FROM recipient), ''), (SELECT ok FROM allowed)::text, " +
-	"(SELECT ok FROM bind_ok)::text " +
-	"FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
+	"(SELECT ok FROM bind_ok)::text, " + DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" +
+	DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "$2" + DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL +
+	"::text FROM (SELECT 1) AS one LEFT JOIN stored s ON true"
 
 // The identity key of the recipient $2 of a message from $1, as hex ('' for an account without
-// one); no row for an unknown account or the sender itself. An envelope is checked against it
-// before DATABASE_POST_DIRECT_MESSAGE_SQL stores it under the same key.
+// one); no row for an unknown account, the sender itself, or (D17, #103) a peer the sender does
+// not know (DATABASE_DIRECT_PEER_KNOWN_*), which must read as unknown. An envelope is checked
+// against it before DATABASE_POST_DIRECT_MESSAGE_SQL stores it under the same key.
 DATABASE_DIRECT_MESSAGE_RECIPIENT_KEY_SQL ::
 	"SELECT COALESCE(encode(public_key, 'hex'), '') FROM users " +
-	"WHERE id = $2::bigint AND id <> $1::bigint"
+	"WHERE id = $2::bigint AND id <> $1::bigint AND " + DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL +
+	"$1" + DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "$2" + DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL
 
 // Returns the peer-exists flag on every row, with message columns NULL when the peer does
 // not exist or the page is empty. Messages in both directions between $1 and $2 form one
@@ -69,15 +75,13 @@ DATABASE_DIRECT_MESSAGE_RECIPIENT_KEY_SQL ::
 //
 // Protocol 25 (D17): a peer the requester may not meet (a restricted account on either side,
 // no shared room, no admin) counts as missing unless the two already have a conversation, whose
-// history stays readable after the last shared room is gone.
+// history stays readable after the last shared room is gone (DATABASE_DIRECT_PEER_KNOWN_*).
 //
 // Protocol 27: the last column is the message's attachments (DATABASE_MESSAGE_ATTACHMENTS_*).
 DATABASE_GET_DIRECT_HISTORY_SQL ::
-	"WITH peer AS (SELECT (EXISTS (SELECT 1 FROM users WHERE id = $2::bigint) AND (" +
-	DATABASE_USERS_MAY_MEET_OPEN_SQL + "$1" + DATABASE_USERS_MAY_MEET_MIDDLE_SQL + "$2" +
-	DATABASE_USERS_MAY_MEET_CLOSE_SQL + " OR EXISTS (SELECT 1 FROM direct_messages h " +
-	"WHERE (h.sender_user_id = $1::bigint AND h.recipient_user_id = $2::bigint) " +
-	"OR (h.sender_user_id = $2::bigint AND h.recipient_user_id = $1::bigint)))) AS ok) " +
+	"WITH peer AS (SELECT (EXISTS (SELECT 1 FROM users WHERE id = $2::bigint) AND " +
+	DATABASE_DIRECT_PEER_KNOWN_OPEN_SQL + "$1" + DATABASE_DIRECT_PEER_KNOWN_MIDDLE_SQL + "$2" +
+	DATABASE_DIRECT_PEER_KNOWN_CLOSE_SQL + ") AS ok) " +
 	"SELECT p.ok, d.id::text, d.sender_user_id::text, d.recipient_user_id::text, " +
 	"d.created_at::text, d.content, d.sender_nickname, d.recipient_nickname, " +
 	"COALESCE(encode(d.client_message_id, 'hex'), ''), COALESCE(encode(d.envelope, 'hex'), ''), " +
@@ -245,7 +249,12 @@ databaseExecutePostDirectMessage :: proc(
 	}
 
 	if databaseGetBool(result, 0, 0) && !databaseGetBool(result, 0, 5) {
-		return databaseSuccess(common.DatabasePostDirectMessageResult{outcome = .Restricted})
+		// D17, #103: only a peer the sender knows hears why.
+		outcome := common.DirectMessagePostOutcome.UnknownRecipient
+		if databaseGetBool(result, 0, 7) {
+			outcome = .Restricted
+		}
+		return databaseSuccess(common.DatabasePostDirectMessageResult{outcome = outcome})
 	}
 	if !databaseGetBool(result, 0, 0) {
 		// The recipient checked above lost the key the envelope names in between.

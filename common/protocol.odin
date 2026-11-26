@@ -2490,9 +2490,11 @@ DatabasePublishEncryptionKeyRequest :: struct {
 	signature:           SignatureBytes,
 }
 
-// Reads the bundles of userIds (owned), at most USER_KEYS_FETCH_MAX of them.
+// Reads the bundles of userIds (owned), at most USER_KEYS_FETCH_MAX of them, that
+// requesterUserId may see (protocol 25, D17, #103); the rest are missing like unknown IDs.
 DatabaseFetchUserKeysRequest :: struct {
-	userIds: [dynamic]int,
+	requesterUserId: int,
+	userIds:         [dynamic]int,
 }
 
 // Protocol 18: one member log entry (owned) that actorUserId sent. The worker locks the room,
