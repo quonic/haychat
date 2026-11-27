@@ -224,6 +224,17 @@ below in the database for every request, in the same statement as the change.
   and nothing proves it came from a ban: a server that is not honest can take any manager away
   this way, in the open, which freezes who joins a room but lets it read nothing and add no
   one.
+- **Damaged member lists** (protocol 35, #196): an encrypted room whose stored member list
+  does not replay (an entry that no longer verifies, a gap, or a head that does not match, for
+  example after a bad restore) refuses every change to its members. **Member logs**, under
+  Removed files in Server settings, shows such rooms after **Check member logs**: which version
+  fails and why, and the last version that still replays. **Truncate log to version N…**, behind
+  a confirmation, deletes everything after that version: the later changes to the member list,
+  the room's keys and encrypted messages of those versions, and its voice; the room's members,
+  managers and access go back to what they were at version N. Members whose app had seen a
+  later version see "This room's member list was changed on the server" for the room; the
+  others carry on after restarting their app. Operators without an admin can run
+  `deploy/sql/truncate-room-log.sql` (see [deploy/README.md](../deploy/README.md)).
 
 ## Roles and Permissions
 
@@ -529,6 +540,14 @@ newest message.
   keeps the account (as member and manager) until it is banned again (the Admin section lists
   those rooms). Other account changes (a role, a restriction) change no encrypted room's member
   list.
+- Repairing a damaged member list ([Damaged member lists](#admin-actions)) only truncates it:
+  there is no way to keep a change after the first one that no longer verifies, and the
+  messages and keys of the later versions are deleted. Members whose app had verified a later
+  version cannot use the room again (it shows "This room's member list was changed on the
+  server" after every restart); they need to be invited to a new room. Every member's app that
+  saw the damaged list keeps the room failed until it restarts. A room whose very first entry
+  does not verify cannot be repaired, only deleted. Checking every encrypted room replays every
+  member list on the database worker, which other requests wait for.
 - The member counts in the Admin section's list of rooms leave out accounts that signed up since
   it was last fetched, until another change to the room or reopening Server settings.
 - The Admin section lists every account of the server at once, with no search or paging.

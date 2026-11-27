@@ -551,7 +551,9 @@ State_receiveRoomLog :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	serverID, roomID := event.serverID, event.roomID
 	State_roomLogsCheckServerKey(state, serverID)
 	room := State_roomLogRoom(state, serverID, roomID)
-	room.serverHead = max(room.serverHead, event.logHeadVersion)
+	// ServerRoomLog arrives in order on one channel, so its head is the server's head now, even
+	// when it is lower than before (#196: an admin truncated a damaged log).
+	room.serverHead = event.logHeadVersion
 	State_roomLogNote(state, serverID, roomID)
 	switch room.status {
 	case .Failed:
@@ -568,7 +570,16 @@ State_receiveRoomLog :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 			append(&room.collecting, entry)
 		}
 		clear(&event.logEntries)
-		if event.hasOlder {
+		// #196: a head below what this fetch collected (the log was truncated while it was on
+		// its way) ends the log there; the replay checks it against the stored head.
+		shrunk := event.logHeadVersion < len(room.collecting)
+		if shrunk {
+			for entry in room.collecting[event.logHeadVersion:] {
+				delete(entry)
+			}
+			resize(&room.collecting, event.logHeadVersion)
+		}
+		if event.hasOlder && !shrunk {
 			room.fetching = false
 			State_requestRoomLogPage(state, serverID, room)
 			return
@@ -576,6 +587,13 @@ State_receiveRoomLog :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 		room.fetching = false
 		State_roomLogReplayCollected(state, serverID, room)
 	case .Verified:
+		if event.logHeadVersion < room.state.version {
+			// #196: the server's head went back past the version this client verified (an
+			// admin truncated the room's log). Like a log that ends before the stored head.
+			State_roomLogFail(state, serverID, room, .Rollback, event.logHeadVersion)
+			State_roomChainsPump(state, serverID, roomID)
+			return
+		}
 		if event.logAfterVersion <= room.state.version {
 			room.fetching = false
 		}

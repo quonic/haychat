@@ -165,7 +165,7 @@ roomLogKeyTableLookup :: proc(
 	return key, true
 }
 
-@(private = "file")
+@(private)
 databaseRoomLogExec :: proc(conn: pg.Conn, query: cstring) -> bool {
 	result := pg.exec(conn, query)
 	if result == nil {
@@ -206,7 +206,7 @@ databaseRoomLogRollback :: proc(conn: pg.Conn, transaction: RoomLogTransaction) 
 }
 
 // Runs a statement with text parameters. The caller clears a non-nil result.
-@(private = "file")
+@(private)
 databaseRoomLogQuery :: proc(conn: pg.Conn, query: cstring, values: []string) -> pg.Result {
 	params := make([][^]byte, len(values))
 	defer delete(params)
@@ -225,7 +225,7 @@ databaseRoomLogQuery :: proc(conn: pg.Conn, query: cstring, values: []string) ->
 }
 
 // A Postgres array literal of ids, "{1,2,3}". The caller frees it.
-@(private = "file")
+@(private)
 databaseRoomLogIDArray :: proc(ids: []int) -> string {
 	builder := strings.builder_make()
 	strings.write_byte(&builder, '{')
@@ -323,7 +323,7 @@ databaseRoomLogLoadEntries :: proc(
 	return entries, true, false
 }
 
-@(private = "file")
+@(private)
 databaseRoomLogHexBytes :: proc(result: pg.Result, row, column: i32) -> ([]u8, bool) {
 	text := databaseGetText(result, row, column)
 	defer delete(text)
@@ -366,6 +366,7 @@ databaseRoomLogReplay :: proc(
 		return {}, false, false
 	}
 	if loadDamaged || len(entries) != room.logVersion {
+		databaseRoomLogReportDamage(conn, roomID, room.logVersion, serverIdentityPublicKey)
 		return {}, true, true
 	}
 	ctx := common.RoomLogContext {
@@ -376,6 +377,8 @@ databaseRoomLogReplay :: proc(
 	}
 	replayed, replayErr, _ := common.replayRoomLog(roomID, entries[:], ctx)
 	if replayErr != .None {
+		// Protocol 35 (#196): say which version to truncate to.
+		databaseRoomLogReportDamage(conn, roomID, room.logVersion, serverIdentityPublicKey)
 		return {}, true, true
 	}
 	return replayed, true, false
@@ -408,7 +411,7 @@ databaseRoomLogLoadKeys :: proc(conn: pg.Conn, userIDs: []int, table: ^RoomLogKe
 }
 
 // The sorted keys of a log state's member or manager map, owned.
-@(private = "file")
+@(private)
 roomLogSortedUserIDs :: proc(users: map[int]common.IdentityPublicKeyBytes) -> [dynamic]int {
 	ids := make([dynamic]int, 0, len(users))
 	for userID in users {
@@ -514,7 +517,7 @@ databaseRoomLogStore :: proc(
 	return
 }
 
-@(private = "file")
+@(private)
 databaseRoomLogCommand :: proc(conn: pg.Conn, query: cstring, values: []string) -> bool {
 	result := databaseRoomLogQuery(conn, query, values)
 	if result == nil {

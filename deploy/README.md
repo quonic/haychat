@@ -24,6 +24,7 @@ and the release builds that produce the image and the client downloads. Testers 
 | `deploy/sql/set-restricted.sql` | Restricts one account or lifts its restriction without a client; a running server applies it at once                             |
 | `deploy/sql/attachment-usage.sql` | Shows attachment storage use: totals, the accounts that store the most, and one account's files                                 |
 | `deploy/sql/remove-attachment.sql` | Removes one attachment by its blob ID; the server deletes the file within the hour                                             |
+| `deploy/sql/truncate-room-log.sql` | Truncates an encrypted room's damaged member log to the version the server reported; restart the server after             |
 | `deploy/release-artifacts.sh`    | Builds the server binary and client archives for a release                                                                             |
 | `deploy/client-README-*.txt`     | The `README.txt` shipped in each client archive                                                                                        |
 | `THIRD_PARTY_NOTICES.md`         | Third-party components, licences and credits of each artifact; shipped as `THIRD_PARTY_NOTICES.txt`                                    |
@@ -61,7 +62,7 @@ the dev image and CI use.
 | Volumes           | `/var/lib/haychat/logs` (`HAYCHAT_LOG_DIR`), `/var/lib/haychat/storage` (`HAYCHAT_FILE_STORAGE_PATH`: server identity key) and `/var/lib/haychat/attachments` (`HAYCHAT_ATTACHMENT_DIR`: attachment files, protocol 26)                                                       |
 | Port              | `12345/udp` (clients)                                                                                                                                                                                                                                                          |
 | Stop signal       | `SIGINT`, the server's graceful shutdown; it stops its worker threads and exits 0                                                                                                                                                                                              |
-| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `set-restricted.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
+| Also included     | `/usr/share/haychat/sql/` (`make-admin.sql`, `create-invite.sql`, `set-registration-mode.sql`, `set-restricted.sql`, `attachment-usage.sql`, `remove-attachment.sql`, `truncate-room-log.sql`, `auth_bootstrap.sql`); `/usr/share/licenses/haychat-server/` (`LICENSE`, `THIRD_PARTY_NOTICES.txt`, and `licenses/` with the Odin, compiler-rt and pg licences); the Fedora packages' licences in `/usr/share/licenses/<package>` |
 
 The image sets `HAYCHAT_LISTEN_ADDR=0.0.0.0`, `HAYCHAT_LISTEN_PORT=12345`, and the four
 path variables (`HAYCHAT_LOG_DIR`, `HAYCHAT_FILE_STORAGE_PATH`,
@@ -476,6 +477,43 @@ made in SQL reads "removed by an operator". Rows are kept indefinitely, since re
 and are not tied to the `attachments` row, so a row stays after the server deletes a removed
 file's row. An admin's reason also still goes to the server's log
 (`[Admin] Attachment ... removed by user ...: REASON`).
+
+### Damaged Encrypted Room Member Logs
+
+An encrypted room's member list is a signed log (`room_log_entries`). When the stored log no
+longer replays (a restore that mixed rows from two backups, or a change made in SQL), the
+server refuses every change to that room's members and a ban reports the room as one it could
+not change. The server's log then says which version to keep:
+
+```text
+[RoomLog] Room 12's member log is damaged: version 5 does not replay (BadSignature); it replays
+to version 4 of 6 stored entries, and the room's head is version 6. Truncate it to version 4
+(...)
+```
+
+The way to repair it is from an admin's client: Server settings → **Member logs** → **Check
+member logs** lists every damaged room with the same facts, and **Truncate log to version N…**
+deletes everything after version N on the running server and tells the room's members
+([protocol 35](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/protocol.md#repairing-a-damaged-member-log-protocol-35)).
+Without an admin, use the SQL helper with the version from the log line:
+
+```sh
+podman exec -i haychat-db psql -U haychat -d haychat \
+	-v room_id=12 -v to_version=4 <deploy/sql/truncate-room-log.sql
+sudo systemctl restart haychat-server.service        # or: podman restart haychat-server
+```
+
+SQL cannot check the entries' signatures, so give it exactly the version the server reported:
+a lower one undoes real member changes, and a higher one leaves the log damaged. It refuses a
+room that does not exist or is not encrypted, a version below 1 (a room whose first entry does
+not replay can only be deleted), a version whose earlier entries are missing, and a log that
+already ends there. In one transaction it deletes the entries after that version, the room's
+key envelopes, sealed messages and sealed edits of the later versions (their files are deleted
+by the server's hourly sweeper), sets the room's members, log managers and access to what they
+were at that version, and sets its head. **Restart the server afterwards**: SQL cannot reach
+it, so until then connected clients keep what they had and the room's voice keeps the old
+version. Members whose app had verified a later version see "This room's member list was
+changed on the server" for the room; the others carry on after restarting their app.
 
 ## Upgrades
 

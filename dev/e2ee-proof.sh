@@ -81,7 +81,16 @@ set -euo pipefail
 #               server removed rg as a manager"), and admin_result says the room has no manager
 #               left. ra and rc replay the log without error and keep sending to each other, and
 #               an add signed by rc, a member who is no manager, is refused by the server.
-#  22. secrets: no client ever printed its encryption private key, and no client wrote the
+#  22. repair:  (protocol 35, #196) rd, no admin, may not check the member logs; ra's check
+#               lists the room the ban step damaged (version 3 does not replay: Unsigned; it
+#               replays to version 2), refuses a truncation to version 1, and truncates it to
+#               version 2: the forged entry is gone and the members are ra and rd. A second
+#               room damaged the same way (and given rc in room_members behind the server's
+#               back) is truncated by deploy/sql/truncate-room-log.sql, which leaves ra and rd
+#               at version 2 and the server finds it intact. Restarted (both refused the damaged
+#               log in this run), ra and rd verify the room at version 2; ra adds rc with a
+#               signed entry and sends, and rd opens the message.
+#  23. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -1034,7 +1043,103 @@ expect_event rc '^\{"event":"protocol_error",.*"message":"You may not make this 
 	"$cstart" "the server did not refuse rc's add to a room with no manager" >/dev/null
 managers=$(run_sql "SELECT count(*) FROM room_log_managers WHERE room_id = $manager_id")
 [[ "$managers" == 0 ]] || fail "expected no log manager left in the database, got $managers"
+
+echo "==> [e2ee] repair: ra finds the damaged room, truncates its log, and its members carry on"
+start_client rd2 "$room_dan" rd
+expect_connected rd2
+expect_ok rd2 wait room_list 5000
+dstart=$(lines rd2)
+expect_ok rd2 room-log-status
+expect_event rd2 '^\{"event":"protocol_error",.*"message":"Admin permission required"' "$dstart" \
+	"rd, no admin, could check the member logs" >/dev/null
+astart=$(lines ra3)
+expect_ok ra3 room-log-status
+every=$(expect_event ra3 '^\{"event":"room_log_status",.*"roomID":0,' "$astart" \
+	"ra got no member log status")
+wanted="{\"roomID\":$damaged_id,\"storedVersion\":$forged_version,"
+wanted+="\"entryCount\":$forged_version,\"goodVersion\":2,\"failingVersion\":$forged_version,"
+wanted+="\"error\":\"Unsigned\",\"damaged\":true}"
+[[ "$every" == *"$wanted"* ]] || fail "the status does not report the damaged room: $every"
+astart=$(lines ra3)
+expect_ok ra3 room-log-truncate "$damaged_id" 1
+expect_event ra3 '^\{"event":"protocol_error",.*"message":"The member list can only be truncated' \
+	"$astart" "a truncation below the good version was not refused" >/dev/null
+[[ $(run_sql "SELECT log_version FROM rooms WHERE id = $damaged_id") == "$forged_version" ]] ||
+	fail "a refused truncation changed the room"
+astart=$(lines ra3)
+expect_ok ra3 room-log-truncate "$damaged_id" 2
+expect_event ra3 \
+	"^\\{\"event\":\"admin_result\",.*\"action\":\"room-log-truncate\",.*\"roomID\":$damaged_id\\}" \
+	"$astart" "ra got no result for the truncation" >/dev/null
+repaired=$(run_sql "SELECT log_version || '/' || (SELECT count(*) FROM room_log_entries
+	WHERE room_id = $damaged_id) || '/' || (SELECT string_agg(user_id::text, ',' ORDER BY user_id)
+	FROM room_members WHERE room_id = $damaged_id) FROM rooms WHERE id = $damaged_id")
+expected_members=$(printf '%s\n' "$ra_id" "$rd_id" | sort -n | paste -sd,)
+[[ "$repaired" == "2/2/$expected_members" ]] ||
+	fail "expected the log at version 2 with ra and rd, got $repaired"
+astart=$(lines ra3)
+expect_ok ra3 room-log-status "$damaged_id"
+expect_event ra3 "^\\{\"event\":\"room_log_status\",.*\"roomID\":$damaged_id,.*\"damaged\":false\\}\\]\\}" \
+	"$astart" "the repaired log is still reported damaged" >/dev/null
+
+# The SQL helper on the server's database: a second room damaged the same way, with carol
+# added to room_members behind the server's back; the helper's truncation leaves what the
+# server's replay finds.
+start=$(lines ra3)
+expect_ok ra3 room-create "text,admin-invite,encrypted,managers=none" "repair-sql-$run_tag"
+created=$(expect_event ra3 \
+	"^\\{\"event\":\"room_created\",.*\"name\":\"repair-sql-$run_tag\"" \
+	"$start" "ra never got room_created for the helper's room")
+helper_id=$(field "$created" roomID)
+room_log_line ra3 "$helper_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+expect_ok ra3 room-add "$helper_id" "$rd_id"
+room_log_line ra3 "$helper_id" '"status":"verified","logVersion":2,' "$start" >/dev/null
+expect_ok ra3 room-log-entry "$helper_id" add "$rc_id" unsigned
+forged_hex=$(field "$last_result" entry)
+run_sql "INSERT INTO room_log_entries (room_id, version, entry)
+	VALUES ($helper_id, 3, decode('$forged_hex', 'hex'));
+	UPDATE rooms SET log_version = 3 WHERE id = $helper_id;
+	INSERT INTO room_members (room_id, user_id) VALUES ($helper_id, $rc_id);" >/dev/null
+PGPASSWORD="${HAYCHAT_DATABASE_PASS:-haychat}" psql -q -X -v ON_ERROR_STOP=1 \
+	-h "${HAYCHAT_DATABASE_URL:-localhost}" -p "${HAYCHAT_DATABASE_PORT:-5432}" \
+	-U "${HAYCHAT_DATABASE_USER:-haychat}" -d "${HAYCHAT_DATABASE_NAME:-haychat}" \
+	-v room_id="$helper_id" -v to_version=2 -f deploy/sql/truncate-room-log.sql >/dev/null ||
+	fail "deploy/sql/truncate-room-log.sql did not truncate room $helper_id"
+helped=$(run_sql "SELECT log_version || '/' || (SELECT string_agg(user_id::text, ','
+	ORDER BY user_id) FROM room_members WHERE room_id = $helper_id) FROM rooms
+	WHERE id = $helper_id")
+[[ "$helped" == "2/$expected_members" ]] ||
+	fail "expected the helper to leave version 2 with ra and rd, got $helped"
+astart=$(lines ra3)
+expect_ok ra3 room-log-status "$helper_id"
+expect_event ra3 "^\\{\"event\":\"room_log_status\",.*\"roomID\":$helper_id,.*\"damaged\":false\\}\\]\\}" \
+	"$astart" "the server still finds the helper's room damaged" >/dev/null
+
+# Both clients refused the damaged log in this run (a refusal is final until a restart); after
+# one they replay the truncated log against the head they stored, which never went past 2,
+# and carry on: ra adds rc with a signed entry and sends, and rd opens it.
+stop_client rd2
 stop_client ra3
+start_client ra4 "$room_alice" ra
+expect_connected ra4
+expect_ok ra4 wait room_list 5000
+room_log_line ra4 "$damaged_id" '"status":"verified","logVersion":2,' 0 >/dev/null
+start_client rd3 "$room_dan" rd
+expect_connected rd3
+expect_ok rd3 wait room_list 5000
+room_log_line rd3 "$damaged_id" '"status":"verified","logVersion":2,' 0 >/dev/null
+dstart=$(lines rd3)
+fetch_keys ra4 "$rc_id" >/dev/null
+astart=$(lines ra4)
+expect_ok ra4 room-add "$damaged_id" "$rc_id"
+room_log_line ra4 "$damaged_id" '"status":"verified","logVersion":3,' "$astart" >/dev/null
+room_log_line rd3 "$damaged_id" '"status":"verified","logVersion":3,' "$dstart" >/dev/null
+after_repair="e2ee-room-marker-after-repair-$run_tag"
+dstart=$(lines rd3)
+expect_ok ra4 send "$damaged_id" "$after_repair"
+room_message rd3 "$damaged_id" "$after_repair" "$dstart" >/dev/null
+stop_client rd3
+stop_client ra4
 
 for client in re rc; do
 	stop_client "$client"

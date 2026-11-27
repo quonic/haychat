@@ -41,6 +41,9 @@ AdminRequest :: struct {
 	// Protocol 28 (attachment_moderation.odin). RemoveAttachment: blobID and reason (0..500
 	// bytes, no control characters).
 	blobID:      common.AttachmentBlobID,
+	// Protocol 35 (room_log_repair.odin). TruncateRoomLog: roomID and toVersion.
+	roomID:      int,
+	toVersion:   int,
 }
 
 AdminSendBridge :: #type proc(transport: ^ClientServerTransport, request: AdminRequest) -> bool
@@ -103,6 +106,8 @@ ClientServerTransport_sendAdminRequest :: proc(
 		return ClientServerTransport_setRestricted(transport, request.userID, request.flag)
 	case .RemoveAttachment:
 		return ClientServerTransport_removeAttachment(transport, request.blobID, request.reason)
+	case .TruncateRoomLog:
+		return ClientServerTransport_truncateRoomLog(transport, request.roomID, request.toVersion)
 	}
 	return false
 }
@@ -119,6 +124,8 @@ AdminRequestState :: struct {
 	requestID: int,
 	// Protocol 28: the attachment a RemoveAttachment names.
 	blobID:    common.AttachmentBlobID,
+	// Protocol 35: the room a TruncateRoomLog names.
+	roomID:    int,
 	pending:  bool,
 	// The server's sentence for a success (ServerAdminActionResult.message).
 	result:   string,
@@ -197,6 +204,14 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 			return "The reason must be at most 500 bytes long, without control characters."
 		}
 		return ""
+	case .TruncateRoomLog:
+		if request.roomID <= 0 {
+			return "No room selected."
+		}
+		if request.toVersion < 1 {
+			return "No version of this room's member list replays; delete the room instead."
+		}
+		return ""
 	case .SetUserRoles:
 		if request.userID <= 0 {
 			return "No account selected."
@@ -263,6 +278,7 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	tracked.inviteID = request.inviteID
 	tracked.requestID = request.requestID
 	tracked.blobID = request.blobID
+	tracked.roomID = request.roomID
 	tracked.pending = true
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
@@ -382,6 +398,7 @@ State_adminActionResult :: proc(
 	requestID := 0,
 	blobID := common.AttachmentBlobID{},
 	failedRoomIDs: []int = nil,
+	roomID := 0,
 ) {
 	tracked := &state.adminRequest
 	if tracked.serverID != serverID {
@@ -394,6 +411,7 @@ State_adminActionResult :: proc(
 	tracked.inviteID = inviteID
 	tracked.requestID = requestID
 	tracked.blobID = blobID
+	tracked.roomID = roomID
 	AdminRequestState_setText(&tracked.result, message)
 	AdminRequestState_setText(&tracked.error, "")
 	AdminRequestState_setFailedRooms(tracked, failedRoomIDs)

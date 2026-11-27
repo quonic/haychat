@@ -158,6 +158,10 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerAdminRoomChanged, 228},
 	// Protocol 34 (#78: rejecting a key envelope that does not open).
 	{.ClientRejectRoomKeyEnvelope, 229},
+	// Protocol 35 (#196: repairing a damaged member log).
+	{.ClientAdminRoomLogStatus, 230},
+	{.ServerAdminRoomLogStatus, 231},
+	{.ClientAdminTruncateRoomLog, 232},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -186,6 +190,28 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 			"expected AdminAction SetRestricted 10 and RemoveAttachment 11, got %d and %d",
 			int(AdminAction.SetRestricted),
 			int(AdminAction.RemoveAttachment),
+		),
+	)
+	assert(
+		int(AdminAction.TruncateRoomLog) == 12,
+		fmt.tprintf("expected AdminAction TruncateRoomLog 12, got %d", int(AdminAction.TruncateRoomLog)),
+	)
+	// Protocol 35 (#196): RoomLogStatus.error carries a RoomLogError as a number. Append new
+	// errors at the end of the enum.
+	assert(
+		int(RoomLogError.None) == 0 &&
+		int(RoomLogError.Truncated) == 3 &&
+		int(RoomLogError.VersionNotNext) == 18 &&
+		int(RoomLogError.BadSignature) == 25 &&
+		int(RoomLogError.Rollback) == 41,
+		fmt.tprintf(
+			"expected RoomLogError None 0, Truncated 3, VersionNotNext 18, BadSignature 25, " +
+			"Rollback 41, got %d, %d, %d, %d, %d",
+			int(RoomLogError.None),
+			int(RoomLogError.Truncated),
+			int(RoomLogError.VersionNotNext),
+			int(RoomLogError.BadSignature),
+			int(RoomLogError.Rollback),
 		),
 	)
 	assert(
@@ -566,11 +592,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// encrypted room it is in and names the rooms it could not change); 33 changed the member
 	// log's rules (#195: the server's unsigned RemoveManager, which a ban writes); 34 added
 	// ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open and
-	// the next one is stored.
+	// the next one is stored; 35 added repairing a damaged member log (#196:
+	// ClientAdminRoomLogStatus, ServerAdminRoomLogStatus, ClientAdminTruncateRoomLog,
+	// AdminAction.TruncateRoomLog and ServerAdminActionResult.roomId).
 	assert(
-		protocolVersion == 34,
+		protocolVersion == 35,
 		fmt.tprintf(
-			"expected protocol version 34 for rejected room key envelopes, got %d",
+			"expected protocol version 35 for member log repair, got %d",
 			protocolVersion,
 		),
 	)

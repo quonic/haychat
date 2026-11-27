@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 34
+protocolVersion: ProtocolVersion = 35
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -491,6 +491,11 @@ MessageType :: enum {
 	// Rejecting a key envelope that does not open (protocol 34, #78), appended so no existing
 	// wire value moves.
 	ClientRejectRoomKeyEnvelope, // ClientRejectRoomKeyEnvelopePayload: drop this copy for me
+	// Repairing a damaged member log (protocol 35, #196, common/room_log_repair.odin), appended
+	// so no existing wire value moves. Admins only, checked in the database statement.
+	ClientAdminRoomLogStatus, // ClientAdminRoomLogStatusPayload: replay a room's stored log
+	ServerAdminRoomLogStatus, // ServerAdminRoomLogStatusPayload: what the replay found
+	ClientAdminTruncateRoomLog, // ClientAdminTruncateRoomLogPayload: drop the entries after
 }
 
 // Room types on the wire since protocol 14 (RoomSummary.roomType, ClientCreateRoom,
@@ -1813,6 +1818,8 @@ AdminAction :: enum u8 {
 	SetRestricted       = 10,
 	// Protocol 28 (attachments F3): ClientAdminRemoveAttachment.
 	RemoveAttachment    = 11,
+	// Protocol 35 (#196): ClientAdminTruncateRoomLog.
+	TruncateRoomLog     = 12,
 }
 
 // ClientAdminSetRole: grant (isAdmin true) or revoke the admin role.
@@ -1867,7 +1874,10 @@ ClientAdminBanUserPayload :: struct {
 // of (the server's unsigned Remove in each room's log, in the ban's transaction).
 // failedRoomIds (owned once decoded, ascending) names the encrypted rooms whose member log it
 // could not change (a damaged log, or a room another connection held locked); the ban still
-// applies, and an admin deals with those rooms by hand. Empty for every other action.
+// applies, and an admin deals with those rooms by hand (protocol 35: ClientAdminRoomLogStatus
+// and ClientAdminTruncateRoomLog). Empty for every other action.
+//
+// Protocol 35 (#196): roomId names the room a TruncateRoomLog repaired; 0 otherwise.
 ServerAdminActionResultPayload :: struct {
 	action:        AdminAction,
 	userId:        int,
@@ -1877,6 +1887,7 @@ ServerAdminActionResultPayload :: struct {
 	requestId:     int,
 	blobId:        AttachmentBlobID,
 	failedRoomIds: [dynamic]int,
+	roomId:        int,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
@@ -2274,6 +2285,8 @@ DatabaseQueryRequest :: union {
 	DatabaseMessageChangeRequest,
 	// Protocol 34 (#78): a rejected key envelope.
 	DatabaseRejectRoomKeyEnvelopeRequest,
+	// Member log repair (protocol 35, common/room_log_repair.odin).
+	DatabaseRoomLogRepairRequest,
 }
 
 DatabaseUserIdentityRequest :: struct {
@@ -2596,6 +2609,7 @@ DatabaseQueryResult :: union {
 	DatabaseAttachmentResult,
 	DatabaseMessageChangeResult,
 	DatabaseRejectRoomKeyEnvelopeResult,
+	DatabaseRoomLogRepairResult,
 }
 
 // userId is 0 when the identity could not be resolved, for example when the nickname is bound

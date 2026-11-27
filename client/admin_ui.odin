@@ -620,8 +620,10 @@ adminBanFailedRoomsStatus :: proc(
 	strings.write_string(
 		&builder,
 		single \
-		? ". Its member list is damaged or was busy; ban them again to retry." \
-		: ". Their member lists are damaged or were busy; ban them again to retry.",
+		? ". Its member list is damaged or was busy: ban them again to retry, and if it " +
+		  "stays, use Check member logs under Member logs to repair it." \
+		: ". Their member lists are damaged or were busy: ban them again to retry, and if " +
+		  "one stays, use Check member logs under Member logs to repair it.",
 	)
 	return strings.to_string(builder)
 }

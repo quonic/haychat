@@ -76,6 +76,10 @@ PendingDBRequestType :: enum {
 	// an edit fetch, whose one statement checks everything. It outlives its peer's disconnect
 	// like Attachment, so an applied delete always removes its files and tells the readers.
 	MessageChange,
+	// Member log repair (router_room_log_repair.odin, protocol 35): a status or a truncation.
+	// It outlives its peer's disconnect like MessageChange, so an applied truncation is always
+	// fanned out. adminAction is TruncateRoomLog for a truncation.
+	RoomLogRepair,
 }
 
 PendingDBRequest :: struct {
@@ -418,7 +422,8 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 		   request.requestType != .Register &&
 		   request.requestType != .ResolveUserIdentity &&
 		   request.requestType != .Attachment &&
-		   request.requestType != .MessageChange {
+		   request.requestType != .MessageChange &&
+		   request.requestType != .RoomLogRepair {
 			append(&requestIDs, requestID)
 		}
 	}
@@ -870,7 +875,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 		case .VisibleRecipients, .LoadRestrictedUsers, .RestrictedChanges:
 		case .Attachment:
 			MainRouterState_attachmentDatabaseFailed(pm, state, request)
-		case .MessageChange:
+		case .MessageChange, .RoomLogRepair:
 			if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
 				MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			}
@@ -1655,6 +1660,10 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientDeleteDirectMessage(pm, state, peerID, packet.payload)
 	case .ClientFetchMessageEdits:
 		MainRouterState_handleClientFetchMessageEdits(pm, state, peerID, packet.payload)
+	case .ClientAdminRoomLogStatus:
+		MainRouterState_handleClientAdminRoomLogStatus(pm, state, peerID, packet.payload)
+	case .ClientAdminTruncateRoomLog:
+		MainRouterState_handleClientAdminTruncateRoomLog(pm, state, peerID, packet.payload)
 	case:
 		MainRouterState_sendProtocolError(pm, state, peerID, "Unsupported message type")
 	}
@@ -2308,6 +2317,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleAttachmentResult(pm, state, request, response)
 	case .MessageChange:
 		MainRouterState_handleMessageChangeResult(pm, state, request, response)
+	case .RoomLogRepair:
+		MainRouterState_handleRoomLogRepairResult(pm, state, request, response)
 	}
 }
 

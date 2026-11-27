@@ -851,3 +851,94 @@ testRoomLogServerRemovesTheLastManager :: proc(t: ^testing.T) {
 		fmt.tprintf("expected the Members page with no manager, got %v", view),
 	)
 }
+
+// Protocol 35 (#196): an admin truncated the room's log. A client that verified a later
+// version fails the room (Rollback, the member-list warning) on the ServerRoomLog whose head is
+// below it; one at the new head carries on without fetching; and a whole-log fetch whose next
+// page says the head is now lower ends the log there instead of fetching on.
+@(test)
+testRoomLogTruncatedHeadFailsOnlyLaterHeads :: proc(t: ^testing.T) {
+	roomLogTestBegin()
+	defer roomLogTestEnd()
+	defer free_all(context.temp_allocator)
+	_, serverKey, _ := common.generateIdentityKeyPair()
+	alice := roomLogTestState(serverKey, ROOM_LOG_TEST_ALICE, true)
+	defer State_deinit(&alice)
+	bob := roomLogTestState(serverKey, ROOM_LOG_TEST_BOB, false)
+	defer State_deinit(&bob)
+	carol := roomLogTestState(serverKey, ROOM_LOG_TEST_CAROL, false)
+	defer State_deinit(&carol)
+	roomLogTestDirectory(&alice, {ROOM_LOG_TEST_ALICE}, ROOM_LOG_TEST_ALICE, ROOM_LOG_TEST_BOB)
+	aliceBundle := roomLogTestBundle(&alice, ROOM_LOG_TEST_ALICE)
+	roomLogTestPin(&alice, roomLogTestBundle(&bob, ROOM_LOG_TEST_BOB))
+	create := roomLogTestCreateRoom(&alice)
+	roomLogTestDeliver(&alice, 0, 1, create)
+	State_addRoomMember(&alice, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM, ROOM_LOG_TEST_BOB)
+	add := roomLogTestLastAppend()
+	roomLogTestDeliver(&alice, 1, 2, add)
+	assert(roomLogTestStatus(&alice) == .Verified, "expected alice verified at version 2")
+
+	// bob verified only version 2 too; the server truncates to 2: nothing changes for him.
+	roomLogTestPin(&bob, aliceBundle)
+	roomLogTestListRoom(&bob, 2, true)
+	roomLogTestDeliver(&bob, 0, 2, create, add)
+	fetches := len(roomLogTestFetches)
+	roomLogTestDeliver(&bob, 2, 2)
+	assert(
+		roomLogTestStatus(&bob) == .Verified && len(roomLogTestFetches) == fetches,
+		"expected a head at bob's verified version to change nothing and fetch nothing",
+	)
+
+	// The head goes back to 1 below alice's verified 2: the room fails for her, for good.
+	roomLogTestDeliver(&alice, 1, 1)
+	room := State_findRoomLog(&alice, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	assert(
+		room.status == .Failed && room.failure == .Rollback,
+		fmt.tprintf("expected alice's room failed as a rollback, got %v %v", room.status,
+			room.failure),
+	)
+	assert(
+		alice.chat_status_message == ROOM_LOG_CHANGED_WARNING,
+		"expected the member-list warning",
+	)
+	fetches = len(roomLogTestFetches)
+	roomLogTestDeliver(&alice, 1, 1)
+	roomLogTestListRoom(&alice, 1, true)
+	assert(len(roomLogTestFetches) == fetches, "expected a failed room never fetched again")
+
+	// carol, with nothing verified, is fetching the whole log page by page when it is
+	// truncated: the next page's head ends it at version 1, which she verifies, and she asks for
+	// nothing more.
+	roomLogTestPin(&carol, aliceBundle)
+	roomLogTestListRoom(&carol, 2, true)
+	page := ClientTransportRuntimeEvent {
+		kind            = .RoomLogReceived,
+		serverID        = ROOM_LOG_TEST_SERVER,
+		roomID          = ROOM_LOG_TEST_ROOM,
+		logAfterVersion = 0,
+		logHeadVersion  = 2,
+		hasOlder        = true,
+	}
+	for entry in ([][]u8{create, add}) {
+		copied := make([]u8, len(entry))
+		copy(copied, entry)
+		append(&page.logEntries, copied)
+	}
+	State_applyRuntimeEvent(&carol, &page)
+	ClientTransportRuntimeEvent_deinit(&page)
+	assert(
+		roomLogTestStatus(&carol) == .Loading &&
+		roomLogTestFetches[len(roomLogTestFetches) - 1] == 2,
+		"expected carol to ask for the page after version 2",
+	)
+	fetches = len(roomLogTestFetches)
+	roomLogTestDeliver(&carol, 2, 1)
+	verified := State_roomLogVerified(&carol, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	assert(
+		verified != nil &&
+		verified.version == 1 &&
+		!common.RoomLogState_isMember(verified^, ROOM_LOG_TEST_BOB),
+		"expected carol's log verified at version 1, without bob",
+	)
+	assert(len(roomLogTestFetches) == fetches, "expected carol to fetch nothing more")
+}

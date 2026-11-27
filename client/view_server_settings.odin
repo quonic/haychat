@@ -29,7 +29,10 @@ import "ui"
 //
 // Storage (attachments plan F4; admins), after the Admin section: admin-storage-refresh
 // (server ID). Removed files (protocol 29; admins), after Storage: admin-removals-refresh and
-// admin-removals-more (server ID).
+// admin-removals-more (server ID). Member logs (protocol 35, #196; admins), after Removed
+// files: admin-room-logs-check (server ID), and per damaged room admin-room-log-truncate,
+// then in its confirmation admin-room-log-truncate-confirm and admin-room-log-truncate-cancel
+// (server and room ID).
 
 SERVER_SETTINGS_COLUMN_WIDTH :: 520
 SERVER_SETTINGS_SHORT_WIDTH :: 96
@@ -390,6 +393,7 @@ viewServerSettings :: proc(
 	adminAction: AdminSectionAction
 	storageRefresh := false
 	removalsAction := AttachmentRemovalsAction.None
+	roomLogAction: RoomLogRepairAction
 	if view.admin.visible {
 		adminAction = viewAdminSection(state, ctx, &column, view.admin, serverID, area, scrollID)
 		_ = ui.cutTop(&column, sectionGap)
@@ -399,6 +403,9 @@ viewServerSettings :: proc(
 			_ = ui.cutTop(&column, sectionGap)
 			// Removed files (protocol 29, #138): the removal log, next to Storage.
 			removalsAction = viewAttachmentRemovals(state, ctx, &column, serverID)
+			_ = ui.cutTop(&column, sectionGap)
+			// Member logs (protocol 35, #196): damaged encrypted rooms and their repair.
+			roomLogAction = viewRoomLogRepair(state, ctx, &column, serverID)
 			_ = ui.cutTop(&column, sectionGap)
 		}
 	}
@@ -492,6 +499,11 @@ viewServerSettings :: proc(
 	if len(removalsError) > 0 {
 		delete(state.serverSettings.error)
 		state.serverSettings.error = strings.clone(removalsError)
+	}
+	if roomLogError := runRoomLogRepairAction(state, serverID, roomLogAction);
+	   len(roomLogError) > 0 {
+		delete(state.serverSettings.error)
+		state.serverSettings.error = strings.clone(roomLogError)
 	}
 	if adminAction.registration.kind != .None {
 		runRegistrationAdminAction(
@@ -1340,4 +1352,121 @@ viewAdminConfirm :: proc(
 		action = {kind = .CancelConfirm, userID = userID}
 	}
 	return
+}
+
+// What Member logs asks for (protocol 35, #196).
+RoomLogRepairAction :: struct {
+	kind:      RoomLogRepairActionKind,
+	roomID:    int,
+	toVersion: int,
+}
+
+RoomLogRepairActionKind :: enum u8 {
+	None,
+	Check,
+	OpenConfirm,
+	CancelConfirm,
+	Truncate,
+}
+
+// Member logs (admins, protocol 35, #196), after Removed files: Check member logs replays
+// every encrypted room's member list; each damaged one shows why, with Truncate log to
+// version N… behind a confirmation that says what members will see.
+viewRoomLogRepair :: proc(
+	state: ^State,
+	ctx: ^ui.Context,
+	column: ^ui.Rect,
+	serverID: int,
+) -> RoomLogRepairAction {
+	view := buildRoomLogRepairView(state, serverID)
+	action: RoomLogRepairAction
+	if !view.visible {
+		return action
+	}
+	rowH := ui.dp(ctx, ROW_HEIGHT)
+	{
+		header := ui.cutTop(column, rowH)
+		checkControl := AdminControl {
+			label   = view.pending ? "Checking…" : ROOM_LOG_REPAIR_CHECK_LABEL,
+			enabled = !view.pending,
+		}
+		checkW := ui.textSize(ui.textGet(ctx, 0, .Regular, checkControl.label)).x
+		checkW += ui.dp(ctx, ctx.theme.padding * 3)
+		checkRect := header
+		_ = ui.cutLeft(&checkRect, header.w - checkW)
+		if adminButton(ctx, &checkRect, ui.idOf("admin-room-logs-check", serverID), checkControl) {
+			action = {kind = .Check}
+		}
+		ui.label(ctx, header, "Member logs", ctx.theme.fgMuted, .Bold)
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+	}
+	serverSettingsWrapped(ctx, column, view.summary, ctx.theme.fgMuted)
+	if len(view.error) > 0 {
+		serverSettingsWrapped(ctx, column, view.error, ctx.theme.danger)
+	}
+	form := &state.serverSettings
+	for row in view.rows {
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		ui.label(ctx, ui.cutTop(column, ui.lineHeight(ctx)), row.roomName, ctx.theme.fg, .Bold)
+		serverSettingsWrapped(ctx, column, row.detail, ctx.theme.fgMuted)
+		if row.toVersion == 0 {
+			continue
+		}
+		confirming :=
+			form.roomLogConfirmRoomID == row.roomID && form.roomLogConfirmVersion == row.toVersion
+		if !confirming {
+			buttons := ui.cutTop(column, rowH)
+			if adminButton(
+				ctx,
+				&buttons,
+				ui.idOf("admin-room-log-truncate", serverID, row.roomID),
+				AdminControl{label = row.actionLabel, enabled = true},
+				danger = true,
+			) {
+				action = {kind = .OpenConfirm, roomID = row.roomID, toVersion = row.toVersion}
+			}
+			continue
+		}
+		serverSettingsWrapped(ctx, column, row.confirmText, ctx.theme.fg)
+		_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
+		buttons := ui.cutTop(column, rowH)
+		if adminButton(
+			ctx,
+			&buttons,
+			ui.idOf("admin-room-log-truncate-confirm", serverID, row.roomID),
+			AdminControl{label = fmt.tprintf("Truncate to version %d", row.toVersion), enabled = true},
+			danger = true,
+		) {
+			action = {kind = .Truncate, roomID = row.roomID, toVersion = row.toVersion}
+		}
+		if adminButton(
+			ctx,
+			&buttons,
+			ui.idOf("admin-room-log-truncate-cancel", serverID, row.roomID),
+			AdminControl{label = "Cancel", enabled = true},
+		) {
+			action = {kind = .CancelConfirm}
+		}
+	}
+	return action
+}
+
+// Runs what Member logs asked for. Returns why it could not, or "".
+runRoomLogRepairAction :: proc(state: ^State, serverID: int, action: RoomLogRepairAction) -> string {
+	form := &state.serverSettings
+	switch action.kind {
+	case .None:
+	case .Check:
+		form.roomLogConfirmRoomID = 0
+		return State_requestRoomLogStatus(state, serverID)
+	case .OpenConfirm:
+		form.roomLogConfirmRoomID = action.roomID
+		form.roomLogConfirmVersion = action.toVersion
+	case .CancelConfirm:
+		form.roomLogConfirmRoomID = 0
+	case .Truncate:
+		form.roomLogConfirmRoomID = 0
+		return State_truncateRoomLog(state, serverID, action.roomID, action.toVersion)
+	}
+	return ""
 }
