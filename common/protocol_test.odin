@@ -156,6 +156,8 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerMessageEdits, 227},
 	// Protocol 31 (#73: room changes for room managers).
 	{.ServerAdminRoomChanged, 228},
+	// Protocol 32 (#78: rejecting a key envelope that does not open).
+	{.ClientRejectRoomKeyEnvelope, 229},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -551,11 +553,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// chatMessageId and directMessageId in ServerAttachmentRemoved); 30 added editing and
 	// deleting messages (#76: ClientEditRoomMessage ... ServerMessageEdits, and editCount,
 	// lastEdit, deleted and deletion on stored messages and conversation summaries); 31 added
-	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes.
+	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes; 32
+	// added ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open
+	// and the next one is stored.
 	assert(
-		protocolVersion == 31,
+		protocolVersion == 32,
 		fmt.tprintf(
-			"expected protocol version 31 for admin room changes, got %d",
+			"expected protocol version 32 for rejected room key envelopes, got %d",
 			protocolVersion,
 		),
 	)
@@ -2027,4 +2031,22 @@ testAdminRoomChangedPayloadRoundTrips :: proc(t: ^testing.T) {
 			),
 		)
 	}
+}
+
+// Protocol 32 (#78): ClientRejectRoomKeyEnvelope names only the envelope.
+@(test)
+testRejectRoomKeyEnvelopePayloadRoundTrips :: proc(t: ^testing.T) {
+	_ = t
+	encoded, err := cbor.marshal(ClientRejectRoomKeyEnvelopePayload{envelopeId = 4242})
+	assert(err == nil, "expected ClientRejectRoomKeyEnvelopePayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ClientRejectRoomKeyEnvelopePayload
+	assert(
+		cbor.unmarshal(encoded, &decoded) == nil,
+		"expected ClientRejectRoomKeyEnvelopePayload to decode",
+	)
+	assert(
+		decoded.envelopeId == 4242,
+		fmt.tprintf("expected envelope 4242, got %d", decoded.envelopeId),
+	)
 }
