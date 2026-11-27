@@ -35,8 +35,11 @@ ClientServerTransport_translateRegistrationPacket :: proc(
 			true
 
 	case .ServerInviteCreated:
+		// The code is decoded through a WipingAllocator (#189); the event owns it from here and
+		// wipes it when freed (ClientTransportRuntimeEvent_deinit).
 		payload: common.ServerInviteCreatedPayload
-		if cbor.unmarshal(innerPacket.payload, &payload) != nil || payload.invite.id <= 0 {
+		decodeErr := common.unmarshalSecretPayload(innerPacket.payload, &payload)
+		if decodeErr != nil || payload.invite.id <= 0 {
 			common.ServerInviteCreatedPayload_deinit(&payload)
 			return ClientServerTransport_registrationInvalid(
 					transport,

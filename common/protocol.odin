@@ -87,8 +87,7 @@ ClientRegisterRequest :: struct {
 
 ClientRegisterRequest_deinit :: proc(request: ^ClientRegisterRequest) {
 	wipeAndDeleteString(&request.inviteCode)
-	delete(request.reason)
-	request.reason = ""
+	wipeAndDeleteString(&request.reason)
 }
 
 // ServerRegisterResponse (wire value 15; protocol 25) answers one ClientRegister, encrypted.

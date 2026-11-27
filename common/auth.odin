@@ -1354,8 +1354,8 @@ sealPacketForSession :: proc(
 // The decrypted CBOR is wiped before it is freed, and the inner packet is decoded with a
 // WipingAllocator, so the copies cbor.unmarshal outgrows while it reads a payload of more than
 // 1 KiB are wiped too (#111). The returned payload is a block of the caller's context
-// allocator, freed with delete as before; wiping it, and what handlers decode from it, is the
-// caller's.
+// allocator; the caller frees it with wipeAndDeleteBytes once its handler is done, and decodes
+// payloads that carry secrets with unmarshalSecretPayload (#189).
 openPacketForSession :: proc(state: ^TransportState, outerPacket: Packet) -> (Packet, bool) {
 	if !TransportState_canEncrypt(state) {
 		return {}, false

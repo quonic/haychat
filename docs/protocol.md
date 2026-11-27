@@ -550,7 +550,9 @@ D7-D19). The rules in user terms are in
   account. `reason` 0..500 characters, needed (1..) when the code needs approval; clients leave
   that check to the server, since only it knows whether the code skips approval. One at a time.
   The client wipes the sealed packet's CBOR plaintext before freeing it, and the copies
-  `cbor.marshal` outgrew while encoding it (#111).
+  `cbor.marshal` outgrew while encoding it (#111). The server wipes the opened payload, and
+  decodes the code and reason with `common.unmarshalSecretPayload` and wipes them when it frees
+  them (#189); it passes on only the code's hash and the reason.
 - **`ServerRegisterResponse{status, message, auth}`** (sealed): `Created` 0 (the session is
   authenticated now; `auth` holds the `ServerAuthSuccess` fields, and the `NetworkVoiceSession`,
   the new account's `ServerUserUpdated` and its presence follow as after a sign-in, with no

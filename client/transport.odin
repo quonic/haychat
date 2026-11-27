@@ -2422,7 +2422,8 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 				),
 				true
 		}
-		defer delete(innerPacket.payload)
+		// The decrypted payload is wiped once it is translated (#189).
+		defer common.wipeAndDeleteBytes(&innerPacket.payload)
 
 		return ClientServerTransport_translateRuntimeOpenedPacket(transport, innerPacket)
 

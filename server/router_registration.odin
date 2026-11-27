@@ -674,7 +674,8 @@ MainRouterState_handleRegisteringPacket :: proc(
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to open encrypted packet")
 		return
 	}
-	defer delete(innerPacket.payload)
+	// The decrypted payload holds the invite code and reason: wiped once handled (#189).
+	defer common.wipeAndDeleteBytes(&innerPacket.payload)
 	MainRouterState_setPeerSession(state, peerID, session)
 	#partial switch innerPacket.messageType {
 	case .ClientRegister:
@@ -697,8 +698,10 @@ MainRouterState_handleClientRegister :: proc(
 		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientRegister")
 		return
 	}
+	// The invite code and reason are decoded through a WipingAllocator and wiped when freed
+	// (#189); the code's parsed bytes are wiped once hashed.
 	req: common.ClientRegisterRequest
-	decodeErr := cbor.unmarshal(payload, &req)
+	decodeErr := common.unmarshalSecretPayload(payload, &req)
 	defer common.ClientRegisterRequest_deinit(&req)
 	session.registerAttempts += 1
 	refusal := ""
@@ -714,6 +717,7 @@ MainRouterState_handleClientRegister :: proc(
 			refusal = common.INVITE_CODE_INVALID_MESSAGE
 		}
 		code = parsed
+		crypto.zero_explicit(&parsed, size_of(parsed))
 		hasCode = parsedOK
 	}
 	if len(refusal) > 0 {
