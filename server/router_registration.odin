@@ -34,8 +34,12 @@ import "core:time"
 // Restricted visibility (D17): presence, ServerUserUpdated and ServerUserKeyChanged about an
 // account go through MainRouterState_sendAboutUser. A recipient sees the account at once when
 // it is the account, holds ApproveRegistrations (admins hold every permission), or neither of
-// the two is restricted; otherwise the database decides (DATABASE_SHARED_ROOMS_SQL: a shared
-// room, or an admin on either side) before the message goes out. Which accounts are restricted
+// the two is restricted; otherwise the database decides before the message goes out: for
+// presence and ServerUserUpdated DATABASE_SHARED_ROOMS_SQL (a shared room, or an admin on
+// either side), for ServerUserKeyChanged (#190) DATABASE_KEY_CHANGE_RECIPIENTS_SQL, the key
+// fetch's own rule (DATABASE_USER_KEY_VISIBLE_*), so every account that may fetch the key
+// hears that it changed (an old direct conversation, a readable room message's author, an
+// encrypted room's log, a room key envelope). Which accounts are restricted
 // is MainRouterState.restrictedUserIDs, loaded from the database when the router starts and
 // kept current by every path that changes users.restricted (sign-in, sign-up, an admin's
 // ClientAdminSetRestricted) and (#116) by the database's change notifications, which bring a
@@ -138,7 +142,8 @@ MainRouterState_seesUserAtOnce :: proc(
 
 // Sends payload about subjectUserID to every authenticated session (but excludePeerID) that
 // may see it (D17). Sessions the router cannot decide for are asked of the database in one
-// DatabaseSharedRoomsRequest, and get the message when it answers.
+// DatabaseSharedRoomsRequest (with keyRecipients for a key change), and get the message when it
+// answers.
 MainRouterState_sendAboutUser :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -174,7 +179,11 @@ MainRouterState_sendAboutUser :: proc(
 		pm,
 		state,
 		0,
-		common.DatabaseSharedRoomsRequest{userId = subjectUserID, candidateUserIds = candidates},
+		common.DatabaseSharedRoomsRequest {
+			userId = subjectUserID,
+			candidateUserIds = candidates,
+			keyRecipients = payload.kind == .KeyChanged,
+		},
 		PendingDBRequest {
 			requestType = .VisibleRecipients,
 			targetUserID = subjectUserID,
@@ -296,13 +305,8 @@ MainRouterState_identityRequestIsLive :: proc(
 	state: ^MainRouterState,
 	request: PendingDBRequest,
 ) -> bool {
-	session, ok := state.peerSessions[request.peerID]
-	if !ok {
-		return false
-	}
-	sessionID := session.sessionID
-	requestSessionID := request.sessionID
-	return common.constantTimeEqual(sessionID[:], requestSessionID[:])
+	_, live := MainRouterState_askingSession(state, request.peerID, request.sessionID)
+	return live
 }
 
 // #165: the identity statement declined the key's approved request because its room went away
@@ -670,7 +674,8 @@ MainRouterState_handleRegisteringPacket :: proc(
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to open encrypted packet")
 		return
 	}
-	defer delete(innerPacket.payload)
+	// The decrypted payload holds the invite code and reason: wiped once handled (#189).
+	defer common.wipeAndDeleteBytes(&innerPacket.payload)
 	MainRouterState_setPeerSession(state, peerID, session)
 	#partial switch innerPacket.messageType {
 	case .ClientRegister:
@@ -693,8 +698,10 @@ MainRouterState_handleClientRegister :: proc(
 		MainRouterState_protocolViolation(pm, state, peerID, "Unexpected ClientRegister")
 		return
 	}
+	// The invite code and reason are decoded through a WipingAllocator and wiped when freed
+	// (#189); the code's parsed bytes are wiped once hashed.
 	req: common.ClientRegisterRequest
-	decodeErr := cbor.unmarshal(payload, &req)
+	decodeErr := common.unmarshalSecretPayload(payload, &req)
 	defer common.ClientRegisterRequest_deinit(&req)
 	session.registerAttempts += 1
 	refusal := ""
@@ -710,6 +717,7 @@ MainRouterState_handleClientRegister :: proc(
 			refusal = common.INVITE_CODE_INVALID_MESSAGE
 		}
 		code = parsed
+		crypto.zero_explicit(&parsed, size_of(parsed))
 		hasCode = parsedOK
 	}
 	if len(refusal) > 0 {
@@ -735,6 +743,7 @@ MainRouterState_handleClientRegister :: proc(
 		},
 		PendingDBRequest {
 			requestType = .Register,
+			sessionID = session.sessionID,
 			identityPublicKey = session.clientIdentityPublicKey,
 		},
 	)
@@ -857,17 +866,10 @@ MainRouterState_handleRegisterResult :: proc(
 	if created {
 		MainRouterState_setUserRestricted(state, registered.userId, registered.isRestricted)
 	}
-	session, sessionOK := &state.peerSessions[request.peerID]
-	// A reused peer ID: the answer belongs to the key that asked, not to this session.
-	sessionKey: common.IdentityPublicKeyBytes
-	if sessionOK {
-		sessionKey = session.clientIdentityPublicKey
-	}
-	requestKey := request.identityPublicKey
-	if !sessionOK ||
-	   !session.isRegistering ||
-	   !session.registerInFlight ||
-	   !common.constantTimeEqual(sessionKey[:], requestKey[:]) {
+	// A reused peer ID: the answer belongs to the session that asked, not to a new one, even
+	// of the same key (#188).
+	session, sessionOK := MainRouterState_askingSession(state, request.peerID, request.sessionID)
+	if !sessionOK || !session.isRegistering || !session.registerInFlight {
 		if created {
 			// #166: the applicant left before the answer; the account still exists.
 			MainRouterState_announceAccountWithoutSession(

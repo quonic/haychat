@@ -559,6 +559,9 @@ HeadlessAdminResultJSON :: struct {
 	// Protocol 28: the attachment an attachment-remove removed (hex), left out for every other
 	// action so their lines stay as they were.
 	blobID:    string `json:"blobID,omitempty"`,
+	// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from, left out
+	// when there are none.
+	failedRoomIDs: []int `json:"failedRoomIDs,omitempty"`,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -1660,6 +1663,7 @@ headlessRenderRuntimeEvent :: proc(
 				inviteID = event.inviteID,
 				requestID = event.requestID,
 				blobID = headlessAdminResultBlob(event.blobID),
+				failedRoomIDs = event.failedRoomIDs[:],
 			},
 			allocator,
 		)

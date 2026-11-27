@@ -156,7 +156,7 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerMessageEdits, 227},
 	// Protocol 31 (#73: room changes for room managers).
 	{.ServerAdminRoomChanged, 228},
-	// Protocol 32 (#78: rejecting a key envelope that does not open).
+	// Protocol 33 (#78: rejecting a key envelope that does not open).
 	{.ClientRejectRoomKeyEnvelope, 229},
 }
 
@@ -396,10 +396,15 @@ testAdminPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		)
 	}
 	{
+		// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from.
+		failed := make([dynamic]int, 0, 2)
+		defer delete(failed)
+		append(&failed, 4, 9)
 		original := ServerAdminActionResultPayload {
-			action  = .Ban,
-			userId  = 7,
-			message = "bob is banned",
+			action        = .Ban,
+			userId        = 7,
+			message       = "bob is banned",
+			failedRoomIds = failed,
 		}
 		encoded, err := cbor.marshal(original)
 		assert(err == nil, "expected ServerAdminActionResultPayload encoding to succeed")
@@ -408,8 +413,11 @@ testAdminPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected admin result decoding")
 		defer ServerAdminActionResultPayload_deinit(&decoded)
 		assert(
-			decoded.action == .Ban && decoded.userId == 7 && decoded.message == "bob is banned",
-			fmt.tprintf("expected the ban result, got %v", decoded),
+			decoded.action == .Ban && decoded.userId == 7 && decoded.message == "bob is banned" &&
+			len(decoded.failedRoomIds) == 2 &&
+			decoded.failedRoomIds[0] == 4 &&
+			decoded.failedRoomIds[1] == 9,
+			fmt.tprintf("expected the ban result with rooms 4 and 9, got %v", decoded),
 		)
 	}
 	{
@@ -554,12 +562,14 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// deleting messages (#76: ClientEditRoomMessage ... ServerMessageEdits, and editCount,
 	// lastEdit, deleted and deletion on stored messages and conversation summaries); 31 added
 	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes; 32
-	// added ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open
-	// and the next one is stored.
+	// added ServerAdminActionResult.failedRoomIds (#72: a ban removes the account from every
+	// encrypted room it is in and names the rooms it could not change); 33 added
+	// ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open and
+	// the next one is stored.
 	assert(
-		protocolVersion == 32,
+		protocolVersion == 33,
 		fmt.tprintf(
-			"expected protocol version 32 for rejected room key envelopes, got %d",
+			"expected protocol version 33 for rejected room key envelopes, got %d",
 			protocolVersion,
 		),
 	)
@@ -2033,7 +2043,7 @@ testAdminRoomChangedPayloadRoundTrips :: proc(t: ^testing.T) {
 	}
 }
 
-// Protocol 32 (#78): ClientRejectRoomKeyEnvelope names only the envelope.
+// Protocol 33 (#78): ClientRejectRoomKeyEnvelope names only the envelope.
 @(test)
 testRejectRoomKeyEnvelopePayloadRoundTrips :: proc(t: ^testing.T) {
 	_ = t

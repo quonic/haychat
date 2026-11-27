@@ -803,7 +803,11 @@ databaseExecuteSharedRooms :: proc(
 	candidatesParam := databaseIntArrayParam(request.candidateUserIds[:])
 	defer delete(candidatesParam)
 	params := [?][^]byte{transmute([^]byte)userParam, transmute([^]byte)candidatesParam}
-	result := databaseExecParams(conn, DATABASE_SHARED_ROOMS_SQL, params[:])
+	statement: cstring = DATABASE_SHARED_ROOMS_SQL
+	if request.keyRecipients {
+		statement = DATABASE_KEY_CHANGE_RECIPIENTS_SQL
+	}
+	result := databaseExecParams(conn, statement, params[:])
 	if result == nil {
 		return databaseConnectionError(conn)
 	}

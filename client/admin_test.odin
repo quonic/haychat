@@ -754,6 +754,26 @@ testHeadlessAdminCommandsAndEvents :: proc(t: ^testing.T) {
 			fmt.tprintf("expected %v to count for wait", entry.kind),
 		)
 	}
+	// Protocol 32 (#72): the encrypted rooms a ban could not change, only when there are some.
+	failed := ClientTransportRuntimeEvent {
+		kind        = .AdminActionResult,
+		serverID    = 955,
+		adminAction = .Ban,
+		peerUserID  = 9,
+		message     = strings.clone("Banned bob; 1 encrypted room could not be changed"),
+	}
+	append(&failed.failedRoomIDs, 12)
+	headlessHandleRuntimeEvent(&harness, &failed)
+	ClientTransportRuntimeEvent_deinit(&failed)
+	testExpectString(
+		t,
+		testHeadlessTakeOutput(&builder),
+		`{"event":"admin_result","serverID":955,"action":"ban","userID":9,` +
+		`"message":"Banned bob; 1 encrypted room could not be changed","roleID":0,` +
+		`"inviteID":0,"requestID":0,"failedRoomIDs":[12]}` +
+		"\n",
+		"the ban result naming the room it could not change",
+	)
 	testing.expect(
 		t,
 		State_serverConnection(&harness.state, 955).status == .Failed,

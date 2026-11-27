@@ -1071,3 +1071,298 @@ testRoomLogServerRules :: proc(t: ^testing.T) {
 	assert(roomLogAppendOutcomeFor(.BadSignature) == .Invalid, "expected invalid")
 	assert(roomLogAppendOutcomeFor(.PinMismatch) == .Invalid, "expected invalid")
 }
+
+// Protocol 32 (#72): what a ban did to encrypted rooms, copied to the temp allocator. removed
+// lists "room@version" per removal; members and entry are the first removal's.
+@(private = "file")
+RoomLogTestBan :: struct {
+	outcome: common.DatabaseAdminOutcome,
+	changed: bool,
+	removed: string,
+	members: string,
+	entry:   []u8,
+	failed:  string,
+}
+
+@(private = "file")
+roomLogTestBan :: proc(
+	conn: pg.Conn,
+	serverKey: common.IdentityPublicKeyBytes,
+	actorID, targetID: int,
+	banned: bool,
+) -> (
+	ban: RoomLogTestBan,
+) {
+	response := databaseExecuteRequest(
+		conn,
+		common.DatabaseAdminUserRequest {
+			action = .Ban,
+			actorUserId = actorID,
+			targetUserId = targetID,
+			banned = banned,
+			reason = "proof ban",
+			serverIdentityPublicKey = serverKey,
+		},
+	)
+	defer IPC__database_query_response_deinit(response)
+	got, ok := response.result.(common.DatabaseAdminUserResult)
+	assert(response.success && ok, fmt.tprintf("expected the ban to run: %s", response.message))
+	ban.outcome = got.outcome
+	ban.changed = got.changed
+	removed := strings.builder_make(context.temp_allocator)
+	for removal, index in got.banRemovals {
+		if index > 0 {
+			strings.write_byte(&removed, ',')
+		}
+		fmt.sbprintf(&removed, "%d@%d", removal.roomId, removal.logVersion)
+		if index == 0 {
+			ban.members = roomLogTestIDs(removal.memberUserIDs[:])
+			ban.entry = make([]u8, len(removal.logEntry), context.temp_allocator)
+			copy(ban.entry, removal.logEntry)
+		}
+	}
+	ban.removed = strings.to_string(removed)
+	ban.failed = roomLogTestIDs(got.failedRoomIDs[:])
+	return
+}
+
+// An encrypted Admin invite room alice creates and joins, with members added by her.
+@(private = "file")
+roomLogTestBanRoom :: proc(
+	conn: pg.Conn,
+	serverKey: common.IdentityPublicKeyBytes,
+	alice: RoomLogTestAccount,
+	name: string,
+	members: []RoomLogTestAccount,
+) -> RoomLogTestHead {
+	created := roomLogTestCreateRoom(conn, alice.userID, name, .AdminInvite)
+	head := RoomLogTestHead {
+		roomID = created.room.id,
+	}
+	managers := []RoomLogTestAccount{alice}
+	roomLogTestExpect(conn, serverKey, &head, alice.userID,
+		roomLogTestSign(serverKey, head, {action = .Create, actor = alice, access = .AdminInvite,
+			history = .FromJoin, joins = true, managers = managers}),
+		.Applied, "the Create")
+	for member in members {
+		roomLogTestExpect(conn, serverKey, &head, alice.userID,
+			roomLogTestSign(serverKey, head, {action = .Add, actor = alice, target = member}),
+			.Applied, "an add")
+	}
+	return head
+}
+
+// Stores an unsigned Add of target behind the server's back, so the log no longer replays.
+@(private = "file")
+roomLogTestDamage :: proc(conn: pg.Conn, head: ^RoomLogTestHead, target: RoomLogTestAccount) {
+	entry := common.RoomLogEntry {
+		roomID            = head.roomID,
+		version           = head.version + 1,
+		prevHash          = head.hash,
+		action            = .Add,
+		targetUserID      = target.userID,
+		targetIdentityKey = target.publicKey,
+		createdAt         = 1,
+	}
+	buffer: [common.ROOM_LOG_ENTRY_MAX_BYTES]u8
+	n, err := common.encodeRoomLogEntry(entry, buffer[:])
+	assert(err == .None, "expected the forged add to encode")
+	entryHex := common.encodeBytesToHex(buffer[:n])
+	defer delete(entryHex)
+	databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"WITH i AS (INSERT INTO room_log_entries (room_id, version, entry) " +
+			"VALUES (%d, %d, decode('%s', 'hex')) RETURNING version), " +
+			"u AS (UPDATE rooms SET log_version = %d WHERE id = %d) " +
+			"SELECT version::text FROM i",
+			head.roomID,
+			head.version + 1,
+			entryHex,
+			head.version + 1,
+			head.roomID,
+		),
+	)
+	roomLogTestAdvance(head, buffer[:n])
+}
+
+@(private = "file")
+roomLogTestLogVersion :: proc(conn: pg.Conn, roomID: int) -> string {
+	return databaseAdminTestValue(
+		conn,
+		fmt.tprintf("SELECT log_version::text FROM rooms WHERE id = %d", roomID),
+	)
+}
+
+// Protocol 32 (#72): a ban removes the account from every encrypted room it is a member of, in
+// the ban's transaction, with the server's unsigned Remove: a room it is in loses it (a new
+// epoch the remaining members' next entry follows), a room it is not in is left alone, and a
+// room whose log is damaged is reported while the ban still applies. A refused ban removes
+// nothing, banning again retries only what is left, and an unban adds nobody back.
+@(test)
+testBanRemovesFromEncryptedRoomsAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "room_log_ban")
+	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
+	assert(serverKeyOK, "expected a server key")
+	alice := roomLogTestAccount(conn, "ban-alice")
+	databaseAdminTestGrant(conn, alice.userID)
+	bob := roomLogTestAccount(conn, "ban-bob")
+	carol := roomLogTestAccount(conn, "ban-carol")
+
+	member := roomLogTestBanRoom(conn, serverKey, alice, "ban-member", {bob, carol})
+	other := roomLogTestBanRoom(conn, serverKey, alice, "ban-other", {carol})
+	damaged := roomLogTestBanRoom(conn, serverKey, alice, "ban-damaged", {bob})
+	roomLogTestDamage(conn, &damaged, carol)
+
+	// carol is no admin: the statement's guards decide before any room is touched.
+	refused := roomLogTestBan(conn, serverKey, carol.userID, bob.userID, true)
+	assert(
+		refused.outcome == .NotAdmin && refused.removed == "" && refused.failed == "",
+		fmt.tprintf("expected carol's ban refused with nothing removed, got %v", refused),
+	)
+	assert(
+		roomLogTestLogVersion(conn, member.roomID) == "3" &&
+		roomLogTestMembers(conn, member.roomID) ==
+			roomLogTestIDs({alice.userID, bob.userID, carol.userID}),
+		"expected a refused ban to leave the member room alone",
+	)
+	self := roomLogTestBan(conn, serverKey, alice.userID, alice.userID, true)
+	assert(self.outcome == .SelfTarget && self.removed == "", "expected a self ban refused")
+
+	ban := roomLogTestBan(conn, serverKey, alice.userID, bob.userID, true)
+	assert(
+		ban.outcome == .Applied && ban.changed,
+		fmt.tprintf("expected alice's ban applied, got %v", ban),
+	)
+	assert(
+		ban.removed == fmt.tprintf("%d@4", member.roomID),
+		fmt.tprintf("expected bob removed from room %d only, got %q", member.roomID, ban.removed),
+	)
+	assert(
+		ban.members == roomLogTestIDs({alice.userID, carol.userID}),
+		fmt.tprintf("expected alice and carol left, got %q", ban.members),
+	)
+	assert(
+		ban.failed == roomLogTestIDs({damaged.roomID}),
+		fmt.tprintf("expected the damaged room %d reported, got %q", damaged.roomID, ban.failed),
+	)
+	managers: [common.ROOM_LOG_MANAGERS_MAX]common.RoomLogManager
+	removal, decodeErr := common.decodeRoomLogEntry(ban.entry, managers[:])
+	assert(
+		decodeErr == .None &&
+		removal.action == .Remove &&
+		removal.actorUserID == 0 &&
+		removal.targetUserID == bob.userID &&
+		removal.version == 4,
+		fmt.tprintf("expected the server's unsigned Remove of bob, got %v (%v)", removal,
+			decodeErr),
+	)
+	assert(
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf("SELECT (banned_at IS NOT NULL)::text FROM users WHERE id = %d",
+				bob.userID),
+		) == "true",
+		"expected bob banned",
+	)
+	assert(
+		roomLogTestMembers(conn, member.roomID) == roomLogTestIDs({alice.userID, carol.userID}) &&
+		roomLogTestLogVersion(conn, member.roomID) == "4",
+		"expected bob out of the member room at version 4",
+	)
+	assert(
+		roomLogTestMembers(conn, other.roomID) == roomLogTestIDs({alice.userID, carol.userID}) &&
+		roomLogTestLogVersion(conn, other.roomID) == "2",
+		"expected the room bob is not in left alone",
+	)
+	assert(
+		roomLogTestMembers(conn, damaged.roomID) == roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestLogVersion(conn, damaged.roomID) == fmt.tprintf("%d", damaged.version),
+		"expected the damaged room left as it was",
+	)
+	// The stored log still replays: alice's next entry follows the server's Remove.
+	roomLogTestAdvance(&member, ban.entry)
+	roomLogTestExpect(conn, serverKey, &member, alice.userID,
+		roomLogTestSign(serverKey, member, {action = .Remove, actor = alice, target = carol}),
+		.Applied, "alice's removal after the ban's")
+
+	// Banning again retries what is left: the damaged room, still reported.
+	again := roomLogTestBan(conn, serverKey, alice.userID, bob.userID, true)
+	assert(
+		again.outcome == .Applied && !again.changed && again.removed == "" &&
+		again.failed == roomLogTestIDs({damaged.roomID}),
+		fmt.tprintf("expected a second ban to change nothing but report the room, got %v",
+			again),
+	)
+
+	// An unban lifts the ban and adds bob back to nothing.
+	unban := roomLogTestBan(conn, serverKey, alice.userID, bob.userID, false)
+	assert(
+		unban.outcome == .Applied && unban.changed && unban.removed == "" && unban.failed == "",
+		fmt.tprintf("expected the unban applied alone, got %v", unban),
+	)
+	assert(
+		roomLogTestMembers(conn, member.roomID) == roomLogTestIDs({alice.userID}) &&
+		roomLogTestLogVersion(conn, member.roomID) == "5",
+		"expected the unban to leave the member room as it was",
+	)
+}
+
+// Protocol 32 (#72): a ban does not wait for a room another connection holds locked; it
+// reports the room and still applies, and removes the account from the others. The schema is
+// committed (the second connection must see it) and dropped by the test's cleanup.
+@(test)
+testBanReportsLockedEncryptedRoomAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn, schema := databaseMigrationTestOpen(t, "ban_locked")
+	databaseMigrationTestMigrate(conn, DATABASE_MIGRATIONS[:])
+	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
+	assert(serverKeyOK, "expected a server key")
+	alice := roomLogTestAccount(conn, "lock-alice")
+	databaseAdminTestGrant(conn, alice.userID)
+	bob := roomLogTestAccount(conn, "lock-bob")
+	unheld := roomLogTestBanRoom(conn, serverKey, alice, "lock-free", {bob})
+	held := roomLogTestBanRoom(conn, serverKey, alice, "lock-held", {bob})
+
+	// Opened after conn, so its cleanup (a rollback) runs before conn drops the schema.
+	holder := databaseSQLTestOpen(t)
+	databaseDefaultRoomTestExec(
+		holder,
+		"hold the room",
+		fmt.tprintf(
+			"SET search_path TO %s; BEGIN; SELECT id FROM rooms WHERE id = %d FOR UPDATE",
+			schema,
+			held.roomID,
+		),
+	)
+	ban := roomLogTestBan(conn, serverKey, alice.userID, bob.userID, true)
+	databaseDefaultRoomTestExec(holder, "release the room", "ROLLBACK")
+	assert(
+		ban.outcome == .Applied && ban.changed,
+		fmt.tprintf("expected the ban applied, got %v", ban),
+	)
+	assert(
+		ban.removed == fmt.tprintf("%d@3", unheld.roomID) &&
+		ban.failed == roomLogTestIDs({held.roomID}),
+		fmt.tprintf("expected room %d changed and %d reported, got %q and %q", unheld.roomID,
+			held.roomID, ban.removed, ban.failed),
+	)
+	assert(
+		roomLogTestMembers(conn, held.roomID) == roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestMembers(conn, unheld.roomID) == roomLogTestIDs({alice.userID}),
+		"expected bob still in the held room only",
+	)
+	// Once released, banning again removes him there too.
+	again := roomLogTestBan(conn, serverKey, alice.userID, bob.userID, true)
+	assert(
+		again.removed == fmt.tprintf("%d@3", held.roomID) && again.failed == "",
+		fmt.tprintf("expected the retry to remove bob from room %d, got %v", held.roomID, again),
+	)
+}

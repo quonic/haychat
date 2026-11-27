@@ -666,7 +666,7 @@ clients that saw it.
     access to it. A forwarded chain is checked against the sender's pin and the log like any other.
   - A chain that no online member holds stays unopened until one connects. The message shows
     "Waiting for this message's key".
-  - **Checking a forwarded key** (changed 2026-11-26, protocol 32, #78, the maintainer's option
+  - **Checking a forwarded key** (changed 2026-11-26, protocol 33, #78, the maintainer's option
     B2). The server stores the first copy of a chain per recipient, so a member could forward a
     wrong chain key, validly signed, ahead of the real one, and a wrap made for the recipient's
     old encryption key would block every later copy in the same way. Both only hide messages:

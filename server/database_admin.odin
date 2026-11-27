@@ -34,6 +34,13 @@ import "shared:pg"
 // missing target. Protocol 23 (#95) adds two more: the target's role IDs after the action
 // (comma separated) and its effective permission mask after it (database_roles.odin), and
 // protocol 25 one: whether the target is restricted after it.
+//
+// Protocol 32 (#72): a ban (banned true, also of an account already banned) is a transaction:
+// DATABASE_ADMIN_BAN_SQL decides and applies first, and only when it applied does
+// databaseRoomLogRemoveBanned (database_room_log.odin) write the server's unsigned Remove of the
+// account into every encrypted room it is a member of. A room whose log cannot change is
+// reported, not a reason to refuse the ban. An unban is still the one statement and adds the
+// account back to no room.
 
 @(private = "file")
 DATABASE_ADMIN_ACTOR_AND_TARGET_SQL ::
@@ -204,6 +211,50 @@ databaseAdminOutcomeFromText :: proc(text: string) -> (common.DatabaseAdminOutco
 }
 
 databaseExecuteAdminUser :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAdminUserRequest,
+) -> common.DatabaseQueryResponse {
+	if request.action == .Ban && request.banned {
+		return databaseExecuteAdminBan(conn, request)
+	}
+	return databaseRunAdminUserStatement(conn, request)
+}
+
+// A ban and its removals from encrypted rooms in one transaction (a savepoint inside the SQL
+// tests' own). The statement's guards decide first; a refusal or a database error rolls back
+// and changes nothing.
+@(private = "file")
+databaseExecuteAdminBan :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAdminUserRequest,
+) -> common.DatabaseQueryResponse {
+	transaction, beginOK := databaseRoomLogBegin(conn)
+	if !beginOK {
+		return databaseConnectionError(conn)
+	}
+	response := databaseRunAdminUserStatement(conn, request)
+	result, isResult := response.result.(common.DatabaseAdminUserResult)
+	if !response.success || !isResult || result.outcome != .Applied {
+		databaseRoomLogRollback(conn, transaction)
+		return response
+	}
+	failure, failed := databaseRoomLogRemoveBanned(conn, request, &result)
+	if failed {
+		databaseRoomLogRollback(conn, transaction)
+		IPC__admin_user_result_deinit(result)
+		return failure
+	}
+	if !databaseRoomLogCommit(conn, transaction) {
+		databaseRoomLogRollback(conn, transaction)
+		IPC__admin_user_result_deinit(result)
+		return databaseConnectionError(conn)
+	}
+	return databaseSuccess(result)
+}
+
+// The one statement of an admin action on an account.
+@(private = "file")
+databaseRunAdminUserStatement :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseAdminUserRequest,
 ) -> common.DatabaseQueryResponse {

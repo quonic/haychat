@@ -627,11 +627,9 @@ testMainRouterRefusesABannedSignIn :: proc(t: ^testing.T) {
 		h := routerTestHarness_init()
 		defer routerTestHarness_deinit(&h)
 		peerID := u32(1)
-		MainRouterState_sendDatabaseRequest(
-			&h.pm,
-			&h.state,
+		routerTestSendIdentityRequest(
+			&h,
 			peerID,
-			.ResolveUserIdentity,
 			common.DatabaseUserIdentityRequest{nickname = strings.clone("banned-user")},
 		)
 		identityQuery := routerPollDatabaseQuery(&h)

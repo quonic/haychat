@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -37,6 +38,8 @@ routerRegistrationTestBegin :: proc(
 	disconnectFirst := false,
 	// With disconnectFirst: a new connection takes the peer ID before the answer.
 	reusePeerID := false,
+	// #188: a zeroed key is generated and written back, a set one is signed in with again.
+	identityKey: ^common.IdentityPrivateKeyBytes = nil,
 ) -> RouterRegistrationTestClient {
 	if _, ok := h.state.peerSessions[peerID]; !ok {
 		h.state.connectedPeers[peerID] = true
@@ -44,6 +47,15 @@ routerRegistrationTestBegin :: proc(
 	}
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected a client identity key")
+	if identityKey != nil {
+		if identityKey^ == {} {
+			identityKey^ = clientPrivateKey
+		} else {
+			clientPrivateKey = identityKey^
+			clientPublicKey, identityOK = common.identityPublicKeyFromPrivateKey(clientPrivateKey)
+			assert(identityOK, "expected the given identity key's public key")
+		}
+	}
 	ephemeralPrivate, ephemeralPublic, ephemeralOK := common.generateKeyExchangeKeyPair()
 	assert(ephemeralOK, "expected a client ephemeral key")
 	defer ecdh.private_key_clear(&ephemeralPrivate)
@@ -636,6 +648,105 @@ testRestrictedPresenceIsFilteredPerRecipient :: proc(t: ^testing.T) {
 	routerTestExpectNoNetworkMessage(&h, "presence to carol, who shares no room")
 }
 
+// Answers the router's pending visibility check with userIDs.
+@(private = "file")
+routerRegistrationTestAnswerVisibility :: proc(
+	h: ^RouterTestHarness,
+	check: DatabaseQuery,
+	userIDs: ..int,
+) {
+	answer := make([dynamic]int, 0, len(userIDs))
+	append(&answer, ..userIDs)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		check.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseSharedRoomsResult{userIds = answer},
+		},
+	)
+}
+
+// #190: ServerUserKeyChanged about an unrestricted account reaches a restricted account only
+// after the database says it may fetch the key (the fetch's rule, not shared rooms): erin, who
+// has an old conversation with bob, hears of bob's new key; gail, who knows nobody, does not.
+@(test)
+testKeyChangeReachesRestrictedAccountsThatMayFetchTheKey :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	bob := routerCompleteHandshake(&h, 1, userID = 2, nickname = "bob")
+	defer common.TransportState_deinit(&bob)
+	h.state.connectedPeers[2] = true
+	MainRouterState_setPeerSession(&h.state, 2, RouterPeerSession_init())
+	erin := routerCompleteHandshake(&h, 2, userID = 5, nickname = "erin", isRestricted = true)
+	defer common.TransportState_deinit(&erin)
+	// erin's presence to bob waits for a check presence makes by shared rooms; nobody shares one.
+	erinPresence := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(erinPresence.request)
+	presenceCheck, presenceOK := erinPresence.request.(common.DatabaseSharedRoomsRequest)
+	assert(
+		presenceOK && presenceCheck.userId == 5 && !presenceCheck.keyRecipients,
+		fmt.tprintf("expected a shared rooms check for erin's presence, got %v", presenceCheck),
+	)
+	routerRegistrationTestAnswerVisibility(&h, erinPresence)
+	h.state.connectedPeers[3] = true
+	MainRouterState_setPeerSession(&h.state, 3, RouterPeerSession_init())
+	gail := routerCompleteHandshake(&h, 3, userID = 6, nickname = "gail", isRestricted = true)
+	defer common.TransportState_deinit(&gail)
+	gailPresence := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(gailPresence.request)
+	routerRegistrationTestAnswerVisibility(&h, gailPresence)
+	routerTestExpectNoNetworkMessage(&h, "presence nobody may see")
+
+	bundle := common.UserKeyBundle {
+		userId    = 2,
+		createdAt = 1_700_000_000,
+	}
+	bundle.encryptionPublicKey[0] = 7
+	MainRouterState_handlePublishEncryptionKeyResult(
+		&h.pm,
+		&h.state,
+		PendingDBRequest{requestType = .PublishEncryptionKey},
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabasePublishEncryptionKeyResult{stored = true, bundle = bundle},
+		},
+	)
+	// bob hears of his own key at once; erin and gail wait for the database.
+	own := routerTestOpenInnerPacket(&h, &bob)
+	delete(own.payload)
+	assert(own.messageType == .ServerUserKeyChanged, "expected bob told of his own key")
+	routerTestExpectNoNetworkMessage(&h, "a key change before the database answered")
+	check := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(check.request)
+	keyCheck, keyCheckOK := check.request.(common.DatabaseSharedRoomsRequest)
+	assert(
+		keyCheckOK &&
+		keyCheck.keyRecipients &&
+		keyCheck.userId == 2 &&
+		len(keyCheck.candidateUserIds) == 2 &&
+		slice.contains(keyCheck.candidateUserIds[:], 5) &&
+		slice.contains(keyCheck.candidateUserIds[:], 6),
+		fmt.tprintf("expected erin and gail checked by the key fetch's rule, got %v", keyCheck),
+	)
+	routerRegistrationTestAnswerVisibility(&h, check, 5)
+	changed := routerTestOpenInnerPacket(&h, &erin)
+	defer delete(changed.payload)
+	assert(
+		changed.messageType == .ServerUserKeyChanged,
+		fmt.tprintf("expected erin told of bob's key, got %v", changed.messageType),
+	)
+	decoded: common.ServerUserKeyChangedPayload
+	assert(cbor.unmarshal(changed.payload, &decoded) == nil, "expected the key change to decode")
+	assert(decoded.bundle == bundle, fmt.tprintf("expected bob's bundle, got %v", decoded))
+	routerTestExpectNoNetworkMessage(&h, "bob's key to gail, who may not fetch it")
+}
+
 // A ClientRegister's answer outlives its peer (approvers still hear of a request), so it must
 // never complete another session that got the same peer ID.
 @(test)
@@ -677,6 +788,71 @@ testRegistrationAnswerIgnoresAReusedPeerID :: proc(t: ^testing.T) {
 	routerTestExpectNoNetworkMessage(&h, "an answer for another key")
 	session, _ := MainRouterState_getPeerSession(&h.state, 1)
 	assert(!session.isAuthenticated && session.isRegistering, "expected the new session untouched")
+}
+
+// #188: the same key signs up again on the reused peer ID while the first session's
+// ClientRegister is still in the database. The first answer is not the new session's: it
+// neither answers it nor ends its own ClientRegister, which the second answer settles.
+@(test)
+testRegistrationAnswerIgnoresTheSameKeyOnAReusedPeerID :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	identityKey: common.IdentityPrivateKeyBytes
+	first := routerRegistrationTestBegin(&h, 1, identityKey = &identityKey)
+	defer common.TransportState_deinit(&first.transport)
+	_, text := routerRegistrationTestCode()
+	defer delete(text)
+	routerRegistrationTestRegister(&h, &first, text)
+	firstQuery := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(firstQuery.request)
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, 1)
+	h.state.connectedPeers[1] = true
+	MainRouterState_setPeerSession(&h.state, 1, RouterPeerSession_init())
+	second := routerRegistrationTestBegin(&h, 1, identityKey = &identityKey)
+	defer common.TransportState_deinit(&second.transport)
+	assert(second.publicKey == first.publicKey, "expected the same key on both sessions")
+	routerRegistrationTestRegister(&h, &second, text)
+	secondQuery := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(secondQuery.request)
+
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		firstQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRegisterResult {
+				outcome = .Created,
+				userId = 70,
+				nickname = strings.clone("applicant"),
+			},
+		},
+	)
+	routerTestExpectNoNetworkMessage(&h, "the first session's answer to the new session")
+	session, _ := MainRouterState_getPeerSession(&h.state, 1)
+	assert(
+		!session.isAuthenticated && session.isRegistering && session.registerInFlight,
+		"expected the new session still waiting for its own ClientRegister",
+	)
+
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		secondQuery.request_id,
+		common.DatabaseQueryResponse{success = false},
+	)
+	response := routerRegistrationTestResponse(&h, &second)
+	defer common.ServerRegisterResponsePayload_deinit(&response)
+	assert(
+		response.status == .Refused,
+		fmt.tprintf("expected the new session's own answer, got %v", response),
+	)
+	session, _ = MainRouterState_getPeerSession(&h.state, 1)
+	assert(!session.registerInFlight, "expected the new session's ClientRegister settled")
 }
 
 // Opens and drops every queued network message (the fan-outs a test does not look at), each

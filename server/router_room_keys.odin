@@ -25,7 +25,7 @@ import "core:time"
 //   stores it only in a Full history room for a stored chain, and drops it silently when the
 //   recipient already holds the chain. In a Full history room a key request goes to every
 //   session of every other member, so whoever holds the chain can forward it.
-// - Protocol 32 (#78): ClientRejectRoomKeyEnvelope takes the session's account off the wraps of
+// - Protocol 33 (#78): ClientRejectRoomKeyEnvelope takes the session's account off the wraps of
 //   one stored envelope of a chain it did not send (the database checks that in the statement
 //   that changes it), so the next forward or re-seal for it is stored. At most
 //   ROOM_KEY_REJECTS_PER_MINUTE per session; nothing is answered.
@@ -265,7 +265,7 @@ MainRouterState_handleClientRequestRoomKey :: proc(
 	)
 }
 
-// Protocol 32 (#78): the session rejects its copy of one envelope. Only the session's own
+// Protocol 33 (#78): the session rejects its copy of one envelope. Only the session's own
 // account is ever taken off a wrap, so the limit is per session and only keeps a client from
 // looping: past ROOM_KEY_REJECTS_PER_MINUTE in a minute it is refused.
 MainRouterState_handleClientRejectRoomKeyEnvelope :: proc(

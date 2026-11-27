@@ -37,7 +37,7 @@ import "core:time"
 //   of its epoch, with the sender's pinned identity key (this profile's own for itself, else the
 //   pin, else the identity the verified log names) and this profile's encryption key; its chain
 //   key goes into the key store (a cache, format 4). A failure is dropped and never retried.
-// - Checking a key (protocol 32, #78, design 6.6): a chain someone else sent is kept unchecked
+// - Checking a key (protocol 33, #78, design 6.6): a chain someone else sent is kept unchecked
 //   (KeyStoreRoomChain.unchecked, in memory only, never written to the file) until a message
 //   of the chain opens with it, after its signature verified against the sender's pin as
 //   always; then it is kept like any other. A key whose message fails the AEAD, or whose start
@@ -392,7 +392,7 @@ RoomChainKeyOutcome :: enum u8 {
 	// Protocol 20.
 	NotAllowed, // A forward in a room without Full history, or from a forwarder who may not
 	NotHeld, // A key request (Full history) for a chain this profile does not hold
-	// Protocol 32 (#78).
+	// Protocol 33 (#78).
 	Unchecked, // Kept until a message of the chain opens with it
 	Rejected, // Its key did not open the chain's message: dropped, the envelope rejected
 }
@@ -426,7 +426,7 @@ RoomChainRequestKind :: enum u8 {
 	FetchKeys,
 	RequestKey,
 	SealedEdit, // #76 M2: ClientEditRoomMessage with sealed bytes
-	RejectEnvelope, // Protocol 32 (#78): ClientRejectRoomKeyEnvelope of envelopeID
+	RejectEnvelope, // Protocol 33 (#78): ClientRejectRoomKeyEnvelope of envelopeID
 }
 
 RoomChainRequest :: struct {
@@ -1290,7 +1290,7 @@ State_roomChainsRequestKey :: proc(state: ^State, serverID, roomID: int, ref: Ro
 	}
 }
 
-// ── Checking keys (protocol 32, #78) ─────────────────────────────
+// ── Checking keys (protocol 33, #78) ─────────────────────────────
 
 // An unchecked chain a message is about to check: the chain and the envelope it came from.
 RoomChainUncheckedKey :: struct {
@@ -1480,7 +1480,7 @@ State_roomChainsTick :: proc(state: ^State) {
 // ── Receiving distributions ──────────────────────────────────────
 
 // Handles one envelope: opens and keeps its chain, or says why not. Takes ownership of
-// envelope when it waits for the log (Pending). Protocol 32 (#78): a chain someone else sent
+// envelope when it waits for the log (Pending). Protocol 33 (#78): a chain someone else sent
 // is kept unchecked until a message of it opens (Unchecked); an envelope for this account
 // that does not open, or that it may not take, is rejected; a rejected one is never opened
 // again.

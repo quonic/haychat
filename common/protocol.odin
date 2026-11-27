@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 32
+protocolVersion: ProtocolVersion = 33
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -87,8 +87,7 @@ ClientRegisterRequest :: struct {
 
 ClientRegisterRequest_deinit :: proc(request: ^ClientRegisterRequest) {
 	wipeAndDeleteString(&request.inviteCode)
-	delete(request.reason)
-	request.reason = ""
+	wipeAndDeleteString(&request.reason)
 }
 
 // ServerRegisterResponse (wire value 15; protocol 25) answers one ClientRegister, encrypted.
@@ -489,7 +488,7 @@ MessageType :: enum {
 	// Room changes for room managers (protocol 31, #73), appended so no existing wire value
 	// moves.
 	ServerAdminRoomChanged, // ServerAdminRoomChangedPayload: a room changed, to its managers
-	// Rejecting a key envelope that does not open (protocol 32, #78), appended so no existing
+	// Rejecting a key envelope that does not open (protocol 33, #78), appended so no existing
 	// wire value moves.
 	ClientRejectRoomKeyEnvelope, // ClientRejectRoomKeyEnvelopePayload: drop this copy for me
 }
@@ -1294,7 +1293,7 @@ ServerRoomKeyRequestPayload :: struct {
 
 ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
 
-// ClientRejectRoomKeyEnvelope (protocol 32, #78, e2ee-design.md 6.6): the requester's client
+// ClientRejectRoomKeyEnvelope (protocol 33, #78, e2ee-design.md 6.6): the requester's client
 // opened envelope envelopeId (a stored envelope with a wrap for the requester, of a chain
 // someone else sent) and its chain key did not open a message of that chain, or its wrap did
 // not open at all. The server takes the requester off that envelope's wraps in the statement
@@ -1318,7 +1317,7 @@ ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE :: "Invalid room message signature"
 ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE :: "This room does not share its history with new members"
 ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
 ROOM_KEY_REQUEST_INVALID_MESSAGE :: "Invalid room key request"
-// Protocol 32 (#78): a ClientRejectRoomKeyEnvelope past the session's limit.
+// Protocol 33 (#78): a ClientRejectRoomKeyEnvelope past the session's limit.
 ROOM_KEY_REJECT_LIMIT_MESSAGE :: "Too many room key rejections"
 // A sealed message to a room that is not encrypted.
 SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
@@ -1846,6 +1845,9 @@ ClientAdminKickUserPayload :: struct {
 // ServerAuthFailure "This account is banned from this server" (plus ": reason" when set).
 // banned false lifts the ban. On an Open server a banned person can still connect with a new
 // key as a new account; registration (protocol 25) closes that. reason is owned once decoded.
+//
+// Protocol 32 (#72): a ban (also of an account already banned) removes the account from every
+// encrypted room it is a member of, in the ban's transaction; an unban adds it back to none.
 ClientAdminBanUserPayload :: struct {
 	userId: int,
 	banned: bool,
@@ -1860,14 +1862,21 @@ ClientAdminBanUserPayload :: struct {
 // DecideRegistration decided; userId is the target of SetRestricted.
 //
 // Protocol 28: blobId names the attachment a RemoveAttachment removed, and userId its owner.
+//
+// Protocol 32 (#72): a ban also removes the account from every encrypted room it is a member
+// of (the server's unsigned Remove in each room's log, in the ban's transaction).
+// failedRoomIds (owned once decoded, ascending) names the encrypted rooms whose member log it
+// could not change (a damaged log, or a room another connection held locked); the ban still
+// applies, and an admin deals with those rooms by hand. Empty for every other action.
 ServerAdminActionResultPayload :: struct {
-	action:    AdminAction,
-	userId:    int,
-	message:   string,
-	roleId:    int,
-	inviteId:  int,
-	requestId: int,
-	blobId:    AttachmentBlobID,
+	action:        AdminAction,
+	userId:        int,
+	message:       string,
+	roleId:        int,
+	inviteId:      int,
+	requestId:     int,
+	blobId:        AttachmentBlobID,
+	failedRoomIds: [dynamic]int,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
@@ -2197,6 +2206,8 @@ ClientAdminBanUserPayload_deinit :: proc(payload: ^ClientAdminBanUserPayload) {
 ServerAdminActionResultPayload_deinit :: proc(payload: ^ServerAdminActionResultPayload) {
 	delete(payload.message)
 	payload.message = ""
+	delete(payload.failedRoomIds)
+	payload.failedRoomIds = nil
 }
 
 ServerUserUpdatedPayload_deinit :: proc(payload: ^ServerUserUpdatedPayload) {
@@ -2261,7 +2272,7 @@ DatabaseQueryRequest :: union {
 	DatabaseAttachmentRequest,
 	// Message edits and deletes (protocol 30, common/message_edits.odin).
 	DatabaseMessageChangeRequest,
-	// Protocol 32 (#78): a rejected key envelope.
+	// Protocol 33 (#78): a rejected key envelope.
 	DatabaseRejectRoomKeyEnvelopeRequest,
 }
 
@@ -2338,7 +2349,7 @@ DatabaseRoomKeyRequestCheckRequest :: struct {
 	chainId:     ChainID,
 }
 
-// Protocol 32 (#78): userId rejects its copy of envelope envelopeId.
+// Protocol 33 (#78): userId rejects its copy of envelope envelopeId.
 DatabaseRejectRoomKeyEnvelopeRequest :: struct {
 	userId:     int,
 	envelopeId: int,
@@ -2506,6 +2517,8 @@ DatabaseAdminUserRequest :: struct {
 	reason:       string,
 	// Protocol 25: SetRestricted's new restriction.
 	restricted:   bool,
+	// Protocol 32 (#72): a ban replays each encrypted room's log against the server's key.
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
 }
 
 // Stores a bundle the router already verified against the session's identity key (protocol
@@ -2827,6 +2840,21 @@ DatabaseAdminUserResult :: struct {
 	permissions:      ServerPermissions,
 	// Protocol 25: the Public rooms a lifted restriction joined (owned, ascending).
 	addedRoomIDs:     [dynamic]int,
+	// Protocol 32 (#72): a ban's removals from encrypted rooms (owned, by room ID), and the
+	// encrypted rooms whose log it could not change (owned, ascending).
+	banRemovals:      [dynamic]DatabaseBanRoomRemoval,
+	failedRoomIDs:    [dynamic]int,
+}
+
+// One encrypted room a ban removed the account from (protocol 32, #72): the server's unsigned
+// Remove (logEntry, owned) at logVersion, and the room's members and log managers after it
+// (owned, ascending), as for an admin's ClientRemoveRoomMember.
+DatabaseBanRoomRemoval :: struct {
+	roomId:         int,
+	logEntry:       []u8,
+	logVersion:     int,
+	memberUserIDs:  [dynamic]int,
+	managerUserIDs: [dynamic]int,
 }
 
 // Which role statement a DatabaseRoleRequest runs (protocol 23, server/database_roles.odin).
@@ -2988,7 +3016,7 @@ DatabaseStoreRoomKeyEnvelopeResult :: struct {
 	recipientUserIDs: [dynamic]int,
 }
 
-// Protocol 32 (#78): rejected when the requester was taken off the envelope's wraps (deleted
+// Protocol 33 (#78): rejected when the requester was taken off the envelope's wraps (deleted
 // when that removed the row), with the envelope's room and chain for the log. Not rejected:
 // no such envelope with a wrap for the requester, or a chain the requester sent.
 DatabaseRejectRoomKeyEnvelopeResult :: struct {

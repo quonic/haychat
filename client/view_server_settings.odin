@@ -1201,6 +1201,8 @@ viewAdminStatus :: proc(
 		color = ctx.theme.success
 	case .Error:
 		color = ctx.theme.danger
+	case .Warning:
+		color = ctx.theme.warning
 	}
 	_ = ui.cutTop(column, ui.dp(ctx, SETTINGS_LABEL_GAP))
 	area := column^

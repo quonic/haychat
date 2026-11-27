@@ -19,6 +19,10 @@ import "core:strings"
 //   changed (#41), so its client updates without reconnecting.
 // - Kick and ban: ServerSessionEnded and then a disconnect for every session of the target,
 //   which also leave voice and go offline (MainRouterState_endUserSessions).
+// - Ban (protocol 32, #72): for every encrypted room the ban's transaction removed the account
+//   from, ServerRoomLog with the server's unsigned Remove and ServerRoomMembershipChanged, as
+//   for an admin's ClientRemoveRoomMember; ServerAdminActionResult.failedRoomIds names the
+//   encrypted rooms it could not change.
 
 // The ServerAuthFailure message for a banned account, followed by ": reason" when the ban has
 // one. Clients match the prefix (client/connection.odin), so keep it stable.
@@ -71,6 +75,8 @@ MainRouterState_enqueueAdminUserAction :: proc(
 		targetUserId = targetUserID,
 		nickname     = strings.clone(nickname),
 		reason       = strings.clone(reason),
+		// Protocol 32: a ban replays the logs of the account's encrypted rooms.
+		serverIdentityPublicKey = state.serverIdentityPublicKey,
 	}
 	#partial switch action {
 	case .SetRole:
@@ -270,10 +276,28 @@ MainRouterState_adminSuccessMessage :: proc(
 	case .Kick:
 		return fmt.aprintf("Kicked %s", nickname)
 	case .Ban:
-		if request.adminFlag {
-			return fmt.aprintf("Banned %s", nickname)
+		if !request.adminFlag {
+			return fmt.aprintf("Unbanned %s", nickname)
 		}
-		return fmt.aprintf("Unbanned %s", nickname)
+		builder := strings.builder_make()
+		fmt.sbprintf(&builder, "Banned %s", nickname)
+		if removed := len(result.banRemovals); removed > 0 {
+			fmt.sbprintf(
+				&builder,
+				"; removed from %d encrypted %s",
+				removed,
+				removed == 1 ? "room" : "rooms",
+			)
+		}
+		if failed := len(result.failedRoomIDs); failed > 0 {
+			fmt.sbprintf(
+				&builder,
+				"; %d encrypted %s could not be changed",
+				failed,
+				failed == 1 ? "room" : "rooms",
+			)
+		}
+		return strings.to_string(builder)
 	case .SetRestricted:
 		if !result.changed {
 			return fmt.aprintf(
@@ -401,6 +425,7 @@ MainRouterState_handleAdminUserResult :: proc(
 			action = request.adminAction,
 			userId = result.user.id,
 			message = message,
+			failedRoomIds = result.failedRoomIDs,
 		},
 	)
 
@@ -448,6 +473,39 @@ MainRouterState_handleAdminUserResult :: proc(
 		}
 		if result.changed {
 			MainRouterState_broadcastUserUpdated(pm, state, result.user)
+		}
+		// Protocol 32 (#72): the encrypted rooms the ban removed the account from, sent as an
+		// admin's removal is (router_room_access.odin), and the remaining members move to the
+		// new epoch. The account has no session left; the eviction only drops it from the
+		// room's voice members.
+		for removal in result.banRemovals {
+			MainRouterState_voiceEvictUser(
+				pm,
+				state,
+				removal.roomId,
+				userID,
+				VOICE_LEFT_REMOVED_FROM_ROOM,
+			)
+			MainRouterState_sendRoomLogEntry(
+				pm,
+				state,
+				removal.roomId,
+				removal.logVersion,
+				removal.logEntry,
+				removal.memberUserIDs[:],
+				removal.managerUserIDs[:],
+				userID,
+				request.peerID,
+			)
+			MainRouterState_sendRoomMembershipChange(
+				pm,
+				state,
+				removal.roomId,
+				userID,
+				false,
+				removal.memberUserIDs[:],
+				request.peerID,
+			)
 		}
 	case .SetRestricted:
 		if !result.changed {

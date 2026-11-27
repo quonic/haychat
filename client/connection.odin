@@ -462,7 +462,7 @@ ClientServerTransport_serviceHandshake :: proc(
 		result, _ := ClientServerTransport_handleIncomingPacket(transport, packetBytes)
 		delete(packetBytes)
 		if result.hasOpenedPacket {
-			delete(result.openedPacket.payload)
+			common.wipeAndDeleteBytes(&result.openedPacket.payload)
 		}
 		if result.hasResponse {
 			sent :=
@@ -774,7 +774,8 @@ ClientServerTransport_handleRegisteringPacketBytes :: proc(
 			),
 			true
 	}
-	defer delete(innerPacket.payload)
+	// The decrypted payload is wiped once it is handled (#189).
+	defer common.wipeAndDeleteBytes(&innerPacket.payload)
 
 	#partial switch innerPacket.messageType {
 	case .ServerRegisterResponse:

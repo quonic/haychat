@@ -62,13 +62,20 @@ set -euo pipefail
 #               invites re: rc, not its sender, forwards rb's newest chain on request. SQL:
 #               forward envelopes exist only in the Full history room (none in step 14's From
 #               join room, where nothing older opened for rc).
-#  19. forged:  (protocol 32, #78) rc, a member, invites rf with the test-only forged forwards
+#  19. ban:     (protocol 32, #72) ra adds a new account rd to an encrypted room, where rd
+#               opens ra's message, and to a second one whose log SQL then damages. ra bans rd:
+#               the server removes rd from the first room (ra sees "the server removed rd" in a
+#               new epoch) and names the second in admin_result failedRoomIDs. ra sends during
+#               the ban and unbans rd: rd signs in again but is no member, is refused the room's
+#               history and keys, never opens the message sent during the ban, and no envelope
+#               of the new epoch has a wrap for rd. The damaged room still lists rd.
+#  20. forged:  (protocol 33, #78) rc, a member, invites rf with the test-only forged forwards
 #               on, so the three chains rc forwards carry wrong keys, validly signed, ahead of
 #               every good copy. rf keeps them unchecked, rejects each when its message does
 #               not open (room_key "rejected", ClientRejectRoomKeyEnvelope), the server deletes
 #               rf's copies, and rf reads all three messages once the other members' copies
 #               arrive. (The wrap for an old encryption key is in the server's SQL tests.)
-#  20. secrets: no client ever printed its encryption private key, and no client wrote the
+#  21. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -819,6 +826,90 @@ forwards=$(run_sql "SELECT count(*) FILTER (WHERE room_id = $full_id) || '/' || 
 	fail "expected at least 3 forwards, all in the Full history room, got $forwards"
 history_check=$(run_sql "SELECT history_visibility FROM rooms WHERE id = $invite_id")
 [[ "$history_check" == 1 ]] || fail "the From join room is not From join: $history_check"
+
+echo "==> [e2ee] ban: a ban removes rd from its encrypted rooms; unbanned, rd opens nothing new"
+room_dan="e2rd-$run_tag"
+start_client rd "$room_dan"
+expect_connected rd
+expect_ok rd wait room_list 5000
+rd_id=$(user_id ra3 "$room_dan")
+fetch_keys ra3 "$rd_id" >/dev/null
+start=$(lines ra3)
+expect_ok ra3 room-create "text,admin-invite,encrypted,managers=none" "ban-$run_tag"
+created=$(expect_event ra3 "^\\{\"event\":\"room_created\",.*\"name\":\"ban-$run_tag\"" \
+	"$start" "ra never got room_created for the ban room")
+ban_id=$(field "$created" roomID)
+room_log_line ra3 "$ban_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+dstart=$(lines rd)
+expect_ok ra3 room-add "$ban_id" "$rd_id"
+room_log_line rd "$ban_id" '"status":"verified","logVersion":2,' "$dstart" >/dev/null
+before_ban="e2ee-room-marker-before-ban-$run_tag"
+during_ban="e2ee-room-marker-during-ban-$run_tag"
+dstart=$(lines rd)
+expect_ok ra3 send "$ban_id" "$before_ban"
+room_message rd "$ban_id" "$before_ban" "$dstart" >/dev/null
+
+# A second room with rd, whose log the server can no longer replay: the ban reports it.
+start=$(lines ra3)
+expect_ok ra3 room-create "text,admin-invite,encrypted,managers=none" "ban-damaged-$run_tag"
+created=$(expect_event ra3 \
+	"^\\{\"event\":\"room_created\",.*\"name\":\"ban-damaged-$run_tag\"" \
+	"$start" "ra never got room_created for the damaged ban room")
+damaged_id=$(field "$created" roomID)
+room_log_line ra3 "$damaged_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+expect_ok ra3 room-add "$damaged_id" "$rd_id"
+room_log_line ra3 "$damaged_id" '"status":"verified","logVersion":2,' "$start" >/dev/null
+expect_ok ra3 room-log-entry "$damaged_id" add "$rc_id" unsigned
+forged_hex=$(field "$last_result" entry)
+forged_version=$(field "$last_result" version)
+run_sql "INSERT INTO room_log_entries (room_id, version, entry)
+	VALUES ($damaged_id, $forged_version, decode('$forged_hex', 'hex'));
+	UPDATE rooms SET log_version = $forged_version WHERE id = $damaged_id;" >/dev/null
+
+astart=$(lines ra3)
+dstart=$(lines rd)
+expect_ok ra3 admin-ban "$rd_id" proof ban
+expect_event rd '^\{"event":"session_ended",.*"kind":"banned",' "$dstart" \
+	"rd did not see session_ended banned" >/dev/null
+result=$(expect_event ra3 "^\\{\"event\":\"admin_result\",.*\"action\":\"ban\",\"userID\":$rd_id," \
+	"$astart" "ra got no result for the ban")
+[[ "$result" == *"removed from 1 encrypted room; 1 encrypted room could not be changed"* &&
+	"$result" == *"\"failedRoomIDs\":[$damaged_id]}" ]] ||
+	fail "the ban did not report one removal and the damaged room: $result"
+removed=$(room_log_line ra3 "$ban_id" '"status":"verified","logVersion":3,' "$astart")
+[[ "$removed" == *"\"members\":[$ra_id],"* && "$removed" == *"the server removed $room_dan"* ]] ||
+	fail "ra does not see the server's removal of rd: $removed"
+astart=$(lines ra3)
+expect_ok ra3 send "$ban_id" "$during_ban"
+room_message ra3 "$ban_id" "$during_ban" "$astart" >/dev/null
+wrapped=$(run_sql "SELECT count(*) FILTER (WHERE $rd_id = ANY (recipient_user_ids)) || '/' ||
+	count(*) FROM room_key_envelopes WHERE room_id = $ban_id AND epoch >= 3")
+[[ "$wrapped" == 0/* && "$wrapped" != "0/0" ]] ||
+	fail "expected envelopes from epoch 3 on without a wrap for rd, got $wrapped"
+
+astart=$(lines ra3)
+expect_ok ra3 admin-unban "$rd_id"
+expect_event ra3 "^\\{\"event\":\"user_updated\",.*\"id\":$rd_id,.*\"isBanned\":false," \
+	"$astart" "ra did not see rd unbanned" >/dev/null
+expect_ok rd reconnect
+expect_ok rd wait connected 8000
+members=$(run_sql "SELECT count(*) FILTER (WHERE room_id = $ban_id) || '/' ||
+	count(*) FILTER (WHERE room_id = $damaged_id)
+	FROM room_members WHERE user_id = $rd_id")
+[[ "$members" == "0/1" ]] ||
+	fail "expected rd in the damaged room only after the unban, got $members"
+dstart=$(lines rd)
+expect_ok rd history "$ban_id"
+expect_event rd '^\{"event":"protocol_error",.*"message":"Not a room member"' "$dstart" \
+	"the unbanned rd could still read the room's history" >/dev/null
+dstart=$(lines rd)
+expect_ok rd room-keys "$ban_id" fetch
+expect_event rd '^\{"event":"protocol_error",.*"message":"Not a room member"' "$dstart" \
+	"the unbanned rd could still fetch the room's keys" >/dev/null
+if grep -qF -- "$during_ban" "$work_dir/rd.out"; then
+	fail "the unbanned rd saw the message sent during the ban"
+fi
+stop_client rd
 
 echo "==> [e2ee] forged: rc forwards wrong keys to rf; rf rejects them and reads the history"
 room_frank="e2rf-$run_tag"

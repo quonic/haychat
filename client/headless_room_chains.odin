@@ -231,7 +231,7 @@ HEADLESS_ROOM_KEY_OUTCOME_NAMES := [RoomChainKeyOutcome]string {
 	.Rejected   = "rejected",
 }
 
-// room_key: an envelope this client handled (protocol 32, #78: unchecked when a chain someone
+// room_key: an envelope this client handled (protocol 33, #78: unchecked when a chain someone
 // else sent waits for a message to check it, then stored or rejected when one did). room_key_request: a request it answered
 // (outcome stored), refused, or could not answer (not_held), and (Full history) each chain an
 // inviter forwards. forwarderID: who forwarded a RoomKeyForward envelope (room_key), or this

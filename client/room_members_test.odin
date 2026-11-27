@@ -794,3 +794,52 @@ testHeadlessPrintsAdminRoomChanged :: proc(t: ^testing.T) {
 		fmt.tprintf("expected admin_room_changed for room 12, got %q", line),
 	)
 }
+
+// Protocol 32 (#72): a ban that could not change some encrypted rooms names them, by name when
+// the client knows the room, as a warning under the banned account's row; the next answer
+// replaces it.
+@(test)
+testAdminSectionNamesTheRoomsABanCouldNotChange :: proc(t: ^testing.T) {
+	state := testRoomMembersState(true)
+	defer State_deinit(&state)
+	state.adminRequest.serverID = 957
+	state.adminRequest.pending = true
+	event := ClientTransportRuntimeEvent {
+		kind        = .AdminActionResult,
+		serverID    = 957,
+		adminAction = .Ban,
+		peerUserID  = 4,
+		message     = strings.clone("Banned bob; 2 encrypted rooms could not be changed"),
+	}
+	append(&event.failedRoomIDs, 2, 77)
+	State_applyRuntimeEvent(&state, &event)
+	ClientTransportRuntimeEvent_deinit(&event)
+	view := buildAdminSectionView(&state, 957)
+	expected :=
+		"Banned bob; 2 encrypted rooms could not be changed. These encrypted rooms still " +
+		"list them: # team, room 77. Their member lists are damaged or were busy; ban them " +
+		"again to retry."
+	testing.expect(
+		t,
+		view.statusTone == .Warning && view.statusUserID == 4 && view.status == expected,
+		fmt.tprintf("expected the rooms named as a warning, got %v %q", view.statusTone,
+			view.status),
+	)
+
+	state.adminRequest.pending = true
+	unban := ClientTransportRuntimeEvent {
+		kind        = .AdminActionResult,
+		serverID    = 957,
+		adminAction = .Ban,
+		peerUserID  = 4,
+		message     = strings.clone("Unbanned bob"),
+	}
+	State_applyRuntimeEvent(&state, &unban)
+	ClientTransportRuntimeEvent_deinit(&unban)
+	view = buildAdminSectionView(&state, 957)
+	testing.expect(
+		t,
+		view.statusTone == .Success && view.status == "Unbanned bob",
+		fmt.tprintf("expected the next answer to replace the warning, got %q", view.status),
+	)
+}

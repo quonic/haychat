@@ -204,8 +204,10 @@ ClientTransportRuntimeEvent :: struct {
 	// On Connected: the transport's session counter, which voice bindings are checked against
 	// (see ClientTransportVoiceBinding).
 	sessionGeneration: u64,
-	// AdminActionResult: which action the server answered.
+	// AdminActionResult: which action the server answered, and (protocol 32) the encrypted
+	// rooms a ban could not remove the account from (owned).
 	adminAction:       common.AdminAction,
+	failedRoomIDs:     [dynamic]int,
 	// SessionEnded: the admin's reason, owned (may be empty).
 	detail:            string,
 	// RoomMembersReceived: the room's members (owned). AdminRoomsReceived: every room (owned).
@@ -494,6 +496,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	delete(event.voiceParticipants)
 	delete(event.detail)
 	delete(event.userIDs)
+	delete(event.failedRoomIDs)
 	AdminRoomSummaries_deinit(&event.adminRooms)
 	delete(event.userKeys)
 	delete(event.missingUserIDs)
@@ -2184,6 +2187,7 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				inviteID = payload.inviteId,
 				requestID = payload.requestId,
 				blobID = payload.blobId,
+				failedRoomIDs = payload.failedRoomIds,
 			},
 			true
 
@@ -2418,7 +2422,8 @@ ClientServerTransport_handleRuntimePacketBytes :: proc(
 				),
 				true
 		}
-		defer delete(innerPacket.payload)
+		// The decrypted payload is wiped once it is translated (#189).
+		defer common.wipeAndDeleteBytes(&innerPacket.payload)
 
 		return ClientServerTransport_translateRuntimeOpenedPacket(transport, innerPacket)
 
