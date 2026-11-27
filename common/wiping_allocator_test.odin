@@ -310,3 +310,62 @@ testWipingAllocatorIsTransparentToTheContextAllocator :: proc(t: ^testing.T) {
 	defer ClientRegisterRequest_deinit(&decoded)
 	assert(decoded.reason == text, "expected the reason to survive the round trip")
 }
+
+// #189: unmarshalSecretPayload wipes the copies cbor.unmarshal outgrows for a string of more
+// than 1 KiB, what it decodes is the context allocator's (freed and wiped by the payload's
+// _deinit), and wipeAndDeleteBytes zeroes a buffer before it frees it.
+@(test)
+testUnmarshalSecretPayloadAndWipeAndDeleteBytes :: proc(t: ^testing.T) {
+	_ = t
+	text := strings.repeat("a long sign-up reason ", 300)
+	defer delete(text)
+	request := ClientRegisterRequest {
+		inviteCode = "ABCD-EFGH",
+		reason     = text,
+	}
+	packet, buildOK := buildPacket(.ClientRegister, request)
+	assert(buildOK, "expected the payload to encode")
+	defer delete(packet.payload)
+
+	buffer := make([]u8, 256 * 1024)
+	defer delete(buffer)
+	backing := RecordingBacking {
+		buffer = buffer,
+	}
+	// Only the decode and the wipes run on the recording allocator; the deferred frees above
+	// stay the test's.
+	{
+		context.allocator = recordingBackingAllocator(&backing)
+
+		decoded: ClientRegisterRequest
+		decodeErr := unmarshalSecretPayload(packet.payload, &decoded)
+		assert(decodeErr == nil, fmt.tprintf("expected the payload to decode, got %v", decodeErr))
+		assert(
+			decoded.inviteCode == "ABCD-EFGH" && decoded.reason == text,
+			"expected the code and reason to survive",
+		)
+		assert(backing.frees > 0, "expected cbor.unmarshal to outgrow its 1 KiB first buffer")
+		assert(
+			backing.freedNonZero == 0,
+			fmt.tprintf("expected every outgrown buffer zeroed, %d were not", backing.freedNonZero),
+		)
+		reasonBlock := transmute([]u8)decoded.reason
+		ClientRegisterRequest_deinit(&decoded)
+		assert(bytesAreZero(reasonBlock), "expected the freed reason to be zero")
+		assert(
+			backing.freedNonZero == 0 && backing.freedUnsized == 0,
+			"expected the decoded strings freed sized and zeroed",
+		)
+
+		opened, allocErr := make([]u8, 64)
+		assert(allocErr == nil, "expected the buffer to allocate")
+		for &b, i in opened {
+			b = u8(i + 1)
+		}
+		block := opened
+		wipeAndDeleteBytes(&opened)
+		assert(opened == nil, "expected the buffer cleared")
+		assert(bytesAreZero(block), "expected the freed buffer to be zero")
+		assert(backing.freedNonZero == 0, "expected the buffer zeroed before it was freed")
+	}
+}

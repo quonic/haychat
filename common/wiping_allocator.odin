@@ -1,5 +1,6 @@
 package common
 
+import "core:encoding/cbor"
 import "core:mem"
 
 // A thin allocator that wipes every block it gives back (#111). The control channel's seal and
@@ -102,4 +103,33 @@ wipingAllocatorProc :: proc(
 		return nil, .Mode_Not_Implemented
 	}
 	return nil, .Mode_Not_Implemented
+}
+
+// Zeroes a byte buffer before freeing it with the context allocator, for the payload
+// openPacketForSession returns (#189): it is the decrypted CBOR of an invite code, a sign-up
+// reason or a message's text, so the router's and the client transport's dispatch free it
+// through here after the handler is done.
+wipeAndDeleteBytes :: proc(value: ^[]u8) {
+	if len(value^) > 0 {
+		mem.zero_explicit(raw_data(value^), len(value^))
+	}
+	delete(value^)
+	value^ = nil
+}
+
+// Decodes a payload that carries a secret (ClientRegister's invite code, ServerInviteCreated's
+// code) through a WipingAllocator (#189), so the copies cbor.unmarshal outgrows are wiped as it
+// grows them. What it decodes is the context allocator's, as with cbor.unmarshal: the caller
+// frees it with the payload's _deinit, which wipes the secret fields.
+unmarshalSecretPayload :: proc(payload: []u8, value: ^$T) -> cbor.Unmarshal_Error {
+	wiping := WipingAllocator {
+		backing = context.allocator,
+	}
+	wipingAllocator := WipingAllocator_allocator(&wiping)
+	return cbor.unmarshal_from_bytes(
+		payload,
+		value,
+		allocator = wipingAllocator,
+		temp_allocator = wipingAllocator,
+	)
 }
