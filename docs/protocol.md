@@ -562,8 +562,14 @@ D7-D19). The rules in user terms are in
   approver declined; the session is disconnected). A session gets 5 answers and 10 minutes
   before it is ended with `Refused` ("Too many sign-up attempts" or "Sign-up took too long");
   at most 64 sessions register at once, more get `ServerAuthFailure` "Too many sign-ups are in
-  progress; try again later". An invalid code is always "This invite code is not valid", whether
-  it is unknown, revoked, expired or used up.
+  progress; try again later". Per-address limits (#105, no protocol change) answer in the same
+  shapes: past an address's share of those sessions or its attempts, the session gets
+  `ServerAuthFailure` "Too many sign-ups from your network; try again later" or "Too many
+  sign-up attempts from your network; try again later" and a disconnect; a `ClientRegister`
+  past its attempts or (Invite + approval) its requests gets `Refused` with that sentence or
+  "Too many sign-up requests from your network; try again later" and stays registering
+  ([server-configuration.md](server-configuration.md#sign-up-limits)). An invalid code is
+  always "This invite code is not valid", whether it is unknown, revoked, expired or used up.
 - **Modes (D7, D8):** `RegistrationMode` Open 1, InviteOnly 2, InviteApproval 3
   (`server_settings.registration_mode`, migrated as Open). `ClientAdminSetRegistrationMode{mode}`
   (admins) is answered by `ServerAdminActionResult{SetRegistrationMode 8}`; a change sends
