@@ -1,0 +1,98 @@
+# Shared by Forgejo and GitHub: Forgejo reads issue forms from .github/ISSUE_TEMPLATE too and
+# lists every candidate directory, so a copy under .forgejo/ISSUE_TEMPLATE would show twice.
+# Keep to the keys both forges accept (no assignees, projects, type, visible or input
+# validations other than required). Forgejo reads "description" as its "about".
+name: Bug report
+description: Something in HayChat behaves wrongly, crashes, or is confusing.
+title: "Bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please search the existing issues first.
+
+        **Never attach your `config.json`**: it holds your private identity key. The client's
+        log does not contain it.
+
+        A security problem (a way to read, change or forge what you should not) is not for a
+        public issue: send the same details to the maintainer directly.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Where did it happen? Pick every area that applies.
+      multiple: true
+      options:
+        - Client (window, settings, chat)
+        - Voice
+        - Files (attachments)
+        - Encryption (keys, encrypted rooms or messages)
+        - Accounts, registration or admin
+        - Server (running or deploying a server)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What you did
+      description: Step by step, so someone else can do the same.
+      placeholder: |
+        1. Connect to the server
+        2. Open #general
+        3. Attach a 10 MiB file and press Send
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: A screenshot helps. Drag it into this box.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HayChat version
+      description: The release name you downloaded, or the commit you built from.
+      placeholder: v0.1.0-rc1
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Windows or Linux, and which version or distribution.
+      placeholder: Windows 11 / Fedora 44 / Ubuntu 25.04
+    validations:
+      required: true
+  - type: input
+    id: time
+    attributes:
+      label: When it happened
+      description: The time with your time zone, so the server's log can be searched.
+      placeholder: 2026-11-27 14:05 UTC+1
+  - type: textarea
+    id: log
+    attributes:
+      label: Client log
+      description: |
+        Linux: `./haychat-client 2>&1 | tee haychat.log`. Windows: copy the console window's
+        text, or run `.\haychat-client.exe *> haychat.log` in PowerShell. Attach the file, or
+        paste the relevant part between two lines of three backticks. Server operators: the
+        server's log lines around the time.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I have not attached my `config.json` or any private key.
+          required: true

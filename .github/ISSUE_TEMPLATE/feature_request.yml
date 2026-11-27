@@ -1,0 +1,55 @@
+# Shared by Forgejo and GitHub; see the note at the top of bug_report.yml.
+name: Feature request
+description: Suggest a new feature or an improvement to an existing one.
+title: "Feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search the existing issues first; a comment there is better than a duplicate.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Pick every area that applies.
+      multiple: true
+      options:
+        - Client (window, settings, chat)
+        - Communication (chat, voice, video)
+        - Files (attachments)
+        - Encryption (keys, encrypted rooms or messages)
+        - Accounts, registration or admin
+        - Server (running or deploying a server)
+        - Development (tests, CI, tooling)
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what stops you today?
+      placeholder: When I come back after a day, I cannot tell which rooms mention me...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: How it could work, from the user's or operator's side.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways around it you have tried or thought of.
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: |
+        Other apps that do it well, screenshots, mock-ups, or concerns about privacy and
+        encryption (for example, what the server would learn).

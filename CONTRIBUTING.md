@@ -11,7 +11,15 @@ We welcome contributions to HayChat! Please follow these guidelines to ensure a 
 5. Run `./dev.sh ci`. It runs the compile checks (including the Windows client), every test suite, and the live server/client proof, and a test fails on any memory leak or bad free. Forgejo CI runs the same steps on every pull request.
 6. While iterating, `./dev.sh check` skips the live proof. Inside `./dev.sh shell`, or on a host with `odin`, scope checks to one component: `odin test common`, `odin test client`, or `odin test server -define:ODIN_TEST_THREADS=1`.
 7. Commit with clear, descriptive messages and push to your fork.
-8. Create a pull request against the main branch.
+8. Create a pull request against the main branch. The pull request template lists what a
+   review checks: tests, protocol and migration rules, configuration, and documentation.
+
+## Issues
+
+Use the issue forms (bug report, feature request, documentation) on Forgejo. A bug report
+needs the steps, the HayChat version, the system and the client's log; never attach a
+`config.json`, which holds a private identity key. Send security problems to the maintainer
+directly instead of opening a public issue.
 
 ## Code Style
 
