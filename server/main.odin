@@ -1660,7 +1660,8 @@ MainRouterState_handleEncryptedPacket :: proc(
 		MainRouterState_protocolViolation(pm, state, peerID, "Failed to open encrypted packet")
 		return
 	}
-	defer delete(innerPacket.payload)
+	// The decrypted payload is wiped once its handler is done (#189).
+	defer common.wipeAndDeleteBytes(&innerPacket.payload)
 
 	MainRouterState_setPeerSession(state, peerID, session)
 	MainRouterState_dispatchApplicationPacket(pm, state, peerID, innerPacket)
