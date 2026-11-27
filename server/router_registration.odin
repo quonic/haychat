@@ -23,7 +23,9 @@ import "core:time"
 // common.REGISTER_SESSION_SECONDS per session (MainRouterState_expireRegisteringSessions, run
 // by the main loop and on every registering packet), one ClientRegister in flight at a time,
 // and at most common.REGISTERING_SESSIONS_MAX registering sessions at once (more are refused
-// with ServerAuthFailure REGISTRATION_BUSY_MESSAGE, which clients retry later).
+// with ServerAuthFailure REGISTRATION_BUSY_MESSAGE, which clients retry later). #105 adds
+// per-address limits on top (router_registration_limits.odin): a share of those sessions, an
+// attempt bucket, and a bucket for the sign-up requests Invite + approval mode makes.
 //
 // Created completes the session through MainRouterState_completeAuthentication with a sender
 // that answers ServerRegisterResponse{Created, auth} instead of ServerAuthSuccess, so the
@@ -569,6 +571,13 @@ MainRouterState_beginRegistration :: proc(
 		MainRouterState_disconnectPeer(pm, peerID)
 		return
 	}
+	if refusal := MainRouterState_registrationAddressAdmits(pm, state, peerID, time.tick_now());
+	   len(refusal) > 0 {
+		MainRouterState_sendAuthFailure(pm, state, peerID, refusal)
+		session.transport.phase = .Failed
+		MainRouterState_disconnectPeer(pm, peerID)
+		return
+	}
 	message := MainRouterState_registrationRequiredMessage(identity)
 	defer delete(message)
 	if !MainRouterState_sendPeerMessage(
@@ -590,6 +599,7 @@ MainRouterState_beginRegistration :: proc(
 		stored.registeringSince = time.tick_now()
 		stored.registerAttempts = 0
 		stored.registerInFlight = false
+		stored.registrationMode = identity.registrationMode
 	}
 }
 
@@ -704,6 +714,10 @@ MainRouterState_handleClientRegister :: proc(
 	decodeErr := common.unmarshalSecretPayload(payload, &req)
 	defer common.ClientRegisterRequest_deinit(&req)
 	session.registerAttempts += 1
+	if !MainRouterState_registrationAllowsAttempt(pm, state, session.peerAddress, time.tick_now()) {
+		MainRouterState_registerRefused(pm, state, peerID, common.REGISTRATION_ADDRESS_RATE_MESSAGE)
+		return
+	}
 	refusal := ""
 	code: common.InviteCodeBytes
 	hasCode := false
@@ -729,6 +743,22 @@ MainRouterState_handleClientRegister :: proc(
 	}
 	hash := common.inviteCodeHash(code)
 	crypto.zero_explicit(&code, size_of(code))
+	reserved, requestRefused := MainRouterState_registrationReserveRequest(
+		pm,
+		state,
+		session.peerAddress,
+		session.registrationMode,
+		time.tick_now(),
+	)
+	if requestRefused {
+		MainRouterState_registerRefused(
+			pm,
+			state,
+			peerID,
+			common.REGISTRATION_ADDRESS_REQUESTS_MESSAGE,
+		)
+		return
+	}
 	session.registerInFlight = true
 	MainRouterState_enqueueChannelDatabaseRequest(
 		pm,
@@ -745,6 +775,8 @@ MainRouterState_handleClientRegister :: proc(
 			requestType = .Register,
 			sessionID = session.sessionID,
 			identityPublicKey = session.clientIdentityPublicKey,
+			registrationAddress = session.peerAddress,
+			registrationRequestReserved = reserved,
 		},
 	)
 }
@@ -853,6 +885,14 @@ MainRouterState_handleRegisterResult :: proc(
 	response: common.DatabaseQueryResponse,
 ) {
 	registered, registeredOK := response.result.(common.DatabaseRegisterResult)
+	// #105: the address's request bucket, whether or not the applicant is still there.
+	MainRouterState_registrationSettleRequest(
+		pm,
+		state,
+		request,
+		response.success && registeredOK && registered.outcome == .Pending,
+		time.tick_now(),
+	)
 	if response.success && registeredOK && registered.outcome == .Pending {
 		// Approvers hear of it even when the applicant already left.
 		MainRouterState_sendRegistrationRequestUpdated(
