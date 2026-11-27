@@ -188,8 +188,8 @@ import "core:unicode/utf8"
 //               5 RemoveManager, 6 Leave, 7 SetAccess)
 //   50    8   targetUserId i64 (> 0; 0 for SetAccess)
 //   58    32  targetIdentityKey (zeros for SetAccess)
-//   90    8   actorUserId i64 (> 0; 0 only for a server Remove)
-//   98    32  actorIdentityKey (zeros for a server Remove)
+//   90    8   actorUserId i64 (> 0; 0 only for a server Remove or RemoveManager)
+//   98    32  actorIdentityKey (zeros for a server entry)
 //   130   8   createdAt u64, Unix seconds
 //   138   1   hasSettings: 1 for Create and SetAccess, 0 otherwise
 //   139   (settings, only when hasSettings is 1)
@@ -200,7 +200,10 @@ import "core:unicode/utf8"
 //         40n managers: userId i64 (> 0, unique) || identityKey (32)
 //   s     64  signature: Ed25519(actor identity key,
 //               "haychat-room-log-v1" || serverIdentityPublicKey || bytes [0, s));
-//               zeros for a server Remove
+//               zeros for a server entry
+//
+//   A server entry (actor 0, zero key, zero signature) is a Remove, or (protocol 33, #195) a
+//   RemoveManager of an account that is no longer a member; LastManager never refuses it.
 //
 //   The entry hash (hashRoomLogEntry) is SHA-256 over all bytes, signature included.
 //
@@ -3034,7 +3037,7 @@ RoomLogError :: enum u8 {
 	FirstEntryNotCreate,
 	UnexpectedCreate, // a Create after version 1
 	Unsigned, // an action that needs a signature has actor 0
-	MalformedUnsigned, // a server Remove with an actor key or a signature
+	MalformedUnsigned, // a server entry with an actor key or a signature
 	BadActorKey, // the actor's identity key is not a valid Ed25519 key
 	BadSignature,
 	PinMismatch, // a named identity key differs from the client's pin
@@ -3053,6 +3056,9 @@ RoomLogError :: enum u8 {
 	EmptyLog,
 	Fork, // the entry at the known head's version has another hash
 	Rollback, // the log ends before the known head
+	// Protocol 33 (#195): a server RemoveManager whose target is still a member (the server
+	// removes the member first).
+	ManagerStillMember,
 }
 
 ROOM_LOG_ENTRY_FORMAT :: u8(1)
@@ -3079,7 +3085,7 @@ roomLogEntrySize :: proc(entry: RoomLogEntry) -> int {
 
 // Writes entry, signature included as it stands, into dst. Refuses an entry that the decoder
 // would refuse, so nothing malformed can be produced. The server writes its own unsigned Remove
-// with this (actor 0, zero key, zero signature).
+// and RemoveManager with this (actor 0, zero key, zero signature).
 encodeRoomLogEntry :: proc(entry: RoomLogEntry, dst: []u8) -> (n: int, err: RoomLogError) {
 	checkRoomLogEntryShape(entry) or_return
 	total := roomLogEntrySize(entry)
@@ -3402,12 +3408,13 @@ validateRoomLogEntry :: proc(
 		return {}, .UnexpectedCreate
 	}
 
-	// The signature. Only a Remove may be unsigned, and then it carries no actor at all.
+	// The signature. Only a Remove or (protocol 33, #195) a RemoveManager may be unsigned: the
+	// server's own entry, which carries no actor at all.
 	zeroKey: IdentityPublicKeyBytes
 	zeroSignature: SignatureBytes
 	signed := entry.actorUserID != 0
 	if !signed {
-		if entry.action != .Remove {
+		if entry.action != .Remove && entry.action != .RemoveManager {
 			return {}, .Unsigned
 		}
 		if entry.actorIdentityKey != zeroKey || entry.signature != zeroSignature {
@@ -3511,13 +3518,21 @@ validateRoomLogEntry :: proc(
 			return {}, .TooManyManagers
 		}
 	case .RemoveManager:
-		if !actorIsManager {
+		if signed && !actorIsManager {
 			return {}, .NotAuthorized
 		}
 		if entry.targetUserID not_in state.managers {
 			return {}, .NotManager
 		}
-		if len(state.managers) == 1 && len(state.members) > 0 {
+		if !signed {
+			// Protocol 33 (#195): the server's RemoveManager (a ban) only of an account it has
+			// already removed as a member, so a demotion is never quieter than a removal. It
+			// may leave the room with no manager: nothing can then add members (Admin invite),
+			// change the managers or the access, and members still talk.
+			if entry.targetUserID in state.members {
+				return {}, .ManagerStillMember
+			}
+		} else if len(state.managers) == 1 && len(state.members) > 0 {
 			return {}, .LastManager
 		}
 	case .Leave:

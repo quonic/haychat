@@ -561,11 +561,12 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// lastEdit, deleted and deletion on stored messages and conversation summaries); 31 added
 	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes; 32
 	// added ServerAdminActionResult.failedRoomIds (#72: a ban removes the account from every
-	// encrypted room it is in and names the rooms it could not change).
+	// encrypted room it is in and names the rooms it could not change); 33 changed the member
+	// log's rules (#195: the server's unsigned RemoveManager, which a ban writes).
 	assert(
-		protocolVersion == 32,
+		protocolVersion == 33,
 		fmt.tprintf(
-			"expected protocol version 32 for bans that leave encrypted rooms, got %d",
+			"expected protocol version 33 for bans that remove log managers, got %d",
 			protocolVersion,
 		),
 	)
