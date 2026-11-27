@@ -62,7 +62,13 @@ set -euo pipefail
 #               invites re: rc, not its sender, forwards rb's newest chain on request. SQL:
 #               forward envelopes exist only in the Full history room (none in step 14's From
 #               join room, where nothing older opened for rc).
-#  19. secrets: no client ever printed its encryption private key, and no client wrote the
+#  19. forged:  (protocol 32, #78) rc, a member, invites rf with the test-only forged forwards
+#               on, so the three chains rc forwards carry wrong keys, validly signed, ahead of
+#               every good copy. rf keeps them unchecked, rejects each when its message does
+#               not open (room_key "rejected", ClientRejectRoomKeyEnvelope), the server deletes
+#               rf's copies, and rf reads all three messages once the other members' copies
+#               arrive. (The wrap for an old encryption key is in the server's SQL tests.)
+#  20. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -813,6 +819,57 @@ forwards=$(run_sql "SELECT count(*) FILTER (WHERE room_id = $full_id) || '/' || 
 	fail "expected at least 3 forwards, all in the Full history room, got $forwards"
 history_check=$(run_sql "SELECT history_visibility FROM rooms WHERE id = $invite_id")
 [[ "$history_check" == 1 ]] || fail "the From join room is not From join: $history_check"
+
+echo "==> [e2ee] forged: rc forwards wrong keys to rf; rf rejects them and reads the history"
+room_frank="e2rf-$run_tag"
+start_client rf "$room_frank"
+expect_connected rf
+expect_ok rf wait room_list 5000
+rf_id=$(user_id rc "$room_frank")
+fetch_keys rc "$rf_id" >/dev/null
+expect_ok rc room-keys "$full_id" forge-forwards on
+[[ "$last_result" == *'"forgeForwards":true}' ]] || fail "rc did not switch forged forwards on"
+cstart=$(lines rc)
+fstart=$(lines rf)
+expect_ok rc room-add "$full_id" "$rf_id"
+room_log_line rf "$full_id" '"status":"verified","logVersion":5,' "$fstart" >/dev/null
+# rc's three forwards to rf, stored before any other copy.
+forged_rows=0
+for _ in $(seq 1 100); do
+	forged_rows=$(run_sql "SELECT count(*) FROM room_key_envelopes WHERE room_id = $full_id
+		AND forwarder_user_id = $rc_id AND $rf_id = ANY (recipient_user_ids)")
+	[[ "$forged_rows" == 3 ]] && break
+	sleep 0.1
+done
+[[ "$forged_rows" == 3 ]] || fail "expected rc's three forged forwards to rf, got $forged_rows"
+forged_ids=$(run_sql "SELECT string_agg(id::text, ',') FROM room_key_envelopes
+	WHERE room_id = $full_id AND forwarder_user_id = $rc_id AND $rf_id = ANY (recipient_user_ids)")
+expect_ok rc room-keys "$full_id" forge-forwards off
+for marker in "$full_bob_one" "$full_alice" "$full_bob_two"; do
+	if grep -F -- "$marker" "$work_dir/rf.out" | grep -q '"protection":"encrypted"'; then
+		fail "rf opened $marker before it fetched the history"
+	fi
+done
+fstart=$(lines rf)
+expect_ok rf history "$full_id"
+for marker in "$full_bob_one" "$full_alice" "$full_bob_two"; do
+	pattern="^\\{\"event\":\"room_(history|opened)\",.*\"protection\":\"encrypted\","
+	pattern+="\"content\":\"$marker\""
+	expect_event rf "$pattern" "$fstart" "rf did not read $marker after rejecting the forgeries" \
+		>/dev/null
+done
+rejected_pattern="^\\{\"event\":\"room_key\",.*\"roomID\":$full_id,.*\"outcome\":\"rejected\","
+rejected_pattern+=".*\"forwarderID\":$rc_id\\}$"
+rejected=$(tail -n "+$((fstart + 1))" "$work_dir/rf.out" | grep -cE -- "$rejected_pattern" || true)
+[[ "$rejected" == 3 ]] || fail "expected rf to reject rc's three forwards, got $rejected"
+grep -qF "[E2EE] Rejected key envelope" "$work_dir/rf.err" || fail "rf did not log its rejects"
+left=$(run_sql "SELECT count(*) FROM room_key_envelopes WHERE id IN ($forged_ids)")
+[[ "$left" == 0 ]] || fail "the server kept $left of the forged copies rf rejected"
+expect_ok rf room-keys "$full_id"
+held=$(grep -o '"unchecked":false' <<<"$last_result" | wc -l)
+[[ "$held" == 3 && "$last_result" != *'"unchecked":true'* ]] ||
+	fail "expected rf to hold the three chains, checked: $last_result"
+stop_client rf
 stop_client ra3
 
 for client in re rc; do
@@ -825,7 +882,7 @@ for marker in "$marker_one" "$marker_two" "e2ee-room-marker"; do
 		fail "a client logged the text of an encrypted message"
 	fi
 done
-for profile in a b m c d ra rb rc; do
+for profile in a b m c d ra rb rc rf; do
 	secret=$(config_value "$profile" encryption_private_key)
 	[[ ${#secret} -eq 64 ]] || fail "profile $profile has no encryption private key"
 	if grep -rqF -- "$secret" "$work_dir"/*.out "$work_dir"/*.err; then

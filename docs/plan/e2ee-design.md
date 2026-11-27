@@ -666,6 +666,40 @@ clients that saw it.
     access to it. A forwarded chain is checked against the sender's pin and the log like any other.
   - A chain that no online member holds stays unopened until one connects. The message shows
     "Waiting for this message's key".
+  - **Checking a forwarded key** (changed 2026-11-26, protocol 32, #78, the maintainer's option
+    B2). The server stores the first copy of a chain per recipient, so a member could forward a
+    wrong chain key, validly signed, ahead of the real one, and a wrap made for the recipient's
+    old encryption key would block every later copy in the same way. Both only hide messages:
+    each message is still checked against its sender's pin. Now:
+    - A client keeps a chain someone else sent **unchecked**, in memory only, until a message (or
+      sealed edit) of that chain opens with it. The message's signature is verified against the
+      sender's pin first, as always. A chain with no message yet stays unchecked until its first
+      message arrives. An unchecked chain is never written to the key store, so after a restart
+      its envelope is fetched and checked again.
+    - A key whose message fails the AEAD, or whose start index is past the message's index, is
+      dropped. So is an envelope addressed to the client that does not open or that the client
+      may not take. The client then sends `ClientRejectRoomKeyEnvelope{envelopeId}` and never
+      opens that envelope again. The failure is logged on the client only and reported to
+      nobody.
+    - The server takes the requester off that envelope's wraps in the statement that checks it.
+      The envelope must have a wrap for the requester and must be of a chain the requester did
+      not send. The row is deleted when the requester was its only recipient, which is always
+      the case for a forward and for a re-seal answering the requester. A SenderKey distribution
+      from the chain's own sender may be rejected the same way, because its wrap for the
+      requester can be just as unopenable (the sender's pin was stale) and it blocks forwards
+      just as much. The other recipients keep their wraps. The next forward or re-seal for the
+      requester is then stored. The server allows at most 20 rejects per session per minute.
+    - After a reject the client fetches the room's envelopes again and asks for the chain again
+      (`ClientRequestRoomKey`) after a back-off of 2, 8 and then 30 seconds. It does this at most
+      three times per chain and session, and sends at most four rejects per chain and session,
+      so one hostile member cannot make a newcomer loop. Members answer the same request again
+      only after 1.5 seconds.
+    - The `held` check ignores a wrap stored before the recipient's current encryption key
+      (`user_encryption_keys.updated_at`). An envelope does not name the key its wraps were made
+      for, so the stored times decide, with no migration. A bundle that is stored again with the
+      same key lets one more copy through. A wrap made for an old key that the server stored
+      after the change, because the sender's pin was stale, is rejected by the client as above.
+    - The envelope layout is unchanged.
 
 ### 6.7 What servers and admins can still do
 

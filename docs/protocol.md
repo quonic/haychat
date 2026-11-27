@@ -76,6 +76,7 @@ version below therefore needs clients and servers rebuilt together.
 | 29 | Attachment removal log (#138, [below](#attachment-removal-log-protocol-29)): `ClientAdminListAttachmentRemovals{beforeId}` and `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}` (wire values 216 and 217, `AttachmentRemovalEntry`), and `chatMessageId`/`directMessageId` in `ServerAttachmentRemoved`, with schema migration 16 (`attachment_removals`). Every removal, by an admin or `deploy/sql/remove-attachment.sql`, keeps a row with its reason that admins list in the client |
 | 30 | Editing and deleting messages (#76, [below](#editing-and-deleting-messages-protocol-30)): `ClientEditRoomMessage` … `ServerMessageEdits` (wire values 218 to 227), `MessageEdit`, `MessageDeletion` and `MessageEditsKind`, `editCount`/`lastEdit`/`deleted`/`deletion` on `StoredChatMessage` and `StoredDirectMessage` and `lastEditCount`/`lastEdit`/`lastDeleted`/`lastDeletion` on `DirectConversationSummary`, and the signatures `"haychat-room-edit-v1"`, `"haychat-dm-edit-v1"`, `"haychat-room-delete-v1"` and `"haychat-dm-delete-v1"`, with schema migration 17 (edit and tombstone columns on both message tables, `chat_message_edits`, `direct_message_edits`). Authors edit and delete their messages, admins delete any room message, and a deleted message leaves a tombstone with its ID |
 | 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
+| 32 | Rejecting a key envelope that does not open (#78, [below](#rejecting-a-key-envelope-protocol-32)): `ClientRejectRoomKeyEnvelope{envelopeId}` (wire value 229) and the refusal "Too many room key rejections". A client keeps another member's chain key only after a message of the chain opens with it, and rejects a copy that does not; the server then stores the next forward. A wrap stored before the recipient's current encryption key no longer counts as held. No schema migration and no envelope layout change |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -871,7 +872,44 @@ never does any of this.
   forwarder who was a member at the same time as the recipient, for a chain whose sender was a
   member of its epoch, and only when its signature verifies against the forwarder's pin (or the
   identity the log names). Messages are still verified against their real senders' keys, so a
-  forwarder can give access to history but never forge a message in it.
+  forwarder can give access to history but never forge a message in it. Since protocol 32 the
+  newcomer also checks the key itself ([below](#rejecting-a-key-envelope-protocol-32)).
+
+## Rejecting a key envelope (protocol 32)
+
+A member could forward a wrong chain key, validly signed, ahead of the real one, and the server
+would keep that first copy and drop every later one. A wrap made for an encryption key that the
+recipient has since replaced blocked later copies in the same way. Neither can forge a message,
+because every message is checked against its sender's pin, but both hide messages from a
+newcomer (#78, [plan/e2ee-design.md](plan/e2ee-design.md) section 6.6).
+
+- **Checking a key.** A client keeps a chain that someone else sent (a forward, or another
+  member's distribution or re-seal) **unchecked** until a message or sealed edit of that chain
+  opens with it. The message's signature is verified against the sender's pin before that, as
+  always. An unchecked chain is kept in memory only and never written to the key store. A key
+  whose message fails the AEAD, or that starts after the message's index, is dropped and its
+  envelope rejected. So is an envelope addressed to the client that does not open or that the
+  client may not take. The message keeps waiting for its key.
+- **`ClientRejectRoomKeyEnvelope{envelopeId}`.** The server takes the requester off the wraps of
+  that envelope in the statement that checks it. The envelope must have a wrap for the requester
+  and must be of a chain the requester did not send. The row is deleted when the requester was
+  its only recipient (every forward and every re-seal answering the requester). Otherwise only
+  the requester's ID leaves the row, so the other recipients keep their copies. The requester
+  then no longer fetches the envelope, and the next forward or re-seal for it is stored.
+  Nothing is answered. An envelope ID of 0 or below is refused with "Invalid room key request".
+  A session may reject at most 20 envelopes a minute; past that the server refuses with "Too
+  many room key rejections".
+- **What the client does next.** It never opens a rejected envelope again. After a back-off of
+  2, 8 and then 30 seconds it fetches the room's envelopes again and sends `ClientRequestRoomKey`
+  again. It does this at most three times per chain and session, and sends at most four rejects
+  per chain and session. A member answers the same request again only 1.5 seconds after its
+  last answer. A reject is logged on the client (stderr, no key material) and reported to
+  nobody.
+- **Old encryption keys.** When the server decides whether a recipient already holds a chain
+  (the first copy wins), it ignores a wrap stored before the recipient's current encryption key
+  was stored (`user_encryption_keys.updated_at`). A wrap that the server stored after a key
+  change, because the sender's pin was stale, does not open for the recipient and is rejected
+  as above.
 
 ## Encrypted voice (protocol 21)
 
