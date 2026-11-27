@@ -133,3 +133,11 @@ headlessCommandRoomLogTruncate :: proc(
 		},
 	)
 }
+
+// admin_result's roomID: only a room-log-truncate names a room.
+headlessAdminResultRoom :: proc(event: ^ClientTransportRuntimeEvent) -> Maybe(int) {
+	if event.adminAction == .TruncateRoomLog && event.roomID > 0 {
+		return event.roomID
+	}
+	return nil
+}

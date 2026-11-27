@@ -122,7 +122,6 @@ BEGIN
 	-- creatorJoins at 141, its manager count at 142 (2 bytes) and its managers from 144 (an
 	-- 8-byte ID and a 32-byte key each), the access of Create and SetAccess at 139. Each
 	-- account's last member and manager event decides.
-	DROP TABLE IF EXISTS pg_temp.haychat_log_state;
 	CREATE TEMP TABLE haychat_log_state ON COMMIT DROP AS
 	WITH e AS (SELECT version, entry, get_byte(entry, 49) AS action,
 		(SELECT bit_or(get_byte(entry, 50 + i)::bigint << (8 * i))

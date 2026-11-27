@@ -204,6 +204,14 @@ validateAdminRequest :: proc(request: AdminRequest) -> string {
 			return "The reason must be at most 500 bytes long, without control characters."
 		}
 		return ""
+	case .TruncateRoomLog:
+		if request.roomID <= 0 {
+			return "No room selected."
+		}
+		if request.toVersion < 1 {
+			return "No version of this room's member list replays; delete the room instead."
+		}
+		return ""
 	case .SetUserRoles:
 		if request.userID <= 0 {
 			return "No account selected."

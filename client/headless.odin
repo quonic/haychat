@@ -564,9 +564,9 @@ HeadlessAdminResultJSON :: struct {
 	// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from, left out
 	// when there are none.
 	failedRoomIDs: []int `json:"failedRoomIDs,omitempty"`,
-	// Protocol 33 (#196): the room a room-log-truncate repaired, left out for every other
-	// action.
-	roomID:        int `json:"roomID,omitempty"`,
+	// Protocol 33 (#196): the room a room-log-truncate repaired, left out (nil) for every
+	// other action so their lines stay as they were.
+	roomID:        Maybe(int) `json:"roomID,omitempty"`,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -1672,7 +1672,7 @@ headlessRenderRuntimeEvent :: proc(
 				requestID = event.requestID,
 				blobID = headlessAdminResultBlob(event.blobID),
 				failedRoomIDs = event.failedRoomIDs[:],
-				roomID = event.roomID,
+				roomID = headlessAdminResultRoom(event),
 			},
 			allocator,
 		)

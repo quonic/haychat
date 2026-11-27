@@ -78,6 +78,7 @@ version below therefore needs clients and servers rebuilt together.
 | 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
 | 32 | Bans leave encrypted rooms (#72, [below](#bans-and-encrypted-rooms-protocol-32)): a ban removes the account from every encrypted room it is a member of with the server's unsigned Remove, in the ban's transaction, and `ServerAdminActionResult.failedRoomIds` names the encrypted rooms whose member log the ban could not change. No new message type and no schema migration |
 | 33 | Bans and log managers (#195, [below](#bans-and-log-managers-protocol-33)): the member log accepts the server's unsigned `RemoveManager` of an account that is no longer a member, which `LastManager` never refuses, and a ban writes it into every encrypted room whose log names the account as a manager, also the last one (the room is left with no manager). Only the log's validation rules change: no entry layout, label, message type or schema migration |
+| 34 | Repairing a damaged member log (#196, [below](#repairing-a-damaged-member-log-protocol-34)): `ClientAdminRoomLogStatus{roomId}`, `ServerAdminRoomLogStatus{roomId, rooms, checkedRooms, damagedRooms}` and `ClientAdminTruncateRoomLog{roomId, toVersion}` (wire values 229 to 231), `RoomLogStatus` (with a `RoomLogError` as a number), `AdminAction.TruncateRoomLog` (12) and `ServerAdminActionResult.roomId`. Admins see which encrypted rooms' logs do not replay and why, and truncate one to the last version that does; clients fail a room whose head goes below the version they verified. No schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -874,6 +875,78 @@ protocol 33:
   or deleting the room. What changes is that a demotion is final in the verified log: an honest
   server later cannot bring a demoted manager's signatures back. It still cannot add a member or
   a manager, give anyone a key, or read a message.
+
+### Repairing a damaged member log (protocol 34)
+
+A stored log is damaged when it does not replay from version 1 (an entry a rule refuses, a row
+that is not an entry, a gap in the versions) or does not end at the room's head
+(`rooms.log_version`), for example after a bad restore or a change made in SQL. The server then
+refuses every change to the room's members ("This room's member list is damaged on the
+server"), a ban lists the room in `failedRoomIds`, and the server writes a line to its log
+naming the room, the version that fails and why, and the version to truncate to:
+
+```text
+[RoomLog] Room 12's member log is damaged: version 5 does not replay (BadSignature); it
+replays to version 4 of 6 stored entries, and the room's head is version 6. Truncate it to
+version 4 (Server settings, Admin, Member logs; or deploy/sql/truncate-room-log.sql
+-v room_id=12 -v to_version=4, then restart the server).
+```
+
+Since protocol 34 admins (checked in the statement, like attachment moderation) can do this
+from a client (#196; the maintainer chose truncation over deleting the room):
+
+- **Diagnose.** `ClientAdminRoomLogStatus{roomId}` replays one encrypted room's stored log
+  (`roomId` > 0) or every encrypted room's (`roomId` 0), each with its row locked as for an
+  append, and answers `ServerAdminRoomLogStatus{roomId, rooms, checkedRooms, damagedRooms}`.
+  Each `RoomLogStatus` has `storedVersion` (the room's head), `entryCount` (the stored rows),
+  `goodVersion` (the last version that replays from version 1), `failingVersion` (the stored
+  version that does not, 0 when every entry replays) and `error` (the `RoomLogError`:
+  `VersionNotNext` for a gap, `Truncated` for a row that is not an entry). A room is damaged
+  when `goodVersion` differs from `storedVersion` or from `entryCount`. For one room the answer
+  holds its status, damaged or not; for every room it lists only the damaged ones, at most
+  `ROOM_LOG_STATUS_ROOMS_MAX` (50). Refusals are `ServerProtocolError`: "Admin permission
+  required", "Room not found", "This room is not encrypted". Replaying costs a signature check
+  per entry, on the database worker, so checking every room of a large server takes a moment.
+- **Truncate.** `ClientAdminTruncateRoomLog{roomId, toVersion}` runs in one transaction with
+  the room's row locked: the stored log is replayed again, and the truncation is refused for a
+  log that is not damaged ("This room's member list is not damaged": a healthy log must never
+  be rolled back, which would undo removals), for a `toVersion` that is not its `goodVersion`
+  ("The member list can only be truncated to the last version that replays; check it again":
+  the smallest loss, and a log that changed since the admin looked is refused rather than cut
+  somewhere else), and when not even the Create replays ("No version of this room's member list
+  replays; delete the room instead": only the creator's client could set it up again).
+  Otherwise it deletes the entries after `toVersion` and everything that belongs to the later
+  epochs, whose numbers the next entries will use again for other members: their room key
+  envelopes (so no chain of those epochs can be requested or forwarded again), their sealed
+  messages, tombstones included (with their edits; their files lose their message and the
+  sweeper deletes them within the hour), and sealed edits of older messages made on a later
+  chain (the message's edit count and time follow). It makes `room_members` the members of the
+  replayed state at `toVersion` (a member the rebuild removes loses its read marker, as for a
+  removal; one it adds starts with nothing unread), `room_log_managers` its managers, the
+  room's access its access, and the head `toVersion`. The answer is
+  `ServerAdminActionResult{action = TruncateRoomLog, roomId, message}`.
+- **Fan-out.** The room's voice ends (`ServerVoiceLeft{"the room's member list was
+  repaired"}`): its keys name a later epoch, and its participants may no longer be members. Every
+  session of the members and managers before and after the truncation, and the admin's, gets
+  `ServerRoomLog{roomId, afterVersion = toVersion, entries = [], headVersion = toVersion}`, and
+  `ServerRoomMembershipChanged` goes out for each member the rebuild added or removed (with
+  `ServerAdminRoomChanged{Members}` to room managers). A truncation the database applied is fanned
+  out even when the admin has disconnected.
+- **Clients.** `ServerRoomLog` arrives in order, so its `headVersion` is the server's head. A
+  client that verified a later version than that head fails the room as a rollback and shows
+  "This room's member list was changed on the server" for it, for the session; after a restart
+  it replays the log against the head it stored, which fails the same way. A client that had
+  verified no further than `toVersion` carries on, and a whole-log fetch whose next page reports
+  a lower head ends the log there. A client that refused the damaged log in this session
+  (which every member's does once it fetches it) keeps the room failed until it restarts; it
+  then verifies the truncated log and carries on. The admin UI is Server settings, Admin,
+  Member logs.
+- **SQL.** [`deploy/sql/truncate-room-log.sql`](../deploy/sql/truncate-room-log.sql) does the
+  same in the database for a server no admin can reach. SQL cannot check signatures, so it takes
+  the `to_version` the server reported and reads the members, managers and access at it from
+  the entries' fixed layout. It cannot reach a running server: restart the server afterwards.
+  The database change notifications of #116 would need a migration with a trigger for this,
+  which a rare manual repair does not justify. See [deploy/README.md](../deploy/README.md).
 
 ## Sender chains in encrypted rooms (protocol 19)
 
