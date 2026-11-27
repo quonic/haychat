@@ -533,18 +533,35 @@ Rules every client checks when it replays the log:
 - `AddManager`, `RemoveManager` and `SetAccess` (switching between Member invite and Admin invite)
   need a current manager's signature. A manager may add themselves as a member like anyone else,
   and that shows in the room like any addition.
+- **Changed in protocol 33 (#195, 2026-11-26):** `RemoveManager` may also be unsigned
+  (`actorUserId` 0, a zero actor key and signature), written by the server when it bans a
+  manager. It is valid only when its target is no longer a member (so a manager who is a member
+  first gets the server's `Remove`), and the last-manager rule below does not apply to it.
+  Nothing in the entry ties it to a ban: the server is not trusted, so clients cannot tell a ban
+  from any other reason. What a malicious server gains is the power to take any manager away
+  (one who is a member only together with a visible removal), up to leaving the room with no
+  manager. That freezes the room's membership changes, which the server could already do by
+  refusing every append, and is less than it could already do by removing every member. It
+  still cannot add a member or a manager, and every such demotion shows in the room ("the
+  server removed alice as a manager").
 - `Remove` is valid when a manager signs it, *or* unsigned (`actorUserId` 0): the server may always
   remove a member (an admin's removal, a ban, an account deleted). Removing can only take readers
   away, so the server needs no signature for it.
 - `Leave` is signed by the member who leaves.
-- The last manager cannot be removed while the room has members. If every manager loses their key,
-  nobody can add members any more; an admin can still remove members and delete the room.
+- The last manager cannot be removed while the room has members, except by the server's unsigned
+  `RemoveManager` (protocol 33). If every manager loses their key, or a ban removed the last one,
+  nobody can add members any more (in a Member invite room members still can), change the
+  managers or switch the access; members still talk, and an admin can still remove members and
+  delete the room. The server never promotes anyone.
 
 The server keeps the log in `room_log_entries`, applies each entry to `room_members` in the same
 transaction, and refuses an entry whose `version` or `prevHash` does not follow its head. Its own
 rules from 5.1 still apply on top, so an addition needs both the server's permission (an admin, or
 a member of a Member invite room) and a valid signature. An admin's removal arrives as an ordinary
-`ClientRemoveRoomMember`, and the server writes the unsigned `Remove` entry itself.
+`ClientRemoveRoomMember`, and the server writes the unsigned `Remove` entry itself. A ban
+(protocol 32) writes that `Remove` in every encrypted room the account is a member of, and since
+protocol 33 then an unsigned `RemoveManager` in every encrypted room whose log names it as a
+manager.
 
 ```
 ClientAppendRoomLog   { entry }                         // Add, Remove, managers, Leave
