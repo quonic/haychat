@@ -41,7 +41,7 @@ AdminRequest :: struct {
 	// Protocol 28 (attachment_moderation.odin). RemoveAttachment: blobID and reason (0..500
 	// bytes, no control characters).
 	blobID:      common.AttachmentBlobID,
-	// Protocol 33 (room_log_repair.odin). TruncateRoomLog: roomID and toVersion.
+	// Protocol 34 (room_log_repair.odin). TruncateRoomLog: roomID and toVersion.
 	roomID:      int,
 	toVersion:   int,
 }
@@ -124,7 +124,7 @@ AdminRequestState :: struct {
 	requestID: int,
 	// Protocol 28: the attachment a RemoveAttachment names.
 	blobID:    common.AttachmentBlobID,
-	// Protocol 33: the room a TruncateRoomLog names.
+	// Protocol 34: the room a TruncateRoomLog names.
 	roomID:    int,
 	pending:  bool,
 	// The server's sentence for a success (ServerAdminActionResult.message).

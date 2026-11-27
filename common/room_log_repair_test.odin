@@ -4,7 +4,7 @@ import "core:encoding/cbor"
 import "core:fmt"
 import "core:testing"
 
-// Protocol 33 (#196): the member log repair payloads round-trip, and a status reads as damaged
+// Protocol 34 (#196): the member log repair payloads round-trip, and a status reads as damaged
 // exactly when the server refuses appends to the room.
 @(test)
 testRoomLogRepairPayloadsRoundTrip :: proc(t: ^testing.T) {

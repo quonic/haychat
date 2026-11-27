@@ -488,7 +488,7 @@ MessageType :: enum {
 	// Room changes for room managers (protocol 31, #73), appended so no existing wire value
 	// moves.
 	ServerAdminRoomChanged, // ServerAdminRoomChangedPayload: a room changed, to its managers
-	// Repairing a damaged member log (protocol 33, #196, common/room_log_repair.odin), appended
+	// Repairing a damaged member log (protocol 34, #196, common/room_log_repair.odin), appended
 	// so no existing wire value moves. Admins only, checked in the database statement.
 	ClientAdminRoomLogStatus, // ClientAdminRoomLogStatusPayload: replay a room's stored log
 	ServerAdminRoomLogStatus, // ServerAdminRoomLogStatusPayload: what the replay found
@@ -1799,7 +1799,7 @@ AdminAction :: enum u8 {
 	SetRestricted       = 10,
 	// Protocol 28 (attachments F3): ClientAdminRemoveAttachment.
 	RemoveAttachment    = 11,
-	// Protocol 33 (#196): ClientAdminTruncateRoomLog.
+	// Protocol 34 (#196): ClientAdminTruncateRoomLog.
 	TruncateRoomLog     = 12,
 }
 
@@ -1855,10 +1855,10 @@ ClientAdminBanUserPayload :: struct {
 // of (the server's unsigned Remove in each room's log, in the ban's transaction).
 // failedRoomIds (owned once decoded, ascending) names the encrypted rooms whose member log it
 // could not change (a damaged log, or a room another connection held locked); the ban still
-// applies, and an admin deals with those rooms by hand (protocol 33: ClientAdminRoomLogStatus
+// applies, and an admin deals with those rooms by hand (protocol 34: ClientAdminRoomLogStatus
 // and ClientAdminTruncateRoomLog). Empty for every other action.
 //
-// Protocol 33 (#196): roomId names the room a TruncateRoomLog repaired; 0 otherwise.
+// Protocol 34 (#196): roomId names the room a TruncateRoomLog repaired; 0 otherwise.
 ServerAdminActionResultPayload :: struct {
 	action:        AdminAction,
 	userId:        int,
@@ -2264,7 +2264,7 @@ DatabaseQueryRequest :: union {
 	DatabaseAttachmentRequest,
 	// Message edits and deletes (protocol 30, common/message_edits.odin).
 	DatabaseMessageChangeRequest,
-	// Member log repair (protocol 33, common/room_log_repair.odin).
+	// Member log repair (protocol 34, common/room_log_repair.odin).
 	DatabaseRoomLogRepairRequest,
 }
 

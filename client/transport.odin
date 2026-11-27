@@ -153,7 +153,7 @@ ClientTransportRuntimeEventKind :: enum {
 	// Room changes for room managers (protocol 31, #73, room_members.odin). AdminRoomChanged is
 	// ServerAdminRoomChanged: roomID and what changed in adminRoomChange. Nothing owned.
 	AdminRoomChanged,
-	// Member log repair (protocol 33, #196, room_log_repair.odin). RoomLogStatusReceived is
+	// Member log repair (protocol 34, #196, room_log_repair.odin). RoomLogStatusReceived is
 	// ServerAdminRoomLogStatus (roomLogStatus, rooms owned). AdminActionResult carries roomID
 	// for a TruncateRoomLog.
 	RoomLogStatusReceived,
@@ -278,7 +278,7 @@ ClientTransportRuntimeEvent :: struct {
 	messageEdits:              [dynamic]common.MessageEdit,
 	// Protocol 31.
 	adminRoomChange:           common.AdminRoomChange,
-	// Protocol 33.
+	// Protocol 34.
 	roomLogStatus:             common.ServerAdminRoomLogStatusPayload,
 }
 

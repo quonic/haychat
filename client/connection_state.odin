@@ -60,7 +60,7 @@ ServerConnection :: struct {
 	hasAttachmentRemovals:     bool,
 	attachmentRemovalsHasMore: bool,
 	attachmentRemovalsPending: bool,
-	// Protocol 33 (#196, room_log_repair.odin): the last ServerAdminRoomLogStatus (rooms owned),
+	// Protocol 34 (#196, room_log_repair.odin): the last ServerAdminRoomLogStatus (rooms owned),
 	// whether one arrived, whether a request waits for its answer, and the refusal of the last
 	// one (owned).
 	roomLogStatus:             common.ServerAdminRoomLogStatusPayload,

@@ -1,4 +1,4 @@
--- Truncates an encrypted room's damaged member log (protocol 33, #196) without a client:
+-- Truncates an encrypted room's damaged member log (protocol 34, #196) without a client:
 --
 --   psql -v room_id=12 -v to_version=4 -f truncate-room-log.sql
 --

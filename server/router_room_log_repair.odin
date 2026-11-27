@@ -4,7 +4,7 @@ import "../common"
 import "core:encoding/cbor"
 import "core:fmt"
 
-// Repairing a damaged member log (protocol 33, #196; database_room_log_repair.odin decides):
+// Repairing a damaged member log (protocol 34, #196; database_room_log_repair.odin decides):
 //
 // - ClientAdminRoomLogStatus{roomId} -> the stored log replayed -> ServerAdminRoomLogStatus to
 //   the requester.

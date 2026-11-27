@@ -74,7 +74,7 @@ PendingDBRequestType :: enum {
 	// an edit fetch, whose one statement checks everything. It outlives its peer's disconnect
 	// like Attachment, so an applied delete always removes its files and tells the readers.
 	MessageChange,
-	// Member log repair (router_room_log_repair.odin, protocol 33): a status or a truncation.
+	// Member log repair (router_room_log_repair.odin, protocol 34): a status or a truncation.
 	// It outlives its peer's disconnect like MessageChange, so an applied truncation is always
 	// fanned out. adminAction is TruncateRoomLog for a truncation.
 	RoomLogRepair,

@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:sync"
 import "core:testing"
 
-// Router tests for member log repair (router_room_log_repair.odin, protocol 33, #196) with
+// Router tests for member log repair (router_room_log_repair.odin, protocol 34, #196) with
 // stubbed database results; the rules run in the database worker (database_room_log_test.odin).
 // Peers: admin alice (1, user 42), two sessions of bob (2 and 3, user 43), and carol (4, user
 // 44), as in router_room_access_test.odin.

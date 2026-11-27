@@ -1,6 +1,6 @@
 package client
 
-// Headless member log repair (protocol 33, #196; docs/testing-harness.md "Encrypted rooms"):
+// Headless member log repair (protocol 34, #196; docs/testing-harness.md "Encrypted rooms"):
 // room-log-status [ROOM_ID] asks for the member log status of one encrypted room or of every
 // one (admins), answered by room_log_status; room-log-truncate ROOM_ID VERSION truncates a
 // damaged log to its goodVersion (admins), answered by admin_result room-log-truncate with

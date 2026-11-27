@@ -564,7 +564,7 @@ HeadlessAdminResultJSON :: struct {
 	// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from, left out
 	// when there are none.
 	failedRoomIDs: []int `json:"failedRoomIDs,omitempty"`,
-	// Protocol 33 (#196): the room a room-log-truncate repaired, left out (nil) for every
+	// Protocol 34 (#196): the room a room-log-truncate repaired, left out (nil) for every
 	// other action so their lines stay as they were.
 	roomID:        Maybe(int) `json:"roomID,omitempty"`,
 }

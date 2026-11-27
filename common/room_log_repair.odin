@@ -1,6 +1,6 @@
 package common
 
-// Repairing an encrypted room's damaged member log (protocol 33, #196). Admins only, checked in
+// Repairing an encrypted room's damaged member log (protocol 34, #196). Admins only, checked in
 // the database statements (DATABASE_ACTOR_IS_ADMIN_SQL), like attachment moderation.
 //
 // A stored log is damaged when it does not replay from version 1 (an entry a rule refuses, a

@@ -49,7 +49,7 @@ ServerSettingsForm :: struct {
 	// (0 for none).
 	roleEditor:       RoleEditorForm,
 	memberRolesUserID: int,
-	// Protocol 33 (#196, room_log_repair.odin): the damaged room whose Truncate log to version
+	// Protocol 34 (#196, room_log_repair.odin): the damaged room whose Truncate log to version
 	// N… confirmation is open (0 for none), and N.
 	roomLogConfirmRoomID:  int,
 	roomLogConfirmVersion: int,

@@ -1469,124 +1469,6 @@ roomLogTestUnsigned :: proc(
 // adds). A client cannot send the server's RemoveManager itself.
 @(test)
 testBanRemovesLogManagersAgainstPostgreSQL :: proc(t: ^testing.T) {
-// ── Member log repair (protocol 33, #196) ───────────────────────────────────────────────────
-
-// Runs a repair request; the result's arrays are copied to the temp allocator.
-@(private = "file")
-roomLogTestRepair :: proc(
-	conn: pg.Conn,
-	serverKey: common.IdentityPublicKeyBytes,
-	action: common.DatabaseRoomLogRepairAction,
-	actorID, roomID: int,
-	toVersion := 0,
-) -> (
-	result: common.DatabaseRoomLogRepairResult,
-) {
-	response := databaseExecuteRequest(
-		conn,
-		common.DatabaseRoomLogRepairRequest {
-			action = action,
-			actorUserId = actorID,
-			roomId = roomID,
-			toVersion = toVersion,
-			serverIdentityPublicKey = serverKey,
-		},
-	)
-	defer IPC__database_query_response_deinit(response)
-	got, ok := response.result.(common.DatabaseRoomLogRepairResult)
-	assert(response.success && ok, fmt.tprintf("expected the repair to run: %s", response.message))
-	result = got
-	copyIDs :: proc(ids: [dynamic]int) -> [dynamic]int {
-		copied := make([dynamic]int, context.temp_allocator)
-		append(&copied, ..ids[:])
-		return copied
-	}
-	result.statuses = make([dynamic]common.RoomLogStatus, context.temp_allocator)
-	append(&result.statuses, ..got.statuses[:])
-	result.memberUserIDs = copyIDs(got.memberUserIDs)
-	result.managerUserIDs = copyIDs(got.managerUserIDs)
-	result.addedUserIDs = copyIDs(got.addedUserIDs)
-	result.removedUserIDs = copyIDs(got.removedUserIDs)
-	result.formerUserIDs = copyIDs(got.formerUserIDs)
-	return
-}
-
-// The status of roomID in a Status answer, if it lists the room.
-@(private = "file")
-roomLogTestStatusOf :: proc(
-	result: common.DatabaseRoomLogRepairResult,
-	roomID: int,
-) -> (
-	common.RoomLogStatus,
-	bool,
-) {
-	for status in result.statuses {
-		if status.roomId == roomID {
-			return status, true
-		}
-	}
-	return {}, false
-}
-
-// A SealedRoomMessage's first bytes for epoch (the server stores the rest as it is).
-@(private = "file")
-roomLogTestSealedHex :: proc(epoch: int) -> string {
-	return fmt.tprintf("01%02x00000000000000aa", epoch)
-}
-
-// The DO block of deploy/sql/truncate-room-log.sql, as the file has it: the test runs the
-// helper's own code, with the two settings its psql lines set.
-ROOM_LOG_TEST_TRUNCATE_HELPER :: #load("../deploy/sql/truncate-room-log.sql", string)
-
-// Runs the SQL helper's block for roomID and toVersion; "" when it truncated the log,
-// otherwise the error PostgreSQL raised (and nothing changed).
-@(private = "file")
-roomLogTestRunHelper :: proc(conn: pg.Conn, roomID, toVersion: int) -> string {
-	helper := ROOM_LOG_TEST_TRUNCATE_HELPER
-	start := strings.index(helper, "DO $$")
-	end := strings.last_index(helper, "$$;")
-	assert(start >= 0 && end > start, "expected one DO block in truncate-room-log.sql")
-	databaseDefaultRoomTestExec(
-		conn,
-		"set the helper's settings",
-		fmt.tprintf(
-			"SELECT set_config('haychat.room_id', '%d', false), " +
-			"set_config('haychat.to_version', '%d', false)",
-			roomID,
-			toVersion,
-		),
-	)
-	databaseDefaultRoomTestExec(conn, "mark the helper's savepoint", "SAVEPOINT helper")
-	block, _ := strings.clone_to_cstring(helper[start:end + 3], context.temp_allocator)
-	result := pg.exec(conn, block)
-	defer pg.clear(result)
-	if pg.result_status(result) == .Command_OK {
-		databaseDefaultRoomTestExec(conn, "keep the helper's change", "RELEASE SAVEPOINT helper")
-		return ""
-	}
-	message := strings.clone_from_cstring(pg.result_error_message(result), context.temp_allocator)
-	databaseDefaultRoomTestExec(conn, "undo the helper", "ROLLBACK TO SAVEPOINT helper")
-	return message
-}
-
-@(private = "file")
-roomLogTestAccess :: proc(conn: pg.Conn, roomID: int) -> string {
-	return databaseAdminTestValue(
-		conn,
-		fmt.tprintf("SELECT access::text FROM rooms WHERE id = %d", roomID),
-	)
-}
-
-// Protocol 33 (#196): an admin diagnoses a room whose stored log stops replaying at version 5
-// (an entry's signature damaged in the database) and truncates it to version 4. The status
-// names the failing version and the rule, a non-admin is refused both requests, a healthy or
-// unencrypted room and a toVersion other than the good one are refused, and the truncation
-// deletes the later entries, the later epochs' envelopes, sealed messages and sealed edits
-// (fixing the edit count), rebuilds the members (carol back, dave out with his read marker)
-// and the managers (bob back) at version 4, and moves the head, after which the remaining
-// members' next signed entry follows version 4's hash.
-@(test)
-testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
 	_ = t
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
@@ -1742,6 +1624,129 @@ testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
 		fmt.tprintf("expected a second ban to change nothing, got %v", again),
 	)
 }
+
+// ── Member log repair (protocol 34, #196) ───────────────────────────────────────────────────
+
+// Runs a repair request; the result's arrays are copied to the temp allocator.
+@(private = "file")
+roomLogTestRepair :: proc(
+	conn: pg.Conn,
+	serverKey: common.IdentityPublicKeyBytes,
+	action: common.DatabaseRoomLogRepairAction,
+	actorID, roomID: int,
+	toVersion := 0,
+) -> (
+	result: common.DatabaseRoomLogRepairResult,
+) {
+	response := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomLogRepairRequest {
+			action = action,
+			actorUserId = actorID,
+			roomId = roomID,
+			toVersion = toVersion,
+			serverIdentityPublicKey = serverKey,
+		},
+	)
+	defer IPC__database_query_response_deinit(response)
+	got, ok := response.result.(common.DatabaseRoomLogRepairResult)
+	assert(response.success && ok, fmt.tprintf("expected the repair to run: %s", response.message))
+	result = got
+	copyIDs :: proc(ids: [dynamic]int) -> [dynamic]int {
+		copied := make([dynamic]int, context.temp_allocator)
+		append(&copied, ..ids[:])
+		return copied
+	}
+	result.statuses = make([dynamic]common.RoomLogStatus, context.temp_allocator)
+	append(&result.statuses, ..got.statuses[:])
+	result.memberUserIDs = copyIDs(got.memberUserIDs)
+	result.managerUserIDs = copyIDs(got.managerUserIDs)
+	result.addedUserIDs = copyIDs(got.addedUserIDs)
+	result.removedUserIDs = copyIDs(got.removedUserIDs)
+	result.formerUserIDs = copyIDs(got.formerUserIDs)
+	return
+}
+
+// The status of roomID in a Status answer, if it lists the room.
+@(private = "file")
+roomLogTestStatusOf :: proc(
+	result: common.DatabaseRoomLogRepairResult,
+	roomID: int,
+) -> (
+	common.RoomLogStatus,
+	bool,
+) {
+	for status in result.statuses {
+		if status.roomId == roomID {
+			return status, true
+		}
+	}
+	return {}, false
+}
+
+// A SealedRoomMessage's first bytes for epoch (the server stores the rest as it is).
+@(private = "file")
+roomLogTestSealedHex :: proc(epoch: int) -> string {
+	return fmt.tprintf("01%02x00000000000000aa", epoch)
+}
+
+// The DO block of deploy/sql/truncate-room-log.sql, as the file has it: the test runs the
+// helper's own code, with the two settings its psql lines set.
+ROOM_LOG_TEST_TRUNCATE_HELPER :: #load("../deploy/sql/truncate-room-log.sql", string)
+
+// Runs the SQL helper's block for roomID and toVersion; "" when it truncated the log,
+// otherwise the error PostgreSQL raised (and nothing changed).
+@(private = "file")
+roomLogTestRunHelper :: proc(conn: pg.Conn, roomID, toVersion: int) -> string {
+	helper := ROOM_LOG_TEST_TRUNCATE_HELPER
+	start := strings.index(helper, "DO $$")
+	end := strings.last_index(helper, "$$;")
+	assert(start >= 0 && end > start, "expected one DO block in truncate-room-log.sql")
+	databaseDefaultRoomTestExec(
+		conn,
+		"set the helper's settings",
+		fmt.tprintf(
+			"SELECT set_config('haychat.room_id', '%d', false), " +
+			"set_config('haychat.to_version', '%d', false)",
+			roomID,
+			toVersion,
+		),
+	)
+	databaseDefaultRoomTestExec(conn, "mark the helper's savepoint", "SAVEPOINT helper")
+	block, _ := strings.clone_to_cstring(helper[start:end + 3], context.temp_allocator)
+	result := pg.exec(conn, block)
+	defer pg.clear(result)
+	if pg.result_status(result) == .Command_OK {
+		databaseDefaultRoomTestExec(conn, "keep the helper's change", "RELEASE SAVEPOINT helper")
+		return ""
+	}
+	message := strings.clone_from_cstring(pg.result_error_message(result), context.temp_allocator)
+	databaseDefaultRoomTestExec(conn, "undo the helper", "ROLLBACK TO SAVEPOINT helper")
+	return message
+}
+
+@(private = "file")
+roomLogTestAccess :: proc(conn: pg.Conn, roomID: int) -> string {
+	return databaseAdminTestValue(
+		conn,
+		fmt.tprintf("SELECT access::text FROM rooms WHERE id = %d", roomID),
+	)
+}
+
+// Protocol 34 (#196): an admin diagnoses a room whose stored log stops replaying at version 5
+// (an entry's signature damaged in the database) and truncates it to version 4. The status
+// names the failing version and the rule, a non-admin is refused both requests, a healthy or
+// unencrypted room and a toVersion other than the good one are refused, and the truncation
+// deletes the later entries, the later epochs' envelopes, sealed messages and sealed edits
+// (fixing the edit count), rebuilds the members (carol back, dave out with his read marker)
+// and the managers (bob back) at version 4, and moves the head, after which the remaining
+// members' next signed entry follows version 4's hash.
+@(test)
+testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
 	conn := databaseAdminTestOpen(t, "room_log_repair")
 	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
 	assert(serverKeyOK, "expected a server key")
@@ -2001,7 +2006,7 @@ testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 }
 
-// Protocol 33 (#196): deploy/sql/truncate-room-log.sql, run as the file has it on a log whose
+// Protocol 34 (#196): deploy/sql/truncate-room-log.sql, run as the file has it on a log whose
 // last entry is an unsigned forgery and whose rows were changed behind the server's back (a
 // botched restore): it refuses what it can check, and then leaves exactly what the server's
 // replay finds at the version it was given (members, managers, access and head), after which

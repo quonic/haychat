@@ -5,7 +5,7 @@ import "core:fmt"
 import "core:slice"
 import "shared:pg"
 
-// Repairing a damaged member log (protocol 33, #196, common/room_log_repair.odin). Admins only:
+// Repairing a damaged member log (protocol 34, #196, common/room_log_repair.odin). Admins only:
 // the statement that reads the rooms checks the admin role (DATABASE_ACTOR_IS_ADMIN_SQL), and a
 // truncation's lock statement checks it again in the transaction that makes the change.
 //

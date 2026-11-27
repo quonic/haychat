@@ -377,7 +377,7 @@ databaseRoomLogReplay :: proc(
 	}
 	replayed, replayErr, _ := common.replayRoomLog(roomID, entries[:], ctx)
 	if replayErr != .None {
-		// Protocol 33 (#196): say which version to truncate to.
+		// Protocol 34 (#196): say which version to truncate to.
 		databaseRoomLogReportDamage(conn, roomID, room.logVersion, serverIdentityPublicKey)
 		return {}, true, true
 	}

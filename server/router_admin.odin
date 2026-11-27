@@ -567,7 +567,7 @@ MainRouterState_handleAdminUserResult :: proc(
 	     .TruncateRoomLog:
 	// Role actions are DatabaseRoleRequests (router_roles.odin), registration ones
 	// router_registration.odin's, attachment removal router_attachment_moderation.odin's, and
-	// (protocol 33) a member log truncation router_room_log_repair.odin's.
+	// (protocol 34) a member log truncation router_room_log_repair.odin's.
 	}
 }
 

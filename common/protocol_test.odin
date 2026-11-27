@@ -156,7 +156,7 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerMessageEdits, 227},
 	// Protocol 31 (#73: room changes for room managers).
 	{.ServerAdminRoomChanged, 228},
-	// Protocol 33 (#196: repairing a damaged member log).
+	// Protocol 34 (#196: repairing a damaged member log).
 	{.ClientAdminRoomLogStatus, 229},
 	{.ServerAdminRoomLogStatus, 230},
 	{.ClientAdminTruncateRoomLog, 231},
@@ -194,7 +194,7 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 		int(AdminAction.TruncateRoomLog) == 12,
 		fmt.tprintf("expected AdminAction TruncateRoomLog 12, got %d", int(AdminAction.TruncateRoomLog)),
 	)
-	// Protocol 33 (#196): RoomLogStatus.error carries a RoomLogError as a number. Append new
+	// Protocol 34 (#196): RoomLogStatus.error carries a RoomLogError as a number. Append new
 	// errors at the end of the enum.
 	assert(
 		int(RoomLogError.None) == 0 &&
