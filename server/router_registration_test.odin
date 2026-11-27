@@ -4,6 +4,7 @@ import "../common"
 import "core:crypto/ecdh"
 import "core:encoding/cbor"
 import "core:fmt"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 import "core:testing"
@@ -634,6 +635,105 @@ testRestrictedPresenceIsFilteredPerRecipient :: proc(t: ^testing.T) {
 	defer delete(bobPresence.payload)
 	assert(bobPresence.messageType == .ServerUserPresence, "expected bob, a room mate, told")
 	routerTestExpectNoNetworkMessage(&h, "presence to carol, who shares no room")
+}
+
+// Answers the router's pending visibility check with userIDs.
+@(private = "file")
+routerRegistrationTestAnswerVisibility :: proc(
+	h: ^RouterTestHarness,
+	check: DatabaseQuery,
+	userIDs: ..int,
+) {
+	answer := make([dynamic]int, 0, len(userIDs))
+	append(&answer, ..userIDs)
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		check.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseSharedRoomsResult{userIds = answer},
+		},
+	)
+}
+
+// #190: ServerUserKeyChanged about an unrestricted account reaches a restricted account only
+// after the database says it may fetch the key (the fetch's rule, not shared rooms): erin, who
+// has an old conversation with bob, hears of bob's new key; gail, who knows nobody, does not.
+@(test)
+testKeyChangeReachesRestrictedAccountsThatMayFetchTheKey :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	bob := routerCompleteHandshake(&h, 1, userID = 2, nickname = "bob")
+	defer common.TransportState_deinit(&bob)
+	h.state.connectedPeers[2] = true
+	MainRouterState_setPeerSession(&h.state, 2, RouterPeerSession_init())
+	erin := routerCompleteHandshake(&h, 2, userID = 5, nickname = "erin", isRestricted = true)
+	defer common.TransportState_deinit(&erin)
+	// erin's presence to bob waits for a check presence makes by shared rooms; nobody shares one.
+	erinPresence := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(erinPresence.request)
+	presenceCheck, presenceOK := erinPresence.request.(common.DatabaseSharedRoomsRequest)
+	assert(
+		presenceOK && presenceCheck.userId == 5 && !presenceCheck.keyRecipients,
+		fmt.tprintf("expected a shared rooms check for erin's presence, got %v", presenceCheck),
+	)
+	routerRegistrationTestAnswerVisibility(&h, erinPresence)
+	h.state.connectedPeers[3] = true
+	MainRouterState_setPeerSession(&h.state, 3, RouterPeerSession_init())
+	gail := routerCompleteHandshake(&h, 3, userID = 6, nickname = "gail", isRestricted = true)
+	defer common.TransportState_deinit(&gail)
+	gailPresence := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(gailPresence.request)
+	routerRegistrationTestAnswerVisibility(&h, gailPresence)
+	routerTestExpectNoNetworkMessage(&h, "presence nobody may see")
+
+	bundle := common.UserKeyBundle {
+		userId    = 2,
+		createdAt = 1_700_000_000,
+	}
+	bundle.encryptionPublicKey[0] = 7
+	MainRouterState_handlePublishEncryptionKeyResult(
+		&h.pm,
+		&h.state,
+		PendingDBRequest{requestType = .PublishEncryptionKey},
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabasePublishEncryptionKeyResult{stored = true, bundle = bundle},
+		},
+	)
+	// bob hears of his own key at once; erin and gail wait for the database.
+	own := routerTestOpenInnerPacket(&h, &bob)
+	delete(own.payload)
+	assert(own.messageType == .ServerUserKeyChanged, "expected bob told of his own key")
+	routerTestExpectNoNetworkMessage(&h, "a key change before the database answered")
+	check := routerPollDatabaseQuery(&h)
+	defer IPC__database_query_request_deinit(check.request)
+	keyCheck, keyCheckOK := check.request.(common.DatabaseSharedRoomsRequest)
+	assert(
+		keyCheckOK &&
+		keyCheck.keyRecipients &&
+		keyCheck.userId == 2 &&
+		len(keyCheck.candidateUserIds) == 2 &&
+		slice.contains(keyCheck.candidateUserIds[:], 5) &&
+		slice.contains(keyCheck.candidateUserIds[:], 6),
+		fmt.tprintf("expected erin and gail checked by the key fetch's rule, got %v", keyCheck),
+	)
+	routerRegistrationTestAnswerVisibility(&h, check, 5)
+	changed := routerTestOpenInnerPacket(&h, &erin)
+	defer delete(changed.payload)
+	assert(
+		changed.messageType == .ServerUserKeyChanged,
+		fmt.tprintf("expected erin told of bob's key, got %v", changed.messageType),
+	)
+	decoded: common.ServerUserKeyChangedPayload
+	assert(cbor.unmarshal(changed.payload, &decoded) == nil, "expected the key change to decode")
+	assert(decoded.bundle == bundle, fmt.tprintf("expected bob's bundle, got %v", decoded))
+	routerTestExpectNoNetworkMessage(&h, "bob's key to gail, who may not fetch it")
 }
 
 // A ClientRegister's answer outlives its peer (approvers still hear of a request), so it must
