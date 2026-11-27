@@ -1038,8 +1038,8 @@ testRoomChainsFullHistoryInviterForwardsWhatItHolds :: proc(t: ^testing.T) {
 	roomChainTestDeliverEnvelope(carol, forwards[1], 11)
 	key := roomChainTestLastNote(carol, .Key)
 	assert(
-		key != nil && key.outcome == .Stored && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
-		"expected carol to store the forward from alice",
+		key != nil && key.outcome == .Unchecked && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected carol to keep the forward from alice unchecked until a message opens (#78)",
 	)
 	assert(
 		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 2,
@@ -1047,6 +1047,14 @@ testRoomChainsFullHistoryInviterForwardsWhatItHolds :: proc(t: ^testing.T) {
 	)
 	roomChainTestDeliverMessage(carol, trio.fromAlice, 500)
 	roomChainTestDeliverMessage(carol, trio.fromBob, 501)
+	key = roomChainTestLastNote(carol, .Key)
+	assert(
+		key != nil && key.outcome == .Stored && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected bob's message to check the forward from alice",
+	)
+	for chain in carol.e2ee[0].store.roomChains {
+		assert(!chain.unchecked, "expected both chains checked by their messages")
+	}
 	for expected in ([]struct {
 			id:   int,
 			text: string,
