@@ -136,7 +136,8 @@ an encrypted room:
 - `ClientAddRoomMember` and `ClientLeaveRoom` are refused for encrypted rooms ("This room is
   encrypted: its members change through its member list"); the client signs log entries
   instead. An admin's removal (`ClientRemoveRoomMember`) still works: the server writes an
-  unsigned Remove into the log.
+  unsigned Remove into the log. A ban (protocol 32) does the same in every encrypted room the
+  account is in ([Admin Actions](#admin-actions)).
 - Every verified change shows in the room as an event line ("alice added carol", "the server
   removed dave", "erin (manager) added themselves"), so every addition is visible to every
   member.
@@ -198,6 +199,15 @@ below in the database for every request, in the same statement as the change.
   so on an Open server a banned person can connect again with a new identity key as a new
   account. Closing sign-up ([Invite only or Invite + approval](#registration), protocol 25)
   stops that: a new key then needs a code.
+- **Bans and encrypted rooms** (protocol 32): a ban also removes the account from every
+  [encrypted room](#encrypted-rooms) it is a member of, in the same transaction: the server
+  writes its removal into each room's member list ("the server removed dave"), and the other
+  members' messages from then on carry no key for it. If a room's member list is damaged, or
+  the room is busy with another change to the database, that room keeps the account but the
+  ban still goes through; the Admin section then names those rooms under the account's row
+  ("These encrypted rooms still list them: …"). Banning the account again retries them. An
+  unban does not add the account back to any room: someone has to invite it again, and in a
+  Full history room it then reads the room's history like any new member.
 
 ## Roles and Permissions
 
@@ -486,8 +496,13 @@ newest message.
   the server lets read it, not who can technically read it (the server and its operator can
   read every unencrypted room). In a Full history encrypted
   room a new member reads older messages only once a member who holds their keys is online.
-- Bans and account changes do not remove anyone from encrypted rooms' member lists by
-  themselves; an admin removes them from each room.
+- A ban removes the account from encrypted rooms' member lists, but not from their managers
+  ([Bans and encrypted rooms](#admin-actions)): a banned manager stays named as one. The server
+  never accepts a change from an account that cannot sign in, but members' clients would still
+  accept its signature on a change the server stored. A room whose member list is damaged, or
+  that another database connection holds locked during the ban, keeps the account until it is
+  banned again (the Admin section lists those rooms). Other account changes (a role, a
+  restriction) change no encrypted room's member list.
 - The member counts in the Admin section's list of rooms leave out accounts that signed up since
   it was last fetched, until another change to the room or reopening Server settings.
 - The Admin section lists every account of the server at once, with no search or paging.

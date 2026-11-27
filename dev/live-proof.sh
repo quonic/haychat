@@ -29,8 +29,10 @@ set -euo pipefail
 #                   joining it and still manages
 #   --e2ee          only the encryption key proof between headless clients
 #                   (dev/e2ee-proof.sh): bundles published and pinned on first use, matching
-#                   safety numbers, a verified pin that survives a restart, and a key swapped
-#                   in the database that shows as a key change until it is trusted
+#                   safety numbers, a verified pin that survives a restart, a key swapped
+#                   in the database that shows as a key change until it is trusted, the
+#                   encrypted room steps, and (protocol 32) a ban that removes the account from
+#                   its encrypted rooms, which it does not read again after an unban
 #   --registration  only the registration proof (dev/registration-proof.sh): Invite only,
 #                   invite codes (an inviter's, expired, revoked and used up), an invite link,
 #                   Invite + approval (approved live and declined), a room code that makes a

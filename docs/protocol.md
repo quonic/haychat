@@ -76,6 +76,7 @@ version below therefore needs clients and servers rebuilt together.
 | 29 | Attachment removal log (#138, [below](#attachment-removal-log-protocol-29)): `ClientAdminListAttachmentRemovals{beforeId}` and `ServerAdminAttachmentRemovals{beforeId, entries, hasMore}` (wire values 216 and 217, `AttachmentRemovalEntry`), and `chatMessageId`/`directMessageId` in `ServerAttachmentRemoved`, with schema migration 16 (`attachment_removals`). Every removal, by an admin or `deploy/sql/remove-attachment.sql`, keeps a row with its reason that admins list in the client |
 | 30 | Editing and deleting messages (#76, [below](#editing-and-deleting-messages-protocol-30)): `ClientEditRoomMessage` … `ServerMessageEdits` (wire values 218 to 227), `MessageEdit`, `MessageDeletion` and `MessageEditsKind`, `editCount`/`lastEdit`/`deleted`/`deletion` on `StoredChatMessage` and `StoredDirectMessage` and `lastEditCount`/`lastEdit`/`lastDeleted`/`lastDeletion` on `DirectConversationSummary`, and the signatures `"haychat-room-edit-v1"`, `"haychat-dm-edit-v1"`, `"haychat-room-delete-v1"` and `"haychat-dm-delete-v1"`, with schema migration 17 (edit and tombstone columns on both message tables, `chat_message_edits`, `direct_message_edits`). Authors edit and delete their messages, admins delete any room message, and a deleted message leaves a tombstone with its ID |
 | 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
+| 32 | Bans leave encrypted rooms (#72, [below](#bans-and-encrypted-rooms-protocol-32)): a ban removes the account from every encrypted room it is a member of with the server's unsigned Remove, in the ban's transaction, and `ServerAdminActionResult.failedRoomIds` names the encrypted rooms whose member log the ban could not change. No new message type and no schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -773,8 +774,10 @@ readable in one. Voice in one is end-to-end encrypted since protocol 21
   the actor must be the sender), and stores the entry and applies it to `room_members` in one
   transaction. Every stored entry goes out as `ServerRoomLog` to the room's members and
   managers and to whoever it removed. An admin's `ClientRemoveRoomMember` on an encrypted room
-  becomes an unsigned Remove the server writes; `ClientAddRoomMember` and `ClientLeaveRoom` are
-  refused for encrypted rooms in favour of the log. `ClientFetchRoomLog` serves members,
+  becomes an unsigned Remove the server writes, and so does a ban for every encrypted room the
+  banned account is in (protocol 32, [below](#bans-and-encrypted-rooms-protocol-32));
+  `ClientAddRoomMember` and `ClientLeaveRoom` are refused for encrypted rooms in favour of the
+  log. `ClientFetchRoomLog` serves members,
   managers and admins.
 - **Clients.** A client replays the whole log against its own pins, keeps the verified head
   (version and hash) per room in its [key store](client-configuration.md#key-store), and
@@ -787,6 +790,36 @@ readable in one. Voice in one is end-to-end encrypted since protocol 21
 - **What the server still can do.** Remove members, delete the room, refuse appends and
   withhold entries (a client then sees an older log, or a rollback once it has seen a newer
   one). It cannot add a member or a manager to a log that clients accept.
+
+### Bans and encrypted rooms (protocol 32)
+
+Before protocol 32 a ban left the account in every encrypted room's member log (#72): members'
+clients kept wrapping new chains for it, and once unbanned it read everything sent during the
+ban. Since protocol 32:
+
+- **A ban removes the account.** `ClientAdminBanUser{banned = true}` (also of an account
+  already banned) is one transaction: the ban statement's guards decide and the ban applies
+  first, then the server writes its unsigned Remove of the account into every encrypted room
+  `room_members` lists it in, exactly as for an admin's `ClientRemoveRoomMember`, and applies
+  it. A refused ban changes no room. Each removal goes out as for a manual one: `ServerRoomLog`
+  with the entry to the room's remaining members and managers and to the admin who banned, and
+  `ServerRoomMembershipChanged`; the remaining members' next messages are in the new epoch, so
+  nothing sent after the ban has a wrap for the account. A room whose verified log does not
+  name the account (a row added to `room_members` behind the log) is left alone.
+- **Rooms it could not change.** A room whose stored log does not replay (damaged), or whose
+  row another database connection holds locked (the ban does not wait), keeps the account; the
+  ban still applies. `ServerAdminActionResult{action = Ban}` lists those rooms in
+  `failedRoomIds` (ascending, empty when there are none or for any other action), and its
+  `message` counts the removals and the failures ("Banned bob; removed from 2 encrypted rooms;
+  1 encrypted room could not be changed"). Banning the account again retries them.
+- **An unban adds nothing back.** `ClientAdminBanUser{banned = false}` only lifts the ban.
+  To return to an encrypted room the account needs a new signed `Add`, after which it reads
+  what any new member reads: in a From join room nothing from before the `Add`, and in a Full
+  history room the room's history as members forward it, the ban's time included.
+- **Managers stay.** A ban does not take the account out of a log's manager set (an unsigned
+  `RemoveManager` is not allowed). The server refuses every entry whose actor is not the
+  requester and a banned account cannot sign in, so it never accepts one from it, but clients
+  would still accept that key's signatures in an entry the server stored.
 
 ## Sender chains in encrypted rooms (protocol 19)
 
