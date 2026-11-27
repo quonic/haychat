@@ -1147,6 +1147,47 @@ testRestrictedVisibilityAgainstPostgreSQL :: proc(t: ^testing.T) {
 	assert(markRead(conn, erin, bob), "expected the old conversation marked read")
 	assert(post(conn, erin, bob) == .Restricted, "expected the restricted refusal for bob")
 	assert(upload(conn, erin, bob) == .Restricted, "expected the restricted refusal for bob")
+
+	// #190: a key change reaches every account that may fetch the key, by the fetch's rule.
+	// gail is restricted and shares nothing with anyone.
+	gail := databaseSQLTestCreateUser(conn, "vis-gail")
+	databaseDefaultRoomTestExec(
+		conn,
+		"restrict gail",
+		fmt.tprintf("UPDATE users SET restricted = true WHERE id = %d", gail),
+	)
+	recipients :: proc(conn: pg.Conn, subject: int, candidates: ..int) -> []int {
+		request := common.DatabaseSharedRoomsRequest {
+			userId           = subject,
+			candidateUserIds = make([dynamic]int, 0, len(candidates)),
+			keyRecipients    = true,
+		}
+		defer delete(request.candidateUserIds)
+		append(&request.candidateUserIds, ..candidates)
+		response := databaseExecuteRequest(conn, request)
+		defer IPC__database_query_response_deinit(response)
+		assert(response.success, fmt.tprintf("expected the check to run: %s", response.message))
+		ids := response.result.(common.DatabaseSharedRoomsResult).userIds
+		return slice.clone(ids[:], context.temp_allocator)
+	}
+	// bob's key: erin knows him only through their old conversation now; gail does not.
+	heard := recipients(conn, bob, gail, erin)
+	assert(
+		slice.equal(heard, []int{erin}),
+		fmt.tprintf("expected erin, not gail, told of bob's key, got %v", heard),
+	)
+	// dave's and frank's keys: erin reads dave's message in club (Full history), not frank's,
+	// written in lounge before her From join cut.
+	heard = recipients(conn, dave, erin, gail)
+	assert(slice.equal(heard, []int{erin}), fmt.tprintf("expected erin for dave, got %v", heard))
+	heard = recipients(conn, frank, erin, gail)
+	assert(len(heard) == 0, fmt.tprintf("expected nobody for frank, got %v", heard))
+	// erin's own key: bob (the conversation) and the approver, not carol or gail.
+	heard = recipients(conn, erin, approver, bob, carol, gail)
+	assert(
+		slice.equal(heard, []int{bob, approver}),
+		fmt.tprintf("expected bob and the approver told of erin's key, got %v", heard),
+	)
 }
 
 // #115: a room code's request whose room is deleted or made Public cannot be approved, and an

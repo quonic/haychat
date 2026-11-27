@@ -295,7 +295,10 @@ or Admin invite room) is **restricted** to that room:
   can read, so it can check their signatures, and, in an encrypted room it is in, everyone the
   room's member list history names (who added or removed whom, the managers) and whoever sent
   or passed on a room key meant for it, so the room keeps working on a new device even after
-  those people have left.
+  those people have left. Every account that may ask for a key this way also hears at once
+  when that key changes (#190), by the same rule, so a restricted account learns of a new key
+  of, for example, an old conversation peer it no longer shares a room with. Presence and
+  account changes still reach it only for the accounts it shares a room with and admins.
 - Voice participants: a room's participant list goes only to the room's members, and only
   members can be in its voice. Removing an account from a room (by a member manager, by
   leaving, through a role change or a room edit) takes it out of the room's voice first, so a

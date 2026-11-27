@@ -617,7 +617,9 @@ D7-D19). The rules in user terms are in
   whose signatures it must check, and, in an encrypted room whose member log it reads (as a
   member or a log manager), every account an entry names as actor or target and every current
   manager, since the client replays the log against pinned keys, plus the sender and forwarder
-  of each room key envelope wrapped for it in a room it is a member of.
+  of each room key envelope wrapped for it in a room it is a member of. `ServerUserKeyChanged`
+  follows that same rule rather than the shared room rule (#190, no protocol change): every
+  account that may fetch the key hears that it changed.
   `ClientAdminSetRestricted{userId, restricted}` (admins; never an admin) is answered by
   `ServerAdminActionResult{SetRestricted 10}` and `ServerAccountUpdated.isRestricted`; lifting
   it joins the Public rooms.

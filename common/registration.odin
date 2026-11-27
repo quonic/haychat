@@ -609,10 +609,12 @@ DatabaseRegistrationModeResult :: struct {
 	mode:    RegistrationMode,
 }
 
-// Which of candidateUserIds (owned) share a room with userId (D17 presence filtering).
+// Which of candidateUserIds (owned) share a room with userId (D17 presence filtering), or,
+// with keyRecipients (#190), which of them may fetch userId's key bundle (the key fetch's rule).
 DatabaseSharedRoomsRequest :: struct {
 	userId:           int,
 	candidateUserIds: [dynamic]int,
+	keyRecipients:    bool,
 }
 
 DatabaseSharedRoomsResult :: struct {
