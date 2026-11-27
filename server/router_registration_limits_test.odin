@@ -353,3 +353,37 @@ testRegistrationAddressTableIsBounded :: proc(t: ^testing.T) {
 	)
 	assert(len(h.state.registrationAddresses) == 0, "expected idle addresses forgotten")
 }
+
+// A ClientRegister whose database request fails (MainRouterState_failPendingDatabaseRequests)
+// made no sign-up request, so the address gets its reserved request token back.
+@(test)
+testRegistrationAddressRequestTokenReturnsOnDatabaseFailure :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+	h.pm.config.registrationIPRequestsPerHour = 1
+	address := registrationAddressFromIPv4(LIMITS_TEST_ADDRESS_A)
+
+	routerLimitsTestConnect(&h, 1, LIMITS_TEST_ADDRESS_A)
+	client := routerRegistrationTestBegin(&h, 1, mode = .InviteApproval)
+	defer common.TransportState_deinit(&client.transport)
+	_, text := routerRegistrationTestCode()
+	defer delete(text)
+	routerRegistrationTestRegister(&h, &client, text, "a friend sent me")
+	query := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(query.request)
+	reserved := h.state.registrationAddresses[address]
+	assert(reserved.requestTokens < 1, "expected the token reserved while in flight")
+
+	MainRouterState_failPendingDatabaseRequests(&h.pm, &h.state, "Database unavailable")
+	refused := routerRegistrationTestResponse(&h, &client)
+	defer common.ServerRegisterResponsePayload_deinit(&refused)
+	assert(refused.status == .Refused, fmt.tprintf("expected Refused, got %v", refused))
+	refunded := h.state.registrationAddresses[address]
+	assert(
+		refunded.requestTokens >= 1,
+		fmt.tprintf("expected the token back, got %v", refunded.requestTokens),
+	)
+}

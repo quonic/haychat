@@ -845,6 +845,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			MainRouterState_forgetInviteCode(state, requestID)
 		case .Register:
+			// #105: a request that never reached the database made no sign-up request.
+			MainRouterState_registrationSettleRequest(pm, state, request, false, time.tick_now())
 			if session, sessionOK := MainRouterState_askingSession(
 				state,
 				request.peerID,
