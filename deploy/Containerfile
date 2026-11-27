@@ -26,12 +26,12 @@ WORKDIR /src
 COPY common common
 COPY server server
 # `odin build` checks the server's test files too, and they #load these from outside server/
-# (config_test.odin, database_attachments_test.odin). Keep this list, and .containerignore,
-# in step with every #load("../...") under server/.
+# (config_test.odin, database_attachments_test.odin, database_room_log_test.odin). Keep this
+# list, and .containerignore, in step with every #load("../...") under server/.
 COPY .env.example ./
 COPY docs/server-configuration.md docs/
 COPY deploy/README.md deploy/
-COPY deploy/sql/remove-attachment.sql deploy/sql/
+COPY deploy/sql/remove-attachment.sql deploy/sql/truncate-room-log.sql deploy/sql/
 RUN mkdir -p /out \
 	&& odin build server -o:speed -out:/out/haychat-server \
 	&& echo "Shared libraries the server links:" \
@@ -66,7 +66,8 @@ COPY --from=build /out/haychat-server /usr/local/bin/haychat-server
 COPY --from=build /out/licenses/ /usr/share/licenses/haychat-server/
 COPY server/sql/auth_bootstrap.sql deploy/sql/make-admin.sql deploy/sql/create-invite.sql \
 	deploy/sql/set-registration-mode.sql deploy/sql/set-restricted.sql \
-	deploy/sql/attachment-usage.sql deploy/sql/remove-attachment.sql /usr/share/haychat/sql/
+	deploy/sql/attachment-usage.sql deploy/sql/remove-attachment.sql \
+	deploy/sql/truncate-room-log.sql /usr/share/haychat/sql/
 
 # Fail the build when a linked library is missing from the runtime stage.
 RUN ! /lib64/ld-linux-x86-64.so.2 --list /usr/local/bin/haychat-server | grep -F 'not found'
