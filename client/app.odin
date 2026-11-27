@@ -272,6 +272,8 @@ runApp :: proc(options: AppOptions = {}) -> bool {
 		}
 		// Encrypted voice (voice_e2ee.odin): timed rotations, epoch grace and key requests.
 		State_voiceE2EETick(&state)
+		// Encrypted rooms (room_chains.odin, #78): chain retries whose back-off passed.
+		State_roomChainsTick(&state)
 		// After the events and the network: both the window's key and a voice join or leave
 		// change what push-to-talk follows.
 		if State_voiceSyncPushToTalk(&state, ui.hasTextFocus(&ctx)) {

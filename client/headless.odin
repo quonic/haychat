@@ -1984,8 +1984,8 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 	{"room-access", 2, 0, .None, "room-access ROOM_ID member-invite|admin-invite",
 		"manager admins: switches an encrypted room's mode with a signed SetAccess",
 		headlessCommandRoomAccess},
-	{"room-keys", 1, 1, .None, "room-keys ROOM_ID [fetch]",
-		"an encrypted room's sender chains this profile holds (no keys) and its sending state; fetch asks the server for them again",
+	{"room-keys", 1, 2, .None, "room-keys ROOM_ID [fetch | forge-forwards on|off]",
+		"an encrypted room's sender chains this profile holds (no keys) and its sending state; fetch asks the server for them again; forge-forwards (test only) makes this client's forwards and key answers carry a random chain key",
 		headlessCommandRoomKeys},
 	{"room-log-entry", 3, 1, .None,
 		"room-log-entry ROOM_ID add|remove|add-manager|remove-manager|leave USER_ID [unsigned]",
@@ -2702,6 +2702,9 @@ headlessDrainEvents :: proc(harness: ^HeadlessHarness) {
 	// Speaking changes without any event, and commands change the voice status.
 	headlessPollVoice(harness)
 	headlessDrainTransferEvents(harness)
+	// #78: chain retries whose back-off passed, and what they changed.
+	State_roomChainsTick(&harness.state)
+	headlessWriteRoomChainNotes(harness)
 }
 
 headlessHandleLine :: proc(harness: ^HeadlessHarness, line: string) {

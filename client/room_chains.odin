@@ -37,6 +37,18 @@ import "core:time"
 //   of its epoch, with the sender's pinned identity key (this profile's own for itself, else the
 //   pin, else the identity the verified log names) and this profile's encryption key; its chain
 //   key goes into the key store (a cache, format 4). A failure is dropped and never retried.
+// - Checking a key (protocol 32, #78, design 6.6): a chain someone else sent is kept unchecked
+//   (KeyStoreRoomChain.unchecked, in memory only, never written to the file) until a message
+//   of the chain opens with it, after its signature verified against the sender's pin as
+//   always; then it is kept like any other. A key whose message fails the AEAD, or whose start
+//   is past the message's index, is dropped and its envelope rejected
+//   (ClientRejectRoomKeyEnvelope: the server takes this account off its wraps, so the next copy
+//   is stored), and so is an envelope addressed to this account that does not open or that it
+//   may not take. The message waits for another copy: after ROOM_CHAIN_RETRY_DELAYS_MS the
+//   room's envelopes are fetched and the chain requested again, at most ROOM_CHAIN_RETRIES_MAX
+//   times per chain and session, and at most ROOM_CHAIN_REJECTS_MAX rejects per chain go out,
+//   so a hostile member cannot make the client loop. A rejected envelope is never opened
+//   again, and a reject is logged (stderr, no key material), never reported to anyone.
 // - Opening a message: decode, the chain from the key store, the message key at its index,
 //   the signature against the sender's pin, then the body. A missing chain waits ("Waiting for
 //   this message's key from <sender>"): the client fetches its envelopes once per session and
@@ -210,6 +222,29 @@ RoomChainAnswer :: struct {
 	requesterUserID: int,
 }
 
+// #78: an answer sent this session and when. The same answer goes again only after
+// ROOM_CHAIN_REANSWER_MS, so a requester that rejected a bad copy can get a good one.
+RoomChainAnswered :: struct {
+	answer: RoomChainAnswer,
+	atMS:   i64,
+}
+
+// #78: what this session did about one chain whose copies did not check: how many envelopes
+// it rejected and how many times it fetched and asked again, and when it next asks (0: no
+// retry waiting).
+RoomChainRetry :: struct {
+	ref:     RoomChainRef,
+	rejects: int,
+	retries: int,
+	dueMS:   i64,
+}
+
+// Bounds on what one chain's bad copies make the client do per session (#78).
+ROOM_CHAIN_REJECTS_MAX :: 4
+ROOM_CHAIN_RETRIES_MAX :: 3
+ROOM_CHAIN_RETRY_DELAYS_MS := [ROOM_CHAIN_RETRIES_MAX]i64{2_000, 8_000, 30_000}
+ROOM_CHAIN_REANSWER_MS :: 1_500
+
 RoomChainRoom :: struct {
 	roomID:           int,
 	// The chain this session sends with (never stored, see the top of this file).
@@ -229,7 +264,10 @@ RoomChainRoom :: struct {
 	pendingEnvelopes: [dynamic]common.RoomKeyEnvelope,
 	// Key requests waiting for the requester's key, and the ones answered this session.
 	pendingAnswers:   [dynamic]RoomChainAnswer,
-	answered:         [dynamic]RoomChainAnswer,
+	answered:         [dynamic]RoomChainAnswered,
+	// #78: envelopes this session rejected (never opened again), and the chains it retries.
+	rejectedEnvelopes: [dynamic]int,
+	retries:          [dynamic]RoomChainRetry,
 }
 
 RoomChainRoom_dropSending :: proc(room: ^RoomChainRoom) {
@@ -261,6 +299,8 @@ RoomChainRoom_deinit :: proc(room: ^RoomChainRoom) {
 	delete(room.pendingEnvelopes)
 	delete(room.pendingAnswers)
 	delete(room.answered)
+	delete(room.rejectedEnvelopes)
+	delete(room.retries)
 	room^ = {}
 }
 
@@ -352,6 +392,9 @@ RoomChainKeyOutcome :: enum u8 {
 	// Protocol 20.
 	NotAllowed, // A forward in a room without Full history, or from a forwarder who may not
 	NotHeld, // A key request (Full history) for a chain this profile does not hold
+	// Protocol 32 (#78).
+	Unchecked, // Kept until a message of the chain opens with it
+	Rejected, // Its key did not open the chain's message: dropped, the envelope rejected
 }
 
 RoomChainNote :: struct {
@@ -383,6 +426,7 @@ RoomChainRequestKind :: enum u8 {
 	FetchKeys,
 	RequestKey,
 	SealedEdit, // #76 M2: ClientEditRoomMessage with sealed bytes
+	RejectEnvelope, // Protocol 32 (#78): ClientRejectRoomKeyEnvelope of envelopeID
 }
 
 RoomChainRequest :: struct {
@@ -402,6 +446,7 @@ RoomChainRequest :: struct {
 	// the edit's own.
 	messageID:       int,
 	originalID:      common.ClientMessageID,
+	envelopeID:      int, // RejectEnvelope
 }
 
 RoomChainSendBridge :: #type proc(
@@ -471,6 +516,12 @@ ClientServerTransport_sendRoomChainRequest :: proc(
 				senderId = request.senderUserID,
 				chainId = request.chainID,
 			},
+		)
+	case .RejectEnvelope:
+		return ClientServerTransport_sendEncryptedRuntimeMessage(
+			transport,
+			.ClientRejectRoomKeyEnvelope,
+			common.ClientRejectRoomKeyEnvelopePayload{envelopeId = request.envelopeID},
 		)
 	}
 	return false
@@ -709,12 +760,25 @@ State_roomOpenEntryContent :: proc(
 		entry.security = {protection = .Pending, wait = .Key, header = header}
 		return
 	}
+	// #78: an unchecked key is checked by this message; one that does not open it is dropped
+	// and the message waits for another copy.
+	unchecked := RoomChainUncheckedKey {
+		ref         = {header.epoch, entry.senderId, header.chainID},
+		unchecked   = chain.unchecked,
+		envelopeID  = chain.envelopeID,
+		forwarderID = chain.forwarderID,
+	}
 	messageKey, indexOK := common.deriveSenderChainMessageKey(
 		chain.chainKey,
 		chain.startIndex,
 		header.index,
 	)
 	defer crypto.zero_explicit(&messageKey, size_of(messageKey))
+	if !indexOK && unchecked.unchecked {
+		State_roomChainsDropUnchecked(state, serverID, roomID, unchecked, "it starts after a message")
+		entry.security = {protection = .Pending, wait = .Key, header = header}
+		return
+	}
 	if !indexOK {
 		State_roomSettleSealed(
 			state,
@@ -736,6 +800,15 @@ State_roomOpenEntryContent :: proc(
 		messageKey,
 		buffer[:],
 	)
+	if openErr == .BadCiphertext && unchecked.unchecked {
+		State_roomChainsDropUnchecked(state, serverID, roomID, unchecked, "it does not open a message")
+		entry.security = {protection = .Pending, wait = .Key, header = header}
+		return
+	}
+	if unchecked.unchecked && (openErr == .None || openErr == .BadPadding) {
+		// The body's AEAD passed: the key is the chain's.
+		State_roomChainsKeepChecked(state, serverID, roomID, unchecked)
+	}
 	if openErr != .None {
 		// openRoomMessage checks the signature before the body: a failure at or before it is
 		// not shown, one after it (the body or its padding) is.
@@ -845,12 +918,23 @@ State_roomSealedEditOpen :: proc(
 	if !chainOK {
 		return {status = .Pending, header = header}
 	}
+	// #78: an edit checks an unchecked key like a message does.
+	unchecked := RoomChainUncheckedKey {
+		ref         = {header.epoch, check.senderUserID, header.chainID},
+		unchecked   = chain.unchecked,
+		envelopeID  = chain.envelopeID,
+		forwarderID = chain.forwarderID,
+	}
 	messageKey, indexOK := common.deriveSenderChainMessageKey(
 		chain.chainKey,
 		chain.startIndex,
 		header.index,
 	)
 	defer crypto.zero_explicit(&messageKey, size_of(messageKey))
+	if !indexOK && unchecked.unchecked {
+		State_roomChainsDropUnchecked(state, serverID, roomID, unchecked, "it starts after an edit")
+		return {status = .Pending, header = header}
+	}
 	if !indexOK {
 		return {status = .Failed, failure = .BadIndex, header = header}
 	}
@@ -863,6 +947,13 @@ State_roomSealedEditOpen :: proc(
 		messageKey,
 		buffer[:],
 	)
+	if openErr == .BadCiphertext && unchecked.unchecked {
+		State_roomChainsDropUnchecked(state, serverID, roomID, unchecked, "it does not open an edit")
+		return {status = .Pending, header = header}
+	}
+	if unchecked.unchecked && (openErr == .None || openErr == .BadPadding) {
+		State_roomChainsKeepChecked(state, serverID, roomID, unchecked)
+	}
 	if openErr != .None {
 		return {status = .Failed, failure = .Sealed, sealedError = openErr, header = header}
 	}
@@ -1199,10 +1290,200 @@ State_roomChainsRequestKey :: proc(state: ^State, serverID, roomID: int, ref: Ro
 	}
 }
 
+// ── Checking keys (protocol 32, #78) ─────────────────────────────
+
+// An unchecked chain a message is about to check: the chain and the envelope it came from.
+RoomChainUncheckedKey :: struct {
+	ref:         RoomChainRef,
+	unchecked:   bool,
+	envelopeID:  int,
+	forwarderID: int,
+}
+
+@(private = "file")
+State_roomChainsNowMS :: proc(state: ^State) -> i64 {
+	if state.roomChainNowOverrideMS != 0 {
+		return state.roomChainNowOverrideMS
+	}
+	return time.to_unix_nanoseconds(time.now()) / 1_000_000
+}
+
+@(private = "file")
+RoomChainRoom_retry :: proc(room: ^RoomChainRoom, ref: RoomChainRef) -> ^RoomChainRetry {
+	for &retry in room.retries {
+		if retry.ref == ref {
+			return &retry
+		}
+	}
+	append(&room.retries, RoomChainRetry{ref = ref})
+	return &room.retries[len(room.retries) - 1]
+}
+
+// Rejects envelope envelopeID of ref's chain (forwarderID's; 0 for a SenderKey envelope)
+// because of why: it is never opened again, the server is asked to drop this account's copy
+// (at most ROOM_CHAIN_REJECTS_MAX per chain and session), and while retries remain the room's
+// envelopes are fetched and the chain asked for again once the next back-off step has passed
+// (State_roomChainsTick). Logged with no key material and reported to nobody.
+@(private = "file")
+State_roomChainsReject :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	ref: RoomChainRef,
+	envelopeID, forwarderID: int,
+	why: string,
+) {
+	room := State_roomChainRoom(state, serverID, roomID)
+	if envelopeID > 0 && !slice.contains(room.rejectedEnvelopes[:], envelopeID) {
+		append(&room.rejectedEnvelopes, envelopeID)
+	}
+	retry := RoomChainRoom_retry(room, ref)
+	sendReject := envelopeID > 0 && retry.rejects < ROOM_CHAIN_REJECTS_MAX
+	if sendReject {
+		retry.rejects += 1
+	}
+	if retry.dueMS == 0 && retry.retries < ROOM_CHAIN_RETRIES_MAX {
+		retry.dueMS = State_roomChainsNowMS(state) + ROOM_CHAIN_RETRY_DELAYS_MS[retry.retries]
+		retry.retries += 1
+	}
+	fmt.eprintfln(
+		"[E2EE] Rejected key envelope %d of room %d (epoch %d, sender %d, forwarder %d): %s",
+		envelopeID,
+		roomID,
+		ref.epoch,
+		ref.senderUserID,
+		forwarderID,
+		why,
+	)
+	if sendReject {
+		State_sendRoomChainRequest(
+			state,
+			serverID,
+			{kind = .RejectEnvelope, roomID = roomID, envelopeID = envelopeID},
+		)
+	}
+}
+
+// key's chain did not open the message or edit that checked it: it is dropped and its envelope
+// rejected.
+@(private = "file")
+State_roomChainsDropUnchecked :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	key: RoomChainUncheckedKey,
+	why: string,
+) {
+	if store := State_roomChainStore(state, serverID); store != nil {
+		KeyStore_removeRoomChain(
+			store,
+			roomID,
+			key.ref.epoch,
+			key.ref.senderUserID,
+			key.ref.chainID,
+		)
+	}
+	State_roomChainsReject(state, serverID, roomID, key.ref, key.envelopeID, key.forwarderID, why)
+	State_roomChainNote(
+		state,
+		{
+			kind = .Key,
+			serverID = serverID,
+			roomID = roomID,
+			ref = key.ref,
+			outcome = .Rejected,
+			forwarderID = key.forwarderID,
+		},
+	)
+}
+
+// key's chain opened a message or edit: it is kept like any checked chain, and saved.
+@(private = "file")
+State_roomChainsKeepChecked :: proc(
+	state: ^State,
+	serverID, roomID: int,
+	key: RoomChainUncheckedKey,
+) {
+	store := State_roomChainStore(state, serverID)
+	if store == nil {
+		return
+	}
+	chain, found := KeyStore_roomChain(
+		store,
+		roomID,
+		key.ref.epoch,
+		key.ref.senderUserID,
+		key.ref.chainID,
+	)
+	if !found || !chain.unchecked {
+		return
+	}
+	chain.unchecked = false
+	chain.envelopeID = 0
+	chain.forwarderID = 0
+	State_roomChainSaveStore(state, serverID)
+	State_roomChainNote(
+		state,
+		{
+			kind = .Key,
+			serverID = serverID,
+			roomID = roomID,
+			ref = key.ref,
+			outcome = .Stored,
+			forwarderID = key.forwarderID,
+		},
+	)
+}
+
+// Retries whose back-off has passed (#78): the room's envelopes are fetched again and the chain
+// asked for again (State_roomChainsFollowUp). The frame loop and the harness call it.
+State_roomChainsTick :: proc(state: ^State) {
+	now := State_roomChainsNowMS(state)
+	due := make([dynamic][2]int, context.temp_allocator)
+	for &chains in state.roomChains {
+		for &room in chains.rooms {
+			found := false
+			for &retry in room.retries {
+				if retry.dueMS == 0 || now < retry.dueMS {
+					continue
+				}
+				retry.dueMS = 0
+				if store := State_roomChainStore(state, chains.serverID); store != nil {
+					held, isHeld := KeyStore_roomChain(
+						store,
+						room.roomID,
+						retry.ref.epoch,
+						retry.ref.senderUserID,
+						retry.ref.chainID,
+					)
+					if isHeld && !held.unchecked {
+						// A good copy arrived meanwhile.
+						continue
+					}
+				}
+				found = true
+				for index := len(room.requested) - 1; index >= 0; index -= 1 {
+					if room.requested[index] == retry.ref {
+						ordered_remove(&room.requested, index)
+					}
+				}
+			}
+			if found {
+				room.keysFetched = false
+				append(&due, [2]int{chains.serverID, room.roomID})
+			}
+		}
+	}
+	for item in due {
+		State_roomChainsFollowUp(state, item[0], item[1])
+	}
+}
+
 // ── Receiving distributions ──────────────────────────────────────
 
 // Handles one envelope: opens and keeps its chain, or says why not. Takes ownership of
-// envelope when it waits for the log (Pending).
+// envelope when it waits for the log (Pending). Protocol 32 (#78): a chain someone else sent
+// is kept unchecked until a message of it opens (Unchecked); an envelope for this account
+// that does not open, or that it may not take, is rejected; a rejected one is never opened
+// again.
 @(private = "file")
 State_roomChainsTakeEnvelope :: proc(
 	state: ^State,
@@ -1241,6 +1522,11 @@ State_roomChainsTakeEnvelope :: proc(
 	); found {
 		return .Duplicate, .None
 	}
+	ref := RoomChainRef{envelope.epoch, envelope.senderId, envelope.chainId}
+	if room := State_findRoomChains(state, serverID, roomID);
+	   room != nil && envelope.id > 0 && slice.contains(room.rejectedEnvelopes[:], envelope.id) {
+		return .Duplicate, .None
+	}
 	forward := envelope.forwarderId != 0
 	if forward &&
 	   (log.state.historyVisibility != .Full ||
@@ -1252,7 +1538,16 @@ State_roomChainsTakeEnvelope :: proc(
 				   keys.ownUserID,
 			   )) {
 		// From join rooms never take forwards; in Full history rooms only from someone who was
-		// a member while this account was.
+		// a member while this account was. Its copy would block one this account may take.
+		State_roomChainsReject(
+			state,
+			serverID,
+			roomID,
+			ref,
+			envelope.id,
+			envelope.forwarderId,
+			"a forward this account may not take",
+		)
 		return .NotAllowed, .None
 	}
 	if !roomLogMembershipsInclude(log.memberships[:], envelope.senderId, envelope.epoch) {
@@ -1310,8 +1605,22 @@ State_roomChainsTakeEnvelope :: proc(
 		return .NotForMe, .None
 	}
 	if err != .None {
+		// Addressed to this account and it does not open (a wrap for an older encryption key,
+		// a bad seal): its copy would block a good one.
+		State_roomChainsReject(
+			state,
+			serverID,
+			roomID,
+			ref,
+			envelope.id,
+			envelope.forwarderId,
+			"it does not open",
+		)
 		return .Failed, err
 	}
+	// This account's own chain needs no check (it signed the envelope); anyone else's, and a
+	// forward of any, waits for a message (#78).
+	unchecked := forward || envelope.senderId != keys.ownUserID
 	chain := KeyStoreRoomChain {
 		roomID       = roomID,
 		epoch        = envelope.epoch,
@@ -1319,11 +1628,17 @@ State_roomChainsTakeEnvelope :: proc(
 		chainID      = envelope.chainId,
 		startIndex   = distribution.startIndex,
 		chainKey     = distribution.chainKey,
+		unchecked    = unchecked,
+		envelopeID   = envelope.id,
+		forwarderID  = envelope.forwarderId,
 	}
 	defer crypto.zero_explicit(&chain, size_of(chain))
 	store = State_roomChainStore(state, serverID)
 	if store == nil || !KeyStore_addRoomChain(store, chain) {
 		return .Duplicate, .None
+	}
+	if unchecked {
+		return .Unchecked, .None
 	}
 	return .Stored, .None
 }
@@ -1555,8 +1870,10 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 		outcome = .Refused,
 	}
 	room := State_roomChainRoom(state, serverID, roomID)
+	nowMS := State_roomChainsNowMS(state)
 	for done in room.answered {
-		if done == answer {
+		// #78: the same answer again only after a while, for a requester that rejected a copy.
+		if done.answer == answer && nowMS - done.atMS < ROOM_CHAIN_REANSWER_MS {
 			return
 		}
 	}
@@ -1602,6 +1919,11 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 	startIndex := held.startIndex
 	chainKey := held.chainKey
 	defer crypto.zero_explicit(&chainKey, size_of(chainKey))
+	if state.roomChainForgeForwards {
+		// Test only (the harness's `room-keys ROOM_ID forge-forwards on`): a random key in a
+		// validly signed envelope, for the live proof's forged forward (#78).
+		crypto.rand_bytes(chainKey[:])
+	}
 	info := State_e2eePeerKeyInfo(state, serverID, answer.requesterUserID)
 	if !info.canEncrypt {
 		if info.blockReason == .Pending {
@@ -1691,7 +2013,16 @@ State_roomChainsAnswer :: proc(state: ^State, serverID, roomID: int, answer: Roo
 		return
 	}
 	room = State_roomChainRoom(state, serverID, roomID)
-	append(&room.answered, answer)
+	answeredAgain := false
+	for &done in room.answered {
+		if done.answer == answer {
+			done.atMS = nowMS
+			answeredAgain = true
+		}
+	}
+	if !answeredAgain {
+		append(&room.answered, RoomChainAnswered{answer, nowMS})
+	}
 	note.outcome = .Stored
 	State_roomChainNote(state, note)
 }

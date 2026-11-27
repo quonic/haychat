@@ -108,6 +108,11 @@ KeyStoreFileRoomChain :: struct {
 }
 
 // The same in memory. chainKey is secret: KeyStore_deinit wipes it.
+//
+// #78: unchecked is set for a chain someone else sent whose key no message of the chain has
+// opened yet (room_chains.odin). It is never written to the file, so after a restart the
+// chain is fetched and checked again; envelopeID and forwarderID name the envelope it came
+// from, for the reject.
 KeyStoreRoomChain :: struct {
 	roomID:       int,
 	epoch:        int,
@@ -115,6 +120,9 @@ KeyStoreRoomChain :: struct {
 	chainID:      common.ChainID,
 	startIndex:   u32,
 	chainKey:     common.ChainKey,
+	unchecked:    bool,
+	envelopeID:   int,
+	forwarderID:  int,
 }
 
 // Whether a direct conversation has been encrypted (no downgrade, design 4.5).
@@ -281,6 +289,26 @@ KeyStore_addRoomChain :: proc(store: ^KeyStore, chain: KeyStoreRoomChain) -> boo
 	}
 	append(&store.roomChains, chain)
 	return true
+}
+
+// Drops the chain senderUserID sealed for roomID's epoch under chainID (#78: an unchecked one
+// whose key did not open its message), wiping its key. Returns whether it was held.
+KeyStore_removeRoomChain :: proc(
+	store: ^KeyStore,
+	roomID, epoch, senderUserID: int,
+	chainID: common.ChainID,
+) -> bool {
+	for &chain, index in store.roomChains {
+		if chain.roomID == roomID &&
+		   chain.epoch == epoch &&
+		   chain.senderUserID == senderUserID &&
+		   chain.chainID == chainID {
+			crypto.zero_explicit(&chain, size_of(chain))
+			ordered_remove(&store.roomChains, index)
+			return true
+		}
+	}
+	return false
 }
 
 // How many chains this profile holds for roomID (diagnostics).
@@ -541,6 +569,10 @@ keyStoreEncode :: proc(store: KeyStore) -> ([]u8, bool) {
 		)
 	}
 	for chain in store.roomChains {
+		if chain.unchecked {
+			// #78: only a chain a message opened is kept across runs.
+			continue
+		}
 		chainID := chain.chainID
 		chainKey := chain.chainKey
 		append(
