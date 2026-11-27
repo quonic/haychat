@@ -325,3 +325,100 @@ testConfigStartupRefusesAnAttachmentDirectoryHoldingTheServerState :: proc(t: ^t
 		),
 	)
 }
+
+// #105: the per-address sign-up limits default, parse, clamp, and are documented under the
+// names the server reads.
+@(test)
+testConfigRegistrationLimitKeysDefaultParseAndClamp :: proc(t: ^testing.T) {
+	// ServerConfig is process-lifetime and never freed, so config tests run on the temp allocator.
+	context.allocator = context.temp_allocator
+	_ = t
+	keys := [?]string {
+		REGISTRATION_IP_SESSIONS_KEY,
+		REGISTRATION_IP_ATTEMPTS_BURST_KEY,
+		REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY,
+		REGISTRATION_IP_REQUESTS_PER_HOUR_KEY,
+	}
+	// Restore whatever the environment had, so the test leaves no trace.
+	saved: [len(keys)]string
+	for key, index in keys {
+		saved[index] = os.get_env(key, context.temp_allocator)
+	}
+	defer for key, index in keys {
+		if len(saved[index]) > 0 {
+			os.set_env(key, saved[index])
+		} else {
+			os.unset_env(key)
+		}
+	}
+
+	for key in keys {
+		os.unset_env(key)
+	}
+	config: ServerConfig
+	loadRegistrationLimitConfig(&config)
+	assert(
+		config.registrationIPSessions == 8 &&
+		config.registrationIPAttemptsBurst == 30 &&
+		config.registrationIPAttemptsPerMinute == 10 &&
+		config.registrationIPRequestsPerHour == 10,
+		fmt.tprintf("expected the defaults 8/30/10/10, got %v", config),
+	)
+	assert(
+		DEFAULT_REGISTRATION_IP_SESSIONS < common.REGISTERING_SESSIONS_MAX,
+		"expected one address's default share below every registering session",
+	)
+
+	os.set_env(REGISTRATION_IP_SESSIONS_KEY, "16")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_BURST_KEY, "lots")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY, "120")
+	os.set_env(REGISTRATION_IP_REQUESTS_PER_HOUR_KEY, "0")
+	loadRegistrationLimitConfig(&config)
+	assert(
+		config.registrationIPSessions == 16 &&
+		config.registrationIPAttemptsBurst == DEFAULT_REGISTRATION_IP_ATTEMPTS_BURST &&
+		config.registrationIPAttemptsPerMinute == 120 &&
+		config.registrationIPRequestsPerHour == 0,
+		fmt.tprintf("expected 16/default (unparsable)/120/0 from the environment, got %v", config),
+	)
+
+	// Out of range values clamp; an unparsable one falls back to the default.
+	os.set_env(REGISTRATION_IP_SESSIONS_KEY, "500")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_BURST_KEY, "-4")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY, "0")
+	os.set_env(REGISTRATION_IP_REQUESTS_PER_HOUR_KEY, "many")
+	loadRegistrationLimitConfig(&config)
+	assert(
+		config.registrationIPSessions == common.REGISTERING_SESSIONS_MAX &&
+		config.registrationIPAttemptsBurst == 0 &&
+		config.registrationIPAttemptsPerMinute == REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MIN &&
+		config.registrationIPRequestsPerHour == DEFAULT_REGISTRATION_IP_REQUESTS_PER_HOUR,
+		fmt.tprintf("expected 64/0/1/default after clamping, got %v", config),
+	)
+
+	os.set_env(REGISTRATION_IP_SESSIONS_KEY, "-1")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_BURST_KEY, "50000")
+	os.set_env(REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY, "50000")
+	os.set_env(REGISTRATION_IP_REQUESTS_PER_HOUR_KEY, "50000")
+	loadRegistrationLimitConfig(&config)
+	assert(
+		config.registrationIPSessions == 0 &&
+		config.registrationIPAttemptsBurst == REGISTRATION_IP_ATTEMPTS_BURST_MAX &&
+		config.registrationIPAttemptsPerMinute == REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MAX &&
+		config.registrationIPRequestsPerHour == REGISTRATION_IP_REQUESTS_PER_HOUR_MAX,
+		fmt.tprintf("expected 0/10000/10000/10000 after clamping, got %v", config),
+	)
+
+	documented := [?]string {
+		#load("../docs/server-configuration.md", string),
+		#load("../.env.example", string),
+	}
+	for text, index in documented {
+		for key in keys {
+			assert(
+				strings.contains(text, key),
+				fmt.tprintf("expected document %d to name %s", index, key),
+			)
+		}
+	}
+}

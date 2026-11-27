@@ -137,6 +137,43 @@ is missing, unreadable or empty, or the file's shard directory is missing, and a
 an hour; each case logs an `[Attachments] WARNING: ...` line naming `HAYCHAT_ATTACHMENT_DIR`
 ([protocol.md](protocol.md), Missing files).
 
+### Sign-up Limits
+
+Sign-ups (protocol 25) are limited per session (5 attempts and 10 minutes) and to 64 sessions
+signing up at once. These variables (#105) add limits per network address, so one host cannot
+hold every one of those 64 places or flood approvers with requests. They live in the server's
+memory only and start over when it restarts. `0` turns a limit off; out-of-range values are
+clamped to the range, and a value that does not parse uses the default.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HAYCHAT_REGISTRATION_IP_SESSIONS` | `8` (0 to 64) | Sessions from one address that may be signing up at once. One more is refused with "Too many sign-ups from your network; try again later" and disconnected; clients try again later. A session waiting for approval keeps its place for up to its 10 minutes |
+| `HAYCHAT_REGISTRATION_IP_ATTEMPTS_BURST` | `30` (0 to 10000) | Size of each address's attempt bucket. Starting to sign up and every invite code sent take one token; with none left, a new session is refused (as above) and a code is answered "Too many sign-up attempts from your network; try again later". A refusal takes no token |
+| `HAYCHAT_REGISTRATION_IP_ATTEMPTS_PER_MINUTE` | `10` (1 to 10000) | Tokens the attempt bucket gets back per minute, up to its size |
+| `HAYCHAT_REGISTRATION_IP_REQUESTS_PER_HOUR` | `10` (0 to 10000) | Sign-up requests (Invite + approval mode) one address may make in an hour, as a bucket of that size refilled at that rate. Past it a code is answered "Too many sign-up requests from your network; try again later" before the server reads it, so a code with **Skip approval** is refused too until a token comes back. Only requests this server process made count, not those from before a restart |
+
+A sign-up uses two tokens (starting, then the code), and a mistyped code one more, so the
+defaults let about ten people behind one address sign up together, and a household or a small
+office never notices them.
+
+- **The address is the one ENet reports**, the address the server receives UDP from. Everyone
+  behind one NAT (a home or office router, carrier-grade NAT on mobile networks, a VPN exit)
+  shares one address and therefore one set of limits. ENet carries no forwarded address, so a
+  UDP proxy or load balancer in front of the server makes every client look like the proxy:
+  then raise the limits or turn them off (`0`), and limit sign-ups at the proxy instead. A
+  community whose members share one address (a school, an event's Wi-Fi) may want higher
+  values while people sign up.
+- **IPv6:** an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) counts as its IPv4 address. Any
+  other IPv6 address is grouped by its /64 prefix, because one host or household is usually
+  given a whole /64 and could otherwise pick a new address for every attempt. ENet as HayChat
+  uses it today listens on IPv4 only, so this applies once the transport carries IPv6.
+- **Memory:** the server tracks at most 4096 addresses (`REGISTRATION_ADDRESS_TABLE_MAX` in
+  `server/router_registration_limits.odin`, a few hundred kilobytes). An address whose buckets
+  are full again is forgotten within a second; when the table is still full, the address used
+  longest ago is forgotten to make room, and its limits start over.
+- Refusals are logged only with `HAYCHAT_LOG_LEVEL=debug` (`[Main] Sign-up refused for
+  ADDRESS: ...`), so a flood of them does not flood the log.
+
 ### Retired Variables
 
 The server no longer reads these. When one is set, startup prints `[Startup] NAME is no longer

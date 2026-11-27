@@ -98,6 +98,16 @@ REGISTRATION_INVALID_MESSAGE :: "Invalid sign-up request"
 REGISTRATION_BUSY_MESSAGE :: "Too many sign-ups are in progress; try again later"
 REGISTRATION_TIMED_OUT_MESSAGE :: "Sign-up took too long"
 REGISTRATION_ATTEMPTS_MESSAGE :: "Too many sign-up attempts"
+// Per-address sign-up limits (#105, server/router_registration_limits.odin). A session that
+// would start signing up past its address's share or attempts gets ServerAuthFailure with the
+// busy or the rate sentence, which clients retry later. A ClientRegister past the attempts or
+// the requests gets ServerRegisterResponse Refused with the rate or the requests sentence, and
+// the session stays registering.
+REGISTRATION_ADDRESS_BUSY_MESSAGE :: "Too many sign-ups from your network; try again later"
+REGISTRATION_ADDRESS_RATE_MESSAGE :: "Too many sign-up attempts from your network; " +
+	"try again later"
+REGISTRATION_ADDRESS_REQUESTS_MESSAGE :: "Too many sign-up requests from your network; " +
+	"try again later"
 INVITE_INVALID_REQUEST_MESSAGE :: "Invalid invite request"
 INVITE_NOT_PERMITTED_MESSAGE :: "You cannot create invite codes"
 INVITE_ADMIN_REQUIRED_MESSAGE :: "Only admins can attach roles, a room or skip approval"
