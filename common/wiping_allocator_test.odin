@@ -369,3 +369,44 @@ testUnmarshalSecretPayloadAndWipeAndDeleteBytes :: proc(t: ^testing.T) {
 		assert(backing.freedNonZero == 0, "expected the buffer zeroed before it was freed")
 	}
 }
+
+// #189 review: cbor.unmarshal stores its allocator in every dynamic array it decodes, and the
+// WipingAllocator unmarshalSecretPayload decodes with lives on that procedure's stack. A decoded
+// ServerInviteCreated's invite.roleIds must name the context allocator afterwards, so growing
+// and freeing it later does not reach a dead WipingAllocator.
+@(test)
+testUnmarshalSecretPayloadRebindsDecodedDynamicArrays :: proc(t: ^testing.T) {
+	_ = t
+	roleIds := make([dynamic]int)
+	defer delete(roleIds)
+	append(&roleIds, 3, 5, 8)
+	sent := ServerInviteCreatedPayload {
+		invite = InviteSummary{id = 7, roleIds = roleIds},
+		code = "ABCD-EFGH",
+	}
+	encoded, encodeErr := cbor.marshal(sent)
+	assert(encodeErr == nil, fmt.tprintf("expected the payload to encode, got %v", encodeErr))
+	defer delete(encoded)
+
+	decoded: ServerInviteCreatedPayload
+	decodeErr := unmarshalSecretPayload(encoded, &decoded)
+	defer ServerInviteCreatedPayload_deinit(&decoded)
+	assert(decodeErr == nil, fmt.tprintf("expected the payload to decode, got %v", decodeErr))
+	assert(
+		len(decoded.invite.roleIds) == 3 && decoded.invite.roleIds[2] == 8,
+		fmt.tprintf("expected roles [3 5 8], got %v", decoded.invite.roleIds),
+	)
+	assert(
+		decoded.invite.roleIds.allocator.procedure != wipingAllocatorProc,
+		"expected the decoded roles to name the context allocator, not the wiping one",
+	)
+	assert(
+		decoded.invite.roleIds.allocator.data == context.allocator.data,
+		"expected the decoded roles to name the context allocator",
+	)
+	// Growing reaches the stored allocator, as a later append would.
+	for i in 0 ..< 64 {
+		append(&decoded.invite.roleIds, i)
+	}
+	assert(decoded.code == "ABCD-EFGH", "expected the code to survive")
+}
