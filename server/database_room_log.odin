@@ -31,7 +31,8 @@ import "shared:pg"
 // Leave, and the manager changes need nothing beyond the log's rules. Unsigned entries come
 // only from the server itself (databaseExecuteServerRoomLogRemove, for a ClientRemoveRoomMember
 // of an account holding ManageRoomMembers, and protocol 32's ban, databaseRoomLogRemoveBanned,
-// which runs the same removal for every encrypted room the banned account is a member of).
+// which runs the same removal for every encrypted room the banned account is a member of and,
+// since protocol 33 (#195), then removes it as a manager with an unsigned RemoveManager).
 //
 // Replaying on every append costs one signature check per stored entry; a room's log grows by
 // one entry per membership change, so this stays small next to the round trip. Nothing here
@@ -53,10 +54,14 @@ DATABASE_ROOM_LOG_LOCK_SQL ::
 // to the admin instead of holding up the database worker.
 DATABASE_ROOM_LOG_LOCK_NOWAIT_SQL :: DATABASE_ROOM_LOG_LOCK_SQL + " NOWAIT"
 
-// $1 the banned account: the encrypted rooms it is a member of, in the order a ban locks them.
+// $1 the banned account: the encrypted rooms it is a member or (protocol 33, #195) a log
+// manager of, in the order a ban locks them.
 DATABASE_ROOM_LOG_BANNED_ROOMS_SQL ::
-	"SELECT r.id::text FROM rooms r JOIN room_members rm ON rm.room_id = r.id " +
-	"WHERE r.encrypted AND rm.user_id = $1::bigint ORDER BY r.id"
+	"SELECT r.id::text FROM rooms r WHERE r.encrypted AND (" +
+	"EXISTS (SELECT 1 FROM room_members rm WHERE rm.room_id = r.id " +
+	"AND rm.user_id = $1::bigint) OR " +
+	"EXISTS (SELECT 1 FROM room_log_managers m WHERE m.room_id = r.id " +
+	"AND m.user_id = $1::bigint)) ORDER BY r.id"
 
 // PostgreSQL's lock_not_available, what a NOWAIT lock of a held row fails with.
 DATABASE_LOCK_NOT_AVAILABLE_SQLSTATE :: "55P03"
@@ -750,11 +755,18 @@ databaseExecuteServerRoomLogRemove :: proc(
 // The removal inside the caller's transaction. locked (only with noWait) means another
 // connection holds the room: nothing changed, and the transaction is aborted until the caller
 // rolls back to a savepoint.
+//
+// With managerEntry (a ban, protocol 33, #195), a target the verified log names as a manager
+// is then removed as one too: the server's unsigned RemoveManager, after the Remove when it is
+// also a member, even when it is the last manager. managerEntry receives it (entry owned, nil
+// when the target was no manager), and result.changed is set for either entry; result.logEntry
+// is nil when the target was no member.
 @(private = "file")
 databaseServerRoomLogRemoveInTransaction :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseRoomMemberActionRequest,
 	noWait := false,
+	managerEntry: ^RoomLogServerEntry = nil,
 ) -> (
 	result: common.DatabaseRoomMemberActionResult,
 	failure: common.DatabaseQueryResponse,
@@ -799,47 +811,114 @@ databaseServerRoomLogRemoveInTransaction :: proc(
 	result.outcome = .Applied
 	result.access = room.access
 	targetKey, isMember := state.members[request.targetUserId]
-	if !isMember {
+	managerKey, isManager := state.managers[request.targetUserId]
+	removeManager := managerEntry != nil && isManager
+	if !isMember && !removeManager {
 		return result, {}, false, false
 	}
 
+	if isMember {
+		written := databaseRoomLogWriteServerEntry(
+			conn,
+			request.roomId,
+			&state,
+			.Remove,
+			request.targetUserId,
+			targetKey,
+			request.serverIdentityPublicKey,
+		)
+		if written.failed {
+			return {}, databaseConnectionError(conn), true, false
+		}
+		if written.refused {
+			return {outcome = .LogDamaged}, {}, false, false
+		}
+		result.logEntry = written.entry
+		result.logVersion = written.version
+	}
+	if removeManager {
+		written := databaseRoomLogWriteServerEntry(
+			conn,
+			request.roomId,
+			&state,
+			.RemoveManager,
+			request.targetUserId,
+			managerKey,
+			request.serverIdentityPublicKey,
+		)
+		if written.failed || written.refused {
+			delete(result.logEntry)
+			if written.failed {
+				return {}, databaseConnectionError(conn), true, false
+			}
+			return {outcome = .LogDamaged}, {}, false, false
+		}
+		managerEntry^ = written
+	}
+	result.changed = true
+	result.memberUserIDs = roomLogSortedUserIDs(state.members)
+	result.managerUserIDs = roomLogSortedUserIDs(state.managers)
+	return result, {}, false, false
+}
+
+// One server entry databaseRoomLogWriteServerEntry wrote.
+@(private = "file")
+RoomLogServerEntry :: struct {
+	entry:   []u8, // owned; nil unless written
+	version: int,
+	refused: bool, // the log's rules refused it: nothing was stored
+	failed:  bool, // a database error: the caller's transaction must roll back
+}
+
+// Writes the server's unsigned action (Remove, or protocol 33's RemoveManager) of targetUserID
+// as the next entry of state, applies it to state and stores it, inside the caller's
+// transaction.
+@(private = "file")
+databaseRoomLogWriteServerEntry :: proc(
+	conn: pg.Conn,
+	roomID: int,
+	state: ^common.RoomLogState,
+	action: common.RoomLogAction,
+	targetUserID: int,
+	targetKey: common.IdentityPublicKeyBytes,
+	serverIdentityPublicKey: common.IdentityPublicKeyBytes,
+) -> (
+	written: RoomLogServerEntry,
+) {
 	entry := common.RoomLogEntry {
-		roomID            = request.roomId,
+		roomID            = roomID,
 		version           = state.version + 1,
 		prevHash          = state.headHash,
-		action            = .Remove,
-		targetUserID      = request.targetUserId,
+		action            = action,
+		targetUserID      = targetUserID,
 		targetIdentityKey = targetKey,
 		createdAt         = u64(max(time.time_to_unix(time.now()), 0)),
 	}
 	buffer: [common.ROOM_LOG_ENTRY_MAX_BYTES]u8
 	n, encodeErr := common.encodeRoomLogEntry(entry, buffer[:])
 	if encodeErr != .None {
-		return {outcome = .LogDamaged}, {}, false, false
+		return {refused = true}
 	}
 	ctx := common.RoomLogContext {
-		serverIdentityPublicKey = request.serverIdentityPublicKey,
+		serverIdentityPublicKey = serverIdentityPublicKey,
 	}
-	if _, applyErr := common.RoomLogState_apply(&state, buffer[:n], ctx); applyErr != .None {
-		return {outcome = .LogDamaged}, {}, false, false
+	if _, applyErr := common.RoomLogState_apply(state, buffer[:n], ctx); applyErr != .None {
+		return {refused = true}
 	}
-	stored := databaseRoomLogStore(conn, request.roomId, entry, buffer[:n], &state)
-	if !stored.ok {
-		return {}, databaseConnectionError(conn), true, false
+	if !databaseRoomLogStore(conn, roomID, entry, buffer[:n], state).ok {
+		return {failed = true}
 	}
-	logEntry := make([]u8, n)
-	copy(logEntry, buffer[:n])
-	result.changed = true
-	result.memberUserIDs = roomLogSortedUserIDs(state.members)
-	result.logEntry = logEntry
-	result.logVersion = entry.version
-	result.managerUserIDs = roomLogSortedUserIDs(state.managers)
-	return result, {}, false, false
+	written.entry = make([]u8, n)
+	copy(written.entry, buffer[:n])
+	written.version = entry.version
+	return
 }
 
 // A ban (protocol 32, #72), inside the ban's transaction after DATABASE_ADMIN_BAN_SQL applied:
 // the server's unsigned Remove of targetUserID in every encrypted room room_members lists it
-// in, exactly as an admin's ClientRemoveRoomMember writes it, one savepoint per room. A room
+// in, exactly as an admin's ClientRemoveRoomMember writes it, and (protocol 33, #195) then its
+// unsigned RemoveManager in every encrypted room whose log names it as a manager
+// (room_log_managers lists it), also the last one, one savepoint per room. A room
 // whose stored log does not replay (LogDamaged), that another connection holds locked (the lock
 // does not wait), or that refuses the removal otherwise is left as it was and listed in
 // result.failedRoomIDs: the ban still applies. A room whose verified log does not name the
@@ -875,6 +954,7 @@ databaseRoomLogRemoveBanned :: proc(
 		if !databaseRoomLogExec(conn, "SAVEPOINT haychat_ban_room") {
 			return databaseConnectionError(conn), true
 		}
+		managerEntry: RoomLogServerEntry
 		removal, removalFailure, removalFailed, locked := databaseServerRoomLogRemoveInTransaction(
 			conn,
 			common.DatabaseRoomMemberActionRequest {
@@ -885,6 +965,7 @@ databaseRoomLogRemoveBanned :: proc(
 				serverIdentityPublicKey = request.serverIdentityPublicKey,
 			},
 			noWait = true,
+			managerEntry = &managerEntry,
 		)
 		if removalFailed {
 			return removalFailure, true
@@ -896,6 +977,7 @@ databaseRoomLogRemoveBanned :: proc(
 			delete(removal.memberUserIDs)
 			delete(removal.logEntry)
 			delete(removal.managerUserIDs)
+			delete(managerEntry.entry)
 			rolledBack :=
 				databaseRoomLogExec(conn, "ROLLBACK TO SAVEPOINT haychat_ban_room") &&
 				databaseRoomLogExec(conn, "RELEASE SAVEPOINT haychat_ban_room")
@@ -912,6 +994,7 @@ databaseRoomLogRemoveBanned :: proc(
 			delete(removal.memberUserIDs)
 			delete(removal.logEntry)
 			delete(removal.managerUserIDs)
+			delete(managerEntry.entry)
 			return databaseConnectionError(conn), true
 		}
 		append(
@@ -920,6 +1003,8 @@ databaseRoomLogRemoveBanned :: proc(
 				roomId = roomID,
 				logEntry = removal.logEntry,
 				logVersion = removal.logVersion,
+				managerLogEntry = managerEntry.entry,
+				managerLogVersion = managerEntry.version,
 				memberUserIDs = removal.memberUserIDs,
 				managerUserIDs = removal.managerUserIDs,
 			},

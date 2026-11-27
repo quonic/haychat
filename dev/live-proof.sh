@@ -119,6 +119,7 @@ SQL_TESTS+=,server.testRoomLogFullRoomAgainstPostgreSQL
 SQL_TESTS+=,server.testRestrictedMemberGetsRoomLogKeysAgainstPostgreSQL
 SQL_TESTS+=,server.testBanRemovesFromEncryptedRoomsAgainstPostgreSQL
 SQL_TESTS+=,server.testBanReportsLockedEncryptedRoomAgainstPostgreSQL
+SQL_TESTS+=,server.testBanRemovesLogManagersAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomLogMigrationUpgradesVersion6AgainstPostgreSQL
 SQL_TESTS+=,server.testRoomSenderChainStatementsAgainstPostgreSQL
 SQL_TESTS+=,server.testRoomSenderChainsMigrationUpgradesVersion7AgainstPostgreSQL

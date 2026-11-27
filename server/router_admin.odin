@@ -281,13 +281,37 @@ MainRouterState_adminSuccessMessage :: proc(
 		}
 		builder := strings.builder_make()
 		fmt.sbprintf(&builder, "Banned %s", nickname)
-		if removed := len(result.banRemovals); removed > 0 {
+		// Protocol 33 (#195): the manager sets too, and how many rooms have no manager left.
+		removed, demoted, unmanaged := 0, 0, 0
+		for removal in result.banRemovals {
+			if removal.logEntry != nil {
+				removed += 1
+			}
+			if removal.managerLogEntry != nil {
+				demoted += 1
+				if len(removal.managerUserIDs) == 0 {
+					unmanaged += 1
+				}
+			}
+		}
+		if removed > 0 {
 			fmt.sbprintf(
 				&builder,
 				"; removed from %d encrypted %s",
 				removed,
 				removed == 1 ? "room" : "rooms",
 			)
+		}
+		if demoted > 0 {
+			fmt.sbprintf(
+				&builder,
+				"; no longer a manager of %d encrypted %s",
+				demoted,
+				demoted == 1 ? "room" : "rooms",
+			)
+			if unmanaged > 0 {
+				fmt.sbprintf(&builder, " (%d now with no manager)", unmanaged)
+			}
 		}
 		if failed := len(result.failedRoomIDs); failed > 0 {
 			fmt.sbprintf(
@@ -477,35 +501,50 @@ MainRouterState_handleAdminUserResult :: proc(
 		// Protocol 32 (#72): the encrypted rooms the ban removed the account from, sent as an
 		// admin's removal is (router_room_access.odin), and the remaining members move to the
 		// new epoch. The account has no session left; the eviction only drops it from the
-		// room's voice members.
+		// room's voice members. Protocol 33 (#195): then its RemoveManager.
 		for removal in result.banRemovals {
-			MainRouterState_voiceEvictUser(
+			// Both entries in one ServerRoomLog, the Remove first, so clients move to the
+			// last epoch at once.
+			entries: [2][]u8
+			count := 0
+			firstVersion := removal.logEntry != nil ? removal.logVersion : removal.managerLogVersion
+			if removal.logEntry != nil {
+				entries[count] = removal.logEntry
+				count += 1
+				MainRouterState_voiceEvictUser(
+					pm,
+					state,
+					removal.roomId,
+					userID,
+					VOICE_LEFT_REMOVED_FROM_ROOM,
+				)
+			}
+			if removal.managerLogEntry != nil {
+				entries[count] = removal.managerLogEntry
+				count += 1
+			}
+			MainRouterState_sendRoomLogEntries(
 				pm,
 				state,
 				removal.roomId,
-				userID,
-				VOICE_LEFT_REMOVED_FROM_ROOM,
-			)
-			MainRouterState_sendRoomLogEntry(
-				pm,
-				state,
-				removal.roomId,
-				removal.logVersion,
-				removal.logEntry,
+				firstVersion,
+				entries[:count],
 				removal.memberUserIDs[:],
 				removal.managerUserIDs[:],
 				userID,
 				request.peerID,
 			)
-			MainRouterState_sendRoomMembershipChange(
-				pm,
-				state,
-				removal.roomId,
-				userID,
-				false,
-				removal.memberUserIDs[:],
-				request.peerID,
-			)
+			if removal.logEntry != nil {
+				MainRouterState_sendRoomMembershipChange(
+					pm,
+					state,
+					removal.roomId,
+					userID,
+					false,
+					removal.memberUserIDs[:],
+					request.peerID,
+				)
+			}
 		}
 	case .SetRestricted:
 		if !result.changed {
