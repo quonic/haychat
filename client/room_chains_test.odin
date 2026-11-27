@@ -1608,7 +1608,7 @@ testRoomChainsSealedEditWaitsForItsChain :: proc(t: ^testing.T) {
 	)
 }
 
-// ── Checking keys (protocol 33, #78) ─────────────────────────────
+// ── Checking keys (protocol 34, #78) ─────────────────────────────
 
 // The reject requests sent so far for envelope (0: any).
 @(private = "file")

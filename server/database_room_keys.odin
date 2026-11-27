@@ -24,7 +24,7 @@ import "shared:pg"
 // key request, an older epoch whose chain is already stored. A RoomKeyForward (protocol 20)
 // needs the forwarder to be a member, every wrap a member, the room's history Full, an epoch
 // whose chain (sender, chain ID) is already stored, and no stored envelope of that chain with a
-// wrap for the recipient (the first forward wins; later ones are dropped). Protocol 33 (#78):
+// wrap for the recipient (the first forward wins; later ones are dropped). Protocol 34 (#78):
 // a wrap counts as held only when it was stored no earlier than the recipient's current
 // encryption key (user_encryption_keys.updated_at): a wrap from before the recipient set up
 // encryption again was made for a key it no longer has, so it no longer blocks a forward. An
@@ -106,7 +106,7 @@ DATABASE_ROOM_KEY_REQUEST_CHECK_SQL ::
 	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id <> $1::bigint), '') ELSE '' END"
 
-// Protocol 33 (#78): $1 the requester, $2 the envelope's ID. Takes the requester off the wraps
+// Protocol 34 (#78): $1 the requester, $2 the envelope's ID. Takes the requester off the wraps
 // of that envelope when it has one for the requester and is of a chain someone else sent: the
 // row is deleted when the requester was its only recipient (every forward, and a re-seal
 // answering its request), otherwise only its user ID leaves recipient_user_ids, so the other

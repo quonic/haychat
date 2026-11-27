@@ -791,7 +791,7 @@ testRoomKeyForwardsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 	)
 }
 
-// Protocol 33 (#78): whether userID's reject of envelopeID took it off the wraps, and whether
+// Protocol 34 (#78): whether userID's reject of envelopeID took it off the wraps, and whether
 // that deleted the row.
 @(private = "file")
 roomKeysTestReject :: proc(conn: pg.Conn, userID, envelopeID: int) -> (rejected, deleted: bool) {
@@ -823,7 +823,7 @@ roomKeysTestKeyChangedAt :: proc(conn: pg.Conn, userID: int, offset: string) {
 	)
 }
 
-// Protocol 33 (#78): a recipient rejects its copy of a forward (the row goes, and the next
+// Protocol 34 (#78): a recipient rejects its copy of a forward (the row goes, and the next
 // forward is stored) or of a SenderKey envelope with other wraps (only its ID leaves the
 // wraps); nobody rejects an envelope without a wrap for it or of its own chain; and a wrap
 // stored before the recipient's current encryption key no longer blocks a forward.

@@ -69,13 +69,19 @@ set -euo pipefail
 #               the ban and unbans rd: rd signs in again but is no member, is refused the room's
 #               history and keys, never opens the message sent during the ban, and no envelope
 #               of the new epoch has a wrap for rd. The damaged room still lists rd.
-#  20. forged:  (protocol 33, #78) rc, a member, invites rf with the test-only forged forwards
+#  20. forged:  (protocol 34, #78) rc, a member, invites rf with the test-only forged forwards
 #               on, so the three chains rc forwards carry wrong keys, validly signed, ahead of
 #               every good copy. rf keeps them unchecked, rejects each when its message does
 #               not open (room_key "rejected", ClientRejectRoomKeyEnvelope), the server deletes
 #               rf's copies, and rf reads all three messages once the other members' copies
 #               arrive. (The wrap for an old encryption key is in the server's SQL tests.)
-#  21. secrets: no client ever printed its encryption private key, and no client wrote the
+#  21. managers:(protocol 33, #195) ra adds a new account rg to an encrypted Admin invite room
+#               with rc, makes rg a manager and steps down, so rg is its only manager. ra bans
+#               rg: the server writes its Remove and its RemoveManager (one room_log, "the
+#               server removed rg as a manager"), and admin_result says the room has no manager
+#               left. ra and rc replay the log without error and keep sending to each other, and
+#               an add signed by rc, a member who is no manager, is refused by the server.
+#  22. secrets: no client ever printed its encryption private key, and no client wrote the
 #               text of an encrypted message to its log (stderr).
 #
 # dev/live-proof.sh --e2ee (and --all) runs it against its throwaway server. It needs bash,
@@ -961,6 +967,73 @@ held=$(grep -o '"unchecked":false' <<<"$last_result" | wc -l)
 [[ "$held" == 3 && "$last_result" != *'"unchecked":true'* ]] ||
 	fail "expected rf to hold the three chains, checked: $last_result"
 stop_client rf
+
+echo "==> [e2ee] managers: a ban removes the only manager; the room keeps talking, nobody adds"
+room_gina="e2rg-$run_tag"
+start_client rg "$room_gina"
+expect_connected rg
+expect_ok rg wait room_list 5000
+rg_id=$(user_id ra3 "$room_gina")
+fetch_keys ra3 "$rg_id" >/dev/null
+fetch_keys ra3 "$rc_id" >/dev/null
+fetch_keys rc "$ra_id" >/dev/null
+fetch_keys rc "$rg_id" >/dev/null
+start=$(lines ra3)
+expect_ok ra3 room-create "text,admin-invite,encrypted,managers=none" "ban-manager-$run_tag"
+created=$(expect_event ra3 \
+	"^\\{\"event\":\"room_created\",.*\"name\":\"ban-manager-$run_tag\"" \
+	"$start" "ra never got room_created for the manager room")
+manager_id=$(field "$created" roomID)
+room_log_line ra3 "$manager_id" '"status":"verified","logVersion":1,' "$start" >/dev/null
+expect_ok ra3 room-add "$manager_id" "$rg_id"
+room_log_line ra3 "$manager_id" '"status":"verified","logVersion":2,' "$start" >/dev/null
+cstart=$(lines rc)
+expect_ok ra3 room-add "$manager_id" "$rc_id"
+room_log_line rc "$manager_id" '"status":"verified","logVersion":3,' "$cstart" >/dev/null
+expect_ok ra3 room-manager "$manager_id" "$rg_id" on
+room_log_line ra3 "$manager_id" '"status":"verified","logVersion":4,' "$start" >/dev/null
+expect_ok ra3 room-manager "$manager_id" "$ra_id" off
+only=$(room_log_line rc "$manager_id" '"status":"verified","logVersion":5,' "$cstart")
+[[ "$only" == *"\"managers\":[$rg_id],"* ]] || fail "rg is not the room's only manager: $only"
+
+astart=$(lines ra3)
+cstart=$(lines rc)
+fstart=$(lines rg)
+expect_ok ra3 admin-ban "$rg_id" proof ban
+expect_event rg '^\{"event":"session_ended",.*"kind":"banned",' "$fstart" \
+	"rg did not see session_ended banned" >/dev/null
+result=$(expect_event ra3 "^\\{\"event\":\"admin_result\",.*\"action\":\"ban\",\"userID\":$rg_id," \
+	"$astart" "ra got no result for rg's ban")
+expected="removed from 1 encrypted room; no longer a manager of 1 encrypted room"
+expected+=" (1 now with no manager)"
+[[ "$result" == *"$expected"* ]] || fail "the ban did not report the manager set it changed: $result"
+for client in ra3 rc; do
+	if [[ "$client" == ra3 ]]; then
+		from=$astart
+	else
+		from=$cstart
+	fi
+	demoted=$(room_log_line "$client" "$manager_id" '"status":"verified","logVersion":7,' "$from")
+	[[ "$demoted" == *"\"members\":[$ra_id,$rc_id],\"managers\":[],"* &&
+		"$demoted" == *"the server removed $room_gina as a manager"* ]] ||
+		fail "$client does not see the room left with no manager: $demoted"
+done
+stop_client rg
+no_manager_ra="e2ee-room-marker-no-manager-ra-$run_tag"
+no_manager_rc="e2ee-room-marker-no-manager-rc-$run_tag"
+cstart=$(lines rc)
+expect_ok ra3 send "$manager_id" "$no_manager_ra"
+room_message rc "$manager_id" "$no_manager_ra" "$cstart" >/dev/null
+astart=$(lines ra3)
+expect_ok rc send "$manager_id" "$no_manager_rc"
+room_message ra3 "$manager_id" "$no_manager_rc" "$astart" >/dev/null
+fetch_keys rc "$re_id" >/dev/null
+cstart=$(lines rc)
+expect_ok rc room-add "$manager_id" "$re_id"
+expect_event rc '^\{"event":"protocol_error",.*"message":"You may not make this change to the member list"' \
+	"$cstart" "the server did not refuse rc's add to a room with no manager" >/dev/null
+managers=$(run_sql "SELECT count(*) FROM room_log_managers WHERE room_id = $manager_id")
+[[ "$managers" == 0 ]] || fail "expected no log manager left in the database, got $managers"
 stop_client ra3
 
 for client in re rc; do
@@ -973,7 +1046,7 @@ for marker in "$marker_one" "$marker_two" "e2ee-room-marker"; do
 		fail "a client logged the text of an encrypted message"
 	fi
 done
-for profile in a b m c d ra rb rc rf; do
+for profile in a b m c d ra rb rc rf rg; do
 	secret=$(config_value "$profile" encryption_private_key)
 	[[ ${#secret} -eq 64 ]] || fail "profile $profile has no encryption private key"
 	if grep -rqF -- "$secret" "$work_dir"/*.out "$work_dir"/*.err; then

@@ -132,12 +132,19 @@ an encrypted room:
 - **An add needs both** the server's permission (an admin, or a member of a Member invite room)
   and a valid signature by someone the log allows. A manager who loses the admin role stays a
   manager until another manager removes them, but the server no longer accepts their adds.
-- The last manager cannot be removed while the room has members.
+- The last manager cannot be removed while the room has members, except by a ban (protocol 33,
+  [Admin Actions](#admin-actions)): a room whose only manager is banned is left with no manager.
+  Its members still talk and admins still remove members, but nobody can add members (in a
+  Member invite room members still can), change the managers or switch the access, and the
+  Members page says "This room has no manager left, so nobody can add members." (in a Member
+  invite room "This room has no manager left; only members can add people."). The server never
+  makes anyone a manager; an admin can delete the room, and members move to a new one.
 - `ClientAddRoomMember` and `ClientLeaveRoom` are refused for encrypted rooms ("This room is
   encrypted: its members change through its member list"); the client signs log entries
   instead. An admin's removal (`ClientRemoveRoomMember`) still works: the server writes an
   unsigned Remove into the log. A ban (protocol 32) does the same in every encrypted room the
-  account is in ([Admin Actions](#admin-actions)).
+  account is in, and (protocol 33) also writes the server's removal of the account as a manager
+  ([Admin Actions](#admin-actions)).
 - Every verified change shows in the room as an event line ("alice added carol", "the server
   removed dave", "erin (manager) added themselves"), so every addition is visible to every
   member.
@@ -208,6 +215,15 @@ below in the database for every request, in the same statement as the change.
   ("These encrypted rooms still list them: …"). Banning the account again retries them. An
   unban does not add the account back to any room: someone has to invite it again, and in a
   Full history room it then reads the room's history like any new member.
+- **Bans and encrypted rooms' managers** (protocol 33): a ban also takes the account out of the
+  managers of every encrypted room that names it as one, also rooms it manages without being a
+  member ("the server removed dave as a manager"). It removes the last manager too, leaving the
+  room with no manager ([Encrypted Rooms](#encrypted-rooms)); the ban's result says how many
+  rooms changed ("no longer a manager of 2 encrypted rooms (1 now with no manager)"). Members'
+  clients accept this removal only from the server, only for someone who is no longer a member,
+  and nothing proves it came from a ban: a server that is not honest can take any manager away
+  this way, in the open, which freezes who joins a room but lets it read nothing and add no
+  one.
 
 ## Roles and Permissions
 
@@ -506,13 +522,13 @@ newest message.
   the server lets read it, not who can technically read it (the server and its operator can
   read every unencrypted room). In a Full history encrypted
   room a new member reads older messages only once a member who holds their keys is online.
-- A ban removes the account from encrypted rooms' member lists, but not from their managers
-  ([Bans and encrypted rooms](#admin-actions)): a banned manager stays named as one. The server
-  never accepts a change from an account that cannot sign in, but members' clients would still
-  accept its signature on a change the server stored. A room whose member list is damaged, or
-  that another database connection holds locked during the ban, keeps the account until it is
-  banned again (the Admin section lists those rooms). Other account changes (a role, a
-  restriction) change no encrypted room's member list.
+- A ban that removes an encrypted room's only manager leaves it with no manager for good
+  ([Bans and encrypted rooms' managers](#admin-actions)): nobody can add members to it any more
+  or make anyone a manager, so its members move to a new room to invite someone. A room whose
+  member list is damaged, or that another database connection holds locked during the ban,
+  keeps the account (as member and manager) until it is banned again (the Admin section lists
+  those rooms). Other account changes (a role, a restriction) change no encrypted room's member
+  list.
 - The member counts in the Admin section's list of rooms leave out accounts that signed up since
   it was last fetched, until another change to the room or reopening Server settings.
 - The Admin section lists every account of the server at once, with no search or paging.

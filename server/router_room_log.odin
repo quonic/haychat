@@ -122,18 +122,49 @@ MainRouterState_sendRoomLogEntry :: proc(
 	targetUserID: int,
 	requesterPeerID: u32,
 ) {
-	// The router never frees the temporary allocator, so this one-element array is on the heap.
-	entries := make([dynamic][]u8, 0, 1)
-	defer delete(entries)
-	append(&entries, entry)
+	entries := [1][]u8{entry}
+	MainRouterState_sendRoomLogEntries(
+		pm,
+		state,
+		roomID,
+		version,
+		entries[:],
+		memberUserIDs,
+		managerUserIDs,
+		targetUserID,
+		requesterPeerID,
+	)
+}
+
+// Like MainRouterState_sendRoomLogEntry for consecutive stored entries from firstVersion on, in
+// one ServerRoomLog (protocol 33, #195: a ban's Remove and RemoveManager of one room), so
+// clients move to the last epoch at once. memberUserIDs and managerUserIDs are the room's after
+// the last entry.
+MainRouterState_sendRoomLogEntries :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	roomID, firstVersion: int,
+	entries: [][]u8,
+	memberUserIDs, managerUserIDs: []int,
+	targetUserID: int,
+	requesterPeerID: u32,
+) {
+	if len(entries) == 0 {
+		return
+	}
+	// The router never frees the temporary allocator, so this array is on the heap.
+	payloadEntries := make([dynamic][]u8, 0, len(entries))
+	defer delete(payloadEntries)
+	append(&payloadEntries, ..entries)
+	headVersion := firstVersion + len(entries) - 1
 	payload := common.ServerRoomLogPayload {
 		roomId       = roomID,
-		afterVersion = version - 1,
-		entries      = entries,
-		headVersion  = version,
+		afterVersion = firstVersion - 1,
+		entries      = payloadEntries,
+		headVersion  = headVersion,
 	}
 	// Protocol 21: voice keys must name the new epoch from now on.
-	MainRouterState_voiceLogAdvanced(state, roomID, version)
+	MainRouterState_voiceLogAdvanced(state, roomID, headVersion)
 	for recipientPeerID, recipientSession in state.peerSessions {
 		if !recipientSession.isAuthenticated {
 			continue

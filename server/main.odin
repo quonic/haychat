@@ -46,7 +46,7 @@ PendingDBRequestType :: enum {
 	StoreRoomKeyEnvelope,
 	FetchRoomKeys,
 	RoomKeyRequestCheck,
-	// Protocol 33 (#78): a rejected envelope, never answered.
+	// Protocol 34 (#78): a rejected envelope, never answered.
 	RejectRoomKeyEnvelope,
 	// Roles (router_roles.odin, protocol 23): the role list, and an admin's role change whose
 	// one statement checks the role and the guards.
@@ -180,7 +180,7 @@ RouterPeerSession :: struct {
 	// was told when it started signing up.
 	peerAddress:               RegistrationAddress,
 	registrationMode:          common.RegistrationMode,
-	// Protocol 33 (#78): ClientRejectRoomKeyEnvelope's limit, at most
+	// Protocol 34 (#78): ClientRejectRoomKeyEnvelope's limit, at most
 	// common.ROOM_KEY_REJECTS_PER_MINUTE in the minute that started at roomKeyRejectWindow.
 	roomKeyRejectWindow:       time.Tick,
 	roomKeyRejects:            int,

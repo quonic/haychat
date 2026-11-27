@@ -709,3 +709,145 @@ testRoomLogManagersAndTheMembersPage :: proc(t: ^testing.T) {
 	)
 	assert(view.members[0].keyState == "Not verified", "expected bob's key state shown")
 }
+
+// The server's unsigned entry of action on target after state's verified head (temp).
+@(private = "file")
+roomLogTestServerEntry :: proc(
+	state: ^State,
+	action: common.RoomLogAction,
+	target: common.UserKeyBundle,
+) -> []u8 {
+	verified := State_roomLogVerified(state, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	assert(verified != nil, "expected a verified log to follow")
+	entry := common.RoomLogEntry {
+		roomID            = ROOM_LOG_TEST_ROOM,
+		version           = verified.version + 1,
+		prevHash          = verified.headHash,
+		action            = action,
+		targetUserID      = target.userId,
+		targetIdentityKey = target.identityPublicKey,
+		createdAt         = 1,
+	}
+	buffer: [common.ROOM_LOG_ENTRY_MAX_BYTES]u8
+	n, err := common.encodeRoomLogEntry(entry, buffer[:])
+	assert(err == .None, "expected the server's entry to encode")
+	data := make([]u8, n, context.temp_allocator)
+	copy(data, buffer[:n])
+	return data
+}
+
+// Protocol 33 (#195): a ban of the room's only manager. bob replays the server's Remove and
+// RemoveManager of alice (one ServerRoomLog), keeps the room with no manager, may still talk,
+// and is told nobody can add.
+@(test)
+testRoomLogServerRemovesTheLastManager :: proc(t: ^testing.T) {
+	roomLogTestBegin()
+	defer roomLogTestEnd()
+	defer free_all(context.temp_allocator)
+	_, serverKey, _ := common.generateIdentityKeyPair()
+	alice := roomLogTestState(serverKey, ROOM_LOG_TEST_ALICE, true)
+	defer State_deinit(&alice)
+	bob := roomLogTestState(serverKey, ROOM_LOG_TEST_BOB, false)
+	defer State_deinit(&bob)
+	roomLogTestDirectory(&alice, {ROOM_LOG_TEST_ALICE}, ROOM_LOG_TEST_ALICE, ROOM_LOG_TEST_BOB)
+	roomLogTestDirectory(&bob, {ROOM_LOG_TEST_ALICE}, ROOM_LOG_TEST_ALICE, ROOM_LOG_TEST_BOB)
+	aliceBundle := roomLogTestBundle(&alice, ROOM_LOG_TEST_ALICE)
+	bobBundle := roomLogTestBundle(&bob, ROOM_LOG_TEST_BOB)
+
+	create := roomLogTestCreateRoom(&alice)
+	roomLogTestDeliver(&alice, 0, 1, create)
+	roomLogTestPin(&alice, bobBundle)
+	assert(
+		len(State_addRoomMember(&alice, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM,
+			ROOM_LOG_TEST_BOB)) == 0,
+		"expected alice's add sent",
+	)
+	add := roomLogTestLastAppend()
+	roomLogTestPin(&bob, aliceBundle)
+	roomLogTestListRoom(&bob, 2, true)
+	roomLogTestDeliver(&bob, 0, 2, create, add)
+	assert(roomLogTestStatus(&bob) == .Verified, "expected bob to verify the log")
+
+	// The ban: alice out of the members, then out of the managers. The RemoveManager follows
+	// the Remove's hash, worked out on a replay of its own.
+	removeCopy := roomLogTestServerEntry(&bob, .Remove, aliceBundle)
+	scratch := common.RoomLogState_init(ROOM_LOG_TEST_ROOM)
+	defer common.RoomLogState_deinit(&scratch)
+	ctx := common.RoomLogContext {
+		serverIdentityPublicKey = serverKey,
+	}
+	for entry in ([][]u8{create, add, removeCopy}) {
+		_, err := common.RoomLogState_apply(&scratch, entry, ctx)
+		assert(err == .None, fmt.tprintf("expected the scratch replay, got %v", err))
+	}
+	demotion := common.RoomLogEntry {
+		roomID            = ROOM_LOG_TEST_ROOM,
+		version           = 4,
+		prevHash          = scratch.headHash,
+		action            = .RemoveManager,
+		targetUserID      = ROOM_LOG_TEST_ALICE,
+		targetIdentityKey = aliceBundle.identityPublicKey,
+		createdAt         = 1,
+	}
+	buffer: [common.ROOM_LOG_ENTRY_MAX_BYTES]u8
+	n, encodeErr := common.encodeRoomLogEntry(demotion, buffer[:])
+	assert(encodeErr == .None, "expected the RemoveManager to encode")
+	roomLogTestDeliver(&bob, 2, 4, removeCopy, buffer[:n])
+
+	room := State_findRoomLog(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	assert(
+		room.status == .Verified &&
+		room.state.version == 4 &&
+		len(room.state.managers) == 0 &&
+		len(room.state.members) == 1 &&
+		common.RoomLogState_isMember(room.state, ROOM_LOG_TEST_BOB),
+		fmt.tprintf("expected bob alone with no manager at version 4, got %v %v", room.status,
+			room.failure),
+	)
+	assert(
+		State_roomLogEventText(&bob, ROOM_LOG_TEST_SERVER, room.events[3]) ==
+		"the server removed alice as a manager",
+		fmt.tprintf("expected the server's line, got %q",
+			State_roomLogEventText(&bob, ROOM_LOG_TEST_SERVER, room.events[3])),
+	)
+	assert(
+		KeyStore_roomHead(bob.e2ee[0].store, ROOM_LOG_TEST_ROOM).version == 4,
+		"expected the new head stored",
+	)
+
+	// bob still talks, may leave, and adds nobody.
+	assert(
+		State_roomAllowsChat(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM),
+		"expected chat still allowed",
+	)
+	rights := roomLogRights(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	assert(
+		!rights.canAdd &&
+		rights.canLeave &&
+		!rights.canManageManagers &&
+		rights.addNote == ROOM_LOG_NO_MANAGER_NOTE,
+		fmt.tprintf("expected bob to leave but not add, and told why, got %v", rights),
+	)
+	sentBefore := len(roomLogTestAppends)
+	errorMessage, _ := State_roomLogAppend(
+		&bob,
+		ROOM_LOG_TEST_SERVER,
+		ROOM_LOG_TEST_ROOM,
+		.Add,
+		ROOM_LOG_TEST_ALICE,
+	)
+	assert(
+		errorMessage == ROOM_LOG_NO_MANAGER_NOTE && len(roomLogTestAppends) == sentBefore,
+		fmt.tprintf("expected the add refused locally, got %q", errorMessage),
+	)
+	State_resetRoomEditor(&bob, .Members, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
+	view := buildRoomMembersView(&bob)
+	assert(
+		view.encrypted &&
+		len(view.managers) == 0 &&
+		len(view.members) == 1 &&
+		!view.canAdd &&
+		view.addNote == ROOM_LOG_NO_MANAGER_NOTE,
+		fmt.tprintf("expected the Members page with no manager, got %v", view),
+	)
+}

@@ -2271,6 +2271,80 @@ testRoomLogSignaturesAndUnsignedEntries :: proc(t: ^testing.T) {
 	assert(err == .Unsigned, fmt.tprintf("expected an unsigned Leave refused, got %v", err))
 }
 
+// Protocol 33 (#195): the server's unsigned RemoveManager, which a ban writes after its Remove.
+@(test)
+testRoomLogServerRemoveManager :: proc(t: ^testing.T) {
+	_ = t
+	alice := testUser("alice", TEST_ALICE_ID)
+	bob := testUser("bob", TEST_BOB_ID)
+	carol := testUser("carol", TEST_CAROL_ID)
+	dave := testUser("dave", TEST_DAVE_ID)
+	server := TestUser{}
+	log := testRoomLogMake()
+	defer testRoomLogDestroy(&log)
+	// alice member and manager, carol a manager only, bob a member.
+	assert(testRoomLogCreate(&log, .AdminInvite) == .None, "expected the Create")
+	assert(testRoomLogTry(&log, .Add, bob, alice) == .None, "expected alice to add bob")
+
+	// Never of a member: the server removes the member first.
+	err := testRoomLogTry(&log, .RemoveManager, alice, server)
+	assert(err == .ManagerStillMember, fmt.tprintf("expected ManagerStillMember, got %v", err))
+	// A server entry carries no actor key and no signature.
+	malformed := testRoomLogNext(&log, .RemoveManager, carol, server)
+	malformed.signature[0] = 1
+	err = testRoomLogApply(&log, testRoomLogEncode(malformed, server))
+	assert(err == .MalformedUnsigned, fmt.tprintf("expected MalformedUnsigned, got %v", err))
+	malformed.signature = {}
+	malformed.actorIdentityKey = alice.publicKey
+	err = testRoomLogApply(&log, testRoomLogEncode(malformed, server))
+	assert(err == .MalformedUnsigned, fmt.tprintf("expected MalformedUnsigned, got %v", err))
+	// An unsigned entry that names an actor is not the server's: it needs that actor's
+	// signature.
+	claimed := testRoomLogNext(&log, .RemoveManager, carol, alice)
+	claimed.actorIdentityKey = alice.publicKey
+	err = testRoomLogApply(&log, testRoomLogEncode(claimed, server))
+	assert(err == .BadSignature, fmt.tprintf("expected an unsigned actor refused, got %v", err))
+	// The other manager changes stay signed.
+	err = testRoomLogTry(&log, .AddManager, dave, server)
+	assert(err == .Unsigned, fmt.tprintf("expected an unsigned AddManager refused, got %v", err))
+
+	// A manager who is not a member goes at once.
+	err = testRoomLogTry(&log, .RemoveManager, carol, server)
+	assert(err == .None, fmt.tprintf("expected the server to remove carol, got %v", err))
+	assert(!RoomLogState_isManager(log.state, TEST_CAROL_ID), "expected carol no manager")
+	err = testRoomLogTry(&log, .RemoveManager, carol, server)
+	assert(err == .NotManager, fmt.tprintf("expected NotManager, got %v", err))
+
+	// A signed removal of the last manager is still refused while the room has members.
+	err = testRoomLogTry(&log, .RemoveManager, alice, alice)
+	assert(err == .LastManager, fmt.tprintf("expected LastManager, got %v", err))
+	// The server's is not: a ban's Remove, then its RemoveManager, leaves no manager.
+	assert(testRoomLogTry(&log, .Remove, alice, server) == .None, "expected alice removed")
+	err = testRoomLogTry(&log, .RemoveManager, alice, server)
+	assert(err == .None, fmt.tprintf("expected the last manager removed, got %v", err))
+	assert(len(log.state.managers) == 0, "expected no manager left")
+	assert(RoomLogState_isMember(log.state, TEST_BOB_ID), "expected bob still a member")
+
+	// Without a manager nobody adds to an Admin invite room or changes its managers or access.
+	err = testRoomLogTry(&log, .Add, dave, bob)
+	assert(err == .NotAuthorized, fmt.tprintf("expected a member's Add refused, got %v", err))
+	err = testRoomLogTry(&log, .AddManager, bob, bob)
+	assert(err == .NotAuthorized, fmt.tprintf("expected AddManager refused, got %v", err))
+	err = testRoomLogTry(&log, .SetAccess, {}, bob)
+	assert(err == .NotAuthorized, fmt.tprintf("expected SetAccess refused, got %v", err))
+	err = testRoomLogTry(&log, .Add, alice, alice)
+	assert(err == .NotAuthorized, fmt.tprintf("expected the old manager refused, got %v", err))
+
+	// The whole log replays, and the server still removes members.
+	ctx := testRoomLogContext(&log)
+	replayed, replayErr, _ := replayRoomLog(TEST_ROOM_ID, log.entries[:], ctx)
+	assert(replayErr == .None, fmt.tprintf("expected the log to replay, got %v", replayErr))
+	assert(len(replayed.managers) == 0 && len(replayed.members) == 1, "expected bob alone")
+	RoomLogState_deinit(&replayed)
+	assert(testRoomLogTry(&log, .Remove, bob, server) == .None, "expected bob removed")
+	assert(len(log.state.members) == 0, "expected an empty room")
+}
+
 @(test)
 testRoomLogChainingForksAndRollback :: proc(t: ^testing.T) {
 	_ = t

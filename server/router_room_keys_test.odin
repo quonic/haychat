@@ -948,7 +948,7 @@ testRoomChainsRouterForwardsAndFullHistoryRequests :: proc(t: ^testing.T) {
 	routerTestExpectNoNetworkMessage(h, "expected one request per member session")
 }
 
-// Protocol 33 (#78): a reject goes to the database as the session's account, is never answered,
+// Protocol 34 (#78): a reject goes to the database as the session's account, is never answered,
 // and is refused past ROOM_KEY_REJECTS_PER_MINUTE in a minute; a bad ID is refused.
 @(test)
 testRoomChainsRouterRejectEnvelopeIsTheSessionsAndLimited :: proc(t: ^testing.T) {
