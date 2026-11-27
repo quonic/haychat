@@ -296,13 +296,8 @@ MainRouterState_identityRequestIsLive :: proc(
 	state: ^MainRouterState,
 	request: PendingDBRequest,
 ) -> bool {
-	session, ok := state.peerSessions[request.peerID]
-	if !ok {
-		return false
-	}
-	sessionID := session.sessionID
-	requestSessionID := request.sessionID
-	return common.constantTimeEqual(sessionID[:], requestSessionID[:])
+	_, live := MainRouterState_askingSession(state, request.peerID, request.sessionID)
+	return live
 }
 
 // #165: the identity statement declined the key's approved request because its room went away
@@ -735,6 +730,7 @@ MainRouterState_handleClientRegister :: proc(
 		},
 		PendingDBRequest {
 			requestType = .Register,
+			sessionID = session.sessionID,
 			identityPublicKey = session.clientIdentityPublicKey,
 		},
 	)
@@ -857,17 +853,10 @@ MainRouterState_handleRegisterResult :: proc(
 	if created {
 		MainRouterState_setUserRestricted(state, registered.userId, registered.isRestricted)
 	}
-	session, sessionOK := &state.peerSessions[request.peerID]
-	// A reused peer ID: the answer belongs to the key that asked, not to this session.
-	sessionKey: common.IdentityPublicKeyBytes
-	if sessionOK {
-		sessionKey = session.clientIdentityPublicKey
-	}
-	requestKey := request.identityPublicKey
-	if !sessionOK ||
-	   !session.isRegistering ||
-	   !session.registerInFlight ||
-	   !common.constantTimeEqual(sessionKey[:], requestKey[:]) {
+	// A reused peer ID: the answer belongs to the session that asked, not to a new one, even
+	// of the same key (#188).
+	session, sessionOK := MainRouterState_askingSession(state, request.peerID, request.sessionID)
+	if !sessionOK || !session.isRegistering || !session.registerInFlight {
 		if created {
 			// #166: the applicant left before the answer; the account still exists.
 			MainRouterState_announceAccountWithoutSession(

@@ -37,6 +37,8 @@ routerRegistrationTestBegin :: proc(
 	disconnectFirst := false,
 	// With disconnectFirst: a new connection takes the peer ID before the answer.
 	reusePeerID := false,
+	// #188: a zeroed key is generated and written back, a set one is signed in with again.
+	identityKey: ^common.IdentityPrivateKeyBytes = nil,
 ) -> RouterRegistrationTestClient {
 	if _, ok := h.state.peerSessions[peerID]; !ok {
 		h.state.connectedPeers[peerID] = true
@@ -44,6 +46,15 @@ routerRegistrationTestBegin :: proc(
 	}
 	clientPrivateKey, clientPublicKey, identityOK := common.generateIdentityKeyPair()
 	assert(identityOK, "expected a client identity key")
+	if identityKey != nil {
+		if identityKey^ == {} {
+			identityKey^ = clientPrivateKey
+		} else {
+			clientPrivateKey = identityKey^
+			clientPublicKey, identityOK = common.identityPublicKeyFromPrivateKey(clientPrivateKey)
+			assert(identityOK, "expected the given identity key's public key")
+		}
+	}
 	ephemeralPrivate, ephemeralPublic, ephemeralOK := common.generateKeyExchangeKeyPair()
 	assert(ephemeralOK, "expected a client ephemeral key")
 	defer ecdh.private_key_clear(&ephemeralPrivate)
@@ -677,6 +688,71 @@ testRegistrationAnswerIgnoresAReusedPeerID :: proc(t: ^testing.T) {
 	routerTestExpectNoNetworkMessage(&h, "an answer for another key")
 	session, _ := MainRouterState_getPeerSession(&h.state, 1)
 	assert(!session.isAuthenticated && session.isRegistering, "expected the new session untouched")
+}
+
+// #188: the same key signs up again on the reused peer ID while the first session's
+// ClientRegister is still in the database. The first answer is not the new session's: it
+// neither answers it nor ends its own ClientRegister, which the second answer settles.
+@(test)
+testRegistrationAnswerIgnoresTheSameKeyOnAReusedPeerID :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+
+	identityKey: common.IdentityPrivateKeyBytes
+	first := routerRegistrationTestBegin(&h, 1, identityKey = &identityKey)
+	defer common.TransportState_deinit(&first.transport)
+	_, text := routerRegistrationTestCode()
+	defer delete(text)
+	routerRegistrationTestRegister(&h, &first, text)
+	firstQuery := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(firstQuery.request)
+	MainRouterState_handlePeerDisconnected(&h.pm, &h.state, 1)
+	h.state.connectedPeers[1] = true
+	MainRouterState_setPeerSession(&h.state, 1, RouterPeerSession_init())
+	second := routerRegistrationTestBegin(&h, 1, identityKey = &identityKey)
+	defer common.TransportState_deinit(&second.transport)
+	assert(second.publicKey == first.publicKey, "expected the same key on both sessions")
+	routerRegistrationTestRegister(&h, &second, text)
+	secondQuery := routerPollDatabaseQuery(&h)
+	IPC__database_query_request_deinit(secondQuery.request)
+
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		firstQuery.request_id,
+		common.DatabaseQueryResponse {
+			success = true,
+			result = common.DatabaseRegisterResult {
+				outcome = .Created,
+				userId = 70,
+				nickname = strings.clone("applicant"),
+			},
+		},
+	)
+	routerTestExpectNoNetworkMessage(&h, "the first session's answer to the new session")
+	session, _ := MainRouterState_getPeerSession(&h.state, 1)
+	assert(
+		!session.isAuthenticated && session.isRegistering && session.registerInFlight,
+		"expected the new session still waiting for its own ClientRegister",
+	)
+
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		secondQuery.request_id,
+		common.DatabaseQueryResponse{success = false},
+	)
+	response := routerRegistrationTestResponse(&h, &second)
+	defer common.ServerRegisterResponsePayload_deinit(&response)
+	assert(
+		response.status == .Refused,
+		fmt.tprintf("expected the new session's own answer, got %v", response),
+	)
+	session, _ = MainRouterState_getPeerSession(&h.state, 1)
+	assert(!session.registerInFlight, "expected the new session's ClientRegister settled")
 }
 
 // Opens and drops every queued network message (the fan-outs a test does not look at), each
