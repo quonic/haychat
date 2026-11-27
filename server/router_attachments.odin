@@ -245,13 +245,8 @@ attachmentSession :: proc(
 	^RouterPeerSession,
 	bool,
 ) {
-	session, ok := &state.peerSessions[peerID]
+	session, ok := MainRouterState_askingSession(state, peerID, sessionID)
 	if !ok || !session.isAuthenticated {
-		return nil, false
-	}
-	expected := sessionID
-	current := session.transport.sessionID
-	if current != expected {
 		return nil, false
 	}
 	return session, true

@@ -116,11 +116,12 @@ PendingDBRequest :: struct {
 	// VisibleRecipients (protocol 25): the message (owned) and the session it skips.
 	visibility:            MainRouterVisibilityPayload,
 	excludePeerID:         u32,
-	// Register (protocol 25): the applicant's identity key. The request outlives a disconnect
-	// and ENet reuses peer IDs, so its answer applies only to a session with this key.
+	// Register (protocol 25) and ResolveUserIdentity: the applicant's identity key, for the
+	// account announced when the session that asked is gone.
 	identityPublicKey:     common.IdentityPublicKeyBytes,
-	// Attachment (protocol 26): the step, its session, the blob, the client's begin request
-	// ID, the declared size, and a download's start offset.
+	// The session that asked, for every request that outlives its peer's disconnect
+	// (MainRouterState_askingSession). Attachment (protocol 26): the step, the blob, the
+	// client's begin request ID, the declared size, and a download's start offset.
 	sessionID:             common.SessionID,
 	attachmentAction:      common.DatabaseAttachmentAction,
 	blobID:                common.AttachmentBlobID,
@@ -355,6 +356,31 @@ MainRouterState_removePeerSession :: proc(state: ^MainRouterState, peerID: u32) 
 	delete_key(&state.peerSessions, peerID)
 }
 
+// The session at peerID when it is still the one with sessionID, the session that asked.
+// Every pending request that outlives its peer's disconnect (removePendingRequestsForPeer)
+// answers only through it: ENet reuses peer IDs, so by the time the answer comes a new
+// connection, even one of the same key, may hold the peer ID (#165, #166, #188). An unset
+// session ID never matches.
+MainRouterState_askingSession :: proc(
+	state: ^MainRouterState,
+	peerID: u32,
+	sessionID: common.SessionID,
+) -> (
+	^RouterPeerSession,
+	bool,
+) {
+	session, ok := &state.peerSessions[peerID]
+	if !ok || sessionID == {} {
+		return nil, false
+	}
+	current := session.sessionID
+	asked := sessionID
+	if !common.constantTimeEqual(current[:], asked[:]) {
+		return nil, false
+	}
+	return session, true
+}
+
 MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, peerID: u32) {
 	requestIDs := make([dynamic]u64)
 	defer delete(requestIDs)
@@ -364,7 +390,8 @@ MainRouterState_removePendingRequestsForPeer :: proc(state: ^MainRouterState, pe
 		// an attachment step, which must finish what the storage worker started, (protocol
 		// 30) a message edit or delete, whose readers must hear of it, and (#165, #166) the
 		// identity statement, which may have created an account or declined a request that
-		// others must hear of (its answer reaches only the session that asked).
+		// others must hear of. Each carries the asking session's ID and answers only it
+		// (MainRouterState_askingSession, #188).
 		// The router's own reads (no peer, peerID 0, which ENet also gives a peer) stay too.
 		if request.peerID == peerID &&
 		   request.requestType != .LoadRestrictedUsers &&
@@ -818,8 +845,11 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			MainRouterState_forgetInviteCode(state, requestID)
 		case .Register:
-			if session, sessionOK := &state.peerSessions[request.peerID];
-			   sessionOK && session.isRegistering {
+			if session, sessionOK := MainRouterState_askingSession(
+				state,
+				request.peerID,
+				request.sessionID,
+			); sessionOK && session.isRegistering {
 				session.registerInFlight = false
 				MainRouterState_sendRegisterResponse(
 					pm,

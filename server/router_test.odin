@@ -649,6 +649,27 @@ testResolveUserIdentitySQLGuardsPrivilegedAccounts :: proc(t: ^testing.T) {
 	)
 }
 
+// Queues an identity statement for the session at peerID as its sign-in would, after giving
+// the session a session ID: the answer reaches only the session that asked (#188).
+routerTestSendIdentityRequest :: proc(
+	h: ^RouterTestHarness,
+	peerID: u32,
+	request: common.DatabaseUserIdentityRequest,
+) {
+	session, ok := &h.state.peerSessions[peerID]
+	assert(ok, "expected a session at the peer ID")
+	sessionID, sessionIDOK := common.generateSessionID()
+	assert(sessionIDOK, "expected a session ID")
+	session.sessionID = sessionID
+	MainRouterState_enqueueChannelDatabaseRequest(
+		&h.pm,
+		&h.state,
+		peerID,
+		request,
+		MainRouterState_identityPendingRequest(session^),
+	)
+}
+
 @(test)
 testMainRouterRejectsFailedUserIdentityResolution :: proc(t: ^testing.T) {
 	_ = t
@@ -660,11 +681,9 @@ testMainRouterRejectsFailedUserIdentityResolution :: proc(t: ^testing.T) {
 	defer routerTestHarness_deinit(&h)
 
 	peerID := u32(1)
-	MainRouterState_sendDatabaseRequest(
-		&h.pm,
-		&h.state,
+	routerTestSendIdentityRequest(
+		&h,
 		peerID,
-		.ResolveUserIdentity,
 		common.DatabaseUserIdentityRequest{nickname = strings.clone("taken-name")},
 	)
 	identityQuery := routerPollDatabaseQuery(&h)
