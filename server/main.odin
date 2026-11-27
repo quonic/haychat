@@ -137,6 +137,10 @@ PendingDBRequest :: struct {
 	messageID:             int,
 	messageChangePeerID:   int,
 	messageChangeAdmin:    bool,
+	// Register (#105): the applicant's address, and whether a sign-up request token was
+	// reserved for it (router_registration_limits.odin).
+	registrationAddress:         RegistrationAddress,
+	registrationRequestReserved: bool,
 }
 
 PendingDBRequest_deinit :: proc(request: PendingDBRequest) {
@@ -169,6 +173,11 @@ RouterPeerSession :: struct {
 	registeringSince:          time.Tick,
 	registerAttempts:          int,
 	registerInFlight:          bool,
+	// #105 (router_registration_limits.odin): the peer address the sign-up limits count
+	// against, set when ENet reports the connection, and the registration mode the session
+	// was told when it started signing up.
+	peerAddress:               RegistrationAddress,
+	registrationMode:          common.RegistrationMode,
 }
 
 @(private)
@@ -246,6 +255,8 @@ MainRouterState :: struct {
 	restrictedUsersLoaded:    bool,
 	// Protocol 26 (router_attachments.odin): uploads, downloads and storage steps.
 	attachments:              RouterAttachmentState,
+	// #105 (router_registration_limits.odin): each address's sign-up buckets, in memory only.
+	registrationAddresses:    map[RegistrationAddress]RegistrationAddressEntry,
 }
 
 MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
@@ -260,6 +271,7 @@ MainRouterState_init :: proc(pm: ^ProcessManager) -> MainRouterState {
 		restrictedUserIDs       = make(map[int]bool),
 		pendingInviteCodes      = make(map[u64]common.InviteCodeBytes),
 		attachments             = RouterAttachmentState_init(),
+		registrationAddresses   = make(map[RegistrationAddress]RegistrationAddressEntry),
 	}
 
 	serverPrivateKey, privateKeyOK := common.identityPrivateKeyFromHex(pm.config.serverPrivateKey)
@@ -296,6 +308,7 @@ MainRouterState_deinit :: proc(state: ^MainRouterState) {
 	delete(state.restrictedUserIDs)
 	MainRouterState_wipeInviteCodes(state)
 	delete(state.pendingInviteCodes)
+	delete(state.registrationAddresses)
 	MainRouterState_voiceFreeState(state)
 	RouterAttachmentState_deinit(&state.attachments)
 }
@@ -832,6 +845,8 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			MainRouterState_forgetInviteCode(state, requestID)
 		case .Register:
+			// #105: a request that never reached the database made no sign-up request.
+			MainRouterState_registrationSettleRequest(pm, state, request, false, time.tick_now())
 			if session, sessionOK := MainRouterState_askingSession(
 				state,
 				request.peerID,
@@ -920,12 +935,16 @@ MainRouterState_handleClientHello :: proc(
 	}
 
 	// Reset the stored entry in place, so its keys are wiped and it never keeps a pointer to
-	// the nickname freed here if the handshake stops below.
+	// the nickname freed here if the handshake stops below. The peer address (#105) belongs
+	// to the connection, not the handshake, and stays.
+	peerAddress := session.peerAddress
 	if stored, storedOK := &state.peerSessions[peerID]; storedOK {
 		RouterPeerSession_deinit(stored)
 		stored^ = RouterPeerSession_init()
+		stored.peerAddress = peerAddress
 	}
 	session = RouterPeerSession_init()
+	session.peerAddress = peerAddress
 	session.clientNickname = strings.clone(req.nickname)
 	session.clientIdentityPublicKey = req.clientIdentityPublicKey
 	session.clientEphemeralPublicKey = req.clientEphemeralPublicKey
@@ -2490,6 +2509,12 @@ mainLoop :: proc(pm: ^ProcessManager) {
 		if time.tick_since(lastRegistrationSweep) >= time.Second {
 			lastRegistrationSweep = time.tick_now()
 			MainRouterState_expireRegisteringSessions(pm, &routerState, lastRegistrationSweep)
+			// #105: forget addresses whose sign-up buckets are full again.
+			MainRouterState_pruneRegistrationAddresses(
+				&routerState,
+				registrationLimitsFromConfig(pm.config),
+				lastRegistrationSweep,
+			)
 		}
 
 		// Attachments (protocol 26): paced transfers, progress, the sweeper and the startup scan.
@@ -2532,7 +2557,9 @@ mainLoopHandleMessage :: proc(
 		MainRouterState_handleStorageResponse(pm, routerState, m)
 	case NetworkPeerConnected:
 		routerState.connectedPeers[m.peerId] = true
-		MainRouterState_setPeerSession(routerState, m.peerId, RouterPeerSession_init())
+		session := RouterPeerSession_init()
+		session.peerAddress = registrationAddressFromENet(m.address)
+		MainRouterState_setPeerSession(routerState, m.peerId, session)
 	case NetworkPeerDisconnected:
 		MainRouterState_handlePeerDisconnected(pm, routerState, m.peerId)
 	case NetworkDataReceived:

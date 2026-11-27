@@ -80,6 +80,13 @@ ServerConfig :: struct {
 	attachmentSessionBytesPerSecond: i64, // per-session pace, both directions together
 	// One start's leave to delete orphans past the startup scan's guards (#131).
 	attachmentAllowOrphanPurge:      bool,
+
+	// Per-address sign-up limits (#105, router_registration_limits.odin;
+	// loadRegistrationLimitConfig). 0 turns the sessions, attempts or requests limit off.
+	registrationIPSessions:          int, // registering sessions one address may hold
+	registrationIPAttemptsBurst:     int, // attempt bucket size
+	registrationIPAttemptsPerMinute: int, // attempt bucket refill
+	registrationIPRequestsPerHour:   int, // sign-up requests one address may make in an hour
 }
 
 ServerIdentityFile :: struct {
@@ -139,6 +146,23 @@ DEFAULT_ATTACHMENT_ALLOW_ORPHAN_PURGE :: false
 ATTACHMENT_INCOMING_DIR_NAME :: "incoming"
 ATTACHMENT_BLOBS_DIR_NAME :: "blobs"
 
+// Per-address sign-up limit defaults (#105) and the ranges validateRegistrationLimitConfig
+// clamps to. A limit of 0 is off. The defaults leave room for a household or a small office
+// behind one address; see docs/server-configuration.md (Sign-up Limits).
+REGISTRATION_IP_SESSIONS_KEY :: "HAYCHAT_REGISTRATION_IP_SESSIONS"
+REGISTRATION_IP_ATTEMPTS_BURST_KEY :: "HAYCHAT_REGISTRATION_IP_ATTEMPTS_BURST"
+REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY :: "HAYCHAT_REGISTRATION_IP_ATTEMPTS_PER_MINUTE"
+REGISTRATION_IP_REQUESTS_PER_HOUR_KEY :: "HAYCHAT_REGISTRATION_IP_REQUESTS_PER_HOUR"
+DEFAULT_REGISTRATION_IP_SESSIONS :: 8
+REGISTRATION_IP_SESSIONS_MAX :: common.REGISTERING_SESSIONS_MAX
+DEFAULT_REGISTRATION_IP_ATTEMPTS_BURST :: 30
+REGISTRATION_IP_ATTEMPTS_BURST_MAX :: 10000
+DEFAULT_REGISTRATION_IP_ATTEMPTS_PER_MINUTE :: 10
+REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MIN :: 1
+REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MAX :: 10000
+DEFAULT_REGISTRATION_IP_REQUESTS_PER_HOUR :: 10
+REGISTRATION_IP_REQUESTS_PER_HOUR_MAX :: 10000
+
 loadConfig :: proc() -> (ServerConfig, string) {
 	logDir := getEnvOr("HAYCHAT_LOG_DIR", DEFAULT_LOG_PATH)
 
@@ -177,6 +201,7 @@ loadConfig :: proc() -> (ServerConfig, string) {
 	}
 	loadVoiceConfig(&config)
 	loadAttachmentConfig(&config)
+	loadRegistrationLimitConfig(&config)
 
 	validateAndNormalizeConfig(&config)
 	if preflightErr := startupPreflightError(config); len(preflightErr) > 0 {
@@ -325,6 +350,53 @@ validateAttachmentConfig :: proc(config: ^ServerConfig) {
 		config.attachmentSessionBytesPerSecond,
 		ATTACHMENT_SESSION_BYTES_PER_SECOND_MIN,
 		ATTACHMENT_SESSION_BYTES_PER_SECOND_MAX,
+	)
+}
+
+// Reads the HAYCHAT_REGISTRATION_IP_* keys and clamps them to their ranges. A value that does
+// not parse falls back to the default.
+loadRegistrationLimitConfig :: proc(config: ^ServerConfig) {
+	config.registrationIPSessions = parseOr(
+		REGISTRATION_IP_SESSIONS_KEY,
+		int(DEFAULT_REGISTRATION_IP_SESSIONS),
+	)
+	config.registrationIPAttemptsBurst = parseOr(
+		REGISTRATION_IP_ATTEMPTS_BURST_KEY,
+		int(DEFAULT_REGISTRATION_IP_ATTEMPTS_BURST),
+	)
+	config.registrationIPAttemptsPerMinute = parseOr(
+		REGISTRATION_IP_ATTEMPTS_PER_MINUTE_KEY,
+		int(DEFAULT_REGISTRATION_IP_ATTEMPTS_PER_MINUTE),
+	)
+	config.registrationIPRequestsPerHour = parseOr(
+		REGISTRATION_IP_REQUESTS_PER_HOUR_KEY,
+		int(DEFAULT_REGISTRATION_IP_REQUESTS_PER_HOUR),
+	)
+	validateRegistrationLimitConfig(config)
+}
+
+// Clamps the per-address sign-up limits into their ranges: a negative value is off, a share
+// cannot exceed common.REGISTERING_SESSIONS_MAX, and the attempt bucket always refills.
+validateRegistrationLimitConfig :: proc(config: ^ServerConfig) {
+	config.registrationIPSessions = clamp(
+		config.registrationIPSessions,
+		0,
+		REGISTRATION_IP_SESSIONS_MAX,
+	)
+	config.registrationIPAttemptsBurst = clamp(
+		config.registrationIPAttemptsBurst,
+		0,
+		REGISTRATION_IP_ATTEMPTS_BURST_MAX,
+	)
+	config.registrationIPAttemptsPerMinute = clamp(
+		config.registrationIPAttemptsPerMinute,
+		REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MIN,
+		REGISTRATION_IP_ATTEMPTS_PER_MINUTE_MAX,
+	)
+	config.registrationIPRequestsPerHour = clamp(
+		config.registrationIPRequestsPerHour,
+		0,
+		REGISTRATION_IP_REQUESTS_PER_HOUR_MAX,
 	)
 }
 
