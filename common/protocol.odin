@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 32
+protocolVersion: ProtocolVersion = 33
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -2820,13 +2820,18 @@ DatabaseAdminUserResult :: struct {
 
 // One encrypted room a ban removed the account from (protocol 32, #72): the server's unsigned
 // Remove (logEntry, owned) at logVersion, and the room's members and log managers after it
-// (owned, ascending), as for an admin's ClientRemoveRoomMember.
+// (owned, ascending), as for an admin's ClientRemoveRoomMember. Protocol 33 (#195): then the
+// server's unsigned RemoveManager (managerLogEntry, owned) at managerLogVersion when the log
+// named the account as a manager. Either entry is nil when the account was not a member, or
+// not a manager; at least one is set.
 DatabaseBanRoomRemoval :: struct {
-	roomId:         int,
-	logEntry:       []u8,
-	logVersion:     int,
-	memberUserIDs:  [dynamic]int,
-	managerUserIDs: [dynamic]int,
+	roomId:            int,
+	logEntry:          []u8,
+	logVersion:        int,
+	managerLogEntry:   []u8,
+	managerLogVersion: int,
+	memberUserIDs:     [dynamic]int,
+	managerUserIDs:    [dynamic]int,
 }
 
 // Which role statement a DatabaseRoleRequest runs (protocol 23, server/database_roles.odin).

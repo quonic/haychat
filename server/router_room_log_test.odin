@@ -1,6 +1,7 @@
 package server
 
 import "../common"
+import "core:encoding/cbor"
 import "core:fmt"
 import "core:strings"
 import "core:sync"
@@ -486,6 +487,139 @@ testRoomLogRouterBanSendsRemovalsAndFailedRooms :: proc(t: ^testing.T) {
 			routerAdminTestCount(&drain, peerID, .ServerRoomLog) == 0 &&
 			routerAdminTestCount(&drain, peerID, .ServerRoomMembershipChanged) == 0,
 			fmt.tprintf("expected bob's peer %d to get only its session's end", peerID),
+		)
+	}
+}
+
+// Protocol 33 (#195): a ban that removed bob from room 9's members and managers (its only
+// manager: none is left) and from room 10's managers (he was no member) sends room 9's Remove
+// and RemoveManager in one ServerRoomLog with the membership change, and room 10's
+// RemoveManager alone without one, and the admin's result counts the manager sets.
+@(test)
+testRoomLogRouterBanSendsManagerRemovals :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+	clients := routerRoomAccessTestClients()
+	routerVoiceTestConnect(&h, clients[:])
+	defer routerVoiceTestDisconnectAll(clients[:])
+
+	query, _ := routerAdminTestSend(
+		&h,
+		&clients[0],
+		.ClientAdminBanUser,
+		common.ClientAdminBanUserPayload{userId = 43, banned = true, reason = "spam"},
+	)
+	defer IPC__database_query_request_deinit(query.request)
+	removals := make([dynamic]common.DatabaseBanRoomRemoval)
+	append(
+		&removals,
+		common.DatabaseBanRoomRemoval {
+			roomId = 9,
+			logEntry = routerRoomLogTestEntry(7),
+			logVersion = 6,
+			managerLogEntry = routerRoomLogTestEntry(8),
+			managerLogVersion = 7,
+			memberUserIDs = routerRoomLogTestIDs({44}),
+			managerUserIDs = routerRoomLogTestIDs({}),
+		},
+		common.DatabaseBanRoomRemoval {
+			roomId = 10,
+			managerLogEntry = routerRoomLogTestEntry(9),
+			managerLogVersion = 3,
+			memberUserIDs = routerRoomLogTestIDs({44}),
+			managerUserIDs = routerRoomLogTestIDs({42}),
+		},
+	)
+	result := common.DatabaseAdminUserResult {
+		outcome     = .Applied,
+		changed     = true,
+		user        = {id = 43, isBanned = true},
+		banRemovals = removals,
+	}
+	result.user.nickname = strings.clone("voice-user-43")
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse{success = true, result = result},
+	)
+	drain := routerVoiceTestDrain(&h, clients[:])
+	defer RouterVoiceTestDrain_deinit(&drain)
+
+	answer := routerAdminTestDecode(
+		&drain,
+		1,
+		.ServerAdminActionResult,
+		common.ServerAdminActionResultPayload,
+	)
+	defer common.ServerAdminActionResultPayload_deinit(&answer)
+	expected :=
+		"Banned voice-user-43; removed from 1 encrypted room; " +
+		"no longer a manager of 2 encrypted rooms (1 now with no manager)"
+	assert(
+		answer.action == .Ban && answer.message == expected && len(answer.failedRoomIds) == 0,
+		fmt.tprintf("expected the ban's result to count the manager sets, got %v", answer),
+	)
+
+	// alice (who asked, and room 10's manager) and carol (a member of both) get both rooms'
+	// entries; bob's sessions ended before them.
+	for peerID in ([]u32{1, 4}) {
+		room9, room10 := 0, 0
+		for entry in drain.packets {
+			if entry.peerID != peerID || entry.packet.messageType != .ServerRoomLog {
+				continue
+			}
+			log: common.ServerRoomLogPayload
+			assert(cbor.unmarshal(entry.packet.payload, &log) == nil, "expected a room log")
+			defer common.ServerRoomLogPayload_deinit(&log)
+			switch log.roomId {
+			case 9:
+				room9 += 1
+				assert(
+					log.afterVersion == 5 &&
+					log.headVersion == 7 &&
+					len(log.entries) == 2 &&
+					log.entries[0][0] == 7 &&
+					log.entries[1][0] == 8,
+					fmt.tprintf("expected room 9's Remove and RemoveManager, got %v", log),
+				)
+			case 10:
+				room10 += 1
+				assert(
+					log.afterVersion == 2 &&
+					log.headVersion == 3 &&
+					len(log.entries) == 1 &&
+					log.entries[0][0] == 9,
+					fmt.tprintf("expected room 10's RemoveManager, got %v", log),
+				)
+			case:
+				assert(false, fmt.tprintf("expected no other room's log, got %v", log))
+			}
+		}
+		assert(
+			room9 == 1 && room10 == 1,
+			fmt.tprintf("expected peer %d to get one log per room, got %d %d", peerID, room9,
+				room10),
+		)
+		changed := routerAdminTestDecode(
+			&drain,
+			peerID,
+			.ServerRoomMembershipChanged,
+			common.ServerRoomMembershipChangedPayload,
+		)
+		assert(
+			changed.roomId == 9 && changed.userId == 43 && !changed.joined &&
+			routerAdminTestCount(&drain, peerID, .ServerRoomMembershipChanged) == 1,
+			fmt.tprintf("expected peer %d told only that bob left room 9, got %v", peerID, changed),
+		)
+	}
+	for peerID in ([]u32{2, 3}) {
+		assert(
+			routerAdminTestCount(&drain, peerID, .ServerRoomLog) == 0,
+			fmt.tprintf("expected bob's peer %d to get no room log", peerID),
 		)
 	}
 }

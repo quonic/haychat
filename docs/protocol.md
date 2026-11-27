@@ -77,6 +77,7 @@ version below therefore needs clients and servers rebuilt together.
 | 30 | Editing and deleting messages (#76, [below](#editing-and-deleting-messages-protocol-30)): `ClientEditRoomMessage` … `ServerMessageEdits` (wire values 218 to 227), `MessageEdit`, `MessageDeletion` and `MessageEditsKind`, `editCount`/`lastEdit`/`deleted`/`deletion` on `StoredChatMessage` and `StoredDirectMessage` and `lastEditCount`/`lastEdit`/`lastDeleted`/`lastDeletion` on `DirectConversationSummary`, and the signatures `"haychat-room-edit-v1"`, `"haychat-dm-edit-v1"`, `"haychat-room-delete-v1"` and `"haychat-dm-delete-v1"`, with schema migration 17 (edit and tombstone columns on both message tables, `chat_message_edits`, `direct_message_edits`). Authors edit and delete their messages, admins delete any room message, and a deleted message leaves a tombstone with its ID |
 | 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
 | 32 | Bans leave encrypted rooms (#72, [below](#bans-and-encrypted-rooms-protocol-32)): a ban removes the account from every encrypted room it is a member of with the server's unsigned Remove, in the ban's transaction, and `ServerAdminActionResult.failedRoomIds` names the encrypted rooms whose member log the ban could not change. No new message type and no schema migration |
+| 33 | Bans and log managers (#195, [below](#bans-and-log-managers-protocol-33)): the member log accepts the server's unsigned `RemoveManager` of an account that is no longer a member, which `LastManager` never refuses, and a ban writes it into every encrypted room whose log names the account as a manager, also the last one (the room is left with no manager). Only the log's validation rules change: no entry layout, label, message type or schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -773,9 +774,11 @@ readable in one. Voice in one is end-to-end encrypted since protocol 21
   identity keys, and the actor's Ed25519 signature over the server's identity key and the entry.
   Adds need a manager (or, in a Member invite room, a member); manager changes and access
   switches need a manager; a Leave is signed by whoever leaves; a Remove is signed by a manager
-  or written unsigned by the server (it can always take readers away, never add one). The last
-  manager cannot be removed while the room has members; an encrypted room holds at most 100
-  members ("This encrypted room is full").
+  or written unsigned by the server (it can always take readers away, never add one). Since
+  protocol 33 a RemoveManager may also be written unsigned by the server, for an account that is
+  no longer a member ([below](#bans-and-log-managers-protocol-33)). The last manager cannot be
+  removed while the room has members, except by the server's RemoveManager; an encrypted room
+  holds at most 100 members ("This encrypted room is full").
 - **The server.** It replays the stored log on every append, validates the new entry as the
   next one (version and previous hash must follow the head, so concurrent appends cannot both
   win: "The member list changed on the server; try again"), requires every identity key it
@@ -785,7 +788,8 @@ readable in one. Voice in one is end-to-end encrypted since protocol 21
   transaction. Every stored entry goes out as `ServerRoomLog` to the room's members and
   managers and to whoever it removed. An admin's `ClientRemoveRoomMember` on an encrypted room
   becomes an unsigned Remove the server writes, and so does a ban for every encrypted room the
-  banned account is in (protocol 32, [below](#bans-and-encrypted-rooms-protocol-32));
+  banned account is in (protocol 32, [below](#bans-and-encrypted-rooms-protocol-32)), followed by
+  an unsigned RemoveManager where it is a manager (protocol 33);
   `ClientAddRoomMember` and `ClientLeaveRoom` are refused for encrypted rooms in favour of the
   log. `ClientFetchRoomLog` serves members,
   managers and admins.
@@ -797,9 +801,10 @@ readable in one. Voice in one is end-to-end encrypted since protocol 21
   the log names that the client has not pinned are fetched and pinned on first use, and the
   log is checked against those pins once they arrive. Verified changes show in the room as
   event lines ("alice added carol", "the server removed dave").
-- **What the server still can do.** Remove members, delete the room, refuse appends and
-  withhold entries (a client then sees an older log, or a rollback once it has seen a newer
-  one). It cannot add a member or a manager to a log that clients accept.
+- **What the server still can do.** Remove members, remove managers who are not members
+  (protocol 33), delete the room, refuse appends and withhold entries (a client then sees an
+  older log, or a rollback once it has seen a newer one). It cannot add a member or a manager to
+  a log that clients accept.
 
 ### Bans and encrypted rooms (protocol 32)
 
@@ -826,10 +831,49 @@ ban. Since protocol 32:
   To return to an encrypted room the account needs a new signed `Add`, after which it reads
   what any new member reads: in a From join room nothing from before the `Add`, and in a Full
   history room the room's history as members forward it, the ban's time included.
-- **Managers stay.** A ban does not take the account out of a log's manager set (an unsigned
-  `RemoveManager` is not allowed). The server refuses every entry whose actor is not the
-  requester and a banned account cannot sign in, so it never accepts one from it, but clients
-  would still accept that key's signatures in an entry the server stored.
+- **Managers.** Since protocol 33 a ban also takes the account out of every log's manager set
+  ([below](#bans-and-log-managers-protocol-33)).
+
+### Bans and log managers (protocol 33)
+
+Under protocol 32 a ban left the account in encrypted rooms' log manager sets (#195): the
+server never accepted an entry from it, since it could not sign in, but clients would still
+accept its signature on an entry a compromised server stored, or after an unban. Since
+protocol 33:
+
+- **The log rule.** An unsigned entry (actor 0, a zero actor key and a zero signature) may be a
+  `RemoveManager` as well as a `Remove`. It is valid only when its target is a manager and no
+  longer a member (`ManagerStillMember` otherwise), and `LastManager` never refuses it. A signed
+  `RemoveManager` keeps every rule it had: a manager signs it, and the last manager cannot be
+  removed while the room has members. The entry layout and the signature label are unchanged.
+  The server refuses an unsigned one sent in `ClientAppendRoomLog`, like every entry its sender
+  did not sign.
+- **A ban writes it.** In the ban's transaction and the same per-room savepoint as its Remove,
+  the server writes an unsigned `RemoveManager` of the account into every encrypted room whose
+  verified log names it as a manager (`room_log_managers` lists those rooms, including rooms it
+  is a manager of but no member), after the Remove when it is a member too. It removes the last
+  manager as well: the room is then left with **no manager**, and the server never promotes
+  anyone. A room's Remove and RemoveManager go out in one `ServerRoomLog` (two entries, the
+  Remove first) to the room's remaining members and managers and the admin who banned, so
+  clients move to the last epoch at once; `ServerRoomMembershipChanged` follows only when the
+  account was a member. The ban's `message` also counts the manager sets ("Banned bob; removed
+  from 1 encrypted room; no longer a manager of 2 encrypted rooms (1 now with no manager)").
+  Rooms it could not change are in `failedRoomIds` as before.
+- **A room with no manager.** Its members still read and send, and admins still remove members
+  (the server's Remove). Nobody can add members to an Admin invite room (members of a Member
+  invite room still can), change the managers or switch the access, until an admin deletes the
+  room (members who want to invite someone move to a new room). Clients show "the server removed bob as a
+  manager", and the Members page says "This room has no manager left, so nobody can add
+  members." in place of whom to ask.
+- **What a malicious server gains.** Nothing in the entry ties it to a ban: the server is not
+  trusted, so clients cannot tell a ban from any other reason. The rule only makes it act in the
+  open: a manager who is a member must first be removed, which shows as "the server removed
+  bob", and every demotion shows as an event line too. The server can therefore take any
+  manager away, up to leaving the room with no manager, which freezes its membership. It could
+  already freeze membership by refusing every append, and do more harm by removing every member
+  or deleting the room. What changes is that a demotion is final in the verified log: an honest
+  server later cannot bring a demoted manager's signatures back. It still cannot add a member or
+  a manager, give anyone a key, or read a message.
 
 ## Sender chains in encrypted rooms (protocol 19)
 

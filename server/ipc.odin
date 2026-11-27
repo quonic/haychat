@@ -567,6 +567,7 @@ IPC__admin_user_result_deinit :: proc(result: common.DatabaseAdminUserResult) {
 	delete(result.addedRoomIDs)
 	for removal in result.banRemovals {
 		delete(removal.logEntry)
+		delete(removal.managerLogEntry)
 		delete(removal.memberUserIDs)
 		delete(removal.managerUserIDs)
 	}
