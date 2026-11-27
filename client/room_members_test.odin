@@ -817,8 +817,9 @@ testAdminSectionNamesTheRoomsABanCouldNotChange :: proc(t: ^testing.T) {
 	view := buildAdminSectionView(&state, 957)
 	expected :=
 		"Banned bob; 2 encrypted rooms could not be changed. These encrypted rooms still " +
-		"list them: # team, room 77. Their member lists are damaged or were busy; ban them " +
-		"again to retry."
+		"list them: # team, room 77. Their member lists are damaged or were busy: ban them " +
+		"again to retry, and if one stays, use Check member logs under Member logs to " +
+		"repair it."
 	testing.expect(
 		t,
 		view.statusTone == .Warning && view.statusUserID == 4 && view.status == expected,

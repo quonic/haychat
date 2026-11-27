@@ -190,18 +190,18 @@ State_roomLogStatusProtocolError :: proc(state: ^State, serverID: int, message: 
 	)
 }
 
-// A truncation this admin made (ServerAdminActionResult TruncateRoomLog): the status shown is
-// asked for again, for every room when that is what it showed.
+// A truncation this admin made (ServerAdminActionResult TruncateRoomLog): a status already on
+// screen is asked for again (for every room when that is what it showed); nothing is replayed
+// when none was asked for.
 State_roomLogTruncateApplied :: proc(state: ^State, serverID: int) {
 	index := State_serverConnectionIndex(state^, serverID)
-	if index < 0 {
+	if index < 0 || !state.serverConnections[index].hasRoomLogStatus {
 		return
 	}
-	connection := &state.serverConnections[index]
 	_ = State_requestRoomLogStatus(
 		state,
 		serverID,
-		connection.hasRoomLogStatus ? connection.roomLogStatus.roomId : 0,
+		state.serverConnections[index].roomLogStatus.roomId,
 	)
 }
 
