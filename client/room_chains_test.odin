@@ -1038,8 +1038,8 @@ testRoomChainsFullHistoryInviterForwardsWhatItHolds :: proc(t: ^testing.T) {
 	roomChainTestDeliverEnvelope(carol, forwards[1], 11)
 	key := roomChainTestLastNote(carol, .Key)
 	assert(
-		key != nil && key.outcome == .Stored && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
-		"expected carol to store the forward from alice",
+		key != nil && key.outcome == .Unchecked && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected carol to keep the forward from alice unchecked until a message opens (#78)",
 	)
 	assert(
 		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 2,
@@ -1047,6 +1047,14 @@ testRoomChainsFullHistoryInviterForwardsWhatItHolds :: proc(t: ^testing.T) {
 	)
 	roomChainTestDeliverMessage(carol, trio.fromAlice, 500)
 	roomChainTestDeliverMessage(carol, trio.fromBob, 501)
+	key = roomChainTestLastNote(carol, .Key)
+	assert(
+		key != nil && key.outcome == .Stored && key.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected bob's message to check the forward from alice",
+	)
+	for chain in carol.e2ee[0].store.roomChains {
+		assert(!chain.unchecked, "expected both chains checked by their messages")
+	}
 	for expected in ([]struct {
 			id:   int,
 			text: string,
@@ -1597,5 +1605,231 @@ testRoomChainsSealedEditWaitsForItsChain :: proc(t: ^testing.T) {
 	assert(
 		entry.edit.status == .Verified && entry.edit.shownContent == "edited on a new chain",
 		fmt.tprintf("expected the edit opened once the key arrived, got %v", entry.edit.status),
+	)
+}
+
+// ── Checking keys (protocol 34, #78) ─────────────────────────────
+
+// The reject requests sent so far for envelope (0: any).
+@(private = "file")
+roomChainTestRejects :: proc(envelopeID := 0) -> int {
+	count := 0
+	for sent in roomChainTestOfKind(.RejectEnvelope) {
+		if envelopeID == 0 || sent.request.envelopeID == envelopeID {
+			count += 1
+		}
+	}
+	return count
+}
+
+// A forward of bob's chain beta to carol, signed by alice, with a wrong chain key.
+@(private = "file")
+roomChainTestForgedBeta :: proc(trio: ^RoomChainTestTrio, fill: u8) -> RoomChainTestSent {
+	wrong: common.ChainKey
+	for index in 0 ..< len(wrong) {
+		wrong[index] = fill
+	}
+	return roomChainTestForge(
+		trio.serverKey,
+		&trio.alice,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		0,
+		wrong,
+		&trio.carol,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+}
+
+@(test)
+testRoomChainsForgedForwardIsRejectedAndAGoodCopyOpens :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	alice, carol := &trio.alice, &trio.carol
+	carol.roomChainNowOverrideMS = 1_000_000
+	before := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestDeliverLog(alice, 2, 3, trio.log[2])
+	good := roomChainTestOfKind(.KeyEnvelope)[before + 1]
+	assert(good.request.senderUserID == ROOM_CHAIN_TEST_BOB, "expected alice's forward of beta")
+	roomChainTestCarolJoins(&trio)
+
+	// The forged copy arrives first: carol keeps it unchecked, never on disk.
+	forged := roomChainTestForgedBeta(&trio, 0x33)
+	roomChainTestDeliverEnvelope(carol, forged, 40)
+	assert(roomChainTestLastNote(carol, .Key).outcome == .Unchecked, "expected it unchecked")
+	held, found := KeyStore_roomChain(
+		&carol.e2ee[0].store,
+		ROOM_CHAIN_TEST_ROOM,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+	)
+	assert(found && held.unchecked && held.envelopeID == 40, "expected beta held unchecked")
+	data, encoded := keyStoreEncode(carol.e2ee[0].store)
+	assert(encoded, "expected carol's store to encode")
+	defer delete(data)
+	assert(!strings.contains(string(data), `"room_chains": [{`) &&
+		!strings.contains(string(data), `"sender_user_id": 52`),
+		"expected an unchecked chain never written to the file")
+
+	// bob's message does not open with it: the copy is dropped and rejected, the message waits.
+	roomChainTestDeliverMessage(carol, trio.fromBob, 800)
+	entry := roomChainTestEntry(carol, 800)
+	assert(
+		entry.security.protection == .Pending && entry.security.wait == .Key,
+		fmt.tprintf("expected bob's message to wait for a key, got %v", entry.security),
+	)
+	assert(roomChainTestLastNote(carol, .Key).outcome == .Rejected, "expected it rejected")
+	assert(roomChainTestRejects(40) == 1, "expected one reject of envelope 40")
+	assert(
+		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 0,
+		"expected the forged chain dropped",
+	)
+	// The same envelope again (a fetch) is never opened again.
+	roomChainTestDeliverEnvelope(carol, forged, 40)
+	assert(
+		roomChainTestLastNote(carol, .Key).outcome == .Duplicate &&
+		KeyStore_roomChainCount(carol.e2ee[0].store, ROOM_CHAIN_TEST_ROOM) == 0 &&
+		roomChainTestRejects(40) == 1,
+		"expected a rejected envelope ignored",
+	)
+
+	// The fetch bob's message started finds nothing; after the first back-off the room's
+	// envelopes are fetched again.
+	page := ClientTransportRuntimeEvent {
+		kind     = .RoomKeysReceived,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		roomID   = ROOM_CHAIN_TEST_ROOM,
+	}
+	roomChainTestApply(carol, &page)
+	fetches := len(roomChainTestOfKind(.FetchKeys))
+	State_roomChainsTick(carol)
+	assert(len(roomChainTestOfKind(.FetchKeys)) == fetches, "expected no fetch before the delay")
+	carol.roomChainNowOverrideMS += ROOM_CHAIN_RETRY_DELAYS_MS[0]
+	State_roomChainsTick(carol)
+	assert(len(roomChainTestOfKind(.FetchKeys)) == fetches + 1, "expected a fetch after it")
+
+	// alice's good copy opens the message and is kept, checked.
+	roomChainTestDeliverEnvelope(carol, good, 41)
+	entry = roomChainTestEntry(carol, 800)
+	assert(
+		entry.security.protection == .Encrypted && entry.content == "bob before carol",
+		fmt.tprintf("expected bob's message opened with the good copy, got %v", entry.security),
+	)
+	held, found = KeyStore_roomChain(
+		&carol.e2ee[0].store,
+		ROOM_CHAIN_TEST_ROOM,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+	)
+	assert(found && !held.unchecked, "expected the good chain kept checked")
+	note := roomChainTestLastNote(carol, .Key)
+	assert(
+		note.outcome == .Stored && note.forwarderID == ROOM_CHAIN_TEST_ALICE,
+		"expected the good copy noted as stored",
+	)
+	assert(roomChainTestRejects() == 1, "expected no reject of the good copy")
+}
+
+// One chain's bad copies make the client reject at most ROOM_CHAIN_REJECTS_MAX of them and
+// retry at most ROOM_CHAIN_RETRIES_MAX times, however many arrive.
+@(test)
+testRoomChainsRejectsAndRetriesAreBounded :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	carol := &trio.carol
+	carol.roomChainNowOverrideMS = 1_000_000
+	roomChainTestCarolJoins(&trio)
+	roomChainTestDeliverMessage(carol, trio.fromBob, 900)
+	// Its first fetch of the room's envelopes finds nothing.
+	first := ClientTransportRuntimeEvent {
+		kind     = .RoomKeysReceived,
+		serverID = ROOM_CHAIN_TEST_SERVER,
+		roomID   = ROOM_CHAIN_TEST_ROOM,
+	}
+	roomChainTestApply(carol, &first)
+	fetches := len(roomChainTestOfKind(.FetchKeys))
+	for round in 0 ..< ROOM_CHAIN_REJECTS_MAX + 3 {
+		forged := roomChainTestForgedBeta(&trio, u8(0x40 + round))
+		roomChainTestDeliverEnvelope(carol, forged, 100 + round)
+		assert(
+			roomChainTestLastNote(carol, .Key).outcome == .Rejected,
+			fmt.tprintf("expected round %d's copy rejected", round),
+		)
+		carol.roomChainNowOverrideMS += ROOM_CHAIN_RETRY_DELAYS_MS[ROOM_CHAIN_RETRIES_MAX - 1]
+		State_roomChainsTick(carol)
+		// The fetch the tick asked for completes with nothing new.
+		page := ClientTransportRuntimeEvent {
+			kind     = .RoomKeysReceived,
+			serverID = ROOM_CHAIN_TEST_SERVER,
+			roomID   = ROOM_CHAIN_TEST_ROOM,
+		}
+		roomChainTestApply(carol, &page)
+	}
+	assert(
+		roomChainTestRejects() == ROOM_CHAIN_REJECTS_MAX,
+		fmt.tprintf("expected %d rejects, got %d", ROOM_CHAIN_REJECTS_MAX, roomChainTestRejects()),
+	)
+	retried := len(roomChainTestOfKind(.FetchKeys)) - fetches
+	assert(
+		retried == ROOM_CHAIN_RETRIES_MAX,
+		fmt.tprintf("expected %d fetches again, got %d", ROOM_CHAIN_RETRIES_MAX, retried),
+	)
+	assert(
+		roomChainTestEntry(carol, 900).security.protection == .Pending,
+		"expected bob's message still waiting, never failed",
+	)
+}
+
+// A wrap that does not open (made for another encryption key) is rejected, so it does not
+// block the next copy; and a member answers the same request again only after a while.
+@(test)
+testRoomChainsUnopenableWrapIsRejectedAndAnswersRepeatLater :: proc(t: ^testing.T) {
+	roomChainTestBegin()
+	defer roomChainTestEnd()
+	defer free_all(context.temp_allocator)
+	trio := roomChainTestTrio(.Full)
+	defer roomChainTestTrioDeinit(&trio)
+	alice, carol := &trio.alice, &trio.carol
+	alice.roomChainNowOverrideMS = 5_000_000
+	roomChainTestCarolJoins(&trio)
+	roomChainTestDeliverLog(alice, 2, 3, trio.log[2])
+	// A forward to carol sealed to another key of hers: it does not open.
+	other := roomChainTestState(trio.serverKey, ROOM_CHAIN_TEST_CAROL)
+	defer State_deinit(&other)
+	stale := roomChainTestForge(
+		trio.serverKey,
+		alice,
+		ROOM_CHAIN_TEST_ALICE,
+		2,
+		ROOM_CHAIN_TEST_BOB,
+		trio.beta.request.chainID,
+		0,
+		{},
+		&other,
+		ROOM_CHAIN_TEST_CAROL,
+	)
+	roomChainTestDeliverEnvelope(carol, stale, 50)
+	assert(roomChainTestLastNote(carol, .Key).outcome == .Failed, "expected it not to open")
+	assert(roomChainTestRejects(50) == 1, "expected the unopenable copy rejected")
+
+	// alice answered carol's beta when she forwarded it; the same request now waits.
+	answers := len(roomChainTestOfKind(.KeyEnvelope))
+	roomChainTestAsk(alice, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, trio.beta.request.chainID)
+	assert(len(roomChainTestOfKind(.KeyEnvelope)) == answers, "expected no answer at once")
+	alice.roomChainNowOverrideMS += ROOM_CHAIN_REANSWER_MS
+	roomChainTestAsk(alice, ROOM_CHAIN_TEST_BOB, ROOM_CHAIN_TEST_CAROL, trio.beta.request.chainID)
+	assert(
+		len(roomChainTestOfKind(.KeyEnvelope)) == answers + 1,
+		"expected the answer again after ROOM_CHAIN_REANSWER_MS",
 	)
 }

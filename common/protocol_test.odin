@@ -156,6 +156,8 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerMessageEdits, 227},
 	// Protocol 31 (#73: room changes for room managers).
 	{.ServerAdminRoomChanged, 228},
+	// Protocol 34 (#78: rejecting a key envelope that does not open).
+	{.ClientRejectRoomKeyEnvelope, 229},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -562,11 +564,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes; 32
 	// added ServerAdminActionResult.failedRoomIds (#72: a ban removes the account from every
 	// encrypted room it is in and names the rooms it could not change); 33 changed the member
-	// log's rules (#195: the server's unsigned RemoveManager, which a ban writes).
+	// log's rules (#195: the server's unsigned RemoveManager, which a ban writes); 34 added
+	// ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open and
+	// the next one is stored.
 	assert(
-		protocolVersion == 33,
+		protocolVersion == 34,
 		fmt.tprintf(
-			"expected protocol version 33 for bans that remove log managers, got %d",
+			"expected protocol version 34 for rejected room key envelopes, got %d",
 			protocolVersion,
 		),
 	)
@@ -2038,4 +2042,22 @@ testAdminRoomChangedPayloadRoundTrips :: proc(t: ^testing.T) {
 			),
 		)
 	}
+}
+
+// Protocol 34 (#78): ClientRejectRoomKeyEnvelope names only the envelope.
+@(test)
+testRejectRoomKeyEnvelopePayloadRoundTrips :: proc(t: ^testing.T) {
+	_ = t
+	encoded, err := cbor.marshal(ClientRejectRoomKeyEnvelopePayload{envelopeId = 4242})
+	assert(err == nil, "expected ClientRejectRoomKeyEnvelopePayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ClientRejectRoomKeyEnvelopePayload
+	assert(
+		cbor.unmarshal(encoded, &decoded) == nil,
+		"expected ClientRejectRoomKeyEnvelopePayload to decode",
+	)
+	assert(
+		decoded.envelopeId == 4242,
+		fmt.tprintf("expected envelope 4242, got %d", decoded.envelopeId),
+	)
 }

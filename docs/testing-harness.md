@@ -130,7 +130,7 @@ example during `wait` or `sleep`) are printed as they arrive, before the result.
 | `room-permissions-set ROOM_ID EVERYONE\|none [ROLE_ID=PERMISSIONS\|none ...]` | The same accounts: replaces the room's grants, the everyone grant and each role's (comma lists of `send`, `speak`, `manage-members`, `edit-room`, `attach-files` (protocol 27); a role left out or given `none` loses its grant). The answer is `room_permissions`, and every member's sessions get a fresh `room_list`. Refusals: `You cannot grant a room permission you do not hold`, `Invalid role request` (an unknown or the `admin` role). Like the other admin commands it checks nothing the server checks. |
 | `admin-rooms` | Admins: every room on the server, joined or not, as an `admin_rooms` event; others get `protocol_error "Admin permission required"`. Once listed, every `admin_room_changed` (protocol 31) fetches the list again and prints a fresh `admin_rooms`. |
 | `room-log ROOM_ID` | An encrypted room's member log as this client verified it (protocol 18): prints a `room_log` event at once, then its result (`serverID`, `roomID`), and fetches what the client lacks (the whole log the first time, else what follows its verified version), which prints another `room_log` once applied. A client whose log failed fetches nothing more. Non-members who are neither managers nor admins get `protocol_error "Not a room member"`. See [Encrypted Rooms](#encrypted-rooms). |
-| `room-keys ROOM_ID [fetch]` | Protocol 19: the sender chains of an encrypted room this profile holds (`chains`: epoch, sender, chain ID and start index, never a key), the log's `epoch`, and how sending stands (`sending`, `sendingEpoch`, `sendingChain`, `nextIndex`, `distribution` none/sent/stored, `queued`, `inFlight`, `keysFetched`). With `fetch` it first asks the server for the room's envelopes again (`room_key` events follow; a non-member gets `protocol_error` "Not a room member"). |
+| `room-keys ROOM_ID [fetch \| forge-forwards on\|off]` | Protocol 19: the sender chains of an encrypted room this profile holds (`chains`: epoch, sender, chain ID, start index and (#78) `unchecked` while no message of the chain has opened with it, never a key), the log's `epoch`, and how sending stands (`sending`, `sendingEpoch`, `sendingChain`, `nextIndex`, `distribution` none/sent/stored, `queued`, `inFlight`, `keysFetched`, `forgeForwards`). With `fetch` it first asks the server for the room's envelopes again (`room_key` events follow; a non-member gets `protocol_error` "Not a room member"). **Test only:** `forge-forwards on` makes this client's forwards and key answers (its own chain's re-seals too) carry a random chain key in a validly signed envelope, so a proof has a forged forward to reject (#78); `off` stops it. It changes nothing a real hostile client could not do. |
 | `room-manager ROOM_ID USER_ID on\|off` | Signs an AddManager or RemoveManager entry for an encrypted room. The account's key must be pinned (the change waits for a fetch otherwise). |
 | `room-access ROOM_ID member-invite\|admin-invite` | Signs a SetAccess entry (a manager who is also an admin). |
 | `room-log-entry ROOM_ID add\|remove\|add-manager\|remove-manager\|leave USER_ID [unsigned]` | Builds the next entry on this client's verified head, signed by this account or (`unsigned`) with no actor and no signature, and prints it as hex (`entry`, `version`) without sending it or checking the log's rules, so a proof can insert it behind the server's back. The target's key must be pinned or named by the log. |
@@ -179,7 +179,7 @@ Every runtime event the client applies is printed first. Keys always come in the
 | `room_chat` | `{"event":"room_chat","serverID":1,"roomID":1,"messageID":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}` (printed after the client opened it: `protection` `plain` once the sender's signature verified against its pin (protocol 22); in an encrypted room `encrypted` true, `epoch` the chain's, `protection` `encrypted` with the opened `content`, or `failed` with `decryptError` such as `not_member`, `replayed` when the signature verified; `hidden` with empty `content` for a message the window does not show (no valid signature: `decryptError` `unsigned`, `bad_signature`, `no_sender_key`, `not_sealed`, `BadSignature`, …); a live message that waits for its sender's key, its chain key or the log is printed once it opens) |
 | `room_history` | `{"event":"room_history","serverID":1,"roomID":1,"hasOlder":false,"messages":[{"id":12,"senderID":3,"senderNickname":"alice","timestamp":"...","encrypted":false,"decryptError":"","epoch":0,"protection":"plain","content":"hi"}]}` (messages as for `room_chat`; one that waits shows `protection` `pending`, empty `content`, and `decryptError` `sender_key` (its sender's key is being fetched), `no_key` or `log`, and is printed again as `room_opened`) |
 | `room_opened` | Same shape as `room_chat`: a message from a history page that waited for its sender's key, its chain key or the member log and is now opened or settled |
-| `room_key` | `{"event":"room_key","serverID":1,"roomID":5,"epoch":2,"senderID":3,"chainID":"<hex>","requesterID":0,"outcome":"stored","error":""}` (a key envelope this client handled: `stored`, `duplicate`, `not_for_me` (no wrap for this account), `pending` (waits for the log), `not_member` (the sender was not a member of that epoch), `failed` with `error`) |
+| `room_key` | `{"event":"room_key","serverID":1,"roomID":5,"epoch":2,"senderID":3,"chainID":"<hex>","requesterID":0,"outcome":"stored","error":""}` (a key envelope this client handled: `stored`, `duplicate`, `not_for_me` (no wrap for this account), `pending` (waits for the log), `not_member` (the sender was not a member of that epoch), `failed` with `error`; protocol 34 (#78): `unchecked` for another member's chain kept until a message of it opens, then `stored` when one did, or `rejected` when its key did not open the message and the copy was rejected) |
 | `room_key_request` | Same shape as `room_key`: another member asked for this account's chain (`requesterID`); `outcome` `stored` when it was re-sealed for them, `refused` when they were not a member of that epoch in the verified log |
 | `room_queue` | `{"event":"room_queue","serverID":1,"roomID":5,"state":"sent","count":1,"reason":""}` (messages `send` queued for the sender chain went out; `state` `refused` with `reason` when they went back into the draft) |
 | `room_membership` | `{"event":"room_membership","serverID":1,"roomID":2,"joined":true,"userID":4}` (`userID` joined or left the room: your own account, or another member of a room you are in, or the target of your own add or removal) |
@@ -655,8 +655,14 @@ a `RoomKeyForward` envelope, on `room_key_request` this account when it forwarde
 `SenderKey` envelope. `room_key_request` lines also print each chain an inviter forwards after
 its `room-add`, and `outcome` `not_held` when this profile does not hold the chain asked for;
 `room_key` has `not_allowed` for a forward the client refused (a From join room, or a
-forwarder who was never a member at the same time). And
-`room-keys ROOM_ID [fetch]` lists the chains a profile holds (never a key). `voice-join` is
+forwarder who was never a member at the same time). Since protocol 34 (#78) a chain someone
+else sent is `unchecked` until a message of it opens with it (then `room_key` `stored`); one
+whose message does not open is `rejected`: the client sends `ClientRejectRoomKeyEnvelope`, logs
+`[E2EE] Rejected key envelope …` to stderr, and fetches the room's envelopes and asks for the
+chain again after a back-off. A forward the client refused (`not_allowed`) or that did not open
+(`failed`) is rejected the same way. And
+`room-keys ROOM_ID [fetch | forge-forwards on|off]` lists the chains a profile holds (never a
+key) and switches the test-only forged forwards. `voice-join` is
 refused ("voice is not available in encrypted rooms yet").
 
 `dev/e2ee-proof.sh` (`./dev.sh live --e2ee`) creates encrypted rooms, adds and removes members,
@@ -676,6 +682,10 @@ to a second one whose log SQL damages, then bans rd: `admin_result` reports one 
 damaged room in `failedRoomIDs`, ra's log shows "the server removed" rd in a new epoch, and
 after ra sends and unbans rd, rd signs in but is refused the room's history and keys, never
 sees the message sent during the ban, and no envelope of the new epoch has a wrap for it.
+Then (protocol 34, #78) rc invites rf with `forge-forwards on`, so rc's three
+forwards to rf carry wrong keys and are stored first; rf rejects all three when their messages
+do not open, the server deletes those copies, and rf reads every message once the other
+members' copies arrive, holding the three chains checked.
 Then (protocol 33, #195) a new account rf is made the only manager of an Admin invite room with
 ra and rc, and ra bans it: both remaining clients verify the server's Remove and RemoveManager
 ("the server removed rf as a manager", no manager left), `admin_result` says the room has no
