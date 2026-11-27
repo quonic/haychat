@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:strings"
 import "core:sync"
 import "core:testing"
+import "core:time"
 
 // Router tests for sender chains in encrypted rooms (protocol 19, router_room_keys.odin and the
 // sealed path of MainRouterState_handleClientChatMessage) with stubbed database results; the
@@ -945,4 +946,103 @@ testRoomChainsRouterForwardsAndFullHistoryRequests :: proc(t: ^testing.T) {
 	}
 	assert(asked[1] && asked[2] && !asked[3], "expected alice and bob asked, not carol")
 	routerTestExpectNoNetworkMessage(h, "expected one request per member session")
+}
+
+// Protocol 32 (#78): a reject goes to the database as the session's account, is never answered,
+// and is refused past ROOM_KEY_REJECTS_PER_MINUTE in a minute; a bad ID is refused.
+@(test)
+testRoomChainsRouterRejectEnvelopeIsTheSessionsAndLimited :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	test: RouterRoomKeysTest
+	routerRoomKeysTestInit(&test)
+	defer routerRoomKeysTestDeinit(&test)
+	h := &test.h
+
+	routerTestSendSealed(
+		h,
+		&test.transports[2],
+		3,
+		.ClientRejectRoomKeyEnvelope,
+		common.ClientRejectRoomKeyEnvelopePayload{envelopeId = 0},
+	)
+	routerTestExpectProtocolError(h, test.peers[:], common.ROOM_KEY_REQUEST_INVALID_MESSAGE)
+	routerTestExpectNoDatabaseQuery(h, "expected no statement for envelope 0")
+
+	for index in 0 ..< common.ROOM_KEY_REJECTS_PER_MINUTE {
+		routerTestSendSealed(
+			h,
+			&test.transports[2],
+			3,
+			.ClientRejectRoomKeyEnvelope,
+			common.ClientRejectRoomKeyEnvelopePayload{envelopeId = 70 + index},
+		)
+		query := routerPollDatabaseQuery(h)
+		reject, ok := query.request.(common.DatabaseRejectRoomKeyEnvelopeRequest)
+		assert(
+			ok && reject.userId == 44 && reject.envelopeId == 70 + index,
+			fmt.tprintf("expected carol's reject of envelope %d, got %v", 70 + index, reject),
+		)
+		MainRouterState_handleDatabaseResult(
+			&h.pm,
+			&h.state,
+			query.request_id,
+			common.DatabaseQueryResponse {
+				success = true,
+				result = common.DatabaseRejectRoomKeyEnvelopeResult {
+					rejected = true,
+					deleted = true,
+					roomId = 9,
+					epoch = 2,
+					senderId = 42,
+					forwarderId = 43,
+				},
+			},
+		)
+		IPC__database_query_request_deinit(query.request)
+		routerTestExpectNoNetworkMessage(h, "expected a reject never to be answered")
+	}
+	routerTestSendSealed(
+		h,
+		&test.transports[2],
+		3,
+		.ClientRejectRoomKeyEnvelope,
+		common.ClientRejectRoomKeyEnvelopePayload{envelopeId = 99},
+	)
+	routerTestExpectProtocolError(h, test.peers[:], common.ROOM_KEY_REJECT_LIMIT_MESSAGE)
+	routerTestExpectNoDatabaseQuery(h, "expected no statement past the limit")
+	// The limit is the session's: bob still may.
+	routerTestSendSealed(
+		h,
+		&test.transports[1],
+		2,
+		.ClientRejectRoomKeyEnvelope,
+		common.ClientRejectRoomKeyEnvelopePayload{envelopeId = 99},
+	)
+	query := routerPollDatabaseQuery(h)
+	reject, ok := query.request.(common.DatabaseRejectRoomKeyEnvelopeRequest)
+	assert(ok && reject.userId == 43, fmt.tprintf("expected bob's reject, got %v", reject))
+	IPC__database_query_request_deinit(query.request)
+}
+
+// The limit's window: a new minute starts the count again.
+@(test)
+testRoomKeyRejectLimitWindow :: proc(t: ^testing.T) {
+	_ = t
+	session: RouterPeerSession
+	start := time.tick_now()
+	for _ in 0 ..< common.ROOM_KEY_REJECTS_PER_MINUTE {
+		assert(MainRouterState_takeRoomKeyReject(&session, start), "expected a reject allowed")
+	}
+	assert(
+		!MainRouterState_takeRoomKeyReject(&session, start),
+		"expected the minute's last reject refused",
+	)
+	later := time.Tick{start._nsec + i64(time.Minute)}
+	assert(
+		MainRouterState_takeRoomKeyReject(&session, later),
+		"expected a reject allowed a minute later",
+	)
+	assert(session.roomKeyRejects == 1, fmt.tprintf("expected 1, got %d", session.roomKeyRejects))
 }

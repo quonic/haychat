@@ -790,3 +790,142 @@ testRoomKeyForwardsMigrationKeepsItsShape :: proc(t: ^testing.T) {
 		"expected migration 9 to drop no table or column",
 	)
 }
+
+// Protocol 32 (#78): whether userID's reject of envelopeID took it off the wraps, and whether
+// that deleted the row.
+@(private = "file")
+roomKeysTestReject :: proc(conn: pg.Conn, userID, envelopeID: int) -> (rejected, deleted: bool) {
+	response := databaseExecuteRequest(
+		conn,
+		common.DatabaseRejectRoomKeyEnvelopeRequest{userId = userID, envelopeId = envelopeID},
+	)
+	defer IPC__database_query_response_deinit(response)
+	result, ok := response.result.(common.DatabaseRejectRoomKeyEnvelopeResult)
+	assert(response.success && ok, fmt.tprintf("expected the reject to run: %s", response.message))
+	return result.rejected, result.deleted
+}
+
+// Stores userID's encryption key with updated_at moved by offset (an SQL interval), so a wrap
+// stored in this transaction reads as made before or after the key.
+@(private = "file")
+roomKeysTestKeyChangedAt :: proc(conn: pg.Conn, userID: int, offset: string) {
+	databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"INSERT INTO user_encryption_keys (user_id, encryption_public_key, created_at_unix, " +
+			"signature, updated_at) VALUES (%d, decode(repeat('11', 32), 'hex'), 1, " +
+			"decode(repeat('22', 64), 'hex'), now() + interval '%s') " +
+			"ON CONFLICT (user_id) DO UPDATE SET updated_at = EXCLUDED.updated_at " +
+			"RETURNING user_id::text",
+			userID,
+			offset,
+		),
+	)
+}
+
+// Protocol 32 (#78): a recipient rejects its copy of a forward (the row goes, and the next
+// forward is stored) or of a SenderKey envelope with other wraps (only its ID leaves the
+// wraps); nobody rejects an envelope without a wrap for it or of its own chain; and a wrap
+// stored before the recipient's current encryption key no longer blocks a forward.
+@(test)
+testRoomKeyRejectAndStaleWrapsAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "room_key_rejects")
+	alice := databaseAdminTestUser(conn, "rej-alice")
+	bob := databaseAdminTestUser(conn, "rej-bob")
+	carol := databaseAdminTestUser(conn, "rej-carol")
+	dave := databaseAdminTestUser(conn, "rej-dave")
+	erin := databaseAdminTestUser(conn, "rej-erin")
+	full := roomKeysTestRoom(conn, "rej-full", true, {alice, bob})
+	chain := common.ChainID(roomKeysTestFill(90))
+	outcome, distributionID := roomKeysTestStore(
+		conn,
+		full,
+		alice,
+		2,
+		chain,
+		{alice, bob},
+		[]u8{1, 2, 3},
+	)
+	assert(outcome == .Stored, fmt.tprintf("expected alice's chain stored, got %v", outcome))
+	databaseAdminTestValue(
+		conn,
+		fmt.tprintf("UPDATE rooms SET log_version = 3 WHERE id = %d RETURNING id::text", full),
+	)
+	for userID in ([]int{carol, dave}) {
+		databaseAdminTestValue(
+			conn,
+			fmt.tprintf(
+				"INSERT INTO room_members (room_id, user_id) VALUES (%d, %d) " +
+				"RETURNING user_id::text",
+				full,
+				userID,
+			),
+		)
+	}
+
+	// bob's bogus forward to carol comes first; dave's good one is dropped.
+	bogusID: int
+	outcome, bogusID = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, []u8{6, 6, 6}, bob)
+	assert(outcome == .Stored, fmt.tprintf("expected bob's forward stored, got %v", outcome))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, []u8{7, 7, 7}, dave)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected dave's dropped, got %v", outcome))
+
+	// Only carol may reject it: not erin (no member), dave (no wrap) or alice (the sender).
+	for userID in ([]int{erin, dave, alice}) {
+		rejected, _ := roomKeysTestReject(conn, userID, bogusID)
+		assert(!rejected, fmt.tprintf("expected user %d's reject of carol's copy refused", userID))
+	}
+	rejected, deleted := roomKeysTestReject(conn, carol, 999999)
+	assert(!rejected && !deleted, "expected a reject of a missing envelope to change nothing")
+	rejected, deleted = roomKeysTestReject(conn, carol, bogusID)
+	assert(rejected && deleted, "expected carol's reject to delete her copy")
+	rejected, _ = roomKeysTestReject(conn, carol, bogusID)
+	assert(!rejected, "expected a second reject of the same copy to change nothing")
+	got := roomKeysTestFetch(conn, carol, full)
+	assert(got == "", fmt.tprintf("expected carol to fetch nothing after the reject, got %q", got))
+	// The next forward is stored now.
+	goodID: int
+	outcome, goodID = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, []u8{7, 7, 7}, dave)
+	assert(outcome == .Stored, fmt.tprintf("expected dave's forward stored now, got %v", outcome))
+	got = roomKeysTestFetch(conn, carol, full)
+	expected := fmt.tprintf("%d:2:%d:f%d", goodID, alice, dave)
+	assert(got == expected, fmt.tprintf("expected carol's %q, got %q", expected, got))
+
+	// A SenderKey envelope (a decision of #78): bob rejects alice's distribution, which keeps
+	// alice's wrap; alice cannot reject her own.
+	rejected, _ = roomKeysTestReject(conn, alice, distributionID)
+	assert(!rejected, "expected alice's reject of her own chain's envelope refused")
+	rejected, deleted = roomKeysTestReject(conn, bob, distributionID)
+	assert(rejected && !deleted, "expected bob taken off alice's distribution, the row kept")
+	wraps := databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT array_to_string(recipient_user_ids, ',') FROM room_key_envelopes " +
+			"WHERE id = %d",
+			distributionID,
+		),
+	)
+	assert(wraps == fmt.tprintf("%d", alice), fmt.tprintf("expected alice's wrap, got %q", wraps))
+	got = roomKeysTestFetch(conn, bob, full)
+	assert(got == "", fmt.tprintf("expected bob to fetch nothing now, got %q", got))
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {bob}, []u8{8, 8, 8}, carol)
+	assert(outcome == .Stored, fmt.tprintf("expected carol's forward to bob, got %v", outcome))
+
+	// A wrap stored before the recipient's current key is not held; one stored after it is.
+	roomKeysTestKeyChangedAt(conn, bob, "-1 hour")
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {bob}, []u8{9, 9, 9}, dave)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected bob's current wrap held, got %v",
+		outcome))
+	roomKeysTestKeyChangedAt(conn, bob, "1 hour")
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {bob}, []u8{9, 9, 9}, dave)
+	assert(outcome == .Stored, fmt.tprintf("expected a wrap for bob's old key ignored, got %v",
+		outcome))
+	// And carol, whose key never changed, still holds dave's forward.
+	roomKeysTestKeyChangedAt(conn, carol, "-1 hour")
+	outcome, _ = roomKeysTestStore(conn, full, alice, 2, chain, {carol}, []u8{9, 9, 9}, bob)
+	assert(outcome == .AlreadyHeld, fmt.tprintf("expected carol's wrap held, got %v", outcome))
+}

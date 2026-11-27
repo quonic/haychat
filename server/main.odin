@@ -46,6 +46,8 @@ PendingDBRequestType :: enum {
 	StoreRoomKeyEnvelope,
 	FetchRoomKeys,
 	RoomKeyRequestCheck,
+	// Protocol 32 (#78): a rejected envelope, never answered.
+	RejectRoomKeyEnvelope,
 	// Roles (router_roles.odin, protocol 23): the role list, and an admin's role change whose
 	// one statement checks the role and the guards.
 	ListRoles,
@@ -168,6 +170,10 @@ RouterPeerSession :: struct {
 	registeringSince:          time.Tick,
 	registerAttempts:          int,
 	registerInFlight:          bool,
+	// Protocol 32 (#78): ClientRejectRoomKeyEnvelope's limit, at most
+	// common.ROOM_KEY_REJECTS_PER_MINUTE in the minute that started at roomKeyRejectWindow.
+	roomKeyRejectWindow:       time.Tick,
+	roomKeyRejects:            int,
 }
 
 @(private)
@@ -836,7 +842,7 @@ MainRouterState_failPendingDatabaseRequests :: proc(
 			if _, live := attachmentSession(state, request.peerID, request.sessionID); live {
 				MainRouterState_sendProtocolError(pm, state, request.peerID, message)
 			}
-		case .RoomKeyRequestCheck:
+		case .RoomKeyRequestCheck, .RejectRoomKeyEnvelope:
 		// Never answered (router_room_keys.odin).
 		case .JoinVoiceMemberCheck:
 			MainRouterState_sendVoiceJoinRejected(
@@ -1583,6 +1589,8 @@ MainRouterState_dispatchApplicationPacket :: proc(
 		MainRouterState_handleClientFetchRoomKeys(pm, state, peerID, packet.payload)
 	case .ClientRequestRoomKey:
 		MainRouterState_handleClientRequestRoomKey(pm, state, peerID, packet.payload)
+	case .ClientRejectRoomKeyEnvelope:
+		MainRouterState_handleClientRejectRoomKeyEnvelope(pm, state, peerID, packet.payload)
 	case .ClientVoiceKey:
 		MainRouterState_handleClientVoiceKey(pm, state, peerID, packet.payload)
 	case .ClientRequestVoiceKey:
@@ -2259,6 +2267,8 @@ MainRouterState_handleDatabaseResult :: proc(
 		MainRouterState_handleFetchRoomKeysResult(pm, state, request, response)
 	case .RoomKeyRequestCheck:
 		MainRouterState_handleRoomKeyRequestCheckResult(pm, state, request, response)
+	case .RejectRoomKeyEnvelope:
+		MainRouterState_handleRejectRoomKeyEnvelopeResult(pm, state, request, response)
 	case .VisibleRecipients:
 		MainRouterState_handleVisibleRecipientsResult(pm, state, request, response)
 	case .LoadRestrictedUsers:
