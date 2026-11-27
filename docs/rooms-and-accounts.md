@@ -255,6 +255,13 @@ admins change (from the client, or `deploy/sql/set-registration-mode.sql`):
   plaintext. A session gets 5 attempts and 10 minutes. Every invalid code (unknown, revoked,
   expired or used up) gets the same "This invite code is not valid". The account takes the name
   the client signs in with; a name already in use is refused as at sign-in.
+- **Per-address limits** (#105): one network address may have only 8 sessions signing up at
+  once, starts and code attempts come from a bucket of 30 that refills at 10 a minute, and in
+  Invite + approval mode it may make 10 requests an hour. Past a limit the client is told so,
+  for example "Too many sign-up attempts from your network; try again later". Everyone behind
+  one NAT or proxy shares an address; operators change the limits with the
+  `HAYCHAT_REGISTRATION_IP_*` variables
+  ([server-configuration.md](server-configuration.md#sign-up-limits)).
 - **Invite codes** are 32 symbols (20 random bytes, shown as `XXXX-XXXX-…`; dashes, spaces and
   case do not matter). The server shows a code once, when it is made, and stores only its hash.
   A code has a note, an optional expiry, an optional use limit, and can be revoked. A use counts
@@ -514,8 +521,8 @@ newest message.
 - A few requests still tell a restricted account that another account exists by its ID (the key
   bundle fetch, a direct conversation's mark-read refusal, voice participant names in a shared
   room).
-- There is no per-address limit on sign-up attempts, only the per-session one (5 attempts,
-  10 minutes) and at most 64 sessions signing up at once.
+- The per-address sign-up limits are kept in memory only, so a restart starts them over, and
+  they see the address ENet reports: clients behind one NAT or a UDP proxy share them.
 - Roles do not rank accounts, so kick, ban and rename cannot be delegated. Room permissions
   only allow, never deny: a room cannot take something from a role another grant gives.
 - Files are never previewed, and there is no download cache: each **Save…** downloads again. A

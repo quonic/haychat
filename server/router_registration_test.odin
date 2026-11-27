@@ -23,7 +23,6 @@ RouterRegistrationTestClient :: struct {
 
 // Runs ClientHello .. ClientAuthRequest for peerID (registering as given), answers the identity
 // statement with needsRegistration, and checks the plaintext ServerRegistrationRequired.
-@(private = "file")
 routerRegistrationTestBegin :: proc(
 	h: ^RouterTestHarness,
 	peerID: u32,
@@ -196,7 +195,6 @@ routerRegistrationTestBegin :: proc(
 }
 
 // Opens the next ServerRegisterResponse for client.
-@(private = "file")
 routerRegistrationTestResponse :: proc(
 	h: ^RouterTestHarness,
 	client: ^RouterRegistrationTestClient,
@@ -212,7 +210,6 @@ routerRegistrationTestResponse :: proc(
 	return response
 }
 
-@(private = "file")
 routerRegistrationTestRegister :: proc(
 	h: ^RouterTestHarness,
 	client: ^RouterRegistrationTestClient,
@@ -228,7 +225,6 @@ routerRegistrationTestRegister :: proc(
 	)
 }
 
-@(private = "file")
 routerRegistrationTestCode :: proc() -> (common.InviteCodeBytes, string) {
 	code, ok := common.generateInviteCode()
 	assert(ok, "expected a random code")
