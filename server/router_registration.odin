@@ -34,8 +34,12 @@ import "core:time"
 // Restricted visibility (D17): presence, ServerUserUpdated and ServerUserKeyChanged about an
 // account go through MainRouterState_sendAboutUser. A recipient sees the account at once when
 // it is the account, holds ApproveRegistrations (admins hold every permission), or neither of
-// the two is restricted; otherwise the database decides (DATABASE_SHARED_ROOMS_SQL: a shared
-// room, or an admin on either side) before the message goes out. Which accounts are restricted
+// the two is restricted; otherwise the database decides before the message goes out: for
+// presence and ServerUserUpdated DATABASE_SHARED_ROOMS_SQL (a shared room, or an admin on
+// either side), for ServerUserKeyChanged (#190) DATABASE_KEY_CHANGE_RECIPIENTS_SQL, the key
+// fetch's own rule (DATABASE_USER_KEY_VISIBLE_*), so every account that may fetch the key
+// hears that it changed (an old direct conversation, a readable room message's author, an
+// encrypted room's log, a room key envelope). Which accounts are restricted
 // is MainRouterState.restrictedUserIDs, loaded from the database when the router starts and
 // kept current by every path that changes users.restricted (sign-in, sign-up, an admin's
 // ClientAdminSetRestricted) and (#116) by the database's change notifications, which bring a
@@ -138,7 +142,8 @@ MainRouterState_seesUserAtOnce :: proc(
 
 // Sends payload about subjectUserID to every authenticated session (but excludePeerID) that
 // may see it (D17). Sessions the router cannot decide for are asked of the database in one
-// DatabaseSharedRoomsRequest, and get the message when it answers.
+// DatabaseSharedRoomsRequest (with keyRecipients for a key change), and get the message when it
+// answers.
 MainRouterState_sendAboutUser :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -174,7 +179,11 @@ MainRouterState_sendAboutUser :: proc(
 		pm,
 		state,
 		0,
-		common.DatabaseSharedRoomsRequest{userId = subjectUserID, candidateUserIds = candidates},
+		common.DatabaseSharedRoomsRequest {
+			userId = subjectUserID,
+			candidateUserIds = candidates,
+			keyRecipients = payload.kind == .KeyChanged,
+		},
 		PendingDBRequest {
 			requestType = .VisibleRecipients,
 			targetUserID = subjectUserID,
