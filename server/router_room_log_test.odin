@@ -2,6 +2,7 @@ package server
 
 import "../common"
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 import "core:testing"
 
@@ -382,4 +383,109 @@ testRoomLogRouterRefusesPlaintextInEncryptedRooms :: proc(t: ^testing.T) {
 	drain := routerVoiceTestDrain(&h, clients[:])
 	defer RouterVoiceTestDrain_deinit(&drain)
 	routerRoomAccessTestExpectError(&drain, 1, common.ROOM_LOG_REQUIRED_MESSAGE)
+}
+
+// Protocol 32 (#72): a ban that removed bob from encrypted room 9 sends the server's Remove and
+// the membership change as an admin's removal does, after bob's sessions ended, and names the
+// room it could not change (12) in the admin's result.
+@(test)
+testRoomLogRouterBanSendsRemovalsAndFailedRooms :: proc(t: ^testing.T) {
+	_ = t
+	sync.mutex_lock(&routerTestMutex)
+	defer sync.mutex_unlock(&routerTestMutex)
+	h := routerTestHarness_init()
+	defer routerTestHarness_deinit(&h)
+	clients := routerRoomAccessTestClients()
+	routerVoiceTestConnect(&h, clients[:])
+	defer routerVoiceTestDisconnectAll(clients[:])
+
+	query, request := routerAdminTestSend(
+		&h,
+		&clients[0],
+		.ClientAdminBanUser,
+		common.ClientAdminBanUserPayload{userId = 43, banned = true, reason = "spam"},
+	)
+	defer IPC__database_query_request_deinit(query.request)
+	assert(
+		request.serverIdentityPublicKey == h.state.serverIdentityPublicKey,
+		"expected the ban to carry the server key for the log replays",
+	)
+	removals := make([dynamic]common.DatabaseBanRoomRemoval)
+	append(
+		&removals,
+		common.DatabaseBanRoomRemoval {
+			roomId = 9,
+			logEntry = routerRoomLogTestEntry(7),
+			logVersion = 6,
+			memberUserIDs = routerRoomLogTestIDs({44}),
+			managerUserIDs = routerRoomLogTestIDs({44}),
+		},
+	)
+	result := common.DatabaseAdminUserResult {
+		outcome       = .Applied,
+		changed       = true,
+		user          = {id = 43, nickname = "voice-user-43", isBanned = true},
+		banRemovals   = removals,
+		failedRoomIDs = routerRoomLogTestIDs({12}),
+	}
+	result.user.nickname = strings.clone("voice-user-43")
+	MainRouterState_handleDatabaseResult(
+		&h.pm,
+		&h.state,
+		query.request_id,
+		common.DatabaseQueryResponse{success = true, result = result},
+	)
+	drain := routerVoiceTestDrain(&h, clients[:])
+	defer RouterVoiceTestDrain_deinit(&drain)
+
+	answer := routerAdminTestDecode(
+		&drain,
+		1,
+		.ServerAdminActionResult,
+		common.ServerAdminActionResultPayload,
+	)
+	defer common.ServerAdminActionResultPayload_deinit(&answer)
+	expected :=
+		"Banned voice-user-43; removed from 1 encrypted room; " +
+		"1 encrypted room could not be changed"
+	assert(
+		answer.action == .Ban &&
+		answer.userId == 43 &&
+		answer.message == expected &&
+		len(answer.failedRoomIds) == 1 &&
+		answer.failedRoomIds[0] == 12,
+		fmt.tprintf("expected the ban's result to name room 12, got %v", answer),
+	)
+	// alice (who asked) and carol (the remaining member and manager) get the Remove and the
+	// membership change; bob's sessions ended before it and get neither.
+	for peerID in ([]u32{1, 4}) {
+		log := routerAdminTestDecode(&drain, peerID, .ServerRoomLog, common.ServerRoomLogPayload)
+		defer common.ServerRoomLogPayload_deinit(&log)
+		assert(
+			log.roomId == 9 &&
+			log.headVersion == 6 &&
+			log.afterVersion == 5 &&
+			len(log.entries) == 1 &&
+			log.entries[0][0] == 7,
+			fmt.tprintf("expected peer %d to get the server's Remove, got %v", peerID, log),
+		)
+		changed := routerAdminTestDecode(
+			&drain,
+			peerID,
+			.ServerRoomMembershipChanged,
+			common.ServerRoomMembershipChangedPayload,
+		)
+		assert(
+			changed.roomId == 9 && changed.userId == 43 && !changed.joined,
+			fmt.tprintf("expected peer %d told bob left room 9, got %v", peerID, changed),
+		)
+	}
+	for peerID in ([]u32{2, 3}) {
+		assert(
+			routerAdminTestCount(&drain, peerID, .ServerSessionEnded) == 1 &&
+			routerAdminTestCount(&drain, peerID, .ServerRoomLog) == 0 &&
+			routerAdminTestCount(&drain, peerID, .ServerRoomMembershipChanged) == 0,
+			fmt.tprintf("expected bob's peer %d to get only its session's end", peerID),
+		)
+	}
 }

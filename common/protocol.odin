@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 31
+protocolVersion: ProtocolVersion = 32
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -1827,6 +1827,9 @@ ClientAdminKickUserPayload :: struct {
 // ServerAuthFailure "This account is banned from this server" (plus ": reason" when set).
 // banned false lifts the ban. On an Open server a banned person can still connect with a new
 // key as a new account; registration (protocol 25) closes that. reason is owned once decoded.
+//
+// Protocol 32 (#72): a ban (also of an account already banned) removes the account from every
+// encrypted room it is a member of, in the ban's transaction; an unban adds it back to none.
 ClientAdminBanUserPayload :: struct {
 	userId: int,
 	banned: bool,
@@ -1841,14 +1844,21 @@ ClientAdminBanUserPayload :: struct {
 // DecideRegistration decided; userId is the target of SetRestricted.
 //
 // Protocol 28: blobId names the attachment a RemoveAttachment removed, and userId its owner.
+//
+// Protocol 32 (#72): a ban also removes the account from every encrypted room it is a member
+// of (the server's unsigned Remove in each room's log, in the ban's transaction).
+// failedRoomIds (owned once decoded, ascending) names the encrypted rooms whose member log it
+// could not change (a damaged log, or a room another connection held locked); the ban still
+// applies, and an admin deals with those rooms by hand. Empty for every other action.
 ServerAdminActionResultPayload :: struct {
-	action:    AdminAction,
-	userId:    int,
-	message:   string,
-	roleId:    int,
-	inviteId:  int,
-	requestId: int,
-	blobId:    AttachmentBlobID,
+	action:        AdminAction,
+	userId:        int,
+	message:       string,
+	roleId:        int,
+	inviteId:      int,
+	requestId:     int,
+	blobId:        AttachmentBlobID,
+	failedRoomIds: [dynamic]int,
 }
 
 // ServerUserUpdated: an account's directory entry changed (role, ban, or an admin rename), to
@@ -2178,6 +2188,8 @@ ClientAdminBanUserPayload_deinit :: proc(payload: ^ClientAdminBanUserPayload) {
 ServerAdminActionResultPayload_deinit :: proc(payload: ^ServerAdminActionResultPayload) {
 	delete(payload.message)
 	payload.message = ""
+	delete(payload.failedRoomIds)
+	payload.failedRoomIds = nil
 }
 
 ServerUserUpdatedPayload_deinit :: proc(payload: ^ServerUserUpdatedPayload) {
@@ -2479,6 +2491,8 @@ DatabaseAdminUserRequest :: struct {
 	reason:       string,
 	// Protocol 25: SetRestricted's new restriction.
 	restricted:   bool,
+	// Protocol 32 (#72): a ban replays each encrypted room's log against the server's key.
+	serverIdentityPublicKey: IdentityPublicKeyBytes,
 }
 
 // Stores a bundle the router already verified against the session's identity key (protocol
@@ -2799,6 +2813,21 @@ DatabaseAdminUserResult :: struct {
 	permissions:      ServerPermissions,
 	// Protocol 25: the Public rooms a lifted restriction joined (owned, ascending).
 	addedRoomIDs:     [dynamic]int,
+	// Protocol 32 (#72): a ban's removals from encrypted rooms (owned, by room ID), and the
+	// encrypted rooms whose log it could not change (owned, ascending).
+	banRemovals:      [dynamic]DatabaseBanRoomRemoval,
+	failedRoomIDs:    [dynamic]int,
+}
+
+// One encrypted room a ban removed the account from (protocol 32, #72): the server's unsigned
+// Remove (logEntry, owned) at logVersion, and the room's members and log managers after it
+// (owned, ascending), as for an admin's ClientRemoveRoomMember.
+DatabaseBanRoomRemoval :: struct {
+	roomId:         int,
+	logEntry:       []u8,
+	logVersion:     int,
+	memberUserIDs:  [dynamic]int,
+	managerUserIDs: [dynamic]int,
 }
 
 // Which role statement a DatabaseRoleRequest runs (protocol 23, server/database_roles.odin).

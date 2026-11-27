@@ -30,7 +30,8 @@ import "shared:pg"
 // SetAccess needs ManageRooms. A Remove signed by a manager, a
 // Leave, and the manager changes need nothing beyond the log's rules. Unsigned entries come
 // only from the server itself (databaseExecuteServerRoomLogRemove, for a ClientRemoveRoomMember
-// of an account holding ManageRoomMembers).
+// of an account holding ManageRoomMembers, and protocol 32's ban, databaseRoomLogRemoveBanned,
+// which runs the same removal for every encrypted room the banned account is a member of).
 //
 // Replaying on every append costs one signature check per stored entry; a room's log grows by
 // one entry per membership change, so this stays small next to the round trip. Nothing here
@@ -47,6 +48,18 @@ DATABASE_ROOM_LOG_LOCK_SQL ::
 	"r.id" + DATABASE_ROOM_PERMISSIONS_CLOSE_SQL + " & " +
 	DATABASE_ROOM_PERMISSION_MANAGE_MEMBERS_SQL + ") <> 0)::text " +
 	"FROM rooms r WHERE r.id = $2::bigint FOR UPDATE"
+
+// A ban's lock (protocol 32, #72) does not wait: a room another connection holds is reported
+// to the admin instead of holding up the database worker.
+DATABASE_ROOM_LOG_LOCK_NOWAIT_SQL :: DATABASE_ROOM_LOG_LOCK_SQL + " NOWAIT"
+
+// $1 the banned account: the encrypted rooms it is a member of, in the order a ban locks them.
+DATABASE_ROOM_LOG_BANNED_ROOMS_SQL ::
+	"SELECT r.id::text FROM rooms r JOIN room_members rm ON rm.room_id = r.id " +
+	"WHERE r.encrypted AND rm.user_id = $1::bigint ORDER BY r.id"
+
+// PostgreSQL's lock_not_available, what a NOWAIT lock of a held row fails with.
+DATABASE_LOCK_NOT_AVAILABLE_SQLSTATE :: "55P03"
 
 // Ordered by the column itself: the output column of the same name is text.
 DATABASE_ROOM_LOG_ENTRIES_SQL ::
@@ -158,13 +171,11 @@ databaseRoomLogExec :: proc(conn: pg.Conn, query: cstring) -> bool {
 }
 
 // A transaction of its own, or a savepoint inside the caller's (the SQL tests run every test
-// in one transaction they roll back).
-@(private = "file")
+// in one transaction they roll back; a ban, database_admin.odin, uses it for its own).
 RoomLogTransaction :: struct {
 	nested: bool,
 }
 
-@(private = "file")
 databaseRoomLogBegin :: proc(conn: pg.Conn) -> (transaction: RoomLogTransaction, ok: bool) {
 	transaction.nested = pg.transaction_status(conn) == .In_Trans
 	if transaction.nested {
@@ -173,7 +184,6 @@ databaseRoomLogBegin :: proc(conn: pg.Conn) -> (transaction: RoomLogTransaction,
 	return transaction, databaseRoomLogExec(conn, "BEGIN")
 }
 
-@(private = "file")
 databaseRoomLogCommit :: proc(conn: pg.Conn, transaction: RoomLogTransaction) -> bool {
 	if transaction.nested {
 		return databaseRoomLogExec(conn, "RELEASE SAVEPOINT haychat_room_log")
@@ -181,7 +191,6 @@ databaseRoomLogCommit :: proc(conn: pg.Conn, transaction: RoomLogTransaction) ->
 	return databaseRoomLogExec(conn, "COMMIT")
 }
 
-@(private = "file")
 databaseRoomLogRollback :: proc(conn: pg.Conn, transaction: RoomLogTransaction) {
 	if transaction.nested {
 		_ = databaseRoomLogExec(conn, "ROLLBACK TO SAVEPOINT haychat_room_log")
@@ -225,28 +234,38 @@ databaseRoomLogIDArray :: proc(ids: []int) -> string {
 	return strings.to_string(builder)
 }
 
+// Locks roomID's row and reads it. With noWait a row another connection holds is not waited
+// for: locked is true (ok too, nothing found), and the caller's transaction is aborted until it
+// rolls back to a savepoint.
 @(private = "file")
 databaseRoomLogLock :: proc(
 	conn: pg.Conn,
 	actorUserID, roomID: int,
+	noWait := false,
 ) -> (
 	room: RoomLogLockedRoom,
 	ok: bool,
+	locked: bool,
 ) {
 	actorText := fmt.aprintf("%d", actorUserID)
 	defer delete(actorText)
 	roomText := fmt.aprintf("%d", roomID)
 	defer delete(roomText)
-	result := databaseRoomLogQuery(conn, DATABASE_ROOM_LOG_LOCK_SQL, {actorText, roomText})
+	query: cstring = noWait ? DATABASE_ROOM_LOG_LOCK_NOWAIT_SQL : DATABASE_ROOM_LOG_LOCK_SQL
+	result := databaseRoomLogQuery(conn, query, {actorText, roomText})
 	if result == nil {
-		return {}, false
+		return {}, false, false
 	}
 	defer pg.clear(result)
 	if pg.result_status(result) != .Tuples_OK {
-		return {}, false
+		state := string(pg.result_error_field(result, .SQL_State))
+		if noWait && state == DATABASE_LOCK_NOT_AVAILABLE_SQLSTATE {
+			return {}, true, true
+		}
+		return {}, false, false
 	}
 	if pg.n_tuples(result) == 0 {
-		return {}, true
+		return {}, true, false
 	}
 	room.found = true
 	room.encrypted = databaseGetBool(result, 0, 0)
@@ -261,7 +280,7 @@ databaseRoomLogLock :: proc(
 	room.actorManagesRooms = databaseGetBool(result, 0, 5)
 	room.actorIsMember = databaseGetBool(result, 0, 6)
 	room.actorManagesMembers = databaseGetBool(result, 0, 7)
-	return room, true
+	return room, true, false
 }
 
 // The stored entries of roomID in version order (owned; free with databaseRoomLogFreeEntries).
@@ -603,7 +622,7 @@ databaseAppendRoomLogInTransaction :: proc(
 	failure: common.DatabaseQueryResponse,
 	failed: bool,
 ) {
-	room, lockOK := databaseRoomLogLock(conn, request.actorUserId, request.roomId)
+	room, lockOK, _ := databaseRoomLogLock(conn, request.actorUserId, request.roomId)
 	if !lockOK {
 		return {}, databaseConnectionError(conn), true
 	}
@@ -709,7 +728,7 @@ databaseExecuteServerRoomLogRemove :: proc(
 	if !beginOK {
 		return databaseConnectionError(conn)
 	}
-	result, failure, failed := databaseServerRoomLogRemoveInTransaction(conn, request)
+	result, failure, failed, _ := databaseServerRoomLogRemoveInTransaction(conn, request)
 	if failed {
 		databaseRoomLogRollback(conn, transaction)
 		return failure
@@ -728,28 +747,41 @@ databaseExecuteServerRoomLogRemove :: proc(
 	return databaseSuccess(result)
 }
 
+// The removal inside the caller's transaction. locked (only with noWait) means another
+// connection holds the room: nothing changed, and the transaction is aborted until the caller
+// rolls back to a savepoint.
 @(private = "file")
 databaseServerRoomLogRemoveInTransaction :: proc(
 	conn: pg.Conn,
 	request: common.DatabaseRoomMemberActionRequest,
+	noWait := false,
 ) -> (
 	result: common.DatabaseRoomMemberActionResult,
 	failure: common.DatabaseQueryResponse,
 	failed: bool,
+	locked: bool,
 ) {
-	room, lockOK := databaseRoomLogLock(conn, request.actorUserId, request.roomId)
+	room, lockOK, roomLocked := databaseRoomLogLock(
+		conn,
+		request.actorUserId,
+		request.roomId,
+		noWait,
+	)
 	if !lockOK {
-		return {}, databaseConnectionError(conn), true
+		return {}, databaseConnectionError(conn), true, false
+	}
+	if roomLocked {
+		return {}, {}, false, true
 	}
 	// The same order of refusals as an unencrypted removal.
 	if !room.actorManagesMembers {
-		return {outcome = .AdminRequired}, {}, false
+		return {outcome = .AdminRequired}, {}, false, false
 	}
 	if !room.found {
-		return {outcome = .UnknownRoom}, {}, false
+		return {outcome = .UnknownRoom}, {}, false, false
 	}
 	if !databaseRoomLogUserExists(conn, request.targetUserId) {
-		return {outcome = .UnknownUser}, {}, false
+		return {outcome = .UnknownUser}, {}, false, false
 	}
 	state, replayOK, damaged := databaseRoomLogReplay(
 		conn,
@@ -758,17 +790,17 @@ databaseServerRoomLogRemoveInTransaction :: proc(
 		request.serverIdentityPublicKey,
 	)
 	if !replayOK {
-		return {}, databaseConnectionError(conn), true
+		return {}, databaseConnectionError(conn), true, false
 	}
 	if damaged {
-		return {outcome = .LogDamaged}, {}, false
+		return {outcome = .LogDamaged}, {}, false, false
 	}
 	defer common.RoomLogState_deinit(&state)
 	result.outcome = .Applied
 	result.access = room.access
 	targetKey, isMember := state.members[request.targetUserId]
 	if !isMember {
-		return result, {}, false
+		return result, {}, false, false
 	}
 
 	entry := common.RoomLogEntry {
@@ -783,17 +815,17 @@ databaseServerRoomLogRemoveInTransaction :: proc(
 	buffer: [common.ROOM_LOG_ENTRY_MAX_BYTES]u8
 	n, encodeErr := common.encodeRoomLogEntry(entry, buffer[:])
 	if encodeErr != .None {
-		return {outcome = .LogDamaged}, {}, false
+		return {outcome = .LogDamaged}, {}, false, false
 	}
 	ctx := common.RoomLogContext {
 		serverIdentityPublicKey = request.serverIdentityPublicKey,
 	}
 	if _, applyErr := common.RoomLogState_apply(&state, buffer[:n], ctx); applyErr != .None {
-		return {outcome = .LogDamaged}, {}, false
+		return {outcome = .LogDamaged}, {}, false, false
 	}
 	stored := databaseRoomLogStore(conn, request.roomId, entry, buffer[:n], &state)
 	if !stored.ok {
-		return {}, databaseConnectionError(conn), true
+		return {}, databaseConnectionError(conn), true, false
 	}
 	logEntry := make([]u8, n)
 	copy(logEntry, buffer[:n])
@@ -802,7 +834,98 @@ databaseServerRoomLogRemoveInTransaction :: proc(
 	result.logEntry = logEntry
 	result.logVersion = entry.version
 	result.managerUserIDs = roomLogSortedUserIDs(state.managers)
-	return result, {}, false
+	return result, {}, false, false
+}
+
+// A ban (protocol 32, #72), inside the ban's transaction after DATABASE_ADMIN_BAN_SQL applied:
+// the server's unsigned Remove of targetUserID in every encrypted room room_members lists it
+// in, exactly as an admin's ClientRemoveRoomMember writes it, one savepoint per room. A room
+// whose stored log does not replay (LogDamaged), that another connection holds locked (the lock
+// does not wait), or that refuses the removal otherwise is left as it was and listed in
+// result.failedRoomIDs: the ban still applies. A room whose verified log does not name the
+// account (a row added behind the log) changes nothing and is not listed. Each removal goes to
+// result.banRemovals for the router's fan-out. failed with failure only for a database error,
+// after which the caller rolls the whole ban back.
+databaseRoomLogRemoveBanned :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseAdminUserRequest,
+	result: ^common.DatabaseAdminUserResult,
+) -> (
+	failure: common.DatabaseQueryResponse,
+	failed: bool,
+) {
+	targetText := fmt.aprintf("%d", request.targetUserId)
+	defer delete(targetText)
+	rooms := databaseRoomLogQuery(conn, DATABASE_ROOM_LOG_BANNED_ROOMS_SQL, {targetText})
+	if rooms == nil {
+		return databaseConnectionError(conn), true
+	}
+	if pg.result_status(rooms) != .Tuples_OK {
+		pg.clear(rooms)
+		return databaseConnectionError(conn), true
+	}
+	roomIDs := make([dynamic]int, 0, int(pg.n_tuples(rooms)))
+	defer delete(roomIDs)
+	for row in 0 ..< pg.n_tuples(rooms) {
+		append(&roomIDs, databaseGetIntOrZero(rooms, row, 0))
+	}
+	pg.clear(rooms)
+
+	for roomID in roomIDs {
+		if !databaseRoomLogExec(conn, "SAVEPOINT haychat_ban_room") {
+			return databaseConnectionError(conn), true
+		}
+		removal, removalFailure, removalFailed, locked := databaseServerRoomLogRemoveInTransaction(
+			conn,
+			common.DatabaseRoomMemberActionRequest {
+				action = .Remove,
+				actorUserId = request.actorUserId,
+				roomId = roomID,
+				targetUserId = request.targetUserId,
+				serverIdentityPublicKey = request.serverIdentityPublicKey,
+			},
+			noWait = true,
+		)
+		if removalFailed {
+			return removalFailure, true
+		}
+		applied := !locked && removal.outcome == .Applied
+		if !applied || !removal.changed {
+			// Nothing of this room's is kept: a locked room's error aborted the transaction,
+			// and the other refusals wrote nothing.
+			delete(removal.memberUserIDs)
+			delete(removal.logEntry)
+			delete(removal.managerUserIDs)
+			rolledBack :=
+				databaseRoomLogExec(conn, "ROLLBACK TO SAVEPOINT haychat_ban_room") &&
+				databaseRoomLogExec(conn, "RELEASE SAVEPOINT haychat_ban_room")
+			if !rolledBack {
+				return databaseConnectionError(conn), true
+			}
+			// A room deleted since the list was read needs nothing.
+			if !applied && removal.outcome != .UnknownRoom {
+				append(&result.failedRoomIDs, roomID)
+			}
+			continue
+		}
+		if !databaseRoomLogExec(conn, "RELEASE SAVEPOINT haychat_ban_room") {
+			delete(removal.memberUserIDs)
+			delete(removal.logEntry)
+			delete(removal.managerUserIDs)
+			return databaseConnectionError(conn), true
+		}
+		append(
+			&result.banRemovals,
+			common.DatabaseBanRoomRemoval {
+				roomId = roomID,
+				logEntry = removal.logEntry,
+				logVersion = removal.logVersion,
+				memberUserIDs = removal.memberUserIDs,
+				managerUserIDs = removal.managerUserIDs,
+			},
+		)
+	}
+	return {}, false
 }
 
 @(private = "file")

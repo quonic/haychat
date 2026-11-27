@@ -394,10 +394,15 @@ testAdminPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		)
 	}
 	{
+		// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from.
+		failed := make([dynamic]int, 0, 2)
+		defer delete(failed)
+		append(&failed, 4, 9)
 		original := ServerAdminActionResultPayload {
-			action  = .Ban,
-			userId  = 7,
-			message = "bob is banned",
+			action        = .Ban,
+			userId        = 7,
+			message       = "bob is banned",
+			failedRoomIds = failed,
 		}
 		encoded, err := cbor.marshal(original)
 		assert(err == nil, "expected ServerAdminActionResultPayload encoding to succeed")
@@ -406,8 +411,11 @@ testAdminPayloadsRoundTripOverCBOR :: proc(t: ^testing.T) {
 		assert(cbor.unmarshal(encoded, &decoded) == nil, "expected admin result decoding")
 		defer ServerAdminActionResultPayload_deinit(&decoded)
 		assert(
-			decoded.action == .Ban && decoded.userId == 7 && decoded.message == "bob is banned",
-			fmt.tprintf("expected the ban result, got %v", decoded),
+			decoded.action == .Ban && decoded.userId == 7 && decoded.message == "bob is banned" &&
+			len(decoded.failedRoomIds) == 2 &&
+			decoded.failedRoomIds[0] == 4 &&
+			decoded.failedRoomIds[1] == 9,
+			fmt.tprintf("expected the ban result with rooms 4 and 9, got %v", decoded),
 		)
 	}
 	{
@@ -551,11 +559,13 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// chatMessageId and directMessageId in ServerAttachmentRemoved); 30 added editing and
 	// deleting messages (#76: ClientEditRoomMessage ... ServerMessageEdits, and editCount,
 	// lastEdit, deleted and deletion on stored messages and conversation summaries); 31 added
-	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes.
+	// ServerAdminRoomChanged (#73), so room managers' lists follow every room's changes; 32
+	// added ServerAdminActionResult.failedRoomIds (#72: a ban removes the account from every
+	// encrypted room it is in and names the rooms it could not change).
 	assert(
-		protocolVersion == 31,
+		protocolVersion == 32,
 		fmt.tprintf(
-			"expected protocol version 31 for admin room changes, got %d",
+			"expected protocol version 32 for bans that leave encrypted rooms, got %d",
 			protocolVersion,
 		),
 	)
