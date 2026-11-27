@@ -41,6 +41,8 @@ import "core:time"
 // State.roomLogChanged is a hook for tests (nil by default).
 
 ROOM_LOG_CHANGED_WARNING :: "This room's member list was changed on the server"
+// Protocol 33 (#195): a room whose only manager was banned.
+ROOM_LOG_NO_MANAGER_NOTE :: "This room has no manager left, so nobody can add members."
 ROOM_LOG_NOT_SET_UP_NOTE :: "This encrypted room's member list has not been set up yet"
 
 RoomLogStatus :: enum u8 {
@@ -1003,10 +1005,7 @@ State_roomLogRefusalText :: proc(
 	#partial switch err {
 	case .NotAuthorized:
 		if entry.action == .Add {
-			return fmt.tprintf(
-				"Only this room's managers can add members; ask %s.",
-				State_roomLogManagerNames(state, serverID, roomID),
-			)
+			return State_roomLogAskManagersText(state, serverID, roomID)
 		}
 		return "Only this room's managers can make this change."
 	case .AlreadyMember:
@@ -1034,6 +1033,19 @@ State_roomLogUserName :: proc(state: ^State, serverID, userID: int) -> string {
 		name = ServerDirectCache_peerNickname(&state.serverDirectCaches[index], userID)
 	}
 	return userLabel(name, userID, context.temp_allocator)
+}
+
+// Why someone who is not a manager cannot add (temp): whom to ask, or (protocol 33, #195: a
+// ban removed the only manager) that nobody can.
+State_roomLogAskManagersText :: proc(state: ^State, serverID, roomID: int) -> string {
+	if verified := State_roomLogVerified(state, serverID, roomID);
+	   verified != nil && len(verified.managers) == 0 {
+		return ROOM_LOG_NO_MANAGER_NOTE
+	}
+	return fmt.tprintf(
+		"Only this room's managers can add members; ask %s.",
+		State_roomLogManagerNames(state, serverID, roomID),
+	)
 }
 
 // "alice, bob" for the room's verified managers (temp).
@@ -1534,10 +1546,7 @@ roomLogRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomLogR
 		rights.canAdd = false
 		rights.addNote = common.ENCRYPTED_ROOM_FULL_MESSAGE + "."
 	} else if !rights.canAdd && rights.isAdmin {
-		rights.addNote = fmt.tprintf(
-			"Only this room's managers can add members; ask %s.",
-			State_roomLogManagerNames(state, serverID, roomID),
-		)
+		rights.addNote = State_roomLogAskManagersText(state, serverID, roomID)
 	}
 	rights.canRemove = rights.isManager || rights.isAdmin
 	rights.removeViaServer = !rights.isManager && rights.isAdmin
@@ -1577,6 +1586,9 @@ State_roomLogEventText :: proc(state: ^State, serverID: int, line: RoomLogEventL
 	case .AddManager:
 		return fmt.tprintf("%s made %s a manager", actor, target)
 	case .RemoveManager:
+		if line.actorUserID == 0 {
+			return fmt.tprintf("the server removed %s as a manager", target)
+		}
 		return fmt.tprintf("%s removed %s as a manager", actor, target)
 	case .Leave:
 		return fmt.tprintf("%s left", target)
