@@ -191,6 +191,13 @@ The job container needs no special seccomp or SELinux settings. A runner host se
 web admin (an io_uring seccomp profile in `containers.conf.d/` and `--security-opt
 label=disable` in the runner's `config.yml`) can drop both.
 
+Issue forms (bug report, feature request, documentation) live in `.github/ISSUE_TEMPLATE/`,
+which both Forgejo and GitHub read; Forgejo lists every template directory it finds, so a copy
+under `.forgejo/ISSUE_TEMPLATE/` would show each form twice, and only that directory's
+`config.yml` (Forgejo's contact links) belongs there. The forms use only keys both forges accept.
+Each forge has its own pull request template: `.forgejo/PULL_REQUEST_TEMPLATE.md` (Forgejo looks
+there before `.github/`) and `.github/PULL_REQUEST_TEMPLATE.md`; keep the two in step.
+
 Releases are built by `.forgejo/workflows/release.yml` on tags `v*`; see [deploy/README.md
 "Release Builds"](../deploy/README.md#release-builds). `deploy/release-artifacts.sh VERSION
 OUT_DIR [--windows]` builds the same archives inside `./dev.sh shell`.

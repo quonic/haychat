@@ -1,0 +1,27 @@
+# Shared by Forgejo and GitHub; see the note at the top of bug_report.yml.
+name: Documentation
+description: Something in the documentation is wrong, missing, or hard to follow.
+title: "Docs: "
+labels:
+  - docs
+body:
+  - type: input
+    id: document
+    attributes:
+      label: Document
+      description: The file or section, for example `docs/user-guide.md` "Voice".
+      placeholder: docs/tester-guide.md "Reporting Problems"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+      description: Quote the text if it is wrong, and say what you did or expected.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested wording
+      description: Optional. How it could read instead.

@@ -1,0 +1,12 @@
+# GitHub's issue config. Forgejo uses .forgejo/ISSUE_TEMPLATE/config.yml instead.
+blank_issues_enabled: true
+contact_links:
+  - name: HayChat on Forgejo
+    url: https://git.spyingwind.com/quonic/haychat/issues
+    about: HayChat is developed on Forgejo; issues filed there reach the maintainer first.
+  - name: Tester guide
+    url: https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/tester-guide.md
+    about: Getting the client, connecting, what to try, and what a good report includes.
+  - name: Running a server
+    url: https://git.spyingwind.com/quonic/haychat/src/branch/main/deploy/README.md
+    about: The server image, first-time setup, backups and upgrades.

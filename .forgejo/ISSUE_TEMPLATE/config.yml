@@ -1,0 +1,14 @@
+# Forgejo reads this config before .github/ISSUE_TEMPLATE/config.yml. The issue forms
+# themselves live in .github/ISSUE_TEMPLATE, which Forgejo also reads; do not copy them here,
+# or Forgejo lists every form twice.
+blank_issues_enabled: true
+contact_links:
+  - name: Tester guide
+    url: https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/tester-guide.md
+    about: Getting the client, connecting, what to try, and what a good report includes.
+  - name: User guide
+    url: https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/user-guide.md
+    about: Every screen and control of the client.
+  - name: Running a server
+    url: https://git.spyingwind.com/quonic/haychat/src/branch/main/deploy/README.md
+    about: The server image, first-time setup, backups and upgrades.
