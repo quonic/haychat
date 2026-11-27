@@ -370,6 +370,7 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabaseFetchRoomLogRequest,
 	     common.DatabaseFetchRoomKeysRequest,
 	     common.DatabaseRoomKeyRequestCheckRequest,
+	     common.DatabaseRejectRoomKeyEnvelopeRequest,
 	     common.DatabaseRoomLogRepairRequest:
 	case nil:
 	}
@@ -559,7 +560,8 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseRoomKeyRequestCheckResult:
 		delete(r.memberUserIDs)
 	case common.DatabaseMarkReadResult,
-	     common.DatabasePublishEncryptionKeyResult:
+	     common.DatabasePublishEncryptionKeyResult,
+	     common.DatabaseRejectRoomKeyEnvelopeResult:
 	case nil:
 	}
 }

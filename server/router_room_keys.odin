@@ -2,6 +2,8 @@ package server
 
 import "../common"
 import "core:encoding/cbor"
+import "core:fmt"
+import "core:time"
 
 // Sender chains in encrypted rooms (protocol 19, e2ee-design.md 6.4): ClientRoomKeyEnvelope,
 // ClientFetchRoomKeys and ClientRequestRoomKey. The router checks what needs no database (the
@@ -23,6 +25,10 @@ import "core:encoding/cbor"
 //   stores it only in a Full history room for a stored chain, and drops it silently when the
 //   recipient already holds the chain. In a Full history room a key request goes to every
 //   session of every other member, so whoever holds the chain can forward it.
+// - Protocol 34 (#78): ClientRejectRoomKeyEnvelope takes the session's account off the wraps of
+//   one stored envelope of a chain it did not send (the database checks that in the statement
+//   that changes it), so the next forward or re-seal for it is stored. At most
+//   ROOM_KEY_REJECTS_PER_MINUTE per session; nothing is answered.
 //
 // Fixed-size byte fields decode through CBOR's temporary allocator, so it is the heap here.
 
@@ -256,6 +262,87 @@ MainRouterState_handleClientRequestRoomKey :: proc(
 			chainId = req.chainId,
 		},
 		PendingDBRequest{requestType = .RoomKeyRequestCheck, roomID = req.roomId},
+	)
+}
+
+// Protocol 34 (#78): the session rejects its copy of one envelope. Only the session's own
+// account is ever taken off a wrap, so the limit is per session and only keeps a client from
+// looping: past ROOM_KEY_REJECTS_PER_MINUTE in a minute it is refused.
+MainRouterState_handleClientRejectRoomKeyEnvelope :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	peerID: u32,
+	payload: []u8,
+) {
+	req: common.ClientRejectRoomKeyEnvelopePayload
+	err := cbor.unmarshal(payload, &req)
+	session, ok := &state.peerSessions[peerID]
+	if !ok || !session.isAuthenticated {
+		MainRouterState_sendProtocolError(pm, state, peerID, "Unauthenticated room request")
+		return
+	}
+	if err != nil || req.envelopeId <= 0 {
+		MainRouterState_sendProtocolError(
+			pm,
+			state,
+			peerID,
+			common.ROOM_KEY_REQUEST_INVALID_MESSAGE,
+		)
+		return
+	}
+	if !MainRouterState_takeRoomKeyReject(session, time.tick_now()) {
+		MainRouterState_sendProtocolError(pm, state, peerID, common.ROOM_KEY_REJECT_LIMIT_MESSAGE)
+		return
+	}
+	MainRouterState_enqueueChannelDatabaseRequest(
+		pm,
+		state,
+		peerID,
+		common.DatabaseRejectRoomKeyEnvelopeRequest {
+			userId = session.authenticatedUserID,
+			envelopeId = req.envelopeId,
+		},
+		PendingDBRequest {
+			requestType = .RejectRoomKeyEnvelope,
+			targetUserID = session.authenticatedUserID,
+		},
+	)
+}
+
+// Counts one reject against session's limit at now: false when the minute's are used up.
+MainRouterState_takeRoomKeyReject :: proc(session: ^RouterPeerSession, now: time.Tick) -> bool {
+	if session.roomKeyRejects == 0 ||
+	   time.tick_diff(session.roomKeyRejectWindow, now) >= time.Minute {
+		session.roomKeyRejectWindow = now
+		session.roomKeyRejects = 0
+	}
+	if session.roomKeyRejects >= common.ROOM_KEY_REJECTS_PER_MINUTE {
+		return false
+	}
+	session.roomKeyRejects += 1
+	return true
+}
+
+MainRouterState_handleRejectRoomKeyEnvelopeResult :: proc(
+	pm: ^ProcessManager,
+	state: ^MainRouterState,
+	request: PendingDBRequest,
+	response: common.DatabaseQueryResponse,
+) {
+	result, resultOK := response.result.(common.DatabaseRejectRoomKeyEnvelopeResult)
+	if !response.success || !resultOK || !result.rejected {
+		return
+	}
+	// No key material, only who rejected which copy, for an operator who wonders why a chain
+	// was forwarded again.
+	fmt.printfln(
+		"[RoomKeys] User %d rejected a key envelope of room %d (epoch %d, sender %d, " +
+		"forwarder %d)",
+		request.targetUserID,
+		result.roomId,
+		result.epoch,
+		result.senderId,
+		result.forwarderId,
 	)
 }
 

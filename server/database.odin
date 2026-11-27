@@ -1309,6 +1309,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteStoreRoomKeyEnvelope(conn, r)
 	case common.DatabaseFetchRoomKeysRequest:
 		return databaseExecuteFetchRoomKeys(conn, r)
+	case common.DatabaseRejectRoomKeyEnvelopeRequest:
+		return databaseExecuteRejectRoomKeyEnvelope(conn, r)
 	case common.DatabaseRoleRequest:
 		return databaseExecuteRoleRequest(conn, r)
 	case common.DatabaseRoomPermissionsRequest:

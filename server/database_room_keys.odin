@@ -24,10 +24,16 @@ import "shared:pg"
 // key request, an older epoch whose chain is already stored. A RoomKeyForward (protocol 20)
 // needs the forwarder to be a member, every wrap a member, the room's history Full, an epoch
 // whose chain (sender, chain ID) is already stored, and no stored envelope of that chain with a
-// wrap for the recipient (the first forward wins; later ones are dropped). One row: whether the
-// room exists, its flag, the storing account's membership, its log version, whether the chain
-// is known, how many wraps name non-members, the stored row's ID, the room's history
-// visibility, and whether a recipient already holds the chain.
+// wrap for the recipient (the first forward wins; later ones are dropped). Protocol 34 (#78):
+// a wrap counts as held only when it was stored no earlier than the recipient's current
+// encryption key (user_encryption_keys.updated_at): a wrap from before the recipient set up
+// encryption again was made for a key it no longer has, so it no longer blocks a forward. An
+// envelope does not name the key its wraps were made for, so the times decide; a bundle stored
+// again with the same key only lets one more copy through. A recipient without a stored key
+// keeps every wrap. One row: whether the room exists, its flag, the storing account's
+// membership, its log version, whether the chain is known, how many wraps name non-members,
+// the stored row's ID, the room's history visibility, and whether a recipient already holds
+// the chain.
 DATABASE_STORE_ROOM_KEY_ENVELOPE_SQL ::
 	"WITH room AS (SELECT encrypted, log_version, history_visibility FROM rooms " +
 	"WHERE id = $1::bigint), " +
@@ -38,7 +44,9 @@ DATABASE_STORE_ROOM_KEY_ENVELOPE_SQL ::
 	"AND chain_id = decode($4::text, 'hex') LIMIT 1), " +
 	"held AS (SELECT 1 FROM room_key_envelopes WHERE $7::bigint > 0 AND room_id = $1::bigint " +
 	"AND sender_user_id = $2::bigint AND epoch = $3::bigint " +
-	"AND chain_id = decode($4::text, 'hex') AND recipient_user_ids && $5::bigint[] LIMIT 1), " +
+	"AND chain_id = decode($4::text, 'hex') AND recipient_user_ids && $5::bigint[] " +
+	"AND created_at >= COALESCE((SELECT max(k.updated_at) FROM user_encryption_keys k " +
+	"WHERE k.user_id = ANY ($5::bigint[])), '-infinity'::timestamptz) LIMIT 1), " +
 	"outsiders AS (SELECT count(*) AS n FROM unnest($5::bigint[]) AS r(user_id) " +
 	"WHERE NOT EXISTS (SELECT 1 FROM room_members rm WHERE rm.room_id = $1::bigint " +
 	"AND rm.user_id = r.user_id)), " +
@@ -97,6 +105,57 @@ DATABASE_ROOM_KEY_REQUEST_CHECK_SQL ::
 	"CASE WHEN (SELECT ok FROM base) AND (SELECT yes FROM fh) THEN " +
 	"COALESCE((SELECT string_agg(user_id::text, ',' ORDER BY user_id) FROM room_members " +
 	"WHERE room_id = $2::bigint AND user_id <> $1::bigint), '') ELSE '' END"
+
+// Protocol 34 (#78): $1 the requester, $2 the envelope's ID. Takes the requester off the wraps
+// of that envelope when it has one for the requester and is of a chain someone else sent: the
+// row is deleted when the requester was its only recipient (every forward, and a re-seal
+// answering its request), otherwise only its user ID leaves recipient_user_ids, so the other
+// recipients keep the envelope and the requester no longer fetches it or counts as holding the
+// chain. One row: whether it was taken off, whether the row went, and the envelope's room,
+// epoch, sender and forwarder (0 for a SenderKey envelope).
+DATABASE_REJECT_ROOM_KEY_ENVELOPE_SQL ::
+	"WITH target AS (SELECT id, room_id, epoch, sender_user_id, " +
+	"COALESCE(forwarder_user_id, 0) AS forwarder_user_id, " +
+	"cardinality(recipient_user_ids) AS recipients FROM room_key_envelopes " +
+	"WHERE id = $2::bigint AND $1::bigint = ANY (recipient_user_ids) " +
+	"AND sender_user_id <> $1::bigint FOR UPDATE), " +
+	"deleted AS (DELETE FROM room_key_envelopes e USING target t " +
+	"WHERE e.id = t.id AND t.recipients = 1 RETURNING e.id), " +
+	"narrowed AS (UPDATE room_key_envelopes e " +
+	"SET recipient_user_ids = array_remove(e.recipient_user_ids, $1::bigint) FROM target t " +
+	"WHERE e.id = t.id AND t.recipients > 1 RETURNING e.id) " +
+	"SELECT (EXISTS (SELECT 1 FROM deleted) OR EXISTS (SELECT 1 FROM narrowed))::text, " +
+	"EXISTS (SELECT 1 FROM deleted)::text, COALESCE(t.room_id, 0)::text, " +
+	"COALESCE(t.epoch, 0)::text, COALESCE(t.sender_user_id, 0)::text, " +
+	"COALESCE(t.forwarder_user_id, 0)::text FROM (SELECT 1) AS one LEFT JOIN target t ON true"
+
+databaseExecuteRejectRoomKeyEnvelope :: proc(
+	conn: pg.Conn,
+	request: common.DatabaseRejectRoomKeyEnvelopeRequest,
+) -> common.DatabaseQueryResponse {
+	userIDParam := databaseIntParam(request.userId)
+	defer delete(userIDParam)
+	envelopeIDParam := databaseIntParam(request.envelopeId)
+	defer delete(envelopeIDParam)
+	params := [?][^]byte{transmute([^]byte)userIDParam, transmute([^]byte)envelopeIDParam}
+	result := databaseExecParams(conn, DATABASE_REJECT_ROOM_KEY_ENVELOPE_SQL, params[:])
+	if result == nil {
+		return databaseConnectionError(conn)
+	}
+	defer pg.clear(result)
+	if pg.result_status(result) != .Tuples_OK || pg.n_tuples(result) != 1 {
+		return databaseResultError(&result)
+	}
+	answer := common.DatabaseRejectRoomKeyEnvelopeResult {
+		rejected = databaseGetBool(result, 0, 0),
+		deleted  = databaseGetBool(result, 0, 1),
+	}
+	answer.roomId, _ = databaseGetInt(result, 0, 2)
+	answer.epoch, _ = databaseGetInt(result, 0, 3)
+	answer.senderId, _ = databaseGetInt(result, 0, 4)
+	answer.forwarderId, _ = databaseGetInt(result, 0, 5)
+	return databaseSuccess(answer)
+}
 
 databaseExecuteStoreRoomKeyEnvelope :: proc(
 	conn: pg.Conn,

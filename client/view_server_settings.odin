@@ -29,7 +29,7 @@ import "ui"
 //
 // Storage (attachments plan F4; admins), after the Admin section: admin-storage-refresh
 // (server ID). Removed files (protocol 29; admins), after Storage: admin-removals-refresh and
-// admin-removals-more (server ID). Member logs (protocol 34, #196; admins), after Removed
+// admin-removals-more (server ID). Member logs (protocol 35, #196; admins), after Removed
 // files: admin-room-logs-check (server ID), and per damaged room admin-room-log-truncate,
 // then in its confirmation admin-room-log-truncate-confirm and admin-room-log-truncate-cancel
 // (server and room ID).
@@ -404,7 +404,7 @@ viewServerSettings :: proc(
 			// Removed files (protocol 29, #138): the removal log, next to Storage.
 			removalsAction = viewAttachmentRemovals(state, ctx, &column, serverID)
 			_ = ui.cutTop(&column, sectionGap)
-			// Member logs (protocol 34, #196): damaged encrypted rooms and their repair.
+			// Member logs (protocol 35, #196): damaged encrypted rooms and their repair.
 			roomLogAction = viewRoomLogRepair(state, ctx, &column, serverID)
 			_ = ui.cutTop(&column, sectionGap)
 		}
@@ -1354,7 +1354,7 @@ viewAdminConfirm :: proc(
 	return
 }
 
-// What Member logs asks for (protocol 34, #196).
+// What Member logs asks for (protocol 35, #196).
 RoomLogRepairAction :: struct {
 	kind:      RoomLogRepairActionKind,
 	roomID:    int,
@@ -1369,7 +1369,7 @@ RoomLogRepairActionKind :: enum u8 {
 	Truncate,
 }
 
-// Member logs (admins, protocol 34, #196), after Removed files: Check member logs replays
+// Member logs (admins, protocol 35, #196), after Removed files: Check member logs replays
 // every encrypted room's member list; each damaged one shows why, with Truncate log to
 // version N… behind a confirmation that says what members will see.
 viewRoomLogRepair :: proc(

@@ -494,7 +494,7 @@ to version 4 of 6 stored entries, and the room's head is version 6. Truncate it 
 The way to repair it is from an admin's client: Server settings → **Member logs** → **Check
 member logs** lists every damaged room with the same facts, and **Truncate log to version N…**
 deletes everything after version N on the running server and tells the room's members
-([protocol 34](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/protocol.md#repairing-a-damaged-member-log-protocol-34)).
+([protocol 35](https://git.spyingwind.com/quonic/haychat/src/branch/main/docs/protocol.md#repairing-a-damaged-member-log-protocol-35)).
 Without an admin, use the SQL helper with the version from the log line:
 
 ```sh

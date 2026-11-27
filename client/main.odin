@@ -143,6 +143,11 @@ State :: struct {
 	roomChains:                     [dynamic]ServerRoomChains,
 	recordRoomChainNotes:           bool,
 	roomChainNotes:                 [dynamic]RoomChainNote,
+	// #78: the clock key checks back off by (tests set it; 0 is the wall clock), and the
+	// harness's test-only `room-keys ROOM_ID forge-forwards on` (forwards and answers then seal
+	// a random chain key, so the live proof has a forged forward to reject).
+	roomChainNowOverrideMS:         i64,
+	roomChainForgeForwards:         bool,
 	// Each server's roles (roles.odin, protocol 23).
 	serverRoles:                    [dynamic]ServerRoleCache,
 	// Registration (protocol 25, #43 G2, registration.odin): each server's invites and sign-up

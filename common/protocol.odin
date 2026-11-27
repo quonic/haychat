@@ -9,7 +9,7 @@ import "core:unicode/utf8"
 // It must remain shared between the client and server.
 
 ProtocolVersion :: u32
-protocolVersion: ProtocolVersion = 34
+protocolVersion: ProtocolVersion = 35
 GENERAL_ROOM_ID :: int(1)
 // Largest room or direct message the server accepts, in bytes of UTF-8 content.
 CHAT_MESSAGE_MAX_BYTES :: 4000
@@ -488,7 +488,10 @@ MessageType :: enum {
 	// Room changes for room managers (protocol 31, #73), appended so no existing wire value
 	// moves.
 	ServerAdminRoomChanged, // ServerAdminRoomChangedPayload: a room changed, to its managers
-	// Repairing a damaged member log (protocol 34, #196, common/room_log_repair.odin), appended
+	// Rejecting a key envelope that does not open (protocol 34, #78), appended so no existing
+	// wire value moves.
+	ClientRejectRoomKeyEnvelope, // ClientRejectRoomKeyEnvelopePayload: drop this copy for me
+	// Repairing a damaged member log (protocol 35, #196, common/room_log_repair.odin), appended
 	// so no existing wire value moves. Admins only, checked in the database statement.
 	ClientAdminRoomLogStatus, // ClientAdminRoomLogStatusPayload: replay a room's stored log
 	ServerAdminRoomLogStatus, // ServerAdminRoomLogStatusPayload: what the replay found
@@ -1295,6 +1298,20 @@ ServerRoomKeyRequestPayload :: struct {
 
 ROOM_KEYS_FETCH_MAX_ENVELOPES :: 32
 
+// ClientRejectRoomKeyEnvelope (protocol 34, #78, e2ee-design.md 6.6): the requester's client
+// opened envelope envelopeId (a stored envelope with a wrap for the requester, of a chain
+// someone else sent) and its chain key did not open a message of that chain, or its wrap did
+// not open at all. The server takes the requester off that envelope's wraps in the statement
+// that checks it (it deletes the row when the requester was its only recipient, as for every
+// forward), so the next forward or re-seal of the chain is stored for the requester and other
+// recipients keep theirs. Nothing is answered; at most ROOM_KEY_REJECTS_PER_MINUTE per session
+// (ROOM_KEY_REJECT_LIMIT_MESSAGE past it).
+ClientRejectRoomKeyEnvelopePayload :: struct {
+	envelopeId: int,
+}
+
+ROOM_KEY_REJECTS_PER_MINUTE :: 20
+
 // Refusals of sealed room messages and key envelopes (protocol 19), as ServerProtocolError.
 ROOM_KEY_OUT_OF_DATE_MESSAGE :: "Room key is out of date"
 SEALED_ROOM_MESSAGE_INVALID_MESSAGE :: "Invalid encrypted room message"
@@ -1305,6 +1322,8 @@ ROOM_MESSAGE_SIGNATURE_INVALID_MESSAGE :: "Invalid room message signature"
 ROOM_KEY_FORWARD_NOT_ALLOWED_MESSAGE :: "This room does not share its history with new members"
 ROOM_KEY_ENVELOPE_INVALID_MESSAGE :: "Invalid room key envelope"
 ROOM_KEY_REQUEST_INVALID_MESSAGE :: "Invalid room key request"
+// Protocol 34 (#78): a ClientRejectRoomKeyEnvelope past the session's limit.
+ROOM_KEY_REJECT_LIMIT_MESSAGE :: "Too many room key rejections"
 // A sealed message to a room that is not encrypted.
 SEALED_ROOM_MESSAGE_NOT_ENCRYPTED_MESSAGE :: "This room is not encrypted"
 
@@ -1799,7 +1818,7 @@ AdminAction :: enum u8 {
 	SetRestricted       = 10,
 	// Protocol 28 (attachments F3): ClientAdminRemoveAttachment.
 	RemoveAttachment    = 11,
-	// Protocol 34 (#196): ClientAdminTruncateRoomLog.
+	// Protocol 35 (#196): ClientAdminTruncateRoomLog.
 	TruncateRoomLog     = 12,
 }
 
@@ -1855,10 +1874,10 @@ ClientAdminBanUserPayload :: struct {
 // of (the server's unsigned Remove in each room's log, in the ban's transaction).
 // failedRoomIds (owned once decoded, ascending) names the encrypted rooms whose member log it
 // could not change (a damaged log, or a room another connection held locked); the ban still
-// applies, and an admin deals with those rooms by hand (protocol 34: ClientAdminRoomLogStatus
+// applies, and an admin deals with those rooms by hand (protocol 35: ClientAdminRoomLogStatus
 // and ClientAdminTruncateRoomLog). Empty for every other action.
 //
-// Protocol 34 (#196): roomId names the room a TruncateRoomLog repaired; 0 otherwise.
+// Protocol 35 (#196): roomId names the room a TruncateRoomLog repaired; 0 otherwise.
 ServerAdminActionResultPayload :: struct {
 	action:        AdminAction,
 	userId:        int,
@@ -2264,7 +2283,9 @@ DatabaseQueryRequest :: union {
 	DatabaseAttachmentRequest,
 	// Message edits and deletes (protocol 30, common/message_edits.odin).
 	DatabaseMessageChangeRequest,
-	// Member log repair (protocol 34, common/room_log_repair.odin).
+	// Protocol 34 (#78): a rejected key envelope.
+	DatabaseRejectRoomKeyEnvelopeRequest,
+	// Member log repair (protocol 35, common/room_log_repair.odin).
 	DatabaseRoomLogRepairRequest,
 }
 
@@ -2339,6 +2360,12 @@ DatabaseRoomKeyRequestCheckRequest :: struct {
 	epoch:       int,
 	senderId:    int,
 	chainId:     ChainID,
+}
+
+// Protocol 34 (#78): userId rejects its copy of envelope envelopeId.
+DatabaseRejectRoomKeyEnvelopeRequest :: struct {
+	userId:     int,
+	envelopeId: int,
 }
 
 // Returns a history page only when userId is a member of the room.
@@ -2581,6 +2608,7 @@ DatabaseQueryResult :: union {
 	DatabaseRestrictedChangesResult,
 	DatabaseAttachmentResult,
 	DatabaseMessageChangeResult,
+	DatabaseRejectRoomKeyEnvelopeResult,
 	DatabaseRoomLogRepairResult,
 }
 
@@ -3005,6 +3033,18 @@ DatabaseStoreRoomKeyEnvelopeResult :: struct {
 	outcome:          RoomKeyEnvelopeOutcome,
 	stored:           RoomKeyEnvelope,
 	recipientUserIDs: [dynamic]int,
+}
+
+// Protocol 34 (#78): rejected when the requester was taken off the envelope's wraps (deleted
+// when that removed the row), with the envelope's room and chain for the log. Not rejected:
+// no such envelope with a wrap for the requester, or a chain the requester sent.
+DatabaseRejectRoomKeyEnvelopeResult :: struct {
+	rejected:    bool,
+	deleted:     bool,
+	roomId:      int,
+	epoch:       int,
+	senderId:    int,
+	forwarderId: int,
 }
 
 // envelopes (owned) are in ID order when isMember. sinceEpoch and afterId echo the request.

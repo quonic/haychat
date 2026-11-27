@@ -852,7 +852,7 @@ testRoomLogServerRemovesTheLastManager :: proc(t: ^testing.T) {
 	)
 }
 
-// Protocol 34 (#196): an admin truncated the room's log. A client that verified a later
+// Protocol 35 (#196): an admin truncated the room's log. A client that verified a later
 // version fails the room (Rollback, the member-list warning) on the ServerRoomLog whose head is
 // below it; one at the new head carries on without fetching; and a whole-log fetch whose next
 // page says the head is now lower ends the log there instead of fetching on.

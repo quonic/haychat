@@ -6,7 +6,7 @@ import "core:strings"
 import "core:sync"
 import "core:testing"
 
-// Client tests for member log repair (protocol 34, #196, room_log_repair.odin): the transport
+// Client tests for member log repair (protocol 35, #196, room_log_repair.odin): the transport
 // decodes ServerAdminRoomLogStatus and refuses statuses the server could not have sent, the
 // truncation goes through the admin request tracker with its room, the status and its refusal
 // are kept per server, and the Admin section's Member logs rows say what is wrong and offer

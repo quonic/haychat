@@ -1,6 +1,6 @@
 package client
 
-// Repairing a damaged member log (protocol 34, #196, common/room_log_repair.odin). Admins
+// Repairing a damaged member log (protocol 35, #196, common/room_log_repair.odin). Admins
 // only; the server checks the admin role in the statement, so the client only decides which
 // controls to offer (State_isServerAdmin).
 //

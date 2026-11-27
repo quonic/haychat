@@ -156,10 +156,12 @@ PINNED_MESSAGE_TYPE_VALUES := [?]struct {
 	{.ServerMessageEdits, 227},
 	// Protocol 31 (#73: room changes for room managers).
 	{.ServerAdminRoomChanged, 228},
-	// Protocol 34 (#196: repairing a damaged member log).
-	{.ClientAdminRoomLogStatus, 229},
-	{.ServerAdminRoomLogStatus, 230},
-	{.ClientAdminTruncateRoomLog, 231},
+	// Protocol 34 (#78: rejecting a key envelope that does not open).
+	{.ClientRejectRoomKeyEnvelope, 229},
+	// Protocol 35 (#196: repairing a damaged member log).
+	{.ClientAdminRoomLogStatus, 230},
+	{.ServerAdminRoomLogStatus, 231},
+	{.ClientAdminTruncateRoomLog, 232},
 }
 
 // Enums carried as numbers inside payloads (protocol 14). Like MessageType, their values are
@@ -194,7 +196,7 @@ testPayloadEnumWireValuesArePinned :: proc(t: ^testing.T) {
 		int(AdminAction.TruncateRoomLog) == 12,
 		fmt.tprintf("expected AdminAction TruncateRoomLog 12, got %d", int(AdminAction.TruncateRoomLog)),
 	)
-	// Protocol 34 (#196): RoomLogStatus.error carries a RoomLogError as a number. Append new
+	// Protocol 35 (#196): RoomLogStatus.error carries a RoomLogError as a number. Append new
 	// errors at the end of the enum.
 	assert(
 		int(RoomLogError.None) == 0 &&
@@ -589,12 +591,14 @@ testProtocolVersionIsEighteenForEncryptedRoomLogs :: proc(t: ^testing.T) {
 	// added ServerAdminActionResult.failedRoomIds (#72: a ban removes the account from every
 	// encrypted room it is in and names the rooms it could not change); 33 changed the member
 	// log's rules (#195: the server's unsigned RemoveManager, which a ban writes); 34 added
-	// repairing a damaged member log (#196: ClientAdminRoomLogStatus, ServerAdminRoomLogStatus,
-	// ClientAdminTruncateRoomLog, AdminAction.TruncateRoomLog and ServerAdminActionResult.roomId).
+	// ClientRejectRoomKeyEnvelope (#78), so a newcomer drops a forward that does not open and
+	// the next one is stored; 35 added repairing a damaged member log (#196:
+	// ClientAdminRoomLogStatus, ServerAdminRoomLogStatus, ClientAdminTruncateRoomLog,
+	// AdminAction.TruncateRoomLog and ServerAdminActionResult.roomId).
 	assert(
-		protocolVersion == 34,
+		protocolVersion == 35,
 		fmt.tprintf(
-			"expected protocol version 34 for member log repair, got %d",
+			"expected protocol version 35 for member log repair, got %d",
 			protocolVersion,
 		),
 	)
@@ -2066,4 +2070,22 @@ testAdminRoomChangedPayloadRoundTrips :: proc(t: ^testing.T) {
 			),
 		)
 	}
+}
+
+// Protocol 34 (#78): ClientRejectRoomKeyEnvelope names only the envelope.
+@(test)
+testRejectRoomKeyEnvelopePayloadRoundTrips :: proc(t: ^testing.T) {
+	_ = t
+	encoded, err := cbor.marshal(ClientRejectRoomKeyEnvelopePayload{envelopeId = 4242})
+	assert(err == nil, "expected ClientRejectRoomKeyEnvelopePayload encoding to succeed")
+	defer delete(encoded)
+	decoded: ClientRejectRoomKeyEnvelopePayload
+	assert(
+		cbor.unmarshal(encoded, &decoded) == nil,
+		"expected ClientRejectRoomKeyEnvelopePayload to decode",
+	)
+	assert(
+		decoded.envelopeId == 4242,
+		fmt.tprintf("expected envelope 4242, got %d", decoded.envelopeId),
+	)
 }

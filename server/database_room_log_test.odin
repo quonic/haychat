@@ -1625,7 +1625,7 @@ testBanRemovesLogManagersAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 }
 
-// ── Member log repair (protocol 34, #196) ───────────────────────────────────────────────────
+// ── Member log repair (protocol 35, #196) ───────────────────────────────────────────────────
 
 // Runs a repair request; the result's arrays are copied to the temp allocator.
 @(private = "file")
@@ -1733,7 +1733,7 @@ roomLogTestAccess :: proc(conn: pg.Conn, roomID: int) -> string {
 	)
 }
 
-// Protocol 34 (#196): an admin diagnoses a room whose stored log stops replaying at version 5
+// Protocol 35 (#196): an admin diagnoses a room whose stored log stops replaying at version 5
 // (an entry's signature damaged in the database) and truncates it to version 4. The status
 // names the failing version and the rule, a non-admin is refused both requests, a healthy or
 // unencrypted room and a toVersion other than the good one are refused, and the truncation
@@ -2006,7 +2006,7 @@ testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
 	)
 }
 
-// Protocol 34 (#196): deploy/sql/truncate-room-log.sql, run as the file has it on a log whose
+// Protocol 35 (#196): deploy/sql/truncate-room-log.sql, run as the file has it on a log whose
 // last entry is an unsigned forgery and whose rows were changed behind the server's back (a
 // botched restore): it refuses what it can check, and then leaves exactly what the server's
 // replay finds at the version it was given (members, managers, access and head), after which

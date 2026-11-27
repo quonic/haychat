@@ -78,7 +78,8 @@ version below therefore needs clients and servers rebuilt together.
 | 31 | Room changes for room managers (#73, [below](#room-changes-for-room-managers-protocol-31)): `ServerAdminRoomChanged{roomId, change}` (wire value 228) and `AdminRoomChange` (Created 0, Edited 1, Deleted 2, Members 3, Permissions 4). Holders of ManageRooms or ManageRoomMembers hear of every change to every room, so their list of every room and an open Permissions page follow other managers' changes. No schema migration |
 | 32 | Bans leave encrypted rooms (#72, [below](#bans-and-encrypted-rooms-protocol-32)): a ban removes the account from every encrypted room it is a member of with the server's unsigned Remove, in the ban's transaction, and `ServerAdminActionResult.failedRoomIds` names the encrypted rooms whose member log the ban could not change. No new message type and no schema migration |
 | 33 | Bans and log managers (#195, [below](#bans-and-log-managers-protocol-33)): the member log accepts the server's unsigned `RemoveManager` of an account that is no longer a member, which `LastManager` never refuses, and a ban writes it into every encrypted room whose log names the account as a manager, also the last one (the room is left with no manager). Only the log's validation rules change: no entry layout, label, message type or schema migration |
-| 34 | Repairing a damaged member log (#196, [below](#repairing-a-damaged-member-log-protocol-34)): `ClientAdminRoomLogStatus{roomId}`, `ServerAdminRoomLogStatus{roomId, rooms, checkedRooms, damagedRooms}` and `ClientAdminTruncateRoomLog{roomId, toVersion}` (wire values 229 to 231), `RoomLogStatus` (with a `RoomLogError` as a number), `AdminAction.TruncateRoomLog` (12) and `ServerAdminActionResult.roomId`. Admins see which encrypted rooms' logs do not replay and why, and truncate one to the last version that does; clients fail a room whose head goes below the version they verified. No schema migration |
+| 34 | Rejecting a key envelope that does not open (#78, [below](#rejecting-a-key-envelope-protocol-34)): `ClientRejectRoomKeyEnvelope{envelopeId}` (wire value 229) and the refusal "Too many room key rejections". A client keeps another member's chain key only after a message of the chain opens with it, and rejects a copy that does not; the server then stores the next forward. A wrap stored before the recipient's current encryption key no longer counts as held. No schema migration and no envelope layout change |
+| 35 | Repairing a damaged member log (#196, [below](#repairing-a-damaged-member-log-protocol-35)): `ClientAdminRoomLogStatus{roomId}`, `ServerAdminRoomLogStatus{roomId, rooms, checkedRooms, damagedRooms}` and `ClientAdminTruncateRoomLog{roomId, toVersion}` (wire values 230 to 232), `RoomLogStatus` (with a `RoomLogError` as a number), `AdminAction.TruncateRoomLog` (12) and `ServerAdminActionResult.roomId`. Admins see which encrypted rooms' logs do not replay and why, and truncate one to the last version that does; clients fail a room whose head goes below the version they verified. No schema migration |
 
 Wire values 120 and 121 (`ClientStoreFile`, `ServerStoreFileResponse`) are retired placeholders
 (#31): no client sent them, and the server answers `ClientStoreFile` with "Unsupported message
@@ -876,7 +877,7 @@ protocol 33:
   server later cannot bring a demoted manager's signatures back. It still cannot add a member or
   a manager, give anyone a key, or read a message.
 
-### Repairing a damaged member log (protocol 34)
+### Repairing a damaged member log (protocol 35)
 
 A stored log is damaged when it does not replay from version 1 (an entry a rule refuses, a row
 that is not an entry, a gap in the versions) or does not end at the room's head
@@ -892,7 +893,7 @@ version 4 (Server settings, Admin, Member logs; or deploy/sql/truncate-room-log.
 -v room_id=12 -v to_version=4, then restart the server).
 ```
 
-Since protocol 34 admins (checked in the statement, like attachment moderation) can do this
+Since protocol 35 admins (checked in the statement, like attachment moderation) can do this
 from a client (#196; the maintainer chose truncation over deleting the room):
 
 - **Diagnose.** `ClientAdminRoomLogStatus{roomId}` replays one encrypted room's stored log
@@ -1031,7 +1032,44 @@ never does any of this.
   forwarder who was a member at the same time as the recipient, for a chain whose sender was a
   member of its epoch, and only when its signature verifies against the forwarder's pin (or the
   identity the log names). Messages are still verified against their real senders' keys, so a
-  forwarder can give access to history but never forge a message in it.
+  forwarder can give access to history but never forge a message in it. Since protocol 34 the
+  newcomer also checks the key itself ([below](#rejecting-a-key-envelope-protocol-34)).
+
+## Rejecting a key envelope (protocol 34)
+
+A member could forward a wrong chain key, validly signed, ahead of the real one, and the server
+would keep that first copy and drop every later one. A wrap made for an encryption key that the
+recipient has since replaced blocked later copies in the same way. Neither can forge a message,
+because every message is checked against its sender's pin, but both hide messages from a
+newcomer (#78, [plan/e2ee-design.md](plan/e2ee-design.md) section 6.6).
+
+- **Checking a key.** A client keeps a chain that someone else sent (a forward, or another
+  member's distribution or re-seal) **unchecked** until a message or sealed edit of that chain
+  opens with it. The message's signature is verified against the sender's pin before that, as
+  always. An unchecked chain is kept in memory only and never written to the key store. A key
+  whose message fails the AEAD, or that starts after the message's index, is dropped and its
+  envelope rejected. So is an envelope addressed to the client that does not open or that the
+  client may not take. The message keeps waiting for its key.
+- **`ClientRejectRoomKeyEnvelope{envelopeId}`.** The server takes the requester off the wraps of
+  that envelope in the statement that checks it. The envelope must have a wrap for the requester
+  and must be of a chain the requester did not send. The row is deleted when the requester was
+  its only recipient (every forward and every re-seal answering the requester). Otherwise only
+  the requester's ID leaves the row, so the other recipients keep their copies. The requester
+  then no longer fetches the envelope, and the next forward or re-seal for it is stored.
+  Nothing is answered. An envelope ID of 0 or below is refused with "Invalid room key request".
+  A session may reject at most 20 envelopes a minute; past that the server refuses with "Too
+  many room key rejections".
+- **What the client does next.** It never opens a rejected envelope again. After a back-off of
+  2, 8 and then 30 seconds it fetches the room's envelopes again and sends `ClientRequestRoomKey`
+  again. It does this at most three times per chain and session, and sends at most four rejects
+  per chain and session. A member answers the same request again only 1.5 seconds after its
+  last answer. A reject is logged on the client (stderr, no key material) and reported to
+  nobody.
+- **Old encryption keys.** When the server decides whether a recipient already holds a chain
+  (the first copy wins), it ignores a wrap stored before the recipient's current encryption key
+  was stored (`user_encryption_keys.updated_at`). A wrap that the server stored after a key
+  change, because the sender's pin was stale, does not open for the recipient and is rejected
+  as above.
 
 ## Encrypted voice (protocol 21)
 

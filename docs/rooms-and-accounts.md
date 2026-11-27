@@ -224,7 +224,7 @@ below in the database for every request, in the same statement as the change.
   and nothing proves it came from a ban: a server that is not honest can take any manager away
   this way, in the open, which freezes who joins a room but lets it read nothing and add no
   one.
-- **Damaged member lists** (protocol 34, #196): an encrypted room whose stored member list
+- **Damaged member lists** (protocol 35, #196): an encrypted room whose stored member list
   does not replay (an entry that no longer verifies, a gap, or a head that does not match, for
   example after a bad restore) refuses every change to its members. **Member logs**, under
   Removed files in Server settings, shows such rooms after **Check member logs**: which version

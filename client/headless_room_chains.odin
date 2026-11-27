@@ -227,9 +227,12 @@ HEADLESS_ROOM_KEY_OUTCOME_NAMES := [RoomChainKeyOutcome]string {
 	.Refused    = "refused",
 	.NotAllowed = "not_allowed",
 	.NotHeld    = "not_held",
+	.Unchecked  = "unchecked",
+	.Rejected   = "rejected",
 }
 
-// room_key: an envelope this client handled. room_key_request: a request it answered
+// room_key: an envelope this client handled (protocol 34, #78: unchecked when a chain someone
+// else sent waits for a message to check it, then stored or rejected when one did). room_key_request: a request it answered
 // (outcome stored), refused, or could not answer (not_held), and (Full history) each chain an
 // inviter forwards. forwarderID: who forwarded a RoomKeyForward envelope (room_key), or this
 // account when it forwarded one (room_key_request); 0 for a SenderKey envelope.
@@ -323,6 +326,7 @@ HeadlessRoomChainJSON :: struct {
 	senderID:   int,
 	chainID:    string,
 	startIndex: u32,
+	unchecked:  bool, // #78: no message of the chain has opened with it yet
 }
 
 // `room-keys`: never a key, only which chains are held and how sending stands.
@@ -341,6 +345,7 @@ HeadlessRoomKeysJSON :: struct {
 	queued:       int,
 	inFlight:     int,
 	keysFetched:  bool,
+	forgeForwards: bool, // Test only (#78)
 }
 
 HEADLESS_ROOM_DISTRIBUTION_NAMES := [RoomChainDistribution]string {
@@ -357,9 +362,20 @@ headlessCommandRoomKeys :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 	}
 	state := &harness.state
 	serverID := state.selected_server_id
-	if len(command.args) > 1 && len(command.args[1]) > 0 {
+	usage := "usage: room-keys ROOM_ID [fetch | forge-forwards on|off]"
+	if len(command.args) > 1 && command.args[1] == "forge-forwards" {
+		// Test only (#78): this client's forwards and key answers seal a random chain key.
+		if len(command.args) < 3 || (command.args[2] != "on" && command.args[2] != "off") {
+			headlessWriteError(harness, command.name, usage)
+			return
+		}
+		state.roomChainForgeForwards = command.args[2] == "on"
+	} else if len(command.args) > 2 && len(command.args[2]) > 0 {
+		headlessWriteError(harness, command.name, usage)
+		return
+	} else if len(command.args) > 1 && len(command.args[1]) > 0 {
 		if command.args[1] != "fetch" {
-			headlessWriteError(harness, command.name, "usage: room-keys ROOM_ID [fetch]")
+			headlessWriteError(harness, command.name, usage)
 			return
 		}
 		if errorMessage := State_roomChainsFetchKeysNow(state, serverID, roomID);
@@ -382,6 +398,7 @@ headlessCommandRoomKeys :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 					senderID = chain.senderUserID,
 					chainID = headlessTempHex(chainID[:]),
 					startIndex = chain.startIndex,
+					unchecked = chain.unchecked,
 				},
 			)
 		}
@@ -408,6 +425,7 @@ headlessCommandRoomKeys :: proc(harness: ^HeadlessHarness, command: ^HeadlessPar
 		queued       = len(room.queued),
 		inFlight     = len(room.inFlight),
 		keysFetched  = room.keysFetched,
+		forgeForwards = state.roomChainForgeForwards,
 	}
 	if room.hasSending {
 		value.sendingChain = headlessTempHex(sendingChain[:])
