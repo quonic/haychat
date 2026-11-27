@@ -136,7 +136,8 @@ an encrypted room:
   [Admin Actions](#admin-actions)): a room whose only manager is banned is left with no manager.
   Its members still talk and admins still remove members, but nobody can add members (in a
   Member invite room members still can), change the managers or switch the access, and the
-  Members page says "This room has no manager left, so nobody can add members." The server never
+  Members page says "This room has no manager left, so nobody can add members." (in a Member
+  invite room "This room has no manager left; only members can add people."). The server never
   makes anyone a manager; an admin can delete the room, and members move to a new one.
 - `ClientAddRoomMember` and `ClientLeaveRoom` are refused for encrypted rooms ("This room is
   encrypted: its members change through its member list"); the client signs log entries

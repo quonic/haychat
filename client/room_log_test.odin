@@ -822,13 +822,11 @@ testRoomLogServerRemovesTheLastManager :: proc(t: ^testing.T) {
 	)
 	rights := roomLogRights(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
 	assert(
-		!rights.canAdd && rights.canLeave && !rights.canManageManagers,
-		fmt.tprintf("expected bob to leave but not add, got %v", rights),
-	)
-	assert(
-		State_roomLogAskManagersText(&bob, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM) ==
-		ROOM_LOG_NO_MANAGER_NOTE,
-		"expected the no-manager note",
+		!rights.canAdd &&
+		rights.canLeave &&
+		!rights.canManageManagers &&
+		rights.addNote == ROOM_LOG_NO_MANAGER_NOTE,
+		fmt.tprintf("expected bob to leave but not add, and told why, got %v", rights),
 	)
 	sentBefore := len(roomLogTestAppends)
 	errorMessage, _ := State_roomLogAppend(
@@ -845,7 +843,11 @@ testRoomLogServerRemovesTheLastManager :: proc(t: ^testing.T) {
 	State_resetRoomEditor(&bob, .Members, ROOM_LOG_TEST_SERVER, ROOM_LOG_TEST_ROOM)
 	view := buildRoomMembersView(&bob)
 	assert(
-		view.encrypted && len(view.managers) == 0 && len(view.members) == 1 && !view.canAdd,
+		view.encrypted &&
+		len(view.managers) == 0 &&
+		len(view.members) == 1 &&
+		!view.canAdd &&
+		view.addNote == ROOM_LOG_NO_MANAGER_NOTE,
 		fmt.tprintf("expected the Members page with no manager, got %v", view),
 	)
 }

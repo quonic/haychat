@@ -43,6 +43,7 @@ import "core:time"
 ROOM_LOG_CHANGED_WARNING :: "This room's member list was changed on the server"
 // Protocol 33 (#195): a room whose only manager was banned.
 ROOM_LOG_NO_MANAGER_NOTE :: "This room has no manager left, so nobody can add members."
+ROOM_LOG_NO_MANAGER_MEMBERS_NOTE :: "This room has no manager left; only members can add people."
 ROOM_LOG_NOT_SET_UP_NOTE :: "This encrypted room's member list has not been set up yet"
 
 RoomLogStatus :: enum u8 {
@@ -1036,10 +1037,13 @@ State_roomLogUserName :: proc(state: ^State, serverID, userID: int) -> string {
 }
 
 // Why someone who is not a manager cannot add (temp): whom to ask, or (protocol 33, #195: a
-// ban removed the only manager) that nobody can.
+// ban removed the only manager) that nobody can, or only members can.
 State_roomLogAskManagersText :: proc(state: ^State, serverID, roomID: int) -> string {
 	if verified := State_roomLogVerified(state, serverID, roomID);
 	   verified != nil && len(verified.managers) == 0 {
+		if verified.access == .MemberInvite {
+			return ROOM_LOG_NO_MANAGER_MEMBERS_NOTE
+		}
 		return ROOM_LOG_NO_MANAGER_NOTE
 	}
 	return fmt.tprintf(
@@ -1545,7 +1549,8 @@ roomLogRights :: proc(state: ^State, serverID, roomID: int) -> (rights: RoomLogR
 		// The Members page says so before anything is sent (design 6.1).
 		rights.canAdd = false
 		rights.addNote = common.ENCRYPTED_ROOM_FULL_MESSAGE + "."
-	} else if !rights.canAdd && rights.isAdmin {
+	} else if !rights.canAdd && (rights.isAdmin || len(room.state.managers) == 0) {
+		// Protocol 33 (#195): everyone is told when a ban left the room with no manager.
 		rights.addNote = State_roomLogAskManagersText(state, serverID, roomID)
 	}
 	rights.canRemove = rights.isManager || rights.isAdmin
