@@ -662,6 +662,7 @@ State_transportProtocolError :: proc(state: ^State, serverID: int, message: stri
 	State_roomEditorProtocolError(state, serverID, message)
 	State_roomMembersProtocolError(state, serverID)
 	State_adminProtocolError(state, serverID, message)
+	State_roomLogStatusProtocolError(state, serverID, message)
 	State_registrationProtocolError(state, serverID, message)
 	State_e2eeProtocolError(state, serverID)
 	State_roomLogsProtocolError(state, serverID)
@@ -807,6 +808,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.requestID,
 			event.blobID,
 			event.failedRoomIDs[:],
+			event.roomID,
 		)
 		State_registrationAdminResult(
 			state,
@@ -817,6 +819,9 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		)
 		if event.adminAction == .RemoveAttachment {
 			State_attachmentRemovalApplied(state, event.serverID)
+		}
+		if event.adminAction == .TruncateRoomLog {
+			State_roomLogTruncateApplied(state, event.serverID)
 		}
 	case .RegistrationRequired:
 		State_registrationRequired(state, event)
@@ -854,6 +859,8 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 		State_attachmentUsageReceived(state, event.serverID, &event.attachmentUsage)
 	case .AttachmentRemovalsReceived:
 		State_attachmentRemovalsReceived(state, event.serverID, &event.attachmentRemovals)
+	case .RoomLogStatusReceived:
+		State_roomLogStatusReceived(state, event.serverID, &event.roomLogStatus)
 	case .RoleListReceived:
 		State_receiveRoleList(state, event.serverID, &event.roles)
 	case .RoleUpdated:

@@ -60,6 +60,13 @@ ServerConnection :: struct {
 	hasAttachmentRemovals:     bool,
 	attachmentRemovalsHasMore: bool,
 	attachmentRemovalsPending: bool,
+	// Protocol 33 (#196, room_log_repair.odin): the last ServerAdminRoomLogStatus (rooms owned),
+	// whether one arrived, whether a request waits for its answer, and the refusal of the last
+	// one (owned).
+	roomLogStatus:             common.ServerAdminRoomLogStatusPayload,
+	hasRoomLogStatus:          bool,
+	roomLogStatusPending:      bool,
+	roomLogStatusError:        string,
 	// The sign-up screen: its phase, the server's sentence for it (owned), and the request's
 	// state from ServerRegistrationRequired.
 	signUp:                   SignUpPhase,
@@ -70,6 +77,8 @@ ServerConnection :: struct {
 ServerConnection_deinit :: proc(connection: ^ServerConnection) {
 	common.ServerAdminAttachmentUsagePayload_deinit(&connection.attachmentUsage)
 	common.AttachmentRemovalEntries_deinit(&connection.attachmentRemovals)
+	common.ServerAdminRoomLogStatusPayload_deinit(&connection.roomLogStatus)
+	delete(connection.roomLogStatusError)
 	delete(connection.signUpMessage)
 	delete(connection.nickname)
 	delete(connection.detail)
@@ -295,6 +304,7 @@ State_connectionFailed :: proc(state: ^State, event: ^ClientTransportRuntimeEven
 	connection.lastAttemptFailed = true
 	connection.attachmentUsagePending = false
 	connection.attachmentRemovalsPending = false
+	connection.roomLogStatusPending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}
@@ -327,6 +337,7 @@ State_connectionLost :: proc(state: ^State, event: ^ClientTransportRuntimeEvent)
 	connection.lastAttemptFailed = false
 	connection.attachmentUsagePending = false
 	connection.attachmentRemovalsPending = false
+	connection.roomLogStatusPending = false
 	connection.userID = 0
 	connection.isAdmin = false
 	connection.permissions = {}

@@ -1333,6 +1333,8 @@ databaseExecuteRequest :: proc(
 		return databaseExecuteAttachmentRequest(conn, r)
 	case common.DatabaseMessageChangeRequest:
 		return databaseExecuteMessageChange(conn, r)
+	case common.DatabaseRoomLogRepairRequest:
+		return databaseExecuteRoomLogRepair(conn, r)
 	case nil:
 		return databaseErrorResponse(strings.clone("missing database query"))
 	}

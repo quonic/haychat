@@ -369,7 +369,8 @@ IPC__database_query_request_deinit :: proc(request: common.DatabaseQueryRequest)
 	     common.DatabasePublishEncryptionKeyRequest,
 	     common.DatabaseFetchRoomLogRequest,
 	     common.DatabaseFetchRoomKeysRequest,
-	     common.DatabaseRoomKeyRequestCheckRequest:
+	     common.DatabaseRoomKeyRequestCheckRequest,
+	     common.DatabaseRoomLogRepairRequest:
 	case nil:
 	}
 }
@@ -504,6 +505,9 @@ IPC__database_query_response_deinit :: proc(response: common.DatabaseQueryRespon
 	case common.DatabaseMessageChangeResult:
 		result := r
 		common.DatabaseMessageChangeResult_deinit(&result)
+	case common.DatabaseRoomLogRepairResult:
+		result := r
+		common.DatabaseRoomLogRepairResult_deinit(&result)
 	case common.DatabaseAttachmentResult:
 		delete(r.blobs)
 		delete(r.removal.readerUserIds)

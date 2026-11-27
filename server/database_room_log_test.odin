@@ -4,6 +4,7 @@ import "../common"
 import "core:fmt"
 import "core:os"
 import "core:slice"
+import "core:strconv"
 import "core:strings"
 import "core:testing"
 import "shared:pg"
@@ -1468,6 +1469,124 @@ roomLogTestUnsigned :: proc(
 // adds). A client cannot send the server's RemoveManager itself.
 @(test)
 testBanRemovesLogManagersAgainstPostgreSQL :: proc(t: ^testing.T) {
+// ── Member log repair (protocol 33, #196) ───────────────────────────────────────────────────
+
+// Runs a repair request; the result's arrays are copied to the temp allocator.
+@(private = "file")
+roomLogTestRepair :: proc(
+	conn: pg.Conn,
+	serverKey: common.IdentityPublicKeyBytes,
+	action: common.DatabaseRoomLogRepairAction,
+	actorID, roomID: int,
+	toVersion := 0,
+) -> (
+	result: common.DatabaseRoomLogRepairResult,
+) {
+	response := databaseExecuteRequest(
+		conn,
+		common.DatabaseRoomLogRepairRequest {
+			action = action,
+			actorUserId = actorID,
+			roomId = roomID,
+			toVersion = toVersion,
+			serverIdentityPublicKey = serverKey,
+		},
+	)
+	defer IPC__database_query_response_deinit(response)
+	got, ok := response.result.(common.DatabaseRoomLogRepairResult)
+	assert(response.success && ok, fmt.tprintf("expected the repair to run: %s", response.message))
+	result = got
+	copyIDs :: proc(ids: [dynamic]int) -> [dynamic]int {
+		copied := make([dynamic]int, context.temp_allocator)
+		append(&copied, ..ids[:])
+		return copied
+	}
+	result.statuses = make([dynamic]common.RoomLogStatus, context.temp_allocator)
+	append(&result.statuses, ..got.statuses[:])
+	result.memberUserIDs = copyIDs(got.memberUserIDs)
+	result.managerUserIDs = copyIDs(got.managerUserIDs)
+	result.addedUserIDs = copyIDs(got.addedUserIDs)
+	result.removedUserIDs = copyIDs(got.removedUserIDs)
+	result.formerUserIDs = copyIDs(got.formerUserIDs)
+	return
+}
+
+// The status of roomID in a Status answer, if it lists the room.
+@(private = "file")
+roomLogTestStatusOf :: proc(
+	result: common.DatabaseRoomLogRepairResult,
+	roomID: int,
+) -> (
+	common.RoomLogStatus,
+	bool,
+) {
+	for status in result.statuses {
+		if status.roomId == roomID {
+			return status, true
+		}
+	}
+	return {}, false
+}
+
+// A SealedRoomMessage's first bytes for epoch (the server stores the rest as it is).
+@(private = "file")
+roomLogTestSealedHex :: proc(epoch: int) -> string {
+	return fmt.tprintf("01%02x00000000000000aa", epoch)
+}
+
+// The DO block of deploy/sql/truncate-room-log.sql, as the file has it: the test runs the
+// helper's own code, with the two settings its psql lines set.
+ROOM_LOG_TEST_TRUNCATE_HELPER :: #load("../deploy/sql/truncate-room-log.sql", string)
+
+// Runs the SQL helper's block for roomID and toVersion; "" when it truncated the log,
+// otherwise the error PostgreSQL raised (and nothing changed).
+@(private = "file")
+roomLogTestRunHelper :: proc(conn: pg.Conn, roomID, toVersion: int) -> string {
+	helper := ROOM_LOG_TEST_TRUNCATE_HELPER
+	start := strings.index(helper, "DO $$")
+	end := strings.last_index(helper, "$$;")
+	assert(start >= 0 && end > start, "expected one DO block in truncate-room-log.sql")
+	databaseDefaultRoomTestExec(
+		conn,
+		"set the helper's settings",
+		fmt.tprintf(
+			"SELECT set_config('haychat.room_id', '%d', false), " +
+			"set_config('haychat.to_version', '%d', false)",
+			roomID,
+			toVersion,
+		),
+	)
+	databaseDefaultRoomTestExec(conn, "mark the helper's savepoint", "SAVEPOINT helper")
+	block, _ := strings.clone_to_cstring(helper[start:end + 3], context.temp_allocator)
+	result := pg.exec(conn, block)
+	defer pg.clear(result)
+	if pg.result_status(result) == .Command_OK {
+		databaseDefaultRoomTestExec(conn, "keep the helper's change", "RELEASE SAVEPOINT helper")
+		return ""
+	}
+	message := strings.clone_from_cstring(pg.result_error_message(result), context.temp_allocator)
+	databaseDefaultRoomTestExec(conn, "undo the helper", "ROLLBACK TO SAVEPOINT helper")
+	return message
+}
+
+@(private = "file")
+roomLogTestAccess :: proc(conn: pg.Conn, roomID: int) -> string {
+	return databaseAdminTestValue(
+		conn,
+		fmt.tprintf("SELECT access::text FROM rooms WHERE id = %d", roomID),
+	)
+}
+
+// Protocol 33 (#196): an admin diagnoses a room whose stored log stops replaying at version 5
+// (an entry's signature damaged in the database) and truncates it to version 4. The status
+// names the failing version and the rule, a non-admin is refused both requests, a healthy or
+// unencrypted room and a toVersion other than the good one are refused, and the truncation
+// deletes the later entries, the later epochs' envelopes, sealed messages and sealed edits
+// (fixing the edit count), rebuilds the members (carol back, dave out with his read marker)
+// and the managers (bob back) at version 4, and moves the head, after which the remaining
+// members' next signed entry follows version 4's hash.
+@(test)
+testRoomLogRepairAgainstPostgreSQL :: proc(t: ^testing.T) {
 	_ = t
 	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
 		return
@@ -1622,4 +1741,388 @@ testBanRemovesLogManagersAgainstPostgreSQL :: proc(t: ^testing.T) {
 		again.failed == "",
 		fmt.tprintf("expected a second ban to change nothing, got %v", again),
 	)
+}
+	conn := databaseAdminTestOpen(t, "room_log_repair")
+	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
+	assert(serverKeyOK, "expected a server key")
+	alice := roomLogTestAccount(conn, "repair-alice")
+	databaseAdminTestGrant(conn, alice.userID)
+	bob := roomLogTestAccount(conn, "repair-bob")
+	carol := roomLogTestAccount(conn, "repair-carol")
+	dave := roomLogTestAccount(conn, "repair-dave")
+	erin := roomLogTestAccount(conn, "repair-erin")
+
+	created := roomLogTestCreateRoom(conn, alice.userID, "repair-room", .AdminInvite)
+	head := RoomLogTestHead {
+		roomID = created.room.id,
+	}
+	room := head.roomID
+	aliceOnly := []RoomLogTestAccount{alice}
+	steps := [?]RoomLogTestEntry {
+		{action = .Create, actor = alice, access = .AdminInvite, history = .Full, joins = true,
+			managers = aliceOnly},
+		{action = .Add, actor = alice, target = bob},
+		{action = .Add, actor = alice, target = carol},
+		{action = .AddManager, actor = alice, target = bob},
+		{action = .Remove, actor = alice, target = carol},
+		{action = .RemoveManager, actor = alice, target = bob},
+		{action = .Add, actor = alice, target = dave},
+		{action = .SetAccess, actor = alice, access = .MemberInvite, history = .Full},
+	}
+	// The Create's room has Full history only if the room was created so: edit the row first.
+	databaseDefaultRoomTestExec(
+		conn,
+		"full history",
+		fmt.tprintf("UPDATE rooms SET history_visibility = 2 WHERE id = %d", room),
+	)
+	goodHead: RoomLogTestHead
+	for step, index in steps {
+		roomLogTestExpect(conn, serverKey, &head, alice.userID,
+			roomLogTestSign(serverKey, head, step), .Applied, fmt.tprintf("entry %d", index + 1))
+		if head.version == 4 {
+			goodHead = head
+		}
+	}
+	other := roomLogTestBanRoom(conn, serverKey, alice, "repair-healthy", {bob})
+	assert(
+		roomLogTestMembers(conn, room) == roomLogTestIDs({alice.userID, bob.userID, dave.userID}) &&
+		roomLogTestManagers(conn, room) == roomLogTestIDs({alice.userID}) &&
+		roomLogTestAccess(conn, room) == "2",
+		"expected the room at version 8 before the damage",
+	)
+
+	// Later epochs' rows: envelopes at 4 and 6, sealed messages at 4 and 7, two sealed edits of
+	// the epoch 4 message (one on an epoch 8 chain), and dave's read marker.
+	databaseDefaultRoomTestExec(
+		conn,
+		"store the epochs' rows",
+		fmt.tprintf(
+			"INSERT INTO room_key_envelopes (room_id, epoch, sender_user_id, chain_id, " +
+			"recipient_user_ids, envelope) VALUES " +
+			"(%d, 4, %d, '\\x00112233445566778899aabbccddee04', ARRAY[%d]::bigint[], '\\x01'), " +
+			"(%d, 6, %d, '\\x00112233445566778899aabbccddee06', ARRAY[%d]::bigint[], '\\x01'); " +
+			"INSERT INTO chat_messages (room_id, sender_user_id, content, client_message_id, " +
+			"sealed, epoch, chain_id, chain_index) VALUES " +
+			"(%d, %d, '', '\\x000000000000000000000000000000a4', decode('%s', 'hex'), 4, " +
+			"'\\x00112233445566778899aabbccddee04', 0), " +
+			"(%d, %d, '', '\\x000000000000000000000000000000a7', decode('%s', 'hex'), 7, " +
+			"'\\x00112233445566778899aabbccddee07', 0)",
+			room, alice.userID, bob.userID,
+			room, alice.userID, bob.userID,
+			room, alice.userID, roomLogTestSealedHex(4),
+			room, alice.userID, roomLogTestSealedHex(7),
+		),
+	)
+	kept := databaseAdminTestValue(
+		conn,
+		fmt.tprintf("SELECT id::text FROM chat_messages WHERE room_id = %d AND epoch = 4", room),
+	)
+	databaseDefaultRoomTestExec(
+		conn,
+		"store the edits and the marker",
+		fmt.tprintf(
+			"INSERT INTO chat_message_edits (message_id, sender_user_id, client_message_id, " +
+			"sealed, chain_id, chain_index) VALUES " +
+			"(%s, %d, '\\x000000000000000000000000000000e4', decode('%s', 'hex'), " +
+			"'\\x00112233445566778899aabbccddee04', 1), " +
+			"(%s, %d, '\\x000000000000000000000000000000e8', decode('%s', 'hex'), " +
+			"'\\x00112233445566778899aabbccddee08', 0); " +
+			"UPDATE chat_messages SET edit_count = 2, edited_at = now() WHERE id = %s; " +
+			"INSERT INTO room_read_markers (user_id, room_id, last_read_message_id) " +
+			"VALUES (%d, %d, %s)",
+			kept, alice.userID, roomLogTestSealedHex(4),
+			kept, alice.userID, roomLogTestSealedHex(8),
+			kept,
+			dave.userID, room, kept,
+		),
+	)
+
+	// The damage: entry 5's signature, so the log replays to version 4 only.
+	databaseDefaultRoomTestExec(
+		conn,
+		"damage entry 5",
+		fmt.tprintf(
+			"UPDATE room_log_entries SET entry = set_byte(entry, octet_length(entry) - 1, " +
+			"get_byte(entry, octet_length(entry) - 1) # 255) " +
+			"WHERE room_id = %d AND version = 5",
+			room,
+		),
+	)
+	appended := roomLogTestAppend(conn, serverKey, alice.userID, room,
+		roomLogTestSign(serverKey, head, {action = .Remove, actor = alice, target = dave}))
+	assert(appended.outcome == .Damaged, "expected appends to the damaged room refused")
+
+	// Diagnose.
+	refused := roomLogTestRepair(conn, serverKey, .Status, erin.userID, 0)
+	assert(
+		refused.outcome == .NotAdmin && len(refused.statuses) == 0,
+		"expected a non-admin's status refused",
+	)
+	one := roomLogTestRepair(conn, serverKey, .Status, alice.userID, room)
+	want := common.RoomLogStatus {
+		roomId         = room,
+		storedVersion  = 8,
+		entryCount     = 8,
+		goodVersion    = 4,
+		failingVersion = 5,
+		error          = .BadSignature,
+	}
+	assert(
+		one.outcome == .Applied && len(one.statuses) == 1 && one.statuses[0] == want,
+		fmt.tprintf("expected the room's status %v, got %v", want, one.statuses[:]),
+	)
+	healthy := roomLogTestRepair(conn, serverKey, .Status, alice.userID, other.roomID)
+	assert(
+		healthy.outcome == .Applied &&
+		len(healthy.statuses) == 1 &&
+		!common.roomLogStatusIsDamaged(healthy.statuses[0]),
+		fmt.tprintf("expected the healthy room intact, got %v", healthy.statuses[:]),
+	)
+	every := roomLogTestRepair(conn, serverKey, .Status, alice.userID, 0)
+	listed, isListed := roomLogTestStatusOf(every, room)
+	_, healthyListed := roomLogTestStatusOf(every, other.roomID)
+	assert(
+		every.outcome == .Applied &&
+		isListed &&
+		listed == want &&
+		!healthyListed &&
+		every.checkedRooms == 2 &&
+		every.damagedRooms == 1,
+		fmt.tprintf("expected only the damaged room of 2 listed, got %v", every),
+	)
+	plain := databaseAdminTestValue(
+		conn,
+		"INSERT INTO rooms (name, access, history_visibility) VALUES ('repair-plain', 2, 1) " +
+		"RETURNING id::text",
+	)
+	plainID := roomLogTestInt(plain)
+	assert(
+		roomLogTestRepair(conn, serverKey, .Status, alice.userID, plainID).outcome ==
+		.NotEncrypted,
+		"expected an unencrypted room refused",
+	)
+	assert(
+		roomLogTestRepair(conn, serverKey, .Status, alice.userID, 999_999).outcome ==
+		.UnknownRoom,
+		"expected an unknown room refused",
+	)
+
+	// Refused truncations change nothing.
+	assert(
+		roomLogTestRepair(conn, serverKey, .Truncate, erin.userID, room, 4).outcome == .NotAdmin,
+		"expected a non-admin's truncation refused",
+	)
+	assert(
+		roomLogTestRepair(conn, serverKey, .Truncate, alice.userID, room, 3).outcome ==
+		.WrongVersion,
+		"expected a version below the good one refused",
+	)
+	assert(
+		roomLogTestRepair(conn, serverKey, .Truncate, alice.userID, other.roomID, 2).outcome ==
+		.NotDamaged,
+		"expected a healthy log's truncation refused",
+	)
+	assert(
+		roomLogTestLogVersion(conn, room) == "8" &&
+		roomLogTestMembers(conn, room) == roomLogTestIDs({alice.userID, bob.userID, dave.userID}),
+		"expected refusals to change nothing",
+	)
+
+	// Repair.
+	truncated := roomLogTestRepair(conn, serverKey, .Truncate, alice.userID, room, 4)
+	assert(
+		truncated.outcome == .Applied && truncated.status == want,
+		fmt.tprintf("expected the truncation applied, got %v", truncated),
+	)
+	assert(
+		truncated.deletedEntries == 4 &&
+		truncated.deletedEnvelopes == 1 &&
+		truncated.deletedMessages == 1 &&
+		truncated.deletedEdits == 1,
+		fmt.tprintf("expected 4 entries, 1 envelope, 1 message and 1 edit deleted, got %v",
+			truncated),
+	)
+	assert(
+		roomLogTestIDs(truncated.memberUserIDs[:]) ==
+			roomLogTestIDs({alice.userID, bob.userID, carol.userID}) &&
+		roomLogTestIDs(truncated.managerUserIDs[:]) ==
+			roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestIDs(truncated.addedUserIDs[:]) == roomLogTestIDs({carol.userID}) &&
+		roomLogTestIDs(truncated.removedUserIDs[:]) == roomLogTestIDs({dave.userID}) &&
+		roomLogTestIDs(truncated.formerUserIDs[:]) ==
+			roomLogTestIDs({alice.userID, bob.userID, dave.userID}),
+		fmt.tprintf("expected the state at version 4 and who changed, got %v", truncated),
+	)
+	assert(
+		roomLogTestLogVersion(conn, room) == "4" &&
+		roomLogTestMembers(conn, room) ==
+			roomLogTestIDs({alice.userID, bob.userID, carol.userID}) &&
+		roomLogTestManagers(conn, room) == roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestAccess(conn, room) == "3",
+		"expected the room's rows at version 4",
+	)
+	rows := databaseAdminTestValue(
+		conn,
+		fmt.tprintf(
+			"SELECT (SELECT count(*) FROM room_log_entries WHERE room_id = %d) || '/' || " +
+			"(SELECT string_agg(epoch::text, ',' ORDER BY epoch) FROM room_key_envelopes " +
+			"WHERE room_id = %d) || '/' || " +
+			"(SELECT string_agg(epoch::text, ',' ORDER BY epoch) FROM chat_messages " +
+			"WHERE room_id = %d) || '/' || " +
+			"(SELECT edit_count || ':' || (edited_at IS NOT NULL) FROM chat_messages " +
+			"WHERE id = %s) || '/' || " +
+			"(SELECT count(*) FROM chat_message_edits WHERE message_id = %s) || '/' || " +
+			"(SELECT count(*) FROM room_read_markers WHERE room_id = %d)",
+			room, room, room, kept, kept, room,
+		),
+	)
+	assert(
+		rows == "4/4/4/1:true/1/0",
+		fmt.tprintf("expected entries, envelopes, messages, edits and markers of epoch 4: %s",
+			rows),
+	)
+	repaired := roomLogTestRepair(conn, serverKey, .Status, alice.userID, room)
+	assert(
+		len(repaired.statuses) == 1 && !common.roomLogStatusIsDamaged(repaired.statuses[0]),
+		fmt.tprintf("expected the log intact after the truncation, got %v", repaired.statuses[:]),
+	)
+	assert(
+		roomLogTestRepair(conn, serverKey, .Truncate, alice.userID, room, 4).outcome ==
+		.NotDamaged,
+		"expected a second truncation refused",
+	)
+	// The members carry on from version 4.
+	roomLogTestExpect(conn, serverKey, &goodHead, alice.userID,
+		roomLogTestSign(serverKey, goodHead, {action = .Remove, actor = alice, target = carol}),
+		.Applied, "alice's removal after the truncation")
+	assert(
+		roomLogTestMembers(conn, room) == roomLogTestIDs({alice.userID, bob.userID}),
+		"expected carol removed at version 5",
+	)
+}
+
+// Protocol 33 (#196): deploy/sql/truncate-room-log.sql, run as the file has it on a log whose
+// last entry is an unsigned forgery and whose rows were changed behind the server's back (a
+// botched restore): it refuses what it can check, and then leaves exactly what the server's
+// replay finds at the version it was given (members, managers, access and head), after which
+// the server reports the log intact and appends follow.
+@(test)
+testRoomLogTruncateHelperAgainstPostgreSQL :: proc(t: ^testing.T) {
+	_ = t
+	if os.get_env(DATABASE_SQL_TEST_ENV, context.temp_allocator) != "1" {
+		return
+	}
+	conn := databaseAdminTestOpen(t, "room_log_helper")
+	_, serverKey, serverKeyOK := common.generateIdentityKeyPair()
+	assert(serverKeyOK, "expected a server key")
+	alice := roomLogTestAccount(conn, "helper-alice")
+	databaseAdminTestGrant(conn, alice.userID)
+	bob := roomLogTestAccount(conn, "helper-bob")
+	carol := roomLogTestAccount(conn, "helper-carol")
+	dave := roomLogTestAccount(conn, "helper-dave")
+
+	created := roomLogTestCreateRoom(conn, alice.userID, "helper-room", .AdminInvite)
+	head := RoomLogTestHead {
+		roomID = created.room.id,
+	}
+	room := head.roomID
+	managers := []RoomLogTestAccount{alice, carol}
+	steps := [?]RoomLogTestEntry {
+		{action = .Create, actor = alice, access = .AdminInvite, history = .FromJoin,
+			joins = true, managers = managers},
+		{action = .Add, actor = alice, target = bob},
+		{action = .Add, actor = alice, target = carol},
+		{action = .AddManager, actor = alice, target = bob},
+		{action = .SetAccess, actor = alice, access = .MemberInvite, history = .FromJoin},
+		{action = .RemoveManager, actor = alice, target = carol},
+		{action = .Leave, actor = carol, target = carol},
+	}
+	for step, index in steps {
+		roomLogTestExpect(conn, serverKey, &head, step.actor.userID,
+			roomLogTestSign(serverKey, head, step), .Applied, fmt.tprintf("entry %d", index + 1))
+	}
+	goodHead := head
+	roomLogTestDamage(conn, &head, dave)
+	databaseDefaultRoomTestExec(
+		conn,
+		"change the rows behind the server's back",
+		fmt.tprintf(
+			"INSERT INTO room_members (room_id, user_id) VALUES (%d, %d), (%d, %d); " +
+			"DELETE FROM room_members WHERE room_id = %d AND user_id = %d; " +
+			"DELETE FROM room_log_managers WHERE room_id = %d AND user_id = %d; " +
+			"UPDATE rooms SET access = 3 WHERE id = %d",
+			room, dave.userID, room, carol.userID,
+			room, bob.userID,
+			room, bob.userID,
+			room,
+		),
+	)
+	status := roomLogTestRepair(conn, serverKey, .Status, alice.userID, room)
+	assert(
+		len(status.statuses) == 1 &&
+		status.statuses[0].goodVersion == 7 &&
+		status.statuses[0].failingVersion == 8 &&
+		status.statuses[0].error == .Unsigned,
+		fmt.tprintf("expected the forged entry 8 reported, got %v", status.statuses[:]),
+	)
+
+	plain := databaseAdminTestValue(
+		conn,
+		"INSERT INTO rooms (name, access, history_visibility) VALUES ('helper-plain', 2, 1) " +
+		"RETURNING id::text",
+	)
+	refusals := [?]struct {
+		roomID, toVersion: int,
+		contains:          string,
+	} {
+		{999_999, 7, "no room has the ID"},
+		{roomLogTestInt(plain), 1, "is not encrypted"},
+		{room, 0, "must be at least 1"},
+		{room, 9, "does not have every entry"},
+	}
+	for refusal in refusals {
+		failure := roomLogTestRunHelper(conn, refusal.roomID, refusal.toVersion)
+		assert(
+			strings.contains(failure, refusal.contains),
+			fmt.tprintf("expected %v refused with %q, got %q", refusal, refusal.contains,
+				failure),
+		)
+	}
+	assert(roomLogTestLogVersion(conn, room) == "8", "expected the refusals to change nothing")
+
+	failure := roomLogTestRunHelper(conn, room, 7)
+	assert(failure == "", fmt.tprintf("expected the helper to truncate the log: %s", failure))
+	assert(
+		roomLogTestLogVersion(conn, room) == "7" &&
+		roomLogTestMembers(conn, room) == roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestManagers(conn, room) == roomLogTestIDs({alice.userID, bob.userID}) &&
+		roomLogTestAccess(conn, room) == "2",
+		fmt.tprintf(
+			"expected the rows at version 7, got head %s, members %s, managers %s, access %s",
+			roomLogTestLogVersion(conn, room),
+			roomLogTestMembers(conn, room),
+			roomLogTestManagers(conn, room),
+			roomLogTestAccess(conn, room),
+		),
+	)
+	again := roomLogTestRunHelper(conn, room, 7)
+	assert(
+		strings.contains(again, "nothing to truncate"),
+		fmt.tprintf("expected a second run refused, got %q", again),
+	)
+	intact := roomLogTestRepair(conn, serverKey, .Status, alice.userID, room)
+	assert(
+		len(intact.statuses) == 1 && !common.roomLogStatusIsDamaged(intact.statuses[0]),
+		fmt.tprintf("expected the server to find the log intact, got %v", intact.statuses[:]),
+	)
+	roomLogTestExpect(conn, serverKey, &goodHead, alice.userID,
+		roomLogTestSign(serverKey, goodHead, {action = .Add, actor = alice, target = dave}),
+		.Applied, "alice's add after the helper")
+}
+
+@(private = "file")
+roomLogTestInt :: proc(text: string) -> int {
+	value, ok := strconv.parse_int(text)
+	assert(ok, fmt.tprintf("expected a number, got %q", text))
+	return value
 }

@@ -153,6 +153,10 @@ ClientTransportRuntimeEventKind :: enum {
 	// Room changes for room managers (protocol 31, #73, room_members.odin). AdminRoomChanged is
 	// ServerAdminRoomChanged: roomID and what changed in adminRoomChange. Nothing owned.
 	AdminRoomChanged,
+	// Member log repair (protocol 33, #196, room_log_repair.odin). RoomLogStatusReceived is
+	// ServerAdminRoomLogStatus (roomLogStatus, rooms owned). AdminActionResult carries roomID
+	// for a TruncateRoomLog.
+	RoomLogStatusReceived,
 }
 
 ClientTransportRuntimeEvent :: struct {
@@ -274,6 +278,8 @@ ClientTransportRuntimeEvent :: struct {
 	messageEdits:              [dynamic]common.MessageEdit,
 	// Protocol 31.
 	adminRoomChange:           common.AdminRoomChange,
+	// Protocol 33.
+	roomLogStatus:             common.ServerAdminRoomLogStatusPayload,
 }
 
 ClientServerTransport :: struct {
@@ -507,6 +513,7 @@ ClientTransportRuntimeEvent_deinit :: proc(event: ^ClientTransportRuntimeEvent) 
 	common.AttachmentRefs_deinit(&event.attachments)
 	common.ServerAdminAttachmentUsagePayload_deinit(&event.attachmentUsage)
 	common.ServerAdminAttachmentRemovalsPayload_deinit(&event.attachmentRemovals)
+	common.ServerAdminRoomLogStatusPayload_deinit(&event.roomLogStatus)
 	wipeString(event.messageEdit.content)
 	common.MessageEdit_deinit(&event.messageEdit)
 	common.MessageDeletion_deinit(&event.messageDeletion)
@@ -2188,11 +2195,15 @@ ClientServerTransport_translateRuntimeOpenedPacket :: proc(
 				requestID = payload.requestId,
 				blobID = payload.blobId,
 				failedRoomIDs = payload.failedRoomIds,
+				roomID = payload.roomId,
 			},
 			true
 
 	case .ServerAttachmentRemoved, .ServerAdminAttachmentUsage, .ServerAdminAttachmentRemovals:
 		return ClientServerTransport_translateAttachmentModerationPacket(transport, innerPacket)
+
+	case .ServerAdminRoomLogStatus:
+		return ClientServerTransport_translateRoomLogStatusPacket(transport, innerPacket)
 
 	case .ServerRoomMessageEdited,
 	     .ServerDirectMessageEdited,

@@ -329,6 +329,7 @@ HeadlessEventKind :: enum {
 	MessageDeleted,
 	MessageEdits,
 	AdminRoomChanged,
+	RoomLogStatus,
 }
 
 HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
@@ -393,6 +394,7 @@ HEADLESS_EVENT_NAMES := [HeadlessEventKind]string {
 	.MessageDeleted = "message_deleted",
 	.MessageEdits   = "message_edits",
 	.AdminRoomChanged = "admin_room_changed",
+	.RoomLogStatus  = "room_log_status",
 }
 
 headlessEventKindFromName :: proc(name: string) -> (HeadlessEventKind, bool) {
@@ -562,6 +564,9 @@ HeadlessAdminResultJSON :: struct {
 	// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from, left out
 	// when there are none.
 	failedRoomIDs: []int `json:"failedRoomIDs,omitempty"`,
+	// Protocol 33 (#196): the room a room-log-truncate repaired, left out for every other
+	// action.
+	roomID:        int `json:"roomID,omitempty"`,
 }
 
 // ServerSessionEnded: an admin kicked or banned this account and the server ended the session.
@@ -590,6 +595,7 @@ HEADLESS_ADMIN_ACTION_NAMES := [common.AdminAction]string {
 	.DecideRegistration = "registration-decide",
 	.SetRestricted = "restricted",
 	.RemoveAttachment = "attachment-remove",
+	.TruncateRoomLog = "room-log-truncate",
 }
 
 // The words room-create and room-edit take for a room type, and what room_created,
@@ -1308,6 +1314,8 @@ headlessRenderRuntimeEvent :: proc(
 		return headlessRenderRoomPermissionsEvent(event, allocator)
 	case .AttachmentRemoved, .AttachmentUsageReceived, .AttachmentRemovalsReceived:
 		return headlessRenderAttachmentModerationEvent(event, allocator)
+	case .RoomLogStatusReceived:
+		return headlessRenderRoomLogStatusEvent(event, allocator)
 	case .RegistrationRequired,
 	     .RegistrationResult,
 	     .RegistrationModeChanged,
@@ -1664,6 +1672,7 @@ headlessRenderRuntimeEvent :: proc(
 				requestID = event.requestID,
 				blobID = headlessAdminResultBlob(event.blobID),
 				failedRoomIDs = event.failedRoomIDs[:],
+				roomID = event.roomID,
 			},
 			allocator,
 		)
@@ -2021,6 +2030,13 @@ HEADLESS_COMMANDS := [?]HeadlessCommand {
 		"admins: bans an account and ends its sessions", headlessCommandAdminBan},
 	{"admin-unban", 1, 0, .None, "admin-unban USER_ID", "admins: lifts a ban",
 		headlessCommandAdminUnban},
+	{"room-log-status", 0, 1, .None, "room-log-status [ROOM_ID]",
+		"admins: replays the member log of an encrypted room, or of every one (no ROOM_ID: " +
+		"lists the damaged ones); answered by room_log_status", headlessCommandRoomLogStatus},
+	{"room-log-truncate", 2, 0, .None, "room-log-truncate ROOM_ID VERSION",
+		"admins: truncates a damaged member log to VERSION, its goodVersion; answered by " +
+		"admin_result room-log-truncate, and the members get room_log",
+		headlessCommandRoomLogTruncate},
 	{"roles-list", 0, 0, .None, "roles-list",
 		"the server's roles from the cache; asks for them (role_list) when they have not arrived",
 		headlessCommandRolesList},
