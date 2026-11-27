@@ -124,12 +124,24 @@ AdminRequestState :: struct {
 	result:   string,
 	// The refusal (a ServerProtocolError while pending) or a dropped connection.
 	error:    string,
+	// Protocol 32 (#72): the encrypted rooms a ban could not remove the account from (owned,
+	// ServerAdminActionResult.failedRoomIds); empty for every other answer.
+	failedRoomIDs: [dynamic]int,
 }
 
 AdminRequestState_deinit :: proc(request: ^AdminRequestState) {
 	delete(request.result)
 	delete(request.error)
+	delete(request.failedRoomIDs)
 	request^ = {}
+}
+
+@(private = "file")
+AdminRequestState_setFailedRooms :: proc(request: ^AdminRequestState, roomIDs: []int) {
+	clear(&request.failedRoomIDs)
+	if len(roomIDs) > 0 {
+		append(&request.failedRoomIDs, ..roomIDs)
+	}
 }
 
 @(private = "file")
@@ -254,6 +266,7 @@ State_sendAdminRequest :: proc(state: ^State, serverID: int, request: AdminReque
 	tracked.pending = true
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
+	AdminRequestState_setFailedRooms(tracked, nil)
 	return ""
 }
 
@@ -356,7 +369,8 @@ State_sendAdminSetUserRoles :: proc(
 }
 
 // ServerAdminActionResult: the pending request succeeded. message is borrowed. roleID is the
-// role a role action named (protocol 23), 0 otherwise.
+// role a role action named (protocol 23), 0 otherwise. failedRoomIDs (borrowed, protocol 32)
+// are the encrypted rooms a ban could not remove the account from.
 State_adminActionResult :: proc(
 	state: ^State,
 	serverID: int,
@@ -367,6 +381,7 @@ State_adminActionResult :: proc(
 	inviteID := 0,
 	requestID := 0,
 	blobID := common.AttachmentBlobID{},
+	failedRoomIDs: []int = nil,
 ) {
 	tracked := &state.adminRequest
 	if tracked.serverID != serverID {
@@ -381,6 +396,7 @@ State_adminActionResult :: proc(
 	tracked.blobID = blobID
 	AdminRequestState_setText(&tracked.result, message)
 	AdminRequestState_setText(&tracked.error, "")
+	AdminRequestState_setFailedRooms(tracked, failedRoomIDs)
 }
 
 // A protocol error on the request's server answers it while it is pending.
@@ -425,6 +441,7 @@ State_adminRequestFailed :: proc(
 	tracked.pending = false
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, message)
+	AdminRequestState_setFailedRooms(tracked, nil)
 }
 
 // Forgets the last answer (not a pending request), so a screen opened later does not show an
@@ -436,4 +453,5 @@ State_clearAdminRequestStatus :: proc(state: ^State) {
 	}
 	AdminRequestState_setText(&tracked.result, "")
 	AdminRequestState_setText(&tracked.error, "")
+	AdminRequestState_setFailedRooms(tracked, nil)
 }

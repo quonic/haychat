@@ -806,6 +806,7 @@ State_applyRuntimeEvent :: proc(state: ^State, event: ^ClientTransportRuntimeEve
 			event.inviteID,
 			event.requestID,
 			event.blobID,
+			event.failedRoomIDs[:],
 		)
 		State_registrationAdminResult(
 			state,

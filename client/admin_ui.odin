@@ -3,6 +3,7 @@ package client
 import "../common"
 import "core:fmt"
 import "core:slice"
+import "core:strings"
 
 // The admin's controls for accounts and rooms (plan P4): the Admin section of Server settings
 // (view_server_settings.odin) and the admin entries of the user context menus
@@ -361,6 +362,8 @@ AdminStatusTone :: enum u8 {
 	Pending,
 	Success,
 	Error,
+	// Protocol 32 (#72): a ban that applied but left encrypted rooms naming the account.
+	Warning,
 }
 
 // The open confirmation, as the view draws it under its member's row.
@@ -549,12 +552,78 @@ buildAdminSectionView :: proc(
 		case len(request.error) > 0:
 			view.status = request.error
 			view.statusTone = .Error
+		case len(request.result) > 0 && len(request.failedRoomIDs) > 0:
+			view.status = adminBanFailedRoomsStatus(
+				state,
+				serverID,
+				request.result,
+				request.failedRoomIDs[:],
+				allocator,
+			)
+			view.statusTone = .Warning
 		case len(request.result) > 0:
 			view.status = request.result
 			view.statusTone = .Success
 		}
 	}
 	return
+}
+
+// Protocol 32 (#72): the server's sentence for a ban, followed by the encrypted rooms whose
+// member log the ban could not change, by name where this client knows the room, so the admin
+// can deal with each of them.
+adminBanFailedRoomsStatus :: proc(
+	state: ^State,
+	serverID: int,
+	result: string,
+	roomIDs: []int,
+	allocator := context.temp_allocator,
+) -> string {
+	builder := strings.builder_make(allocator)
+	strings.write_string(&builder, result)
+	single := len(roomIDs) == 1
+	strings.write_string(
+		&builder,
+		single \
+		? ". This encrypted room still lists them: " \
+		: ". These encrypted rooms still list them: ",
+	)
+	index := State_serverRoomCacheIndex(state^, serverID)
+	for roomID, position in roomIDs {
+		if position > 0 {
+			strings.write_string(&builder, ", ")
+		}
+		name := ""
+		if index >= 0 {
+			cache := &state.server_room_caches[index]
+			for entry in cache.adminRooms {
+				if entry.room.id == roomID {
+					name = entry.room.name
+					break
+				}
+			}
+			if len(name) == 0 {
+				for room in cache.rooms {
+					if room.id == roomID {
+						name = room.name
+						break
+					}
+				}
+			}
+		}
+		if len(name) > 0 {
+			fmt.sbprintf(&builder, "# %s", name)
+		} else {
+			fmt.sbprintf(&builder, "room %d", roomID)
+		}
+	}
+	strings.write_string(
+		&builder,
+		single \
+		? ". Its member list is damaged or was busy; ban them again to retry." \
+		: ". Their member lists are damaged or were busy; ban them again to retry.",
+	)
+	return strings.to_string(builder)
 }
 
 @(private = "file")

@@ -565,6 +565,13 @@ IPC__admin_user_result_deinit :: proc(result: common.DatabaseAdminUserResult) {
 	common.UserSummary_deinit(&user)
 	delete(result.previousNickname)
 	delete(result.addedRoomIDs)
+	for removal in result.banRemovals {
+		delete(removal.logEntry)
+		delete(removal.memberUserIDs)
+		delete(removal.managerUserIDs)
+	}
+	delete(result.banRemovals)
+	delete(result.failedRoomIDs)
 }
 
 IPC__message_deinit :: proc(msg: ^Message) {
