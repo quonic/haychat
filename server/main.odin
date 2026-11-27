@@ -729,19 +729,6 @@ MainRouterState_sendAuthFailure :: proc(
 	)
 }
 
-MainRouterState_enqueueDatabaseRequest :: proc(
-	state: ^MainRouterState,
-	requestID: u64,
-	peerID: u32,
-	requestType: PendingDBRequestType,
-) {
-	state.pendingDatabaseRequests[requestID] = PendingDBRequest {
-		requestID   = requestID,
-		peerID      = peerID,
-		requestType = requestType,
-	}
-}
-
 MainRouterState_enqueueChannelDatabaseRequest :: proc(
 	pm: ^ProcessManager,
 	state: ^MainRouterState,
@@ -902,22 +889,6 @@ MainRouterState_prepareForProcessStop :: proc(
 	case .Storage:
 		MainRouterState_attachmentsStorageStopped(pm, state)
 	}
-}
-
-MainRouterState_sendDatabaseRequest :: proc(
-	pm: ^ProcessManager,
-	state: ^MainRouterState,
-	peerID: u32,
-	requestType: PendingDBRequestType,
-	request: common.DatabaseQueryRequest,
-) {
-	requestID := MainRouterState_generateRequestID(state)
-	MainRouterState_enqueueDatabaseRequest(state, requestID, peerID, requestType)
-	IPC_Server_send(
-		&pm.config.databaseSocket,
-		pm.config.databaseFd,
-		DatabaseQuery{request_id = requestID, request = request},
-	)
 }
 
 MainRouterState_handleClientHello :: proc(
